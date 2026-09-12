@@ -19565,11 +19565,20 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
            than being routed through sp_File_write_poly. */
         if (is_sw && comp_ntype(c, argv[0]) == TY_POLY) {
           int sl = ++g_tmp;
-          buf_printf(b, "({ const char *_s%d = ", sl);
-          emit_to_s_expr(c, argv[0], b);
-          buf_printf(b, "; sp_int _l%d = strlen(_s%d); sp_int _r%d = "
-                     "sp_File_syswrite(%s, _s%d, _l%d); _r%d; })",
-                     sl, sl, sl, r, sl, sl, sl);
+          /* The operand's class is only known at run time, so the length is
+             chosen by its TAG rather than off the pointer: a marked String
+             keeps its header length (binary-safe, embedded NULs survive),
+             anything else is a NUL-terminated C string from sp_poly_to_s
+             and is strlen'd. emit_boxed keeps the tag alongside the
+             pointer, so the check is exact -- a marker-byte probe cannot
+             tell a managed String from an unmarked conversion result. */
+          buf_printf(b, "({ sp_RbVal _t%d = ", sl);
+          emit_boxed(c, argv[0], b);
+          buf_printf(b, "; const char *_s%d = (_t%d.tag == SP_TAG_STR) ? _t%d.v.s : sp_poly_to_s(_t%d); "
+                     "sp_int _l%d = (_t%d.tag == SP_TAG_STR) ? "
+                     "sp_str_byte_len(_s%d) : strlen(_s%d); "
+                     "sp_int _r%d = sp_File_syswrite(%s, _s%d, _l%d); _r%d; })",
+                     sl, sl, sl, sl, sl, sl, sl, sl, sl, r, sl, sl, sl);
         }
         else if (comp_ntype(c, argv[0]) == TY_POLY) {
           buf_printf(b, "sp_File_write_poly(%s, ", r);
