@@ -261,6 +261,12 @@ static sp_int sp_io_write_raw(sp_File *f, const char *s, size_t n) {
     }
     off += (size_t)put;
   }
+  /* Sync the FILE* position with the descriptor: the raw write loop moved
+     the descriptor past where stdio thinks it is, and a zero-length write
+     is still a valid sync point. Without this, a subsequent ftello,
+     buffered read, or buffered write on the same stream would use the
+     stale stdio offset. */
+  if (fseeko(f->fp, 0, SEEK_CUR) != 0) sp_file_raise_errno("write", "file");
   return (sp_int)n;
 }
 

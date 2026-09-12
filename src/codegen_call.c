@@ -6791,15 +6791,17 @@ else {
             buf_puts(b, "; ");
           }
           else buf_printf(b, "sp_RbVal _t%d = %s; ", wrr, a0n);
+          /* Root the boxed operand before calling sp_poly_to_s: the
+             conversion can allocate and trigger GC, which would lose the
+             operand if it were only reachable through a local. */
+          buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", wrr);
           /* Resolve the operand to a (pointer, length) pair once. A marked
              String keeps its header length (binary-safe, embedded NULs
              survive); anything else is a NUL-terminated C string from
-             sp_poly_to_s, whose length is taken off the returned pointer
-             with sp_str_byte_len -- not strlen -- so an embedded NUL in a
-             converted value reaches the descriptor too. */
+             sp_poly_to_s, whose length is the C-string length. */
           buf_printf(b, "const char *_t%d = (_t%d.tag == SP_TAG_STR) ? _t%d.v.s : sp_poly_to_s(_t%d); "
                      "sp_int _t%d = (_t%d.tag == SP_TAG_STR) ? "
-                     "sp_str_byte_len(_t%d) : sp_str_byte_len(_t%d); "
+                     "sp_str_byte_len(_t%d) : strlen(_t%d); "
                      "sp_int _t%d = sp_File_syswrite((sp_File *)_t%d.v.p, _t%d, _t%d); ",
                      slen, wrr, wrr, wrr, wlen, wrr, slen, slen,
                      wres, tv, slen, wlen);
@@ -19553,34 +19555,44 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          sp_File_syswrite (which writes straight to the descriptor) rather
          than through the stdio-backed write entries. */
       int is_sw = sp_streq(name, "syswrite");
-      const char *wfn = is_sw ? "sp_File_syswrite" : (comp_ntype(c, argv[0]) == TY_STRING ? "sp_File_write_bin" : "sp_File_write");
       if (argc == 1) {
         /* An operand whose class is only known at run time picks the entry by
            its TAG, not by its static type: chosen statically it took the plain
-           entry and an embedded NUL truncated the write. */
-        if (comp_ntype(c, argv[0]) == TY_POLY) {
+           entry and an embedded NUL truncated the write. syswrite sizes the
+           operand itself (sp_str_byte_len for a String source, strlen for a
+           converted value) and hands both pointer and count to
+           sp_File_syswrite, so a poly operand takes that path here rather
+           than being routed through sp_File_write_poly. */
+        if (is_sw && comp_ntype(c, argv[0]) == TY_POLY) {
+          int sl = ++g_tmp;
+          buf_printf(b, "({ const char *_s%d = ", sl);
+          emit_to_s_expr(c, argv[0], b);
+          buf_printf(b, "; sp_int _l%d = strlen(_s%d); sp_int _r%d = "
+                     "sp_File_syswrite(%s, _s%d, _l%d); _r%d; })",
+                     sl, sl, sl, r, sl, sl, sl);
+        }
+        else if (comp_ntype(c, argv[0]) == TY_POLY) {
           buf_printf(b, "sp_File_write_poly(%s, ", r);
           emit_boxed(c, argv[0], b);
           buf_puts(b, ")");
         }
         else {
+          int sk = comp_ntype(c, argv[0]) == TY_STRING;
+          const char *wfn = sk ? "sp_File_write_bin" : "sp_File_write";
           if (is_sw) {
             /* syswrite needs the byte length alongside the pointer:
                sp_str_byte_len for a String source (embedded NUL survives),
-               strlen for a converted value. */
+               strlen for a converted value -- sp_poly_to_s always returns
+               a NUL-terminated C string, so its length is the C-string
+               length and the GC reclaims the conversion storage. */
             int sl = ++g_tmp;
-            TyKind at = comp_ntype(c, argv[0]);
             buf_printf(b, "({ const char *_s%d = ", sl);
             emit_to_s_expr(c, argv[0], b);
-            if (at == TY_STRING)
-              buf_printf(b, "; sp_int _l%d = sp_str_byte_len(_s%d); sp_int _r%d = "
-                         "sp_File_syswrite(%s, _s%d, _l%d); ",
-                         sl, sl, sl, r, sl, sl);
-            else
-              buf_printf(b, "; sp_int _l%d = strlen(_s%d); sp_int _r%d = "
-                         "sp_File_syswrite(%s, _s%d, _l%d); free((void *)_s%d); ",
-                         sl, sl, sl, r, sl, sl, sl);
-            buf_printf(b, "_r%d; })", sl);
+            buf_printf(b, "; sp_int _l%d = ", sl);
+            if (sk) buf_printf(b, "sp_str_byte_len(_s%d)", sl);
+            else    buf_printf(b, "strlen(_s%d)", sl);
+            buf_printf(b, "; sp_int _r%d = sp_File_syswrite(%s, _s%d, _l%d); _r%d; })",
+                       sl, r, sl, sl, sl);
           }
           else {
             buf_printf(b, "%s(%s, ", wfn, r);
@@ -19596,6 +19608,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
            interleaves them, so each write is its own held unit rather than
            the call's */
         for (int k = 0; k < argc; k++) {
+          if (is_sw && comp_ntype(c, argv[k]) == TY_POLY) {
+            /* syswrite sizes the operand itself and routes through
+               sp_File_syswrite, so a poly operand takes that path here
+               rather than being routed through sp_File_write_poly. */
+            buf_printf(b, " _t%d += ({ const char *_s = ", tw);
+            emit_to_s_expr(c, argv[k], b);
+            buf_printf(b, "; sp_int _l = strlen(_s); sp_int _r = "
+                       "sp_File_syswrite(%s, _s, _l); _r; })", r);
+            continue;
+          }
           if (comp_ntype(c, argv[k]) == TY_POLY) {   /* see the one-argument form */
             buf_printf(b, " _t%d += sp_File_write_poly(%s, ", tw, r);
             emit_boxed(c, argv[k], b);
