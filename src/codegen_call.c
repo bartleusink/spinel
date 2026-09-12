@@ -6777,6 +6777,56 @@ else {
           buf_puts(b, "break; }");
         }
       }
+      /* syswrite on a poly value: the same shape as the write arm above --
+         a Socket reaching this dispatch because some user class owns the
+         name had no arm and raised NoMethodError. syswrite takes one
+         String arg and returns the byte count. The byte length is sized
+         by the caller and handed to sp_File_syswrite directly: a String
+         source's length (sp_str_byte_len, so an embedded NUL reaches the
+         descriptor) or a converted value's length (strlen of sp_poly_to_s),
+         rather than reading it off a marker byte inside the write core. */
+      if (sp_streq(name, "syswrite") && argc == 1 && kwh < 0) {
+        int wrv = ++g_tmp;
+        if (atmp_ty[0] == TY_STRING) {
+          if (ret == TY_POLY)
+            buf_printf(b, " case SP_BUILTIN_IO: { sp_int _t%d = sp_File_syswrite("
+                           "(sp_File *)_t%d.v.p, _t%d, sp_str_byte_len(_t%d)); "
+                           "_t%d = sp_box_int(_t%d); break; }",
+                       wrv, tv, atmp[0], atmp[0], tr, wrv);
+          else
+            buf_printf(b, " case SP_BUILTIN_IO: _t%d = sp_File_syswrite("
+                           "(sp_File *)_t%d.v.p, _t%d, sp_str_byte_len(_t%d)); break;",
+                       tr, tv, atmp[0], atmp[0]);
+        }
+        else {
+          int wrr = ++g_tmp, slen = ++g_tmp, wlen = ++g_tmp, wres = ++g_tmp;
+          char a0n[24]; snprintf(a0n, sizeof a0n, "_t%d", atmp[0]);
+          buf_puts(b, " case SP_BUILTIN_IO: { ");
+          if (atmp_ty[0] != TY_POLY) {
+            buf_printf(b, "sp_RbVal _t%d = ", wrr);
+            emit_boxed_text(c, atmp_ty[0], a0n, b);
+            buf_puts(b, "; ");
+          }
+          else buf_printf(b, "sp_RbVal _t%d = %s; ", wrr, a0n);
+          /* Root the boxed operand before calling sp_poly_to_s: the
+             conversion can allocate and trigger GC, which would lose the
+             operand if it were only reachable through a local. */
+          buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", wrr);
+          /* Resolve the operand to a (pointer, length) pair once. A marked
+             String keeps its header length (binary-safe, embedded NULs
+             survive); anything else is a NUL-terminated C string from
+             sp_poly_to_s, whose length is the C-string length. */
+          buf_printf(b, "const char *_t%d = (_t%d.tag == SP_TAG_STR) ? _t%d.v.s : sp_poly_to_s(_t%d); "
+                     "sp_int _t%d = (_t%d.tag == SP_TAG_STR) ? "
+                     "sp_str_byte_len(_t%d) : strlen(_t%d); "
+                     "sp_int _t%d = sp_File_syswrite((sp_File *)_t%d.v.p, _t%d, _t%d); ",
+                     slen, wrr, wrr, wrr, wlen, wrr, slen, slen,
+                     wres, tv, slen, wlen);
+          if (ret == TY_POLY) buf_printf(b, "_t%d = sp_box_int(_t%d); ", tr, wres);
+          else                buf_printf(b, "_t%d = _t%d; ", tr, wres);
+          buf_puts(b, "break; }");
+        }
+      }
       if (is_unshift) {
         /* sp_poly_insert is the kind dispatch for a positional splice, so
            `unshift(a, b)` is a insert at 0 and b insert at 1 -- CRuby's order.
@@ -19542,21 +19592,63 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          header length so an embedded NUL is written rather than truncating
          the write. The sp_poly_to_s arm keeps the plain entry: it can answer
          a static class/symbol name with no marker byte, which _bin would read
-         out of bounds at s[-1]. */
+         out of bounds at s[-1]. syswrite is unbuffered, so it routes through
+         sp_File_syswrite (which writes straight to the descriptor) rather
+         than through the stdio-backed write entries. */
+      int is_sw = sp_streq(name, "syswrite");
       if (argc == 1) {
         /* An operand whose class is only known at run time picks the entry by
            its TAG, not by its static type: chosen statically it took the plain
-           entry and an embedded NUL truncated the write. */
-        if (comp_ntype(c, argv[0]) == TY_POLY) {
+           entry and an embedded NUL truncated the write. syswrite sizes the
+           operand itself (sp_str_byte_len for a String source, strlen for a
+           converted value) and hands both pointer and count to
+           sp_File_syswrite, so a poly operand takes that path here rather
+           than being routed through sp_File_write_poly. */
+        if (is_sw && comp_ntype(c, argv[0]) == TY_POLY) {
+          int sl = ++g_tmp;
+          /* The operand's class is only known at run time, so the length is
+             chosen by its TAG rather than off the pointer: a marked String
+             keeps its header length (binary-safe, embedded NULs survive),
+             anything else is a NUL-terminated C string from sp_poly_to_s
+             and is strlen'd. emit_boxed keeps the tag alongside the
+             pointer, so the check is exact -- a marker-byte probe cannot
+             tell a managed String from an unmarked conversion result. */
+          buf_printf(b, "({ sp_RbVal _t%d = ", sl);
+          emit_boxed(c, argv[0], b);
+          buf_printf(b, "; const char *_s%d = (_t%d.tag == SP_TAG_STR) ? _t%d.v.s : sp_poly_to_s(_t%d); "
+                     "sp_int _l%d = (_t%d.tag == SP_TAG_STR) ? "
+                     "sp_str_byte_len(_s%d) : strlen(_s%d); "
+                     "sp_int _r%d = sp_File_syswrite(%s, _s%d, _l%d); _r%d; })",
+                     sl, sl, sl, sl, sl, sl, sl, sl, sl, r, sl, sl, sl);
+        }
+        else if (comp_ntype(c, argv[0]) == TY_POLY) {
           buf_printf(b, "sp_File_write_poly(%s, ", r);
           emit_boxed(c, argv[0], b);
           buf_puts(b, ")");
         }
         else {
           int sk = comp_ntype(c, argv[0]) == TY_STRING;
-          buf_printf(b, "%s(%s, ", sk ? "sp_File_write_bin" : "sp_File_write", r);
-          emit_to_s_expr(c, argv[0], b);
-          buf_puts(b, ")");
+          const char *wfn = sk ? "sp_File_write_bin" : "sp_File_write";
+          if (is_sw) {
+            /* syswrite needs the byte length alongside the pointer:
+               sp_str_byte_len for a String source (embedded NUL survives),
+               strlen for a converted value -- sp_poly_to_s always returns
+               a NUL-terminated C string, so its length is the C-string
+               length and the GC reclaims the conversion storage. */
+            int sl = ++g_tmp;
+            buf_printf(b, "({ const char *_s%d = ", sl);
+            emit_to_s_expr(c, argv[0], b);
+            buf_printf(b, "; sp_int _l%d = ", sl);
+            if (sk) buf_printf(b, "sp_str_byte_len(_s%d)", sl);
+            else    buf_printf(b, "strlen(_s%d)", sl);
+            buf_printf(b, "; sp_int _r%d = sp_File_syswrite(%s, _s%d, _l%d); _r%d; })",
+                       sl, r, sl, sl, sl);
+          }
+          else {
+            buf_printf(b, "%s(%s, ", wfn, r);
+            emit_to_s_expr(c, argv[0], b);
+            buf_puts(b, ")");
+          }
         }
       }
       else if (argc >= 2) {
@@ -19566,6 +19658,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
            interleaves them, so each write is its own held unit rather than
            the call's */
         for (int k = 0; k < argc; k++) {
+          if (is_sw && comp_ntype(c, argv[k]) == TY_POLY) {
+            /* syswrite sizes the operand itself and routes through
+               sp_File_syswrite, so a poly operand takes that path here
+               rather than being routed through sp_File_write_poly. */
+            buf_printf(b, " _t%d += ({ const char *_s = ", tw);
+            emit_to_s_expr(c, argv[k], b);
+            buf_printf(b, "; sp_int _l = strlen(_s); sp_int _r = "
+                       "sp_File_syswrite(%s, _s, _l); _r; })", r);
+            continue;
+          }
           if (comp_ntype(c, argv[k]) == TY_POLY) {   /* see the one-argument form */
             buf_printf(b, " _t%d += sp_File_write_poly(%s, ", tw, r);
             emit_boxed(c, argv[k], b);
@@ -19580,7 +19682,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           g_conv_hold = outer;
           buf_printf(b, " _t%d += ", tw);
           if (hk.n > 0) { buf_puts(b, "({ "); buf_puts(b, hk.b.p); }
-          buf_printf(b, "%s(%s, %s)", sk ? "sp_File_write_bin" : "sp_File_write", r, conv.p ? conv.p : "");
+          if (is_sw) {
+            /* syswrite needs the byte length: sp_str_byte_len for a String
+               source (embedded NUL survives), strlen for a converted value. */
+            buf_printf(b, "({ const char *_s = %s; sp_int _l = %s; "
+                       "_t%d += sp_File_syswrite(%s, _s, _l); })",
+                       conv.p ? conv.p : "",
+                       sk ? "sp_str_byte_len(_s)" : "strlen(_s)",
+                       tw, r);
+          }
+          else
+            buf_printf(b, "%s(%s, %s)", sk ? "sp_File_write_bin" : "sp_File_write", r, conv.p ? conv.p : "");
           if (hk.n > 0) buf_puts(b, "; })");
           buf_puts(b, ";");
           free(conv.p); free(hk.b.p); free(hk.tmp);
