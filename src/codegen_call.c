@@ -6782,7 +6782,7 @@ else {
                        tr, tv, atmp[0], atmp[0]);
         }
         else {
-          int wrr = ++g_tmp, slen = ++g_tmp;
+          int wrr = ++g_tmp, slen = ++g_tmp, wlen = ++g_tmp, wres = ++g_tmp;
           char a0n[24]; snprintf(a0n, sizeof a0n, "_t%d", atmp[0]);
           buf_puts(b, " case SP_BUILTIN_IO: { ");
           if (atmp_ty[0] != TY_POLY) {
@@ -6791,16 +6791,20 @@ else {
             buf_puts(b, "; ");
           }
           else buf_printf(b, "sp_RbVal _t%d = %s; ", wrr, a0n);
-          /* Resolve the operand to a (pointer, length) pair once: a marked
-             String keeps its header length (binary-safe), anything else is
-             a NUL-terminated C string from sp_poly_to_s and is strlen'd. */
+          /* Resolve the operand to a (pointer, length) pair once. A marked
+             String keeps its header length (binary-safe, embedded NULs
+             survive); anything else is a NUL-terminated C string from
+             sp_poly_to_s, whose length is taken off the returned pointer
+             with sp_str_byte_len -- not strlen -- so an embedded NUL in a
+             converted value reaches the descriptor too. */
           buf_printf(b, "const char *_t%d = (_t%d.tag == SP_TAG_STR) ? _t%d.v.s : sp_poly_to_s(_t%d); "
                      "sp_int _t%d = (_t%d.tag == SP_TAG_STR) ? "
-                     "sp_File_syswrite((sp_File *)_t%d.v.p, _t%d, sp_str_byte_len(_t%d)) : "
-                     "sp_File_syswrite((sp_File *)_t%d.v.p, _t%d, strlen(_t%d)); ",
-                     slen, wrr, wrr, wrr, wrv, wrr, tv, slen, slen, tv, slen, slen);
-          if (ret == TY_POLY) buf_printf(b, "_t%d = sp_box_int(_t%d); ", tr, wrv);
-          else                buf_printf(b, "_t%d = _t%d; ", tr, wrv);
+                     "sp_str_byte_len(_t%d) : sp_str_byte_len(_t%d); "
+                     "sp_int _t%d = sp_File_syswrite((sp_File *)_t%d.v.p, _t%d, _t%d); ",
+                     slen, wrr, wrr, wrr, wlen, wrr, slen, slen,
+                     wres, tv, slen, wlen);
+          if (ret == TY_POLY) buf_printf(b, "_t%d = sp_box_int(_t%d); ", tr, wres);
+          else                buf_printf(b, "_t%d = _t%d; ", tr, wres);
           buf_puts(b, "break; }");
         }
       }

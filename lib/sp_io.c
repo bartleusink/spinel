@@ -249,6 +249,10 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
 static sp_int sp_io_write_raw(sp_File *f, const char *s, size_t n) {
   int fd = fileno(f->fp);
   size_t off = 0;
+  /* Flush whatever stdio still holds: a previous buffered write would
+     otherwise land after this direct write and reorder the bytes. A
+     flush failure is the same error path as a write failure. */
+  if (fflush(f->fp) != 0) sp_file_raise_errno("write", "file");
   while (off < n) {
     ssize_t put = write(fd, s + off, n - off);
     if (put < 0) {
