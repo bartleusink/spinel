@@ -21,3 +21,16 @@ in [Integer => n, String => s]
 end
 
 p Pathname.new(".").directory?
+
+# An empty `{}` the caller then writes into, handed to a parameter that is
+# poly (a second call site passes another hash kind). The reverse binding
+# widened the local to the PolyPoly hash (#3158); its own element writes
+# re-derived the StrStr kind every round; to the cap, every compile.
+def store(h, n)
+  h[n] ||= n * 10
+end
+sub = {}
+sub["body"] = "hi"
+store(sub, 1)
+store({ 2 => 3 }, 2)
+p sub

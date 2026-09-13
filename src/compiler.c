@@ -1239,6 +1239,7 @@ LocalVar *scope_local_intern(Scope *s, const char *name) {
   lv->or_write_only = 0;
   lv->str_shared = 0;
   lv->str_append = 0;
+  lv->poly_hash_pin = 0;
   lv->nullable_int = 0;
   lv->nullable_int_elem = 0;
   lv->arr_or_nil = 0;
