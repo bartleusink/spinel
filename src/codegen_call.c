@@ -18947,6 +18947,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
     }
     buf_printf(b, "({ sp_BoundMethod *_t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+    /* The Method is a fresh allocation and the defaults evaluated below in
+       this frame allocate too (`b = "x" * 64, c = Array.new(400) { }`): a
+       collection between the two freed the Method and the call jumped
+       through a garbage fn. Root it for the length of the expression. */
+    buf_printf(b, "SP_GC_ROOT(_t%d); ", tr);
     /* An unresolved target (`self.class.method(:m)`, any class value that is
        not a statically-known constant) binds with a NULL fn -- there is no
        callable address. Invoking it jumped through NULL; the poly-slot and
