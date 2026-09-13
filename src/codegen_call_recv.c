@@ -3932,6 +3932,17 @@ else {
           emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
           return 1;
         }
+        if (rt == TY_STR_ARRAY && (a0 == TY_POLY || a0 == TY_NIL)) {
+          /* a boxed needle into a String array: a String compares, anything
+             else (nil first of all) is simply not there. The boxed value
+             used to be passed as the const char* itself, which did not
+             compile (#4458). */
+          int ta = ++g_tmp, tv = ++g_tmp;
+          buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+          buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : sp_box_nil(); })", tv, fn, ta, tv);
+          return 1;
+        }
         buf_printf(b, "sp_%sArray_%s(", k, fn);
         emit_expr(c, recv, b); buf_puts(b, ", ");
         if (rt == TY_INT_ARRAY) emit_int_expr(c, argv[0], b);
@@ -3954,6 +3965,19 @@ else {
       }
       if ((sp_streq(name, "include?") || sp_streq(name, "member?") || sp_streq(name, "index") || sp_streq(name, "find_index")) && argc == 1 && rt != TY_FLOAT_ARRAY) {
         const char *fn = (sp_streq(name, "include?") || sp_streq(name, "member?")) ? "include" : "index";
+        /* A boxed argument into a String array is an equality scan, so a value
+           that is not a String -- nil above all (`%w[..].include?(r.content_type)`
+           with a `String | nil` reader, #4458) -- answers "not there" rather
+           than being unboxed, which raised the conversion TypeError. */
+        TyKind sat = comp_ntype(c, argv[0]);
+        if (rt == TY_STR_ARRAY && (sat == TY_POLY || sat == TY_NIL)) {
+          int ta = ++g_tmp, tv = ++g_tmp;
+          buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+          buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : FALSE; })",
+                     tv, fn, ta, tv);
+          return 1;
+        }
         buf_printf(b, "sp_%sArray_%s(", k, fn);
         emit_expr(c, recv, b); buf_puts(b, ", ");
         /* a poly argument into a string array's const char* slot (`arr.include?(
