@@ -139,14 +139,18 @@ static int sp_bm_sig_scalar_only(const char *sig, sp_int n) {
 }
 sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
   sp_BoundMethod *m = (sp_BoundMethod *)cap;
-  if (!m || !m->fn) return 0;
+  /* A bind site that could not resolve a target (`self.class.method(:m)`) has
+     no callable address; dereferencing the NULL fn here segfaulted. Decline
+     with the same NoMethodError a resolved-but-incompatible target gets. */
+  if (!m || !m->fn) sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
   /* A Method read out of a poly slot carries no call-site types, so this
      generic trampoline may only forward to a target whose stamped legacy ABI
      is callable at the exact fixed arity the C signature reads, and whose
      parameters are all scalar. Any other target -- a rest/optional/keyword
      parameter, a float/poly/by-value-struct parameter, a pointer-typed
      parameter (this route cannot check the argument's class), an unbound
-     Method, or a mismatched argument count -- would take the sp_int register
+     Method, or a mismatched argument count (the 16-slot proc ABI caps the
+     count whatever legacy_fixed says) -- would take the sp_int register
      as the wrong C type: the callee prologue roots a garbage rest pointer
      (SP_GC_ROOT(lv_<rest>)) and the next collection dereferences it, or a
      pointer parameter dereferences an Integer, a SIGSEGV (#4395). The typed
@@ -154,10 +158,25 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      so declining here only affects a Method that travelled through a poly
      slot; raise the same NoMethodError the poly-call gate produces instead of
      reading garbage. */
-  if (!m->legacy_int_abi || m->unbound || m->legacy_fixed > 16 || (m->legacy_ret == SP_BM_RET_POLY && m->legacy_fixed > 8) ||
+  if (!m->legacy_int_abi || m->unbound || argc > 16 || m->legacy_fixed > 16 || (m->legacy_ret == SP_BM_RET_POLY && m->legacy_fixed > 8) ||
       (m->legacy_rest ? argc < m->legacy_fixed : argc != m->legacy_fixed) ||
       !sp_bm_sig_scalar_only(m->legacy_sig, m->legacy_fixed))
     sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
+  /* The raw sp_int slots carry no class, so the trampoline alone cannot tell
+     a pointer/float/string argument from an Integer; the boxed side-channel
+     every caller publishes (the poly spread loop, the generated proc call,
+     the runtime block invokers) can. Reject an argument whose scalar kind
+     does not match its stamped slot, the same way sp_bm_legacy_abi_ok does at
+     a statically-typed call site -- `[obj.method(:m)][0].call(a_string)` and
+     its `.to_proc`/spread forms otherwise fed the String pointer into an
+     sp_int parameter. The exact match is also what keeps a `false` argument
+     from reaching an int-inferred parameter: the raw slot would be 0, which
+     is TRUTHY as a Ruby Integer, so `x ? a : b` would answer the true branch
+     where CRuby answers the false one. Decline the kind change instead of
+     answering it wrong. */
+  for (sp_int i = 0; i < argc && i < m->legacy_fixed; i++)
+    if (!sp_bm_sig_pos_scalar_ok(sp_bm_boxed_scalar_token(_sp_proc_poly_args[i]), m->legacy_sig, i))
+      sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
   /* A proc publishes its result through the boxed side-channel, which every
      generated proc body writes; this trampoline only returned it, so a caller
      reading the slot saw a stale value (#3692). The casts below already assume

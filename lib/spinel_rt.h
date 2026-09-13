@@ -4254,6 +4254,7 @@ static sp_PolyArray *sp_PolyArray_slice(sp_PolyArray *a, sp_int start, sp_int le
 static sp_PolyArray *sp_PolyArray_slice_range(sp_PolyArray *a, sp_int start, sp_int end_, sp_int excl) { if (end_ < 0) end_ += a->len; if (start < 0) start += a->len; sp_int n = end_ - start + (excl ? 0 : 1); if (n < 0 || start < 0) n = 0; return sp_PolyArray_slice(a, start, n); }
 /* 2-arg slice on a poly receiver: dispatch to the typed slice functions. */
 static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args);
+static sp_RbVal sp_poly_callable_spread(sp_RbVal v, sp_RbVal arr);
 static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
   if (a.tag == SP_TAG_STR) return sp_box_nullable_str(sp_str_sub_range(a.v.s ? a.v.s : "", start, len));
   /* A shared-string handle is a String: slicing is non-mutating, so it answers
@@ -7572,7 +7573,13 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
       sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
 #ifdef SP_INT_OVERFLOW_MODE_PROMOTE
       /* promote: methods are poly-signatured, so invoke through the poly ABI
-         and unbox the result rather than the legacy sp_int ABI. */
+         and unbox the result rather than the legacy sp_int ABI. A NULL-fn
+         Method (an unresolved class value) has no callable address; route it
+         through the callable helper's NoMethodError instead of NULL. */
+      if (!m->fn) {
+        sp_int slots[1]; slots[0] = i;
+        return sp_poly_to_i(sp_poly_callable_call(a, 1, slots));
+      }
       return sp_poly_to_i(((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, sp_box_int(i)));
 #else
       if (sp_bm_legacy_abi_ok(m, 1, "00000001")) {
@@ -11747,15 +11754,26 @@ static sp_RbVal sp_env_filter_bang_opt(sp_Proc *p, int keep) {
 static void sp_proc_call_spread(sp_Proc *p, sp_RbVal arr) { SP_GC_ROOT(p);
   if (!p || !p->fn) return;
   sp_int n = sp_poly_length(arr);
-  if (n > 16) n = 16;
+  sp_int fill = n > 16 ? 16 : n;
   sp_int slots[16];
-  for (sp_int i = 0; i < n; i++) {
+  for (sp_int i = 0; i < fill; i++) {
     sp_RbVal e = sp_poly_arr_get(arr, i);
     _sp_proc_poly_args[i] = e;
     slots[i] = (e.tag == SP_TAG_OBJ || e.tag == SP_TAG_STR)
              ? (sp_int)(uintptr_t)e.v.p : sp_poly_to_i(e);
   }
-  sp_proc_call(p, n, slots);
+  /* The generic bound-Method trampoline raises its own NoMethodError for
+     argc > 16 -- the legacy sp_int ABI packs at most 16 slots. Hand it the
+     TRUE count so that guard fires: clamping first made
+     `[Wide.new.method(:m16)][0].to_proc.call(*a20)` answer 1+16 where the
+     plan (and CRuby) decline. The per-site `_mtp_N` bound-Method trampoline
+     checks its own argument count the same way, so it sees the true count
+     too. Both are created with sp_bm_cap_scan and lambda_p; every other proc
+     body reads the boxed channel with a `< 16` bound (its prologue indexes
+     `_sp_proc_poly_args[argc-1]`), so it keeps the clamp. A Hash default proc
+     shares the scan hook but is not a lambda. */
+  sp_int pass = (p->cap_scan == sp_bm_cap_scan && p->lambda_p) ? n : fill;
+  sp_proc_call(p, pass, slots);
 }
 /* Enumerator#size (CRuby's ary2sv-independent size protocol): a materialized
    enumerator reports its snapshot length; a generator reports its stored size --
@@ -11934,6 +11952,49 @@ static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args) 
   for (sp_int i = 0; i < n && i < 16; i++) slots[i] = args[i];
   sp_proc_call((sp_Proc *)v.v.p, n, slots);
   return _sp_proc_poly_ret;
+}
+
+/* Call a boxed callable with a dynamic (spread) argument list. Unlike the
+   fixed-arity sp_poly_callable_call this cannot be selected at the call site
+   by a stamped signature: the value may be a Proc, a Curry, or a bound Method,
+   and a bound Method in particular was read as an sp_Proc and segfaulted
+   (#4395). Dispatch on the value's class, building the raw sp_int slots from
+   the boxed array (pointers laundered, values through sp_poly_to_i) for a
+   Method and applying the boxed elements through the accumulator for a Curry.
+   A Method with more than 16 arguments has no slot to land in and declines --
+   the trampoline's own `argc > 16` guard never sees the overlong count if this
+   helper clamps first. */
+static sp_RbVal sp_poly_callable_spread(sp_RbVal v, sp_RbVal arr) {
+  if (v.tag == SP_TAG_OBJ && v.v.p && v.cls_id == SP_BUILTIN_CURRY) {
+    sp_int n = sp_poly_length(arr);
+    sp_RbVal args[16];
+    for (sp_int i = 0; i < n && i < 16; i++) args[i] = sp_poly_arr_get(arr, i);
+    return sp_curry_call_poly((sp_Curry *)v.v.p, n < 16 ? n : 16, args);
+  }
+  if (v.tag == SP_TAG_OBJ && v.v.p && v.cls_id == SP_BUILTIN_METHOD) {
+    sp_int n = sp_poly_length(arr);
+    if (n > 16) sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
+    sp_int slots[16];
+    for (sp_int i = 0; i < n; i++) {
+      sp_RbVal e = sp_poly_arr_get(arr, i);
+      /* The trampoline rejects an argument whose scalar kind does not match
+         the Method's stamped slot (or a pointer/float/bigint, which has no
+         sp_int slot at all) after reading it back from the published boxed
+         side-channel below, the same way a statically-typed .call declines via
+         sp_bm_legacy_abi_ok. */
+      _sp_proc_poly_args[i] = e;
+      slots[i] = (e.tag == SP_TAG_OBJ || e.tag == SP_TAG_STR)
+               ? (sp_int)(uintptr_t)e.v.p : sp_poly_to_i(e);
+    }
+    sp_method_proc_tramp((void *)v.v.p, n, slots);
+    return _sp_proc_poly_ret;
+  }
+  if (v.tag == SP_TAG_OBJ && v.v.p && v.cls_id == SP_BUILTIN_PROC) {
+    sp_proc_call_spread((sp_Proc *)v.v.p, arr);
+    return _sp_proc_poly_ret;
+  }
+  sp_raise_cls("NoMethodError", sp_nomethod_msg("call", v));
+  return sp_box_nil();
 }
 
 /* Hash#to_proc cap-scan: the proc's `cap` field IS the source hash

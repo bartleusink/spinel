@@ -577,9 +577,12 @@ endif
 # poly_call_legacy_abi_gate / poly_call_fast_abi_gate pin the raise/wrap legacy
 # sp_int Method ABI classification; promote boxes int parameters (and does not
 # consult that classification), so the same dynamic calls take a different
-# path there.
+# path there. poly_method_return_kinds boxes a String argument for a poly
+# Method `.call`, and the promote poly-call fallback's sp_int[16] argument list
+# then initializes an int slot from the String pointer, so the fixture does not
+# compile in that mode.
 ifeq ($(SPINEL_INT_OVERFLOW),promote)
-TESTS := $(filter-out test/int_overflow_raises.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb,$(TESTS))
+TESTS := $(filter-out test/int_overflow_raises.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb,$(TESTS))
 # Drive the spinel front-end and the C compile in promote mode so the test
 # rule actually exercises the auto-promotion path end to end.
 SP_OV_FLAG := --int-overflow=promote
@@ -1129,7 +1132,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_tls_first_write.rb \
                   test/proc_cell_capture_marked.rb \
                   test/gc_minor_byref_lent_slot.rb \
-                  test/gc_minor_barrier_holders.rb
+                  test/gc_minor_barrier_holders.rb \
+                  test/bound_method_fresh_receiver.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every

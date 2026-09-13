@@ -4286,14 +4286,17 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
   if (sp_streq(name, "to_proc") && argc == 0) {
     int tv = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-    buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
+    /* The constructor allocates: root the source Method in the temp or a
+       fresh receiver (`pick.to_proc`) is swept mid-call and the Proc's
+       capture dangles. Same shape as the concrete-`TY_METHOD` fallback. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                   " ? _t%d"
                   /* a Method read out of a container wraps into a Proc, as the
                      typed receiver's #to_proc does (#3692) */
                   " : _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
                   " ? sp_box_obj(sp_method_to_proc((sp_BoundMethod *)_t%d.v.p), SP_BUILTIN_PROC)"
                   " : (sp_raise_nomethod(sp_nomethod_msg(\"to_proc\", _t%d)), sp_box_nil()); })",
-               tv, tv, tv, tv, tv, tv, tv);
+               tv, tv, tv, tv, tv, tv, tv, tv);
     return 1;
   }
   /* Method#unbind on a value read out of a container: the same target with the
@@ -4301,23 +4304,27 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
   if (sp_streq(name, "unbind") && argc == 0) {
     int tv = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-    buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
+    /* sp_bm_unbind allocates and then reads m->desc/legacy_* off the source;
+       root the temp so a fresh receiver cannot be swept mid-call. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
                   " ? sp_box_obj(sp_bm_unbind((sp_BoundMethod *)_t%d.v.p), SP_BUILTIN_METHOD)"
                   " : (sp_raise_nomethod(sp_nomethod_msg(\"unbind\", _t%d)), sp_box_nil()); })",
-               tv, tv, tv, tv);
+               tv, tv, tv, tv, tv);
     return 1;
   }
   if (sp_streq(name, "parameters") && argc == 0) {
     int tv = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-    buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
+    /* Both helpers allocate before reading the receiver's desc/fields; root
+       the temp so a fresh receiver cannot be swept mid-call. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                   " ? sp_proc_parameters_ids((sp_Proc *)_t%d.v.p, -1, (sp_sym)%d, (sp_sym)%d)"
                   /* a Method read out of a container answers from its own
                      rendering, which carries the parameter list (#3692) */
                   " : _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
                   " ? sp_bm_parameters((sp_BoundMethod *)_t%d.v.p)"
                   " : (sp_PolyArray *)(sp_raise_nomethod(sp_nomethod_msg(\"parameters\", _t%d)), (void *)0); })",
-               tv, tv, tv, comp_sym_intern(c, "req"), comp_sym_intern(c, "opt"), tv, tv, tv, tv);
+               tv, tv, tv, tv, comp_sym_intern(c, "req"), comp_sym_intern(c, "opt"), tv, tv, tv, tv);
     return 1;
   }
   if (sp_streq(name, "curry") && argc == 0) {
@@ -4654,9 +4661,11 @@ static void abi_sig_token(TyKind t, char *out) {
 /* Classify the C function a statically-bound Method points at for the legacy
    `sp_int (*)(void *, sp_int...)` cast the poly callable path uses, reading
    the target's parameter/return types the dynamic call site cannot see. The
-   Method arm boxes the sp_int C return with sp_bm_box_ret, and a regular
-   method's recorded kind is always Integer, so only a TY_INT return is
-   callable here (the synthesized typed-array adapters set legacy_ret instead).
+   Method arm boxes the sp_int C return with sp_bm_box_ret, and every target
+   whose C return fits the register records its kind there (a plain Integer,
+   String, Bigint, nil, bool, Symbol, typed array, or user object; the
+   synthesized typed-array adapters record theirs too), so the return-kind
+   arms below accept each of those and decline the rest.
    Otherwise: 0 declines; 1 means the target is callable
    with *out_sig holding a per-position C ABI type token sequence and
    *out_fixed the number of fixed positional C slots. A rest parameter,
@@ -4687,23 +4696,26 @@ static int method_legacy_int_abi(Compiler *c, int mi, int recv_bound, char *out_
      Method carries a receiver" flag). */
   int is_bam = m->name && strncmp(m->name, "__bam_", 6) == 0;
   int pstart = (is_bam && recv_bound && m->nparams > 0) ? 1 : 0;
-  /* How the raw sp_int C return boxes. A regular Method arm boxes with the
-     Integer default, so ONLY a TY_INT return is correct there: TY_NIL/
-     TY_UNKNOWN are emitted as `void` (the cast reads an undefined register),
-     and a bool is a 1-byte `sp_bool` (the sp_int cast reads undefined upper
-     register bytes) while a symbol is an sp_int carrying a Symbol id -- both
-     would box as the wrong Ruby value (true -> a garbage Integer, :sym -> its
-     id). A pointer/poly/float/struct return is a different type entirely.
-     A synthesized __bam_ wrapper may instead launder a String through the
-     register (a StrArray element from `[]`); its C return is `const char *`,
-     so sp_bm_box_ret's String kind boxes it correctly. Allow only the
-     wrapper shape, where spinel owns the ABI. */
+  /* How the raw sp_int C return boxes. A method whose C return is not an
+     sp_int at all declines below: TY_NIL/TY_UNKNOWN are emitted as `void`
+     (the cast reads an undefined register), a bool is a 1-byte `sp_bool`
+     (the sp_int cast reads undefined upper register bytes) while a symbol is
+     an sp_int carrying a Symbol id -- both would box as the wrong Ruby value
+     (true -> a garbage Integer, :sym -> its id). A float return comes back in
+     a different register and a value struct is not a register value at all.
+     The kinds that DO ride the register and have a matching box arm are
+     enumerated here: a String return is `const char *` (a plain method's C
+     return exactly like the synthesized __bam_ wrapper's -- a StrArray
+     element laundered from `[]`), a Bigint return is a nullable `sp_Bigint *`,
+     and the array/object kinds are pointers. Each maps to its sp_bm_box_ret
+     arm so the register is boxed as the Ruby value it really is. */
   if (m->ret == TY_INT) { if (out_ret) *out_ret = 0; /* SP_BM_RET_INT */ }
-  /* A String return is a `const char *` in the register, for a regular
-     method as much as for a wrapper that launders one: the kind boxes it.
-     Declining it left `resolver.call` on a String-returning target with no
-     stamp, and the typed-receiver call then raised (#4445). */
+  /* A plain String-returning method's C return is `const char *` just like
+     the wrapper's: sp_bm_box_ret's STR arm boxes a NULL as nil. */
   else if (m->ret == TY_STRING) { if (out_ret) *out_ret = 1; /* SP_BM_RET_STR */ }
+  /* A Bigint return is a nullable `sp_Bigint *` riding the register; the box
+     arm allocates the Ruby value (or nil for a NULL pointer). */
+  else if (m->ret == TY_BIGINT) { if (out_ret) *out_ret = 10; /* SP_BM_RET_BIGINT */ }
   /* A method whose value is nil (a void C function) is called for its effect
      and answers nil: the store-table callbacks of optcarrot's CPU are these
      (`def poke_ram(addr, data) ... end`), read out of a poly array and called
@@ -4841,8 +4853,10 @@ static void emit_bm_abi_args(Buf *b, const char *rb, int abi, const char *sig, i
    and `[]` (Proc#[] IS #call). Positional only: a keyword split (kwh >= 0)
    has arguments already matched against a specific user candidate and keeps
    falling through to the user arms, and a splatted argument is left to the
-   pre-existing (unsupported) dispatch path rather than published as one
-   argument. Emits
+   pre-existing (unsupported) dispatch path here rather than published as one
+   argument -- the fast path with no user `call` spreads a splat through
+   sp_poly_callable_spread, but this pre-arm's positional publish sequence has
+   no way to spread an array into per-position slots. Emits
    `if (<tag/cls is callable>) { <tr> = <expr>; }\nelse ` and returns 1 when
    emitted, 0 (nothing written) otherwise. */
 static int emit_poly_callable_prearm(Compiler *c, const char *name, int argc,
@@ -4918,7 +4932,11 @@ static int emit_poly_callable_prearm(Compiler *c, const char *name, int argc,
      by the stamped kind, and the sp_RbVal one for a poly-returning target,
      whose struct return no sp_int cast can read; the Method's stamp picks at
      run time. Under promote every target returns sp_RbVal already. */
-  buf_printf(&eb, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", tv, tv);
+  /* A Method that resolved no target (`self.class.method(:m)`, a class value
+     that is not a statically-known constant) carries a NULL fn. Under promote
+     there is no sp_bm_legacy_abi_ok gate, so the cast below would jump through
+     NULL; test fn here and fall to sp_poly_callable_call's NoMethodError. */
+  buf_printf(&eb, "(_t%d.cls_id == SP_BUILTIN_METHOD && ((sp_BoundMethod *)_t%d.v.p)->fn ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", tv, tv, tv);
   for (int pass = 0; pass < (mabi_poly ? 1 : 2); pass++) {
     const char *rty = (pass == 0) ? aty : "sp_RbVal";
     const char *bo = (pass == 0) ? boxopen : "";
@@ -13228,13 +13246,14 @@ int builtin_arity_violation(Compiler *c, int id) {
    count, then the ArgumentError with `exp` as the range, yielding the call's
    default value. Shared by the builtin guard and a call through a Method
    object whose target is known. */
-static void emit_wrong_count(Compiler *c, int id, const char *exp, int eval_recv, Buf *b) {
+static void emit_wrong_count(Compiler *c, int id, const char *exp, int eval_recv, int given, Buf *b) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
   int anode = nt_ref(nt, id, "arguments");
   int argc = 0; const int *argv = anode >= 0 ? nt_arr(nt, anode, "arguments", &argc) : NULL;
   TyKind rty = comp_ntype(c, id);
   const char *dv = default_value(rty);
+  if (given < 0) given = argc;
   buf_puts(b, "({ ");
   if (eval_recv) { buf_puts(b, "(void)("); emit_expr(c, recv, b); buf_puts(b, "); "); }
   for (int i = 0; i < argc; i++) {
@@ -13242,13 +13261,13 @@ static void emit_wrong_count(Compiler *c, int id, const char *exp, int eval_recv
   }
   buf_printf(b, "sp_raise_cls(\"ArgumentError\","
                 " \"wrong number of arguments (given %d, expected %s)\"); %s; })",
-             argc, exp, dv ? dv : "0");
+             given, exp, dv ? dv : "0");
 }
 
 int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
   char exp[32]; int eval_recv;
   if (!arity_violation(c, id, exp, sizeof exp, &eval_recv)) return 0;
-  emit_wrong_count(c, id, exp, eval_recv, b);
+  emit_wrong_count(c, id, exp, eval_recv, -1, b);
   return 1;
 }
 
@@ -13267,37 +13286,100 @@ static int bam_wrapper(const Scope *tm) {
    rules; and never the wrapper of a bound builtin, the one target whose self
    carries a parameter. `exp` receives the range in CRuby's words. */
 static int method_call_count_violation(Compiler *c, Scope *tm, int argc,
-                                       const int *argv, char *exp, size_t cap) {
+                                       const int *argv, char *exp, size_t cap,
+                                       int *given) {
   const NodeTable *nt = c->nt;
-  if (tm->kwrest_idx >= 0 || tm->npost_rest > 0 || tm->cs_synth || bam_wrapper(tm)) return 0;
+  if (given) *given = argc;
+  if (tm->npost_rest > 0 || tm->cs_synth) return 0;
+  /* A trailing keyword hash binds by name when the target declares a keyword
+     parameter or a `**kwrest`: CRuby does not count it as a positional, so a
+     call that omits a required positional must still raise (`def m(a, c: 3)`
+     called `m.call(c: 9)` answers CRuby's `given 0, expected 1`, not
+     `[0, 9]`; `def w(a, **k)` called `w.call(z: 2)` answers `given 0,
+     expected 1`). Without either the hash IS a positional (Ruby packs it into
+     the last positional/rest), so it keeps counting. */
+  int has_decl_kw = 0;
+  for (int i = 0; i < tm->nparams; i++)
+    if (tm->pnames[i] && callee_param_is_declared_kwarg(c, tm, tm->pnames[i])) { has_decl_kw = 1; break; }
+  int kwh_tail = (has_decl_kw || tm->kwrest_idx >= 0) && argc > 0 && argv &&
+                 nt_type(nt, argv[argc - 1]) &&
+                 sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode");
+  int pos_argc = kwh_tail ? argc - 1 : argc;
   for (int k = 0; k < argc; k++) {
     const char *at = nt_type(nt, argv[k]);
-    if (at && (sp_streq(at, "SplatNode") || sp_streq(at, "KeywordHashNode") ||
-               sp_streq(at, "BlockArgumentNode") || sp_streq(at, "ForwardingArgumentsNode")))
+    if (!at) continue;
+    if (sp_streq(at, "KeywordHashNode")) {
+      /* A trailing keyword hash is always the last argument. When the target
+         declares a keyword parameter it binds by name (not positional);
+         otherwise Ruby packs it into the last positional/rest. Either way it
+         does not disqualify the positional count (see pos_argc above). */
+      if (k == argc - 1) continue;
       return 0;
+    }
+    if (sp_streq(at, "SplatNode") || sp_streq(at, "BlockArgumentNode") ||
+        sp_streq(at, "ForwardingArgumentsNode")) return 0;
+  }
+  if (bam_wrapper(tm)) {
+    /* The wrapper of a bound builtin mostly has only the receiver parameter
+       (its own arguments pass through unlisted, so no count can be read off
+       it). A binop wrapper (`__bam_r`, `__bam_a`) is the exception: its one
+       operand is a real parameter, so a call with none read the padding zero
+       as the operand (`arr.method(:[]).call()` answered `arr[0]`). Require at
+       least that operand; the CRuby 2-argument slice form the wrapper does
+       not model keeps its existing behavior. */
+    if (tm->nparams < 2 || !tm->pnames || !tm->pnames[1] ||
+        !sp_streq(tm->pnames[1], "__bam_a")) return 0;
+    if (argc < 1) { snprintf(exp, cap, "1"); if (given) *given = 0; return 1; }
+    return 0;
   }
   int nfixed = 0, nreq = 0;
   for (int i = 0; i < tm->nparams; i++) {
     if (i == tm->rest_idx) continue;
-    if (!tm->pnames[i] || (tm->pnames[i][0] == '_' && tm->pnames[i][1] == '_') ||
-        callee_has_kwarg(c, tm, tm->pnames[i])) return 0;
+    /* A `**kwrest` parameter is not a positional: it can only be reached by a
+       keyword hash, and counting it would let an over-positional call look
+       valid (`def m(a, **k)` called `m.call(1, 2)` answered `[1, 2]` where
+       CRuby raises ArgumentError). It is excluded here; the positionals
+       before it decide the range. */
+    if (i == tm->kwrest_idx) continue;
+    if (!tm->pnames[i] || (tm->pnames[i][0] == '_' && tm->pnames[i][1] == '_')) return 0;
+    if (callee_has_kwarg(c, tm, tm->pnames[i])) {
+      /* A REAL declared keyword parameter is not positional, so it does not
+         count against the positional range: the value comes from a trailing
+         keyword hash, and a call that passes only positionals leaves it at
+         its default (`def kw(a, c: 3)` must refuse `call(1, 2)`). A parameter
+         whose name merely collides with a keyword (`...` forwarding) binds by
+         other rules, so keep declining for it. */
+      if (callee_param_is_declared_kwarg(c, tm, tm->pnames[i])) continue;
+      return 0;
+    }
     nfixed++;
     if (!tm->pdefault || tm->pdefault[i] < 0) nreq++;
   }
-  if (argc >= nreq && (tm->rest_idx >= 0 || argc <= nfixed)) return 0;
+  if (given) *given = pos_argc;
+  if (pos_argc >= nreq && (tm->rest_idx >= 0 || pos_argc <= nfixed)) return 0;
   if (tm->rest_idx >= 0) snprintf(exp, cap, "%d+", nreq);
   else if (nreq == nfixed) snprintf(exp, cap, "%d", nfixed);
   else snprintf(exp, cap, "%d..%d", nreq, nfixed);
+  /* CRuby appends the method's required keywords to the arity message even
+     when they were supplied (`def m(a, c:)` called `m.call(c: 9)` reports
+     `given 0, expected 1; required keyword: c`). The keyword is a static
+     property of the signature, not of this call. */
+  {
+    char kwn[160]; kwn[0] = 0; int nk = 0;
+    for (int i = 0; i < tm->nparams; i++) {
+      if (!tm->pnames[i] || !callee_param_is_declared_kwarg(c, tm, tm->pnames[i])) continue;
+      if (tm->pdefault && tm->pdefault[i] >= 0) continue;
+      if (nk) strncat(kwn, ", ", sizeof kwn - strlen(kwn) - 1);
+      strncat(kwn, tm->pnames[i], sizeof kwn - strlen(kwn) - 1);
+      nk++;
+    }
+    if (nk > 0) {
+      size_t cur = strlen(exp);
+      if (cur < cap)
+        snprintf(exp + cur, cap - cur, "; required keyword%s: %s", nk > 1 ? "s" : "", kwn);
+    }
+  }
   return 1;
-}
-
-/* A default the trampoline of Method#to_proc can fill in from its own frame:
-   a literal, which reads nothing of the frame it was written in. */
-static int literal_default(Compiler *c, int node) {
-  const char *ty = node >= 0 ? nt_type(c->nt, node) : NULL;
-  return ty && (sp_streq(ty, "IntegerNode") || sp_streq(ty, "FloatNode") ||
-                sp_streq(ty, "StringNode") || sp_streq(ty, "SymbolNode") ||
-                sp_streq(ty, "NilNode") || sp_streq(ty, "TrueNode") || sp_streq(ty, "FalseNode"));
 }
 
 /* The guards for an argument whose static class the method cannot take: raise
@@ -15101,6 +15183,359 @@ static void emit_kconv_call(Compiler *c, int id, const int *av, int ac, int rais
   buf_printf(b, "; SP_GC_ROOT_RBVAL(_kv%d); %s(_kv%d, ", tv, fn, tv);
   emit_int_expr(c, av[1], b);
   buf_printf(b, ", %d); })", raise);
+}
+
+/* Bind a bound-Method call site's already-evaluated argument to a named local
+   and register it as the callee parameter's rename, so a LATER parameter
+   default that reads this parameter (`def m(a, b = a + 5)`) resolves at the
+   call site instead of emitting the callee's `lv_a`, which does not exist
+   there -- a C compile failure, or a same-named caller local read by mistake.
+   The direct-call arm does the same with its own `_pd` locals (#4431); this is
+   the bound-Method `.call` path's copy. `k` is the parameter's call position
+   (the local name suffix), `pidx` its index in the callee scope. No-op unless
+   `pd_mode` and the callee has a default reading an earlier parameter. */
+static void emit_bm_param_alias(Compiler *c, Scope *tm, int k, int pidx, int atmp,
+                                int pd_mode, int pd_uid, Buf *b) {
+  if (!pd_mode || !tm || pidx >= tm->nparams || !tm->pnames || !tm->pnames[pidx]) return;
+  if (g_nren >= MAX_RENAME) return;
+  LocalVar *pp = scope_local(tm, tm->pnames[pidx]);
+  buf_puts(b, "; ");
+  emit_ctype(c, pp ? pp->type : TY_INT, b);
+  buf_printf(b, " lv__pd%d_%d = _t%d; ", pd_uid, k, atmp);
+  snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", tm->pnames[pidx]);
+  snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_pd%d_%d", pd_uid, k);
+  g_nren++;
+  /* A parameter a later default's nested proc closes over is read through a
+     heap cell named for the RENAMED parameter; allocate it here and seed it
+     from the argument temp, as the method prologue's emit_cell_decl does. */
+  if (pp && pp->is_cell) {
+    char crn[40]; snprintf(crn, sizeof crn, "_pd%d_%d", pd_uid, k);
+    emit_inlined_local_decl(c, pp, crn, b, 1);
+    buf_printf(b, "  (*_cell_%s) = _t%d;\n", crn, atmp);
+  }
+}
+
+/* Unique C name for a callee's method-scope local in a frame that shares the
+   caller's C scope (the bound `.call` statement expression). The leading
+   uppercase letter is load-bearing: `declare_local_named` and the expression
+   emitter both prefix a name with `lv_`, and a Ruby local name begins with a
+   lowercase letter or `_`, so no caller local can spell `lv_` + this. A
+   source local named `_bm1_z` passed as an argument (`_bm1_z = 100;
+   m.call(5, _bm1_z)`) collided with a callee's `z`, which used to be spelled
+   `_bm1_z`, and the argument read the callee's zeroed slot instead of the
+   caller's. The method scope index makes the name stable between the
+   declaration site and each default's emission. */
+static void callee_frame_local_name(Compiler *c, Scope *tm, const char *name,
+                                    char *out, size_t cap) {
+  snprintf(out, cap, "Bm%d_%s", (int)(tm - c->scopes), name);
+}
+
+/* 1 when `name` can ride the rename table: the source spelling fits
+   g_ren_from and the per-frame unique spelling fits g_ren_to. A name that
+   does not is left UNRENAMED, and both the declaration and the emission fall
+   back to `lv_<name>` so the two still agree (a longer name used to declare
+   `lv_Bm1_<name>` while the default referenced an undeclared `lv_<name>`). */
+static int callee_local_rename_fits(Compiler *c, Scope *tm, const char *name) {
+  if (strlen(name) >= sizeof g_ren_from[0]) return 0;
+  char rn[160];
+  callee_frame_local_name(c, tm, name, rn, sizeof rn);
+  return strlen(rn) < sizeof g_ren_to[0];
+}
+
+/* Register the callee's method-scope locals in the rename table for the
+   duration of one default's emission, so the default resolves them through
+   their per-frame unique names. A name that cannot ride the table is skipped,
+   matching emit_callee_local_decls's fallback to the plain name. Returns the
+   g_nren to restore afterwards. */
+static int push_callee_local_renames(Compiler *c, Scope *tm) {
+  int base = g_nren;
+  if (!tm) return base;
+  for (int li = 0; li < tm->nlocals; li++) {
+    LocalVar *blv = &tm->locals[li];
+    if (!blv->name) continue;
+    if (blv->is_param || blv->byref_out) continue;
+    if (tm->blk_param && sp_streq(blv->name, tm->blk_param)) continue;
+    if (g_nren >= MAX_RENAME) break;
+    if (!callee_local_rename_fits(c, tm, blv->name)) continue;
+    char rn[160];
+    callee_frame_local_name(c, tm, blv->name, rn, sizeof rn);
+    snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", blv->name);
+    snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "%s", rn);
+    g_nren++;
+  }
+  return base;
+}
+
+/* Declare the callee's locals in a frame that evaluates a parameter default
+   but is NOT the callee's own body: the Method#to_proc trampoline and the
+   bound `.call` statement expression. A default -- and any block it inlines --
+   binds its names through METHOD-scope locals (`lv_<p>`), which the inline
+   iterator emitter assigns and relies on the method prologue to have
+   declared. These separate function/statement scopes have no such prologue,
+   so `def m(a, c = [1,2].map { |x; z| z = x + 1; z })` emitted `lv_z`
+   undeclared and the C build failed; a destructured block param
+   (`|(x, y)|`), a block-local, and a local the default itself creates
+   (`c = (q = 5; q)`) all have the same shape. Declare every non-parameter
+   local of the method here, matching the method prologue (`emit_scope_decls`
+   plus `emit_cell_decl`): a plain local with `declare_local`, a captured one
+   with its heap cell so an inlined `proc { ... }` can name it. A parameter
+   rides its rename alias (`_a%d` / `lv__a%d` / `_pd%d_%k`) instead. Declaring
+   every local, not only the ones a default reads, is safe: the unused ones are
+   never referenced -- and with `unique` they cannot collide with the caller's
+   own locals either (which a bare `lv_<name>` in the shared bound-`.call`
+   scope did). When `unique` is set the names are per-frame unique
+   (`Bm%d_<name>`, whose leading uppercase is what keeps a caller local out);
+   the bound `.call` statement expression shares the caller's C scope, and a
+   bare `lv_<name>` there captured a same-named caller local used in an
+   argument expression (`def m(a, b = 2); x = a + b; end` called as `x = 100;
+   m.call(1, x)` read the callee's zeroed `x`). The default's references are
+   routed to the unique name by push_callee_local_renames, active only while
+   that default is emitted; a name too long for the table is left unrenamed in
+   BOTH places (see callee_local_rename_fits). */
+static void emit_callee_local_decls(Compiler *c, Scope *tm, Buf *b, int unique) {
+  if (!tm) return;
+  for (int li = 0; li < tm->nlocals; li++) {
+    LocalVar *blv = &tm->locals[li];
+    if (!blv->name) continue;
+    if (blv->is_param || blv->byref_out) continue;
+    if (tm->blk_param && sp_streq(blv->name, tm->blk_param)) continue;
+    char rn[160];
+    if (unique && callee_local_rename_fits(c, tm, blv->name))
+      callee_frame_local_name(c, tm, blv->name, rn, sizeof rn);
+    else snprintf(rn, sizeof rn, "%s", blv->name);
+    /* The method prologue normalizes an untyped block param to a boxed slot;
+       this frame may be emitted before that prologue runs, and declare_local
+       rejects TY_UNKNOWN. */
+    if (blv->type == TY_UNKNOWN) blv->type = TY_POLY;
+    if (!blv->is_cell) { declare_local_named(c, b, blv, rn, 0); continue; }
+    /* A celled local: `emit_cell_decl` first declares the plain shadow slot
+       the inline iterator binds, then the heap cell the closure reads. */
+    if (blv->cell_shadow) declare_local_named(c, b, blv, rn, 0);
+    emit_inlined_local_decl(c, blv, rn, b, 1);
+  }
+}
+
+/* Collect the local names a subtree reads (writes == 0) or writes (writes ==
+   1) into `out`; `n` is the running count and `cap` the array's size. Nested
+   class/module/definitions are skipped: they have their own local scope, so
+   their names are not this method's locals. */
+static void bm_collect_names(Compiler *c, int id, int writes, const char **out,
+                             int cap, int *n) {
+  if (id < 0 || *n >= cap) return;
+  const char *ty = nt_type(c->nt, id);
+  if (ty && (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") ||
+             sp_streq(ty, "ModuleNode") || sp_streq(ty, "SingletonClassNode"))) return;
+  if (ty) {
+    int is_write = sp_streq(ty, "LocalVariableWriteNode") ||
+                   sp_streq(ty, "LocalVariableTargetNode") ||
+                   sp_streq(ty, "LocalVariableOperatorWriteNode") ||
+                   sp_streq(ty, "LocalVariableOrWriteNode") ||
+                   sp_streq(ty, "LocalVariableAndWriteNode");
+    int is_read = sp_streq(ty, "LocalVariableReadNode") ||
+                  sp_streq(ty, "LocalVariableOperatorWriteNode") ||
+                  sp_streq(ty, "LocalVariableOrWriteNode") ||
+                  sp_streq(ty, "LocalVariableAndWriteNode");
+    if (writes ? is_write : is_read) {
+      const char *nm = nt_str(c->nt, id, "name");
+      if (nm) {
+        int dup = 0;
+        for (int i = 0; i < *n; i++) if (sp_streq(out[i], nm)) { dup = 1; break; }
+        if (!dup) out[(*n)++] = nm;
+      }
+    }
+  }
+  int nr = nt_num_refs(c->nt, id);
+  for (int i = 0; i < nr; i++) bm_collect_names(c, nt_ref_at(c->nt, id, i), writes, out, cap, n);
+  int na = nt_num_arrs(c->nt, id);
+  for (int i = 0; i < na; i++) {
+    int n2 = 0; const int *ids = nt_arr_at(c->nt, id, i, &n2);
+    for (int k = 0; k < n2; k++) bm_collect_names(c, ids[k], writes, out, cap, n);
+  }
+}
+
+/* Does the callee's body READ a local that one of its parameter DEFAULTS
+   WRITES? A bound `.call` or Method#to_proc evaluates the defaults in the
+   CALLER's frame, while the callee's body runs in its own function reading its
+   own slot, so such a write can never reach the body: `def m(a, c = (z = a +
+   1; z)); z; end` answered the body's zeroed `z`, 0, where CRuby answers 6.
+   The direct call refuses the same shape at C compile time (the `lv_z` has no
+   declaration); these two routes would otherwise answer silently, so decline
+   instead. */
+static int default_writes_body_local(Compiler *c, Scope *tm) {
+  if (!tm || tm->body < 0 || !tm->pdefault) return 0;
+  const char *reads[256]; int nread = 0;
+  bm_collect_names(c, tm->body, 0, reads, 256, &nread);
+  if (nread == 0) return 0;
+  for (int i = 0; i < tm->nparams; i++) {
+    if (tm->pdefault[i] < 0) continue;
+    const char *writes[256]; int nwrite = 0;
+    bm_collect_names(c, tm->pdefault[i], 1, writes, 256, &nwrite);
+    for (int w = 0; w < nwrite; w++)
+      for (int r = 0; r < nread; r++)
+        if (sp_streq(writes[w], reads[r])) return 1;
+  }
+  return 0;
+}
+
+/* Would the bound `.call` frame's rename registrations outgrow the table?
+   emit_callee_local_decls declares every local with its unique name, but
+   push_callee_local_renames stops at MAX_RENAME (and emit_bm_param_alias
+   gives the earlier parameters their own slots on top), after which the
+   default's reference resolves to the plain name while the declaration
+   carries the unique one -- an undeclared identifier. Count the renameable
+   locals plus a slot per parameter (an upper bound on the aliases) and
+   decline when the frame cannot hold them. */
+static int callee_locals_rename_overflow(Compiler *c, Scope *tm) {
+  if (!tm) return 0;
+  int n = 0;
+  for (int li = 0; li < tm->nlocals; li++) {
+    LocalVar *blv = &tm->locals[li];
+    if (!blv->name) continue;
+    if (blv->is_param || blv->byref_out) continue;
+    if (tm->blk_param && sp_streq(blv->name, tm->blk_param)) continue;
+    if (!callee_local_rename_fits(c, tm, blv->name)) continue;
+    n++;
+  }
+  return g_nren + n + tm->nparams > MAX_RENAME;
+}
+
+/* Would a parameter rename be needed but impossible to register? The bound
+   `.call` and Method#to_proc frames alias each parameter to a call-local
+   (`_pd%d_%d` / `_a%d`) and register the source name in the rename table, so a
+   default that reads an earlier parameter resolves at the call site. The
+   table's source buffer holds at most sizeof g_ren_from[0]-1 bytes of the Ruby
+   name; a longer parameter name would be TRUNCATED there, the default's
+   reference would not match, and it would emit the undeclared `lv_<name>` (a
+   C build failure). Only a frame that actually aliases parameters -- one whose
+   defaults read an earlier parameter -- is at risk, and a frame with more
+   aliases than the table holds is declined too. */
+static int callee_param_rename_overflow(Compiler *c, Scope *tm) {
+  if (!tm || !tm->pnames) return 0;
+  if (!default_refs_earlier_param(c, tm)) return 0;
+  if (g_nren + tm->nparams > MAX_RENAME) return 1;
+  for (int i = 0; i < tm->nparams; i++)
+    if (tm->pnames[i] && strlen(tm->pnames[i]) >= sizeof g_ren_from[0]) return 1;
+  return 0;
+}
+
+/* Root a codegen temp by name after it has been assigned. Both bound-Method
+   call routes evaluate a callee default (or an earlier argument) into a plain
+   C local, and the NEXT parameter's evaluation -- a fresh String/Array default,
+   or a nested call -- can allocate and collect the value before the call reads
+   it back. The direct-call path roots its argument temps the same way; these
+   are the two flat-local sites (`_a%d` in a Method#to_proc trampoline, `_t%d`
+   in a bound `.call` statement expression). A poly box, a String payload and
+   every other heap pointer each take their own macro. */
+static void emit_named_root(Compiler *c, TyKind t, const char *name, int idx, Buf *b) {
+  if (!needs_root(t) || comp_ty_value_obj(c, t)) return;
+  if (t == TY_POLY) buf_printf(b, "SP_GC_ROOT_RBVAL(%s%d);", name, idx);
+  else if (t == TY_STRING) buf_printf(b, "SP_GC_ROOT_STR(%s%d);", name, idx);
+  else buf_printf(b, "SP_GC_ROOT(%s%d);", name, idx);
+}
+
+/* Emit a callee parameter default for a bound-Method `.call`. Two things have
+   to hold that the caller's prelude cannot give it: (1) the helper statements
+   a default expression hoists (an allocation, a nested call) must run AFTER
+   the parameter aliases this call declares, so they are captured here and
+   emitted at this point inside the call's statement expression instead of the
+   enclosing prelude; (2) a default that reads `self`/an ivar must read the
+   bound receiver, so when `selfexpr` names it, `self` is redirected for the
+   emission (the direct-call arm sets `g_self` for its defaults too, #4431).
+   `k` is the parameter's call position in the alias spelling. */
+static void emit_bm_default_parts(Compiler *c, Scope *tm, int idx, const char *selfexpr,
+                                  int class_id, Buf *pre, Buf *expr) {
+  Buf *sv_pre = g_pre;
+  const char *sv_self = g_self, *sv_deref = g_self_deref;
+  int sv_cls = g_emitting_class_id;
+  /* The parts are spliced mid-line inside the `.call` statement expression, so
+     a `#line` directive here would be a stray `#` -- see codegen_fold.c. */
+  int sv_lm = g_line_map; g_line_map = 0;
+  int sv_nren = push_callee_local_renames(c, tm);
+  g_pre = pre;
+  if (selfexpr) {
+    g_self = selfexpr;
+    g_self_deref = comp_ty_value_obj(c, ty_object(class_id)) ? "." : "->";
+    g_emitting_class_id = class_id;
+  }
+  emit_arg_or_default(c, tm, idx, -1, expr);
+  g_pre = sv_pre;
+  g_self = sv_self; g_self_deref = sv_deref; g_emitting_class_id = sv_cls;
+  g_line_map = sv_lm;
+  g_nren = sv_nren;
+}
+
+/* The kind a typed-array adapter expects at argument position `pos`: 'i' for
+   an index sp_int slot, 'v' for an element written into the array, 's' for a
+   laundered String pointer. An IntArray is int throughout; a StrArray's
+   written element is a String while its index is an int. The index/value
+   distinction matters: CRuby's Array#[]= refuses a non-Integer INDEX with a
+   TypeError, but its Array is heterogeneous, so a non-Integer VALUE the typed
+   array cannot hold declines the way the poly-slot route does. */
+static char adapter_arg_kind(TyKind arr, int is_push, int is_set, int pos) {
+  if (arr == TY_STR_ARRAY) {
+    if (is_push) return 's';
+    if (is_set) return pos == 0 ? 'i' : 's';
+    return 'i';    /* [] index */
+  }
+  if (is_push) return 'v';
+  if (is_set) return pos == 0 ? 'i' : 'v';
+  return 'i';      /* IntArray [] index: converts, or CRuby's TypeError */
+}
+
+/* The decline the poly-slot route raises when a typed-array adapter cannot
+   take a value (a String pushed into an IntArray, an Integer into a
+   StrArray). A `call` no typed-array-adapter Method can take is CRuby's
+   NoMethodError shape here, not a TypeError: CRuby's Array would have
+   accepted the value, the typed array is what cannot. */
+static void emit_adapter_decline(Buf *out) {
+  buf_puts(out, "({ sp_raise_cls(\"NoMethodError\", "
+                "\"undefined method 'call' for an instance of Method\"); (sp_int)0; })");
+}
+
+/* Emit `node` as one typed-array adapter argument of the expected kind. A
+   String slot keeps the laundered pointer; a non-Integer in an INDEX slot
+   goes through sp_poly_arg_int_chk so CRuby's TypeError is raised instead of
+   the pointer being read as an integer. A value that cannot live in the typed
+   array declines, matching the poly-slot route's NoMethodError, rather than
+   launder or truncate it. */
+static void emit_adapter_arg_static(Compiler *c, int node, char kind, Buf *out) {
+  TyKind at = comp_ntype(c, node);
+  if (kind == 's') {
+    if (at == TY_STRING || at == TY_STRBUF) {
+      buf_puts(out, "(sp_int)(uintptr_t)(");
+      emit_expr(c, node, out);
+      buf_puts(out, ")");
+    }
+    else emit_adapter_decline(out);
+  }
+  else if (at == TY_INT) {
+    emit_expr(c, node, out);
+  }
+  else if (kind == 'v') {
+    emit_adapter_decline(out);
+  }
+  else {
+    buf_puts(out, "sp_poly_arg_int_chk(");
+    emit_boxed(c, node, out);
+    buf_puts(out, ")");
+  }
+}
+
+/* Emit a boxed runtime value as one typed-array adapter argument. */
+static void emit_adapter_arg_boxed(const char *v, char kind, Buf *out) {
+  if (kind == 's') {
+    buf_printf(out, "({ sp_RbVal _ade = %s; if (_ade.tag != SP_TAG_STR)"
+                    " sp_raise_cls(\"NoMethodError\", \"undefined method 'call'"
+                    " for an instance of Method\"); (sp_int)(uintptr_t)_ade.v.s; })", v);
+  }
+  else if (kind == 'v') {
+    buf_printf(out, "({ sp_RbVal _ade = %s; if (_ade.tag != SP_TAG_INT)"
+                    " sp_raise_cls(\"NoMethodError\", \"undefined method 'call'"
+                    " for an instance of Method\"); (sp_int)_ade.v.i; })", v);
+  }
+  else {
+    buf_printf(out, "sp_poly_arg_int_chk(%s)", v);
+  }
 }
 
 static void emit_call_body(Compiler *c, int id, Buf *b) {
@@ -16986,8 +17421,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       const char *aty = mabi_poly ? "sp_RbVal" : "sp_int";
       /* A splat among the arguments makes the arg count dynamic: build the full
          (boxed) argument array and spread it, as the statically-typed Proc path
-         does. The poly value is a Proc here (a boxed Method with a splat call is
-         not covered) (#3178). */
+         does. The poly value may be a Proc, a Curry, or a bound Method, so the
+         spread dispatches on the value's class (sp_poly_callable_spread): reading
+         it as an sp_Proc made a Method call segfault (#3178, #4395). */
       {
         int any_splat_pc = 0;
         for (int k = 0; k < argc; k++)
@@ -17017,7 +17453,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
             }
             free(ab.p);
           }
-          buf_printf(b, "((void)sp_proc_call_spread((sp_Proc *)_t%d.v.p, sp_box_poly_array(_t%d)), _sp_proc_poly_ret)", t, ta);
+          buf_printf(b, "sp_poly_callable_spread(_t%d, sp_box_poly_array(_t%d))", t, ta);
           return;
         }
       }
@@ -17103,7 +17539,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       if (mabi_poly) boxopen[0] = 0;
       else snprintf(boxopen, sizeof boxopen, "sp_bm_box_ret((sp_BoundMethod *)_t%d.v.p, ", t);
       if (mabi_poly)
-        buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", t, t);
+        /* A NULL-fn Method (an unresolved class value) has no callable
+           address; test fn so it falls to sp_poly_callable_call's
+           NoMethodError instead of jumping through NULL. */
+        buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD && ((sp_BoundMethod *)_t%d.v.p)->fn ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", t, t, t);
       else {
         buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD && ", t);
         if (method_ok) emit_bm_legacy_ok(b, t, argc, method_sig);
@@ -17281,8 +17720,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int tvp = ++g_tmp;
       buf_printf(b, "({ sp_BoundMethod *_t%d = ", tvp);
       emit_expr(c, recv, b);
+      /* The new constructor allocates: root the source Method so its self
+         (loaded as the new self below) cannot be swept mid-call. */
+      buf_printf(b, "; SP_GC_ROOT(_t%d); ", tvp);
       int sup_unb = method_expr_is_unbound(c, recv);
-      buf_printf(b, "; %ssp_bm_set_abi(sp_bound_method_new_d(_t%d->self, _t%d->self_kind, (sp_int)(uintptr_t)&", sup_unb ? "sp_bm_set_unbound(" : "", tvp, tvp);
+      buf_printf(b, "%ssp_bm_set_abi(sp_bound_method_new_d(_t%d->self, _t%d->self_kind, (sp_int)(uintptr_t)&", sup_unb ? "sp_bm_set_unbound(" : "", tvp, tvp);
       emit_method_cname(c, &c->scopes[pmip], b);
       buf_puts(b, ", ");
       emit_str_literal(b, c->scopes[pmip].name ? c->scopes[pmip].name : "?");
@@ -17349,9 +17791,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     int mn2 = method_recv_node(c, recv);
     int t2 = mn2 >= 0 ? method_obj_target_mi(c, mn2) : -1;
     if (t2 >= 0 && ty_is_object(comp_ntype(c, argv[0]))) {
-      buf_puts(b, "sp_bm_set_abi(sp_bound_method_new_d((void *)(");
+      /* The constructor allocates: hold the fresh `obj` (`...bind(C.new)`)
+         in a rooted C temporary across it, or the only reference can be
+         swept. Same shape as the `.method` and `.to_proc` captures. */
+      int bt = ++g_tmp;
+      buf_printf(b, "({ void *_t%d = (void *)(", bt);
       emit_expr(c, argv[0], b);
-      buf_puts(b, "), SP_BM_SELF_OBJ, (sp_int)(uintptr_t)&");
+      buf_printf(b, "); SP_GC_ROOT(_t%d); sp_bm_set_abi(sp_bound_method_new_d(_t%d, SP_BM_SELF_OBJ, (sp_int)(uintptr_t)&", bt, bt);
       emit_method_cname(c, &c->scopes[t2], b);
       buf_puts(b, ", ");
       emit_str_literal(b, method_sym_arg(c, mn2));
@@ -17362,6 +17808,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       { char _s[8 * 64 + 1]; int _fx = 0, _rs = 0, _rt = 0;
         int _ab = method_legacy_int_abi(c, t2, 1, _s, sizeof _s, &_fx, &_rs, &_rt);
         emit_bm_abi_args(b, "1", _ab, _s, _fx, _rs, _rt); }
+      buf_puts(b, "; })");
       return;
     }
   }
@@ -17415,20 +17862,35 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        element; the other adapters launder the array or a String through the
        register and must not be boxed as Integers (#4395). */
     int bop_ret = 0;    /* SP_BM_RET_INT */
+    int bop_is_adapter = 0;  /* target is a synthesized typed-array adapter */
     char bop_sig[8 * 64 + 1]; bop_sig[0] = 0;  /* typed-array adapter ABI signature */
-    buf_puts(b, mi >= 0 ? "sp_bm_set_abi(sp_bound_method_new_d(" : "sp_bm_set_abi(sp_bound_method_new(");
     /* A Method bound to a class/module (Klass.method(:cmeth)) has no instance
        self -- the class value is not a heap pointer, so pass NULL. */
     const char *self_kind = "SP_BM_SELF_NONE";
-    if (recv >= 0 && comp_ntype(c, recv) == TY_CLASS) buf_puts(b, "NULL");
-    else if (recv >= 0) {
+    int self_is_str = 0, self_rooted = 0;
+    int self_receiver = (recv >= 0 && comp_ntype(c, recv) != TY_CLASS);
+    int self_tmp = 0;
+    if (self_receiver) {
       TyKind rt2 = comp_ntype(c, recv);
       /* A Method binds to whatever the receiver is, and a number is not a
          reference the collector can follow. */
-      if (rt2 == TY_STRING || rt2 == TY_STRBUF) self_kind = "SP_BM_SELF_STR";
-      else if (needs_root(rt2) && rt2 != TY_POLY && !comp_ty_value_obj(c, rt2)) self_kind = "SP_BM_SELF_OBJ";
-      buf_puts(b, "(void *)("); emit_expr(c, recv, b); buf_puts(b, ")");
+      if (rt2 == TY_STRING || rt2 == TY_STRBUF) { self_kind = "SP_BM_SELF_STR"; self_is_str = 1; self_rooted = 1; }
+      else if (needs_root(rt2) && rt2 != TY_POLY && !comp_ty_value_obj(c, rt2)) { self_kind = "SP_BM_SELF_OBJ"; self_rooted = 1; }
+      /* The constructor allocates and may collect: a fresh receiver
+         (`M.new.method(:v)`) is otherwise unreachable and would be swept, so
+         hold it in a rooted C temporary across the call -- the same shape as
+         the `.to_proc` capture below. */
+      if (self_rooted) {
+        self_tmp = ++g_tmp;
+        buf_printf(b, "({ void *_t%d = (void *)(", self_tmp);
+        emit_expr(c, recv, b);
+        buf_printf(b, "); SP_GC_ROOT%s(_t%d); ", self_is_str ? "_STR" : "", self_tmp);
+      }
     }
+    buf_puts(b, mi >= 0 ? "sp_bm_set_abi(sp_bound_method_new_d(" : "sp_bm_set_abi(sp_bound_method_new(");
+    if (self_rooted) buf_printf(b, "_t%d", self_tmp);
+    else if (recv >= 0 && comp_ntype(c, recv) == TY_CLASS) buf_puts(b, "NULL");
+    else if (recv >= 0) { buf_puts(b, "(void *)("); emit_expr(c, recv, b); buf_puts(b, ")"); }
     else if (self_bound) { buf_printf(b, "(void *)%s", g_self); self_kind = "SP_BM_SELF_OBJ"; }
     else buf_puts(b, "NULL");
     buf_printf(b, ", %s, ", self_kind);
@@ -17446,17 +17908,29 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         else if (sp_streq(sym, "push")) bop = "push";
       }
       if (bop) {
-        mi_legacy = 1;
+        /* Under promote the adapter is emitted poly-signatured (sp_RbVal
+           self/arg/return), so it must NOT claim the legacy sp_int ABI: the
+           non-splat poly call path is already selected by mabi_poly and never
+           consults this flag, while the spread path's generic trampoline
+           would cast the poly-signatured adapter through the legacy ABI and
+           crash. Declining leaves that trampoline to raise instead. */
+        mi_legacy = g_promote_mode ? 0 : 1;
+        bop_is_adapter = 1;
         bop_argc = (bop[0] == 's') ? 2 : 1;  /* set=2, get/push=1 */
         /* memoized per (kind, op): emit the adapter once */
         static char bam_done[2][3];
         int ki = (brt == TY_INT_ARRAY) ? 0 : 1;
         int oi = bop[0] == 'g' ? 0 : bop[0] == 's' ? 1 : 2;
-        /* The non-promote adapter's Ruby return: an IntArray adapter answers
-           an int (the element / the assigned value) except push, which
-           answers the array; a StrArray adapter answers a String for get/set
-           (laundered through the register) and the array for push. */
-        bop_ret = (ki == 0) ? (oi == 2 ? 2 : 0) : (oi == 2 ? 3 : 1);
+        /* The non-promote adapter's Ruby return comes from the shared helper
+           (which also drives the analyzer's inferred type): an IntArray
+           adapter answers the array for push and the int element otherwise;
+           a StrArray adapter answers the array for push and the laundered
+           String element for get/set. */
+        TyKind art = method_obj_adapter_ret(brt, sym);
+        bop_ret = art == TY_INT_ARRAY ? 2 /* SP_BM_RET_INT_ARRAY */
+                : art == TY_STR_ARRAY ? 3 /* SP_BM_RET_STR_ARRAY */
+                : art == TY_STRING    ? 1 /* SP_BM_RET_STR */
+                : 0 /* SP_BM_RET_INT */;
         /* A StrArray adapter launders its String element through the sp_int
            slot: the value is arg 1 of []= and arg 0 of push. The int array
            and the StrArray index are scalars. The stamped signature mirrors
@@ -17555,7 +18029,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
     }
     emit_str_literal(b, disp);
-    { int ar; if (mi >= 0 && method_scope_arity(c, mi, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", SP_INT_NIL"); }
+    { int ar; if (mi >= 0 && method_scope_arity(c, mi, &ar)) buf_printf(b, ", (sp_int)%d", ar);
+      else if (bop_is_adapter) {
+        /* An adapter has no method scope: stamp CRuby's arity for the Array op
+           it stands in for (`push`/`[]`/`[]=` are all -1), not SP_INT_NIL. */
+        int ba;
+        if (builtin_method_arity("Array", sym, &ba)) buf_printf(b, ", (sp_int)%d", ba);
+        else buf_puts(b, ", SP_INT_NIL");
+      }
+      else buf_puts(b, ", SP_INT_NIL"); }
     if (mi >= 0) {
       char _db[512]; BUILD_METHOD_DESC(mi, disp, 0, _db);
       buf_puts(b, ", "); emit_str_literal(b, _db);
@@ -17565,6 +18047,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       emit_bm_abi_args(b, _rbb, mi_legacy, mi >= 0 ? mi_sig : bop_sig,
                        mi >= 0 ? mi_fixed : bop_argc, mi >= 0 ? mi_rest : bop_rest,
                        mi >= 0 ? mi_ret : bop_ret); }
+    if (self_rooted) buf_puts(b, "; })");
     return;
   }
   /* <method>.to_proc wraps the bound method in a trampoline Proc. When the
@@ -17598,20 +18081,44 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          publishes. Bound one C argument per slot, `m.to_proc.call(1, 2)` on
          `def r(*v)` read the Integer as the array and crashed, `def o(a, b =
          2)` called with one answered from an unset b, and a wrong count went
-         through unchecked. A keyword parameter, a required one after the
-         rest, a default that is not a literal, more parameters than the
+         through unchecked. A required keyword parameter, a required one after
+         the rest, more parameters than the
          channel's 16 slots, or a bound builtin's wrapper keep the plain
-         positional binding. */
+         positional binding; a declared OPTIONAL keyword parameter takes its
+         default (the proc ABI carries no keywords) and the rest of the
+         signature binds as usual. */
       int bind = tm->kwrest_idx < 0 && tm->npost_rest == 0 && !tm->cs_synth && !bam_wrapper(tm) &&
                  np - shift <= 16;
       int nreq = 0, nfixed = 0;
       for (int k = shift; k < np && bind; k++) {
         if (k == tm->rest_idx) continue;
-        if (!tm->pnames[k] || (tm->pnames[k][0] == '_' && tm->pnames[k][1] == '_') ||
-            callee_has_kwarg(c, tm, tm->pnames[k])) { bind = 0; break; }
+        if (!tm->pnames[k] || (tm->pnames[k][0] == '_' && tm->pnames[k][1] == '_')) { bind = 0; break; }
+        if (callee_has_kwarg(c, tm, tm->pnames[k])) {
+          /* A declared optional keyword param is not positional and the proc
+             ABI cannot carry a keyword, so it always takes its default and
+             does not count against the positional range. A required keyword
+             (no default), or a parameter whose name merely collides with a
+             keyword (ambiguous positional binding), still declines. */
+          if (callee_param_is_declared_kwarg(c, tm, tm->pnames[k]) &&
+              tm->pdefault && tm->pdefault[k] >= 0) continue;
+          bind = 0; break;
+        }
         nfixed++;
         if (!tm->pdefault || tm->pdefault[k] < 0) nreq++;
-        else if (!literal_default(c, tm->pdefault[k])) bind = 0;
+      }
+      /* Whether the target declares any keyword parameter, and whether one of
+         them is required. A required keyword can never be supplied through the
+         proc ABI (it carries no keywords), so the whole trampoline declines. A
+         target with only OPTIONAL keywords keeps working for a keyword-less
+         call (each takes its default), but a runtime trailing keyword hash has
+         no positional slot and used to be read as the next parameter's sp_int
+         (`def m(a, b = a + 1, c: 3)` called `m.to_proc.call(1, c: 5)` answered
+         `[1, <garbage>, 3]`); a runtime guard below declines that shape. */
+      int has_any_kw = 0, has_req_kw = 0;
+      for (int k = shift; k < np; k++) {
+        if (!tm->pnames[k] || !callee_param_is_declared_kwarg(c, tm, tm->pnames[k])) continue;
+        has_any_kw = 1;
+        if (!(tm->pdefault && tm->pdefault[k] >= 0)) has_req_kw = 1;
       }
       /* a float/poly parameter, or the rest's surplus, reads back from the
          boxed side-channel the call site publishes */
@@ -17626,10 +18133,84 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         g_needs_proc_poly_argslot = 1;
         buf_puts(&g_proc_protos, "extern SP_TLS sp_RbVal _sp_proc_poly_args[16];\n");
       }
-      Buf *pb = &g_procs;
+      /* A rest parameter followed by a post-rest positional, a `**kwrest`, or
+         a REQUIRED keyword cannot ride this fixed positional cast: the
+         bind==0 arm below reads the trailing parameter's slot from `args[]` as
+         if the rest were not there, so `def m(a, *r, c:)` handed the keyword
+         hash pointer (or an uninitialized register) to `sp_T_m`, whose
+         prologue rooted it -- a SIGSEGV. A declared OPTIONAL keyword after
+         the rest is fine (it always takes its default, see above). Decline
+         the rest exactly as the direct `.call` route's `rest_drops_tail` and
+         the poly-slot gate do. */
+      int mtp_rest_drops_tail = 0;
+      if (tm->rest_idx >= 0) {
+        if (tm->npost_rest > 0 || tm->kwrest_idx >= 0) mtp_rest_drops_tail = 1;
+        else for (int ri = tm->rest_idx + 1; ri < tm->nparams; ri++)
+          if (tm->pnames && tm->pnames[ri] &&
+              callee_param_is_declared_kwarg(c, tm, tm->pnames[ri]) &&
+              !(tm->pdefault && tm->pdefault[ri] >= 0)) { mtp_rest_drops_tail = 1; break; }
+      }
+      /* Build the trampoline into a LOCAL buffer, not directly into g_procs.
+         A default with an inlined `proc { ... }` literal re-enters the proc
+         emitter while we are mid-emission; writing both straight into g_procs
+         spliced the proc's function definition inside _mtp (an illegal C
+         nested function). The local buffer lets the nested proc append its
+         complete definition to g_procs first; we append the trampoline after
+         it (both at file scope -- the same reason emit_fiber_new and the proc
+         literal emitter keep their bodies local). */
+      Buf mtp_body; memset(&mtp_body, 0, sizeof mtp_body);
+      Buf *pb = &mtp_body;
       buf_printf(pb, "static sp_int _mtp_%d(void *cap, sp_int argc, sp_int *args) {\n", tid);
       if (bind && tm->rest_idx >= 0) buf_puts(pb, "  SP_GC_SAVE();\n");
       buf_puts(pb, "  sp_BoundMethod *_m = (sp_BoundMethod *)cap; (void)_m; (void)argc; (void)args;\n");
+      /* A default (and any block it inlines) binds its names through the
+         METHOD scope's locals (`lv_<p>`), which the method prologue would
+         have declared. This separate function has no prologue, so declare
+         them here. */
+      emit_callee_local_decls(c, tm, pb, 0);
+      /* The wrapper of a bound builtin keeps the plain positional binding
+         (bind == 0), but a BINOP wrapper (`__bam_r <op> __bam_a`) has a real
+         operand parameter, so a zero-argument proc call read the padding as
+         the operand (`arr.method(:[]).to_proc.call()` answered `arr[0]` where
+         CRuby raises ArgumentError). The `__bam_a` parameter is the predicate
+         the direct `.call` route's method_call_count_violation uses; a unary
+         wrapper has none (its own args pass through unlisted) and is not
+         judged. */
+      if (bam_wrapper(tm) && tm->nparams >= 2 && tm->pnames && tm->pnames[1] &&
+          sp_streq(tm->pnames[1], "__bam_a")) {
+        buf_puts(pb, "  if (argc < 1) { const char *_e = sp_sprintf(\"wrong number of arguments"
+                       " (given %lld, expected 1..2)\", (long long)argc); SP_GC_ROOT_STR(_e);"
+                       " sp_raise_cls(\"ArgumentError\", _e); }\n");
+      }
+      /* The per-site trampoline binds one C argument per parameter, reading
+         `args[k - shift]`; the proc ABI carries at most 16 slots, so a
+         signature with more than 16 positional parameters would read past
+         the caller's `(sp_int[16])` array (a garbage value or a crash), and
+         no call could ever supply the missing arguments anyway. Decline it
+         the way the generic runtime trampoline declines `legacy_fixed > 16`
+         (sp_method_proc_tramp). A REST parameter needs a runtime guard
+         instead: the count is open-ended, so `argc > 16` would otherwise
+         silently drop the surplus from the rest array. */
+      if (tm->rest_idx >= 0)
+        buf_puts(pb, "  if (argc > 16) { sp_raise_cls(\"NoMethodError\", \"undefined method 'call' for an instance of Method\"); return 0; }\n");
+      /* A default that writes a method-scope local the body reads cannot be
+         answered from this trampoline frame either: the body reads its own
+         slot, so the trampoline's write never lands. Decline it as the rest
+         shapes above are declined. */
+      /* A `**kwrest` target cannot ride the fixed positional cast at all: the
+         bind==0 arm below reads the kwrest slot straight from `args[]`, which
+         no proc call fills (the proc ABI carries no keywords), so a bare
+         `m.to_proc.call(1)` read an uninitialized register as the
+         sp_SymPolyHash* and the callee dereferenced it -- a SIGSEGV. Decline
+         it as the rest-tail shapes above are declined. */
+      if (mtp_rest_drops_tail || tm->kwrest_idx >= 0 || has_req_kw ||
+          default_writes_body_local(c, tm) ||
+          callee_param_rename_overflow(c, tm) ||
+          np - shift > 16) {
+        buf_puts(pb, "  sp_raise_cls(\"NoMethodError\", \"undefined method 'call' for an instance of Method\");\n");
+        buf_puts(pb, "  return 0;\n}\n");
+      }
+      else {
       if (bind) {
         char expb[32];
         if (tm->rest_idx >= 0) snprintf(expb, sizeof expb, "%d+", nreq);
@@ -17642,70 +18223,197 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                          " (given %%lld, expected %s)\", (long long)argc); SP_GC_ROOT_STR(_e);"
                          " sp_raise_cls(\"ArgumentError\", _e); }\n", expb);
         }
+        /* A trailing runtime keyword hash cannot be placed: the proc ABI has
+           no keyword channel, so it reaches the trampoline as one more
+           positional argument and would be bound to the next parameter's
+           C slot. The call site publishes it boxed on the side-channel, so
+           detect it and decline, matching the required-keyword / kwrest
+           declines. (An explicit braced positional hash is indistinguishable
+           here and declines too -- safe, and the same limitation the
+           generated keyword-proc body has.) */
+        if (has_any_kw) {
+          buf_puts(pb, "  if (argc > 0) { sp_RbVal _kh = _sp_proc_poly_args[argc - 1];"
+                       " if (_kh.tag == SP_TAG_OBJ && _kh.v.p && sp_poly_is_hash_kind(_kh.cls_id))"
+                       " { sp_raise_cls(\"NoMethodError\", \"undefined method 'call' for an instance of Method\"); return 0; } }\n");
+        }
+        int _pd_base = g_nren;
         for (int k = shift; k < np; k++) {
           int j = k - shift;
           if (k == tm->rest_idx) {
             buf_printf(pb, "  sp_PolyArray *_a%d = sp_PolyArray_new(); SP_GC_ROOT(_a%d);"
                            " for (sp_int _i = %d; _i < argc && _i < 16; _i++)"
                            " sp_PolyArray_push(_a%d, _sp_proc_poly_args[_i]);\n", j, j, j, j);
+            if (tm->pnames[k] && g_nren < MAX_RENAME) {
+              buf_printf(pb, "  sp_PolyArray *lv__a%d = _a%d;\n", j, j);
+              snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", tm->pnames[k]);
+              snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_a%d", j);
+              g_nren++;
+            }
             continue;
           }
           LocalVar *pp = scope_local(tm, tm->pnames[k]);
           TyKind pt = pp ? pp->type : TY_INT;
           char slot[48]; snprintf(slot, sizeof slot, "_sp_proc_poly_args[%d]", j);
+          /* A declared optional keyword parameter cannot ride the positional
+             proc ABI, so it ALWAYS takes its default. A rest parameter leaves
+             the count unchecked above, so without forcing the default the
+             `argc > j` arm below would capture a surplus positional argument
+             that belongs to the rest array (`def m(a, *r, c: 3)` answered
+             `[1, [2, 9], 9]` for `call(1, 2, 9)`). */
+          int force_def = tm->pnames[k] && tm->pdefault && tm->pdefault[k] >= 0 &&
+                          callee_param_is_declared_kwarg(c, tm, tm->pnames[k]);
+          /* A non-literal default is evaluated in this generated frame too: its
+             helper statements are captured so the `if (argc > j)` else-branch
+             runs them (inside the function body, where the roots live), and
+             `self` is the Method's receiver so an ivar/implicit-self default
+             reads the right object. Earlier parameters are aliased to `_a%d`
+             below, so a default reading one resolves. */
+          Buf dpre; memset(&dpre, 0, sizeof dpre);
+          Buf dexpr; memset(&dexpr, 0, sizeof dexpr);
+          int hasdef = tm->pdefault && tm->pdefault[k] >= 0;
+          if (hasdef) {
+            Buf *sv_pre2 = g_pre;
+            const char *sv_self2 = g_self, *sv_deref2 = g_self_deref;
+            int sv_cls2 = g_emitting_class_id;
+            /* The default's statements and value are spliced mid-line (after
+               `else { ` / `= `), so a `#line` directive from the emitter would
+               be a stray `#` token -- the same reason codegen_fold.c disables
+               the line map inside its statement-expression splices. */
+            int sv_lm2 = g_line_map; g_line_map = 0;
+            char sb[96];
+            g_pre = &dpre;
+            /* Key off the TARGET being an object-bound instance method, not
+               the syntactic receiver: a bare `method(:m)` in an instance
+               method names no receiver but binds the enclosing self, so its
+               ivar-reading default still has to read `_m->self`. A class
+               method and a top-level def have no self to read. */
+            if (tm->class_id >= 0 && !tm->is_cmethod) {
+              snprintf(sb, sizeof sb, "((sp_%s *)_m->self)", c->classes[tm->class_id].c_name);
+              g_self = sb;
+              g_self_deref = comp_ty_value_obj(c, ty_object(tm->class_id)) ? "." : "->";
+              g_emitting_class_id = tm->class_id;
+            }
+            emit_arg_or_default(c, tm, k, -1, &dexpr);
+            g_pre = sv_pre2;
+            g_self = sv_self2; g_self_deref = sv_deref2; g_emitting_class_id = sv_cls2;
+            g_line_map = sv_lm2;
+          }
           buf_puts(pb, "  "); emit_ctype(c, pt, pb);
-          buf_printf(pb, " _a%d = (argc > %d) ? ", j, j);
-          if (pt == TY_POLY) buf_puts(pb, slot);
-          else if (pt == TY_FLOAT) buf_printf(pb, "sp_poly_to_f(%s)", slot);
-          else if (pt == TY_SYMBOL) buf_printf(pb, "(sp_sym)args[%d]", j);
-          else if (proc_slot_is_ptr(pt)) { buf_puts(pb, "("); emit_ctype(c, pt, pb); buf_printf(pb, ")(uintptr_t)args[%d]", j); }
-          else if (proc_slot_via_poly(c, pt)) emit_unbox_text(c, pt, slot, pb);
-          else buf_printf(pb, "args[%d]", j);
-          buf_puts(pb, " : ");
-          if (tm->pdefault && tm->pdefault[k] >= 0) emit_arg_or_default(c, tm, k, -1, pb);
-          else buf_puts(pb, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
-          buf_puts(pb, ";\n");
+          if (force_def) {
+            buf_printf(pb, " _a%d;\n  { ", j);
+            if (dpre.p) buf_puts(pb, dpre.p);
+            buf_printf(pb, "_a%d = ", j);
+            buf_puts(pb, dexpr.p ? dexpr.p : default_value(pt));
+            buf_puts(pb, "; }\n");
+          }
+          else {
+            buf_printf(pb, " _a%d;\n  if (argc > %d) _a%d = ", j, j, j);
+            if (pt == TY_POLY) buf_puts(pb, slot);
+            else if (pt == TY_FLOAT) buf_printf(pb, "sp_poly_to_f(%s)", slot);
+            else if (pt == TY_SYMBOL) buf_printf(pb, "(sp_sym)args[%d]", j);
+            else if (proc_slot_is_ptr(pt)) { buf_puts(pb, "("); emit_ctype(c, pt, pb); buf_printf(pb, ")(uintptr_t)args[%d]", j); }
+            else if (pt == TY_PROC) buf_printf(pb, "(sp_Proc *)(uintptr_t)args[%d]", j);
+            else if (proc_slot_via_poly(c, pt)) emit_unbox_text(c, pt, slot, pb);
+            else buf_printf(pb, "args[%d]", j);
+            buf_puts(pb, ";\n  else { ");
+            if (dpre.p) buf_puts(pb, dpre.p);
+            buf_printf(pb, "_a%d = ", j);
+            if (hasdef) buf_puts(pb, dexpr.p ? dexpr.p : default_value(pt));
+            else buf_puts(pb, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
+            buf_puts(pb, "; }\n");
+          }
+          free(dpre.p); free(dexpr.p);
+          /* Keep this default (and any earlier one) alive across the LATER
+             parameters' defaults: each is evaluated in this same frame and
+             may allocate, and the destination `_a%d` is otherwise reachable
+             from nothing. The transient `dpre` temp is rooted only until the
+             `else` block above ends, which is too short a life. */
+          if (needs_root(pt) && !comp_ty_value_obj(c, pt)) {
+            buf_puts(pb, "  ");
+            emit_named_root(c, pt, "_a", j, pb);
+            buf_puts(pb, "\n");
+          }
+          if (tm->pnames[k] && g_nren < MAX_RENAME) {
+            buf_puts(pb, "  "); emit_ctype(c, pt, pb);
+            buf_printf(pb, " lv__a%d = _a%d;\n", j, j);
+            snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", tm->pnames[k]);
+            snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_a%d", j);
+            g_nren++;
+            /* A parameter a later default's nested proc closes over is read
+               through a heap cell named for the RENAMED parameter; allocate
+               it here and seed it from the alias, as the method prologue's
+               emit_cell_decl does from the C parameter. */
+            if (pp && pp->is_cell) {
+              char crn[32]; snprintf(crn, sizeof crn, "_a%d", j);
+              emit_inlined_local_decl(c, pp, crn, pb, 1);
+              buf_printf(pb, "  (*_cell_%s) = _a%d;\n", crn, j);
+            }
+          }
         }
+        g_nren = _pd_base;
         /* the channel is consumed, as a lambda body leaves it */
         if (needs_slot)
           buf_puts(pb, "  for (sp_int _i = 0; _i < argc && _i < 16; _i++) _sp_proc_poly_args[_i] = sp_box_nil();\n");
       }
-      /* the call expression: sp_<name>(args...) for a top-level target, else
-         the typed fn cast through _m->fn with _m->self first */
-      Buf cb = {0};
-      if (target_recvless) {
-        emit_method_cname(c, tm, &cb);
-        buf_puts(&cb, "(");
-      }
-      else {
-        buf_puts(&cb, "((");
-        if (is_scalar_ret(tret)) emit_ctype(c, tret, &cb);
-        else buf_puts(&cb, "void");
-        buf_puts(&cb, " (*)(void *");
-        for (int k = shift; k < np; k++) {
-          buf_puts(&cb, ", ");
-          LocalVar *pp = scope_local(tm, tm->pnames[k]);
-          emit_ctype(c, pp ? pp->type : TY_INT, &cb);
-        }
-        buf_puts(&cb, "))(uintptr_t)_m->fn)((void *)_m->self");
-        if (np > shift) buf_puts(&cb, ", ");
-      }
+      /* The call expression. The syntactic presence of a receiver does not
+         say whether the Method bound a self: `Klass.method(:cm)` names a
+         receiver but binds NULL (a class method's C ABI is self-less, like a
+         top-level def), while a bare `method(:im)` has no receiver but IS
+         bound to the enclosing instance. Pick the self-ful/self-less arm from
+         the persisted `recv_bound` flag, exactly as the `.call` path does, so
+         a class-method `.to_proc` does not pass NULL as argument 0 (shifting
+         every parameter) and a bare instance-method one does not drop self.
+         The unused arm still has to compile: both are generic fn casts, as in
+         `.call`. */
+      Buf args = {0};
       for (int k = shift; k < np; k++) {
-        if (k > shift) buf_puts(&cb, ", ");
+        if (k > shift) buf_puts(&args, ", ");
         LocalVar *pp = scope_local(tm, tm->pnames[k]);
         TyKind pt = pp ? pp->type : TY_INT;
-        if (bind) buf_printf(&cb, "_a%d", k - shift);
-        else if (pt == TY_POLY) buf_printf(&cb, "_sp_proc_poly_args[%d]", k - shift);
-        else if (pt == TY_FLOAT) buf_printf(&cb, "sp_poly_to_f(_sp_proc_poly_args[%d])", k - shift);
-        else if (pt == TY_SYMBOL) buf_printf(&cb, "(sp_sym)args[%d]", k - shift);
+        if (bind) buf_printf(&args, "_a%d", k - shift);
+        else if (pt == TY_POLY) buf_printf(&args, "_sp_proc_poly_args[%d]", k - shift);
+        else if (pt == TY_FLOAT) buf_printf(&args, "sp_poly_to_f(_sp_proc_poly_args[%d])", k - shift);
+        else if (pt == TY_SYMBOL) buf_printf(&args, "(sp_sym)args[%d]", k - shift);
         else if (proc_slot_is_ptr(pt)) {
-          buf_puts(&cb, "(");
-          emit_ctype(c, pt, &cb);
-          buf_printf(&cb, ")(uintptr_t)args[%d]", k - shift);
+          buf_puts(&args, "(");
+          emit_ctype(c, pt, &args);
+          buf_printf(&args, ")(uintptr_t)args[%d]", k - shift);
         }
-        else buf_printf(&cb, "args[%d]", k - shift);
+        else if (pt == TY_PROC) buf_printf(&args, "(sp_Proc *)(uintptr_t)args[%d]", k - shift);
+        else buf_printf(&args, "args[%d]", k - shift);
       }
-      buf_puts(&cb, ")");
+      Buf selfc = {0}, selfless = {0};
+      buf_puts(&selfc, "((");
+      if (is_scalar_ret(tret)) emit_ctype(c, tret, &selfc);
+      else buf_puts(&selfc, "void");
+      buf_puts(&selfc, " (*)(void *");
+      for (int k = shift; k < np; k++) {
+        buf_puts(&selfc, ", ");
+        LocalVar *pp = scope_local(tm, tm->pnames[k]);
+        emit_ctype(c, pp ? pp->type : TY_INT, &selfc);
+      }
+      buf_puts(&selfc, "))(uintptr_t)_m->fn)((void *)_m->self");
+      if (np > shift) buf_puts(&selfc, ", ");
+      buf_puts(&selfc, args.p ? args.p : "");
+      buf_puts(&selfc, ")");
+      buf_puts(&selfless, "((");
+      if (is_scalar_ret(tret)) emit_ctype(c, tret, &selfless);
+      else buf_puts(&selfless, "void");
+      buf_puts(&selfless, " (*)(");
+      if (np > shift) {
+        for (int k = shift; k < np; k++) {
+          if (k > shift) buf_puts(&selfless, ", ");
+          LocalVar *pp = scope_local(tm, tm->pnames[k]);
+          emit_ctype(c, pp ? pp->type : TY_INT, &selfless);
+        }
+      }
+      else buf_puts(&selfless, "void");
+      buf_puts(&selfless, "))(uintptr_t)_m->fn)(");
+      buf_puts(&selfless, args.p ? args.p : "");
+      buf_puts(&selfless, ")");
+      Buf cb = {0};
+      buf_printf(&cb, "_m->recv_bound ? %s : %s", selfc.p, selfless.p);
+      free(args.p); free(selfc.p); free(selfless.p);
       if (is_scalar_ret(tret)) {
         buf_puts(pb, "  ");
         emit_ctype(c, tret, pb);
@@ -17720,6 +18428,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       buf_puts(pb, "  return 0;\n}\n");
       free(cb.p);
+      }
+      /* The completed trampoline goes to g_procs after any nested proc
+         definition emitted while building it (see mtp_body above). */
+      buf_puts(&g_procs, mtp_body.p ? mtp_body.p : "");
+      free(mtp_body.p);
       /* arity: required count (minus the self-carried wrapper param),
          negative when the signature is variadic (the Scope folds
          optionals/rest into nparams > nrequired). */
@@ -17736,9 +18449,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                    tid, tcap, m_arity); }
       return;
     }
-    buf_puts(b, "sp_method_to_proc(");
-    emit_expr(c, recv, b);
-    buf_puts(b, ")");
+    /* sp_method_to_proc allocates the proc and stores the Method as its
+       capture; a fresh receiver Method (`self.class.method(:m).to_proc`) is
+       otherwise unreachable and would be swept mid-allocation, leaving the
+       proc's capture dangling. Root it across the constructor, the same shape
+       as the per-site path above. */
+    { int tp = ++g_tmp;
+      buf_printf(b, "({ sp_BoundMethod *_t%d = ", tp);
+      emit_expr(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_method_to_proc(_t%d); })", tp, tp); }
     return;
   }
   /* <method>.name -> the stored method name, interned to a Symbol (CRuby
@@ -18134,7 +18853,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     int mn = method_recv_node(c, recv);
     int target = mn >= 0 ? method_obj_target_mi(c, mn) : -1;
     int target_recvless = (mn >= 0 && nt_ref(nt, mn, "receiver") < 0);
-    if (target >= 0 && target_recvless) {
+    /* A bare `method(:sym)` in an instance method names no receiver but binds
+       the enclosing self: it is receiverless in syntax only, so it must take
+       the object-bound arm (which passes _t->self and the fn cast) rather than
+       the self-less direct call, which dropped self and did not compile. A
+       top-level def and a class method stay self-less. */
+    int target_selfless = target_recvless &&
+        !(target >= 0 && c->scopes[target].class_id >= 0 && !c->scopes[target].is_cmethod);
+    if (target >= 0 && target_selfless) {
       /* A top-level target is called the way its name would be: the ordinary
          argument lowering binds the site's arguments to the target's
          parameters -- an omitted optional takes its default, a rest parameter
@@ -18185,9 +18911,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        call: bound positionally, `def z; end` took `m.call(1)` and answered,
        and `def o(a, b = 2)` answered `m.call` from its defaults. */
     if (tm) {
-      char exp9[32];
-      if (method_call_count_violation(c, tm, argc, argv, exp9, sizeof exp9)) {
-        emit_wrong_count(c, id, exp9, 1, b);
+      char exp9[192];
+      int given9 = argc;
+      if (method_call_count_violation(c, tm, argc, argv, exp9, sizeof exp9, &given9)) {
+        emit_wrong_count(c, id, exp9, 1, given9, b);
         return;
       }
     }
@@ -18197,35 +18924,92 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        cast would truncate the boxed args and return to garbage. */
     int poly_abi = !tm && g_promote_mode;
     TyKind tret = tm ? (TyKind)tm->ret : (poly_abi ? TY_POLY : TY_INT);
+    /* A typed-array adapter (`<array>.method(:op)`) has no target scope; its
+       Ruby return is op-dependent. Read it from the same shared helper the
+       bind site stamps SP_BM_RET_* from, so the call site casts the raw
+       register to the array/String it really is instead of an Integer. The
+       adapter's fixed arg count is needed too: a trailing splat expands
+       against it below, instead of being passed as one sp_int argument (which
+       emitted a `sp_int = sp_PolyArray *` initializer and did not compile). */
+    int adapter_argc = -1;
+    TyKind adapter_ty = TY_UNKNOWN;   /* the adapter's receiver array kind */
+    int adapter_push = 0;             /* `<array>.method(:push)`, variadic */
+    int adapter_set = 0;              /* `<array>.method(:[]=)`, index+value slots */
+    if (!tm) {
+      int arecv = mn >= 0 ? nt_ref(nt, mn, "receiver") : -1;
+      const char *asym = mn >= 0 ? method_sym_arg(c, mn) : NULL;
+      TyKind at = (arecv >= 0 && asym)
+                    ? method_obj_adapter_ret(comp_ntype(c, arecv), asym) : TY_UNKNOWN;
+      if (at != TY_UNKNOWN) {
+        adapter_ty = comp_ntype(c, arecv);
+        if (!g_promote_mode) tret = at;
+        adapter_argc = sp_streq(asym, "[]=") ? 2 : 1;
+        adapter_push = sp_streq(asym, "push");
+        adapter_set = sp_streq(asym, "[]=");
+      }
+    }
+    /* The bound receiver as a C self expression for a callee default that
+       reads an ivar/implicit self (`def m(a, b = @x + a)`): the default must
+       see the receiver, not the caller's self. Empty for a self-less target or
+       an adapter, neither of which fills a callee default. */
+    char bmself[96]; bmself[0] = 0;
+    if (tm && tm->class_id >= 0 && !tm->is_cmethod)
+      snprintf(bmself, sizeof bmself, "((sp_%s *)_t%d->self)",
+               c->classes[tm->class_id].c_name, tr);
     if (!is_scalar_ret(tret)) tret = TY_INT;  /* aggregate ret: raw carrier */
     /* A trailing splat with a statically-known target expands into the
        remaining declared params from the splatted array (#3248); the
        effective arg count becomes the target's residual arity. */
     int splat_at2 = -1;
+    int any_splat_arg = 0;
     for (int k = 0; k < argc; k++) {
       const char *aty3 = nt_type(nt, argv[k]);
-      if (aty3 && sp_streq(aty3, "SplatNode")) { splat_at2 = k; break; }
+      if (aty3 && sp_streq(aty3, "SplatNode")) { splat_at2 = k; any_splat_arg = 1; break; }
     }
     int eargc = argc, tsplat = 0;
-    if (splat_at2 >= 0 && splat_at2 == argc - 1 && tm) {
-      eargc = tm->nparams - shift;
+    if (splat_at2 >= 0 && splat_at2 == argc - 1 && (tm || adapter_argc >= 0)) {
+      eargc = tm ? (tm->nparams - shift) : adapter_argc;
       if (eargc < splat_at2) eargc = splat_at2;
     }
     else splat_at2 = -1;   /* mid-list splat / unknown target: old path */
     /* Bind the call arguments to the target's PARAMETERS, so a keyword
        argument lands in its own slot and an omitted optional keeps its
        default -- positionally, the keyword hash went into the next scalar
-       slot and the C compile failed (#3660). Every parameter gets a source
-       node, or -1 for "use the declared default". */
+       slot and the C compile failed (#3660). Only a KeywordHashNode binds by
+       keyword: an explicit braced hash (`m.call({c: 9})`) is a positional
+       HashNode and stays positional, exactly as the direct call and the
+       count guard above treat it (CRuby answers `[{c: 9}, 3]`, not
+       `[nil, 9]`). Every parameter gets a source node, or -1 for "use the
+       declared default". */
     int *psrc = NULL;
     if (tm && splat_at2 < 0 && tm->rest_idx < 0 && tm->nparams > shift) {
       int np = tm->nparams - shift;
       psrc = (int *)malloc(sizeof(int) * (size_t)np);
       for (int k = 0; k < np; k++) psrc[k] = -1;
+      /* A trailing keyword hash binds by NAME only when the callee declares a
+         keyword parameter. With none it is an ordinary positional Hash, as in
+         CRuby (`def m(a); end; o.method(:m).call(a: 1)` answers `[{a: 1}]`, not
+         `[1]`); binding it by name fed the value node to a hash-typed slot and
+         did not compile. Kept consistent with method_call_count_violation,
+         which only stops counting positionals for a declared keyword. */
+      int has_decl_kw = 0;
+      for (int i = 0; i < tm->nparams; i++)
+        if (tm->pnames[i] && callee_param_is_declared_kwarg(c, tm, tm->pnames[i])) { has_decl_kw = 1; break; }
+      /* A `**kwrest` also makes a trailing keyword hash bind by keyword rather
+         than positionally. The name binding below places the keys that match a
+         DECLARED keyword parameter; a key with no declared match (or one that
+         spells a positional parameter) is flagged and the whole call declines
+         below, since the fixed positional fallback cannot route it to a
+         `**kwrest` slot. A kwrest-only target whose keys are all unknown keeps
+         the positional fallback, which lands the whole hash in its single
+         kwrest slot. */
+      int callee_takes_kw = has_decl_kw || tm->kwrest_idx >= 0;
+      int kwh_present = 0, kw_hits_positional = 0;
       int pos = 0, ok = 1;
       for (int k = 0; k < argc && ok; k++) {
         const char *akt = nt_type(nt, argv[k]);
-        if (akt && (sp_streq(akt, "KeywordHashNode") || sp_streq(akt, "HashNode")) && k == argc - 1) {
+        if (callee_takes_kw && akt && sp_streq(akt, "KeywordHashNode") && k == argc - 1) {
+          kwh_present = 1;
           int kn = 0; const int *kv = nt_arr(nt, argv[k], "elements", &kn);
           for (int e = 0; e < kn && ok; e++) {
             if (nt_kind(nt, kv[e]) != NK_AssocNode) { ok = 0; break; }
@@ -18233,10 +19017,21 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
             const char *kname = keyn >= 0 && nt_kind(nt, keyn) == NK_SymbolNode
                                   ? nt_str(nt, keyn, "value") : NULL;
             if (!kname) { ok = 0; break; }
-            int slot = -1;
+            int slot = -1, slot_decl_kw = 0;
             for (int pi = shift; pi < tm->nparams; pi++)
-              if (tm->pnames[pi] && sp_streq(tm->pnames[pi], kname)) { slot = pi - shift; break; }
+              if (tm->pnames[pi] && sp_streq(tm->pnames[pi], kname)) {
+                slot = pi - shift;
+                slot_decl_kw = callee_param_is_declared_kwarg(c, tm, tm->pnames[pi]);
+                break;
+              }
             if (slot < 0) { ok = 0; break; }
+            /* A keyword argument never binds to a POSITIONAL parameter: CRuby
+               sends it to `**kwrest` (or raises for an unknown keyword). The
+               positional fallback below cannot express that split, and would
+               assign the hash to the positional's scalar slot instead (an
+               `sp_int` initialized from a hash pointer -- a C build failure
+               once a `**kwrest` slot follows). Flag the shape and decline. */
+            if (!slot_decl_kw) { kw_hits_positional = 1; ok = 0; break; }
             psrc[slot] = nt_ref(nt, kv[e], "value");
           }
           continue;
@@ -18246,13 +19041,229 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       if (ok) eargc = np;
       else { free(psrc); psrc = NULL; }
+      /* A trailing keyword hash the name binding could not place (an unknown
+         key, or a key spelling a positional parameter) cannot ride the fixed
+         positional cast when the target also takes keywords: the hash would
+         land in a scalar parameter slot (a C build failure) and any `**kwrest`
+         would never receive it. Decline with the same NoMethodError the other
+         unsupported bound-call shapes use. A kwrest-only target whose keys are
+         all unknown (no declared keyword, no positional name match) is allowed
+         ONLY when the positional arguments already fill every parameter before
+         the kwrest, so the trailing hash lands exactly on the kwrest slot:
+         then the whole hash maps into that slot. When a positional parameter
+         is still unfilled (`def m(a, **k)` called `m.call(z: 2)`, or
+         `def m(a, b = 5, **k)` called `m.call(1, z: 2)`) the positional
+         fallback would bind the hash to a scalar slot and the generated C did
+         not compile; decline instead. The kwrest's index in the parameter
+         list is the hash's own call position plus the self-parameter shift. */
+      int kwrest_misplaced = 0;
+      if (psrc == NULL && kwh_present && tm && tm->kwrest_idx >= 0 &&
+          argc - 1 + shift != tm->kwrest_idx)
+        kwrest_misplaced = 1;
+      if (psrc == NULL && kwh_present && (has_decl_kw || kw_hits_positional || kwrest_misplaced)) {
+        buf_printf(b, "({ sp_raise_cls(\"NoMethodError\", \"undefined method 'call' for an instance of Method\"); %s; })",
+                   default_value(tret));
+        return;
+      }
     }
     buf_printf(b, "({ sp_BoundMethod *_t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+    /* The Method is a fresh allocation and the defaults evaluated below in
+       this frame allocate too (`b = "x" * 64, c = Array.new(400) { }`): a
+       collection between the two freed the Method and the call jumped
+       through a garbage fn. Root it for the length of the expression. */
+    buf_printf(b, "SP_GC_ROOT(_t%d); ", tr);
+    /* An unresolved target (`self.class.method(:m)`, any class value that is
+       not a statically-known constant) binds with a NULL fn -- there is no
+       callable address. Invoking it jumped through NULL; the poly-slot and
+       first-class routes decline with NoMethodError, so decline the same way
+       here instead of dereferencing it. */
+    buf_printf(b, "if (!_t%d->fn) sp_raise_cls(\"NoMethodError\","
+                  " sp_sprintf(\"undefined method '%%s' for an instance of Object\","
+                  " _t%d->name ? _t%d->name : \"?\")); ", tr, tr, tr);
+    /* This statement expression evaluates the callee's defaults (and any
+       inlined blocks they contain), which bind the METHOD scope's locals; the
+       callee's own prologue does not run in this frame, so declare them here. */
+    emit_callee_local_decls(c, tm, b, 1);
+    /* A rest parameter with a trailing runtime splat that is not exactly the
+       rest argument itself cannot ride the fixed sp_int cast: the splat's
+       surplus would land in the trailing sp_PolyArray* slot as an sp_int and
+       the callee prologue would root it (a SIGSEGV). The poly-slot route
+       declines such a target (sp_bm_sig_scalar_only); decline here too. The
+       same cast is wrong when the call omits optionals before the rest
+       (`def m(a, b = 2, *r)` called with one argument): the fixed expansion
+       fills only the supplied slots, so the omitted parameters' registers and
+       the rest pointer are never passed at all. The rest arm builds only
+       `rest_at + 1` C arguments, so a parameter AFTER the rest (a post-rest
+       positional, a declared keyword, or `**kwrest`) is dropped and the
+       callee reads an unpassed register -- `def kr(a, *r, c: 3)` answered
+       `[1, [2, 3], <garbage>]`. The poly-slot route declines these
+       (`sp_bm_sig_scalar_only`), so decline here too rather than mis-answer. */
+    int rest_drops_tail = 0;
+    if (tm && tm->rest_idx >= 0) {
+      if (tm->npost_rest > 0 || tm->kwrest_idx >= 0) rest_drops_tail = 1;
+      else for (int ri = tm->rest_idx + 1; ri < tm->nparams; ri++)
+        if (tm->pnames && tm->pnames[ri] &&
+            callee_param_is_declared_kwarg(c, tm, tm->pnames[ri])) { rest_drops_tail = 1; break; }
+    }
+    if (tm && tm->rest_idx >= 0 &&
+        (rest_drops_tail ||
+         (splat_at2 >= 0 && !(splat_at2 == tm->rest_idx - shift && splat_at2 == eargc - 1)) ||
+         (splat_at2 < 0 && eargc < tm->rest_idx - shift))) {
+      buf_printf(b, "sp_raise_cls(\"NoMethodError\", \"undefined method 'call' for an instance of Method\"); %s; })",
+                 default_value(tret));
+      free(psrc);
+      return;
+    }
+    /* A default that WRITES a method-scope local the body READS, or a frame
+       whose locals cannot all ride the rename table, cannot be answered from
+       this statement expression (see default_writes_body_local and
+       callee_locals_rename_overflow). The direct call refuses the same shapes
+       at C compile time; decline rather than answer the body's zero or emit a
+       reference to a name nothing declares. */
+    if (tm && (default_writes_body_local(c, tm) || callee_locals_rename_overflow(c, tm) ||
+               callee_param_rename_overflow(c, tm))) {
+      buf_printf(b, "sp_raise_cls(\"NoMethodError\", \"undefined method 'call' for an instance of Method\"); %s; })",
+                 default_value(tret));
+      free(psrc);
+      return;
+    }
+    /* A parameter default that reads an earlier parameter is evaluated at the
+       CALL site by emit_arg_or_default; alias each bound parameter to a
+       `lv__pd` local and register the rename so those reads resolve (see
+       emit_bm_param_alias). */
+    int pd_mode = 0, pd_uid = 0, pd_base = g_nren;
+    if (tm && default_refs_earlier_param(c, tm)) { pd_mode = 1; pd_uid = ++g_tmp; }
+    /* A typed-array `push` adapter is variadic in CRuby, but the synthesized
+       adapter pushes exactly ONE value. The generic single-cast call below
+       would silently drop every value after the first (`m.call(*[3, 4])`
+       answered `m.call(3)`), so invoke it once per value, materializing the
+       full (fixed + splatted) argument list for a runtime count. */
+    if (adapter_push && (any_splat_arg || argc != 1)) {
+      if (any_splat_arg) {
+        int tflat = ++g_tmp;
+        buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", tflat, tflat);
+        for (int k = 0; k < argc; k++) {
+          const char *aty3 = nt_type(nt, argv[k]);
+          if (aty3 && sp_streq(aty3, "SplatNode")) {
+            int sx = nt_ref(nt, argv[k], "expression");
+            Buf ab; memset(&ab, 0, sizeof ab);
+            if (sx >= 0) emit_boxed(c, sx, &ab);
+            int ts = ++g_tmp;
+            buf_printf(b, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
+                          " for (sp_int _i = 0; _i < _t%d->len; _i++)"
+                          " sp_PolyArray_push(_t%d, _t%d->data[_i]); } ",
+                       ts, ab.p ? ab.p : "sp_box_nil()", ts, ts, tflat, ts);
+            free(ab.p);
+          }
+          else {
+            Buf ab; memset(&ab, 0, sizeof ab);
+            emit_boxed(c, argv[k], &ab);
+            buf_printf(b, "sp_PolyArray_push(_t%d, %s); ", tflat, ab.p ? ab.p : "sp_box_nil()");
+            free(ab.p);
+          }
+        }
+        int ti = ++g_tmp;
+        buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) { sp_RbVal _e = _t%d->data[_t%d]; ",
+                   ti, ti, tflat, ti, tflat, ti);
+        if (poly_abi)
+          buf_printf(b, "((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)_t%d->fn)((void *)_t%d->self, _e); ", tr, tr);
+        else {
+          char _ak = adapter_arg_kind(adapter_ty, 1, 0, 0);
+          buf_printf(b, "((sp_int (*)(void *, sp_int))(uintptr_t)_t%d->fn)((void *)_t%d->self, ", tr, tr);
+          emit_adapter_arg_boxed("_e", _ak, b);
+          buf_puts(b, "); ");
+        }
+        buf_puts(b, "} ");
+      }
+      else {
+        for (int k = 0; k < argc; k++) {
+          int tv = ++g_tmp;
+          if (poly_abi) { buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[k], b); }
+          else {
+            char _ak = adapter_arg_kind(adapter_ty, 1, 0, k);
+            buf_printf(b, "sp_int _t%d = ", tv);
+            emit_adapter_arg_static(c, argv[k], _ak, b);
+          }
+          buf_puts(b, "; ");
+          if (poly_abi)
+            buf_printf(b, "((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)_t%d->fn)((void *)_t%d->self, _t%d); ", tr, tr, tv);
+          else
+            buf_printf(b, "((sp_int (*)(void *, sp_int))(uintptr_t)_t%d->fn)((void *)_t%d->self, _t%d); ", tr, tr, tv);
+        }
+      }
+      /* push answers the receiver array itself. An adapter call has no
+         target scope, so the analyzer types `.call` poly and the caller may
+         dispatch on the result; box it here like the generic Method-call
+         ABI's sp_bm_box_ret arm. */
+      {
+        char expr[32]; snprintf(expr, sizeof expr, "_t%d->self", tr);
+        emit_boxed_text(c, adapter_ty, expr, b);
+      }
+      buf_puts(b, "; })");
+      free(psrc);
+      return;
+    }
     if (splat_at2 >= 0) {
       tsplat = ++g_tmp;
       buf_printf(b, "sp_PolyArray *_t%d = ", tsplat);
       emit_expr(c, argv[splat_at2], b);
       buf_printf(b, "; SP_GC_ROOT(_t%d); ", tsplat);
+    }
+    /* A trailing runtime splat into a fixed-arity target must supply the
+       right count: the per-position expansion below reads exactly the fixed
+       slots, so a short splat silently filled the missing required slots with
+       0/nil and a long one silently dropped the surplus (CRuby raises
+       ArgumentError for both). Check the run-time length against the
+       target's required and total fixed count. The check mirrors
+       method_call_count_violation's shape: only a plain positional signature
+       has a meaningful count. */
+    if (tsplat && splat_at2 >= 0 && tm && tm->rest_idx < 0) {
+      int simple9 = tm->kwrest_idx < 0 && tm->npost_rest == 0 && !tm->cs_synth && !bam_wrapper(tm);
+      int nreq9 = 0, nfix9 = 0;
+      for (int i = shift; i < tm->nparams && simple9; i++) {
+        if (!tm->pnames[i] || (tm->pnames[i][0] == '_' && tm->pnames[i][1] == '_') ||
+            callee_has_kwarg(c, tm, tm->pnames[i])) { simple9 = 0; break; }
+        nfix9++;
+        if (!tm->pdefault || tm->pdefault[i] < 0) nreq9++;
+      }
+      if (simple9) {
+        int lo9 = nreq9 - splat_at2; if (lo9 < 0) lo9 = 0;
+        int hi9 = nfix9 - splat_at2; if (hi9 < 0) hi9 = 0;
+        char exp9b[32];
+        if (nreq9 == nfix9) snprintf(exp9b, sizeof exp9b, "%d", nfix9);
+        else snprintf(exp9b, sizeof exp9b, "%d..%d", nreq9, nfix9);
+        buf_printf(b, "if (_t%d->len < %d || _t%d->len > %d)"
+                      " sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                      "\"wrong number of arguments (given %%lld, expected %s)\","
+                      " (long long)(_t%d->len + %d))); ",
+                   tsplat, lo9, tsplat, hi9, exp9b, tsplat, splat_at2);
+      }
+    }
+    /* A typed-array adapter's synthesized C function has a fixed parameter
+       count (one for `[]`, two for `[]=`), but the call's C cast is built
+       from the supplied count: too few arguments leave its later parameters
+       reading an undefined register, so `ia.method(:[]=).call(0)` and
+       `.call(*[0])` mutated the array with a garbage element instead of
+       raising. CRuby raises ArgumentError; check the count before the cast.
+       `push` is variadic and handled above. */
+    if (!tm && adapter_argc >= 0 && !adapter_push) {
+      if (splat_at2 < 0) {
+        if (argc < adapter_argc) {
+          buf_printf(b, "sp_raise_cls(\"ArgumentError\", "
+                        "\"wrong number of arguments (given %d, expected %d..%d)\"); %s; })",
+                     argc, adapter_argc, adapter_argc + 1, default_value(tret));
+          free(psrc);
+          return;
+        }
+      }
+      else {
+        buf_printf(b, "if (_t%d->len + %d < %d)"
+                      " sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                      "\"wrong number of arguments (given %%lld, expected %d..%d)\","
+                      " (long long)(_t%d->len + %d))); ",
+                   tsplat, splat_at2, adapter_argc,
+                   adapter_argc, adapter_argc + 1, tsplat, splat_at2);
+      }
     }
     /* A target with a rest parameter takes ONE array there, not one C argument
        per call-site argument: bound positionally, the first argument went into
@@ -18267,8 +19278,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         atmp[k] = ++g_tmp;
         LocalVar *pp = (tm && k + shift < tm->nparams) ? scope_local(tm, tm->pnames[k + shift]) : NULL;
         emit_ctype(c, pp ? pp->type : TY_INT, b);
-        buf_printf(b, " _t%d = ", atmp[k]); emit_arg_or_default(c, tm, k + shift, argv[k], b);
+        buf_printf(b, " _t%d = ", atmp[k]);
+        { int _sv = g_nren; g_nren = pd_base;
+          emit_arg_or_default(c, tm, k + shift, argv[k], b);
+          g_nren = _sv; }
+        emit_bm_param_alias(c, tm, k, k + shift, atmp[k], pd_mode, pd_uid, b);
         buf_puts(b, "; ");
+        emit_named_root(c, pp ? pp->type : TY_INT, "_t", atmp[k], b);
+        buf_puts(b, " ");
       }
       atmp[splat_at2] = tsplat;
       eargc = splat_at2 + 1;
@@ -18289,8 +19306,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         atmp2[k] = ++g_tmp;
         LocalVar *pp = (tm && k + shift < tm->nparams) ? scope_local(tm, tm->pnames[k + shift]) : NULL;
         emit_ctype(c, pp ? pp->type : TY_INT, b);
-        buf_printf(b, " _t%d = ", atmp2[k]); emit_arg_or_default(c, tm, k + shift, argv[k], b);
+        buf_printf(b, " _t%d = ", atmp2[k]);
+        { int _sv = g_nren; g_nren = pd_base;
+          emit_arg_or_default(c, tm, k + shift, argv[k], b);
+          g_nren = _sv; }
+        emit_bm_param_alias(c, tm, k, k + shift, atmp2[k], pd_mode, pd_uid, b);
         buf_puts(b, "; ");
+        emit_named_root(c, pp ? pp->type : TY_INT, "_t", atmp2[k], b);
+        buf_puts(b, " ");
       }
       atmp2[rest_at] = trest;
       free(atmp);
@@ -18302,25 +19325,96 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        reference it without re-evaluating (#3252). */
     for (int k = 0; k < eargc; k++) {
       atmp[k] = ++g_tmp;
-      if (splat_at2 >= 0 && k >= splat_at2) {
-        /* an expanded splat element, coerced to the declared param type */
+      if (splat_at2 >= 0 && k >= splat_at2 && !tm) {
+        /* A typed-array adapter's every fixed slot rides the sp_int register
+           (an StrArray element is laundered as its pointer), and a runtime
+           splat has no per-position type here, so launder each element the
+           same way sp_poly_callable_spread/sp_proc_call_spread do. The KIND
+           is its ABSOLUTE adapter position (`k`), not its offset inside the
+           splat: a fixed argument before the splat still occupies slot 0, so
+           `sa.method(:[]=).call(0, *vals)` must tag the first splat element
+           as the VALUE, not the index. Under promote the adapter is
+           poly-signatured and takes the boxed element. */
+        char el[64];
+        snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, %d)", tsplat, k - splat_at2);
+        if (poly_abi) buf_printf(b, "sp_RbVal _t%d = %s; ", atmp[k], el);
+        else {
+          char _ak = adapter_arg_kind(adapter_ty, adapter_push, adapter_set, k);
+          buf_printf(b, "sp_int _t%d = ", atmp[k]);
+          emit_adapter_arg_boxed(el, _ak, b);
+          buf_puts(b, "; ");
+        }
+      }
+      else if (splat_at2 >= 0 && k >= splat_at2) {
+        /* an expanded splat element, coerced to the declared param type.
+           When the splat is shorter than the declared optional position, use
+           the parameter's default (the runtime count guard permits a short
+           splat only down to the required count) instead of reading past the
+           array. The default may be a literal or an expression reading an
+           earlier parameter, made resolvable by the alias registered below. */
         LocalVar *pp = (tm && k + shift < tm->nparams && tm->pnames)
                          ? scope_local(tm, tm->pnames[k + shift]) : NULL;
         TyKind pt3 = pp ? pp->type : TY_INT;
         char el[64];
         snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, %d)", tsplat, k - splat_at2);
+        int optdef = (tm && tm->pdefault && k + shift < tm->nparams &&
+                      tm->pdefault[k + shift] >= 0) ? 1 : 0;
+        Buf dpre; memset(&dpre, 0, sizeof dpre);
+        Buf dexpr; memset(&dexpr, 0, sizeof dexpr);
+        if (optdef) emit_bm_default_parts(c, tm, k + shift, bmself, tm->class_id, &dpre, &dexpr);
+        if (dpre.p) buf_puts(b, dpre.p);
         emit_ctype(c, pt3, b);
         buf_printf(b, " _t%d = ", atmp[k]);
+        if (optdef) buf_printf(b, "(%d < _t%d->len) ? ", k - splat_at2, tsplat);
         if (pt3 == TY_POLY) buf_puts(b, el);
         else emit_unbox_text(c, pt3, el, b);
+        if (optdef) {
+          buf_puts(b, " : ");
+          buf_puts(b, dexpr.p ? dexpr.p : default_value(pt3));
+        }
+        free(dpre.p); free(dexpr.p);
+        emit_bm_param_alias(c, tm, k, k + shift, atmp[k], pd_mode, pd_uid, b);
+        buf_puts(b, "; ");
+        emit_named_root(c, pt3, "_t", atmp[k], b);
+        buf_puts(b, " ");
       }
       else if (tm && k + shift < tm->nparams) {
         LocalVar *pp = scope_local(tm, tm->pnames[k + shift]);
+        int pv = psrc ? psrc[k] : argv[k];
+        Buf dpre; memset(&dpre, 0, sizeof dpre);
+        Buf dexpr; memset(&dexpr, 0, sizeof dexpr);
+        if (pv < 0) emit_bm_default_parts(c, tm, k + shift, bmself, tm->class_id, &dpre, &dexpr);
+        if (dpre.p) buf_puts(b, dpre.p);
         emit_ctype(c, pp ? pp->type : TY_INT, b);
         buf_printf(b, " _t%d = ", atmp[k]);
-        emit_arg_or_default(c, tm, k + shift, psrc ? psrc[k] : argv[k], b);
+        if (pv >= 0) {
+          int _sv = g_nren; g_nren = pd_base;
+          emit_arg_or_default(c, tm, k + shift, pv, b);
+          g_nren = _sv;
+        }
+        /* An OMITTED `**kwrest` is CRuby's empty hash, not the NULL
+           default_value gives a hash slot: the callee's `k.size`/`k[k]`
+           dereferenced NULL and crashed. All keyword args were bound to
+           declared keywords (or none were supplied), so nothing is left to
+           collect. */
+        else if (tm && tm->kwrest_idx >= 0 && k + shift == tm->kwrest_idx) {
+          if (pp && pp->type == TY_POLY)
+            buf_puts(b, "sp_box_obj(sp_SymPolyHash_new(), SP_BUILTIN_SYM_POLY_HASH)");
+          else buf_puts(b, "sp_SymPolyHash_new()");
+        }
+        else buf_puts(b, dexpr.p ? dexpr.p : default_value(pp ? pp->type : TY_INT));
+        free(dpre.p); free(dexpr.p);
+        emit_bm_param_alias(c, tm, k, k + shift, atmp[k], pd_mode, pd_uid, b);
+        buf_puts(b, "; ");
+        emit_named_root(c, pp ? pp->type : TY_INT, "_t", atmp[k], b);
+        buf_puts(b, " ");
       }
-      else if (poly_abi) { buf_printf(b, "sp_RbVal _t%d = ", atmp[k]); emit_boxed(c, argv[k], b); }
+      else if (poly_abi) { buf_printf(b, "sp_RbVal _t%d = ", atmp[k]); emit_boxed(c, argv[k], b); buf_puts(b, "; "); emit_named_root(c, TY_POLY, "_t", atmp[k], b); }
+      else if (!tm && adapter_argc >= 0) {
+        char _ak = adapter_arg_kind(adapter_ty, adapter_push, adapter_set, k);
+        buf_printf(b, "sp_int _t%d = ", atmp[k]);
+        emit_adapter_arg_static(c, argv[k], _ak, b);
+      }
       else if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) {
         buf_printf(b, "sp_int _t%d = (sp_int)(uintptr_t)(", atmp[k]); emit_expr(c, argv[k], b); buf_puts(b, ")");
       }
@@ -18342,7 +19436,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        poly-slot call does instead of reading garbage. */
     int bm_dyn = !tm && !poly_abi;
     char bm_sig[8 * 64 + 1]; bm_sig[0] = 0;
-    int bm_sig_ok = bm_dyn && splat_at2 < 0 && call_arg_sig(c, argv, eargc, bm_sig, sizeof bm_sig);
+    /* An over-arity typed-array adapter call (`arr.method(:[]=).call(0, 9,
+       8)`) has no over-count to validate: the adapter's C function ignores
+       operands past the slots it models, and its own per-slot emission
+       already class-checks the modeled ones. Skipping the stamped-ABI gate
+       here keeps that shape from raising; the boxing below still applies. */
+    int bm_over_arity_adapter = adapter_argc >= 0 && eargc > adapter_argc;
+    int bm_sig_ok = bm_dyn && splat_at2 < 0 && !bm_over_arity_adapter &&
+                    call_arg_sig(c, argv, eargc, bm_sig, sizeof bm_sig);
     if (bm_dyn) {
       if (bm_sig_ok) buf_printf(b, "!sp_bm_legacy_abi_ok(_t%d, %d, \"%s\") ? (sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_obj(_t%d, SP_BUILTIN_METHOD))), sp_box_nil()) : ", tr, eargc, bm_sig, name, tr);
       buf_printf(b, "_t%d->legacy_ret == SP_BM_RET_POLY ? (", tr);
@@ -18378,6 +19479,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     if (pass == 1) buf_puts(b, ")");
     }
     buf_puts(b, "; })");
+    g_nren = pd_base;
     free(atmp);
     free(psrc);
     return;

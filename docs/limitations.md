@@ -108,6 +108,167 @@ Limited today, but additively fixable; listed roughly easiest-first.
 | A Hash iterator handed a callable whose arity the compiler cannot see (`h.map(&f)` where `f` came from a method call) | `NoMethodError` naming a method Hash has | `recv.<iter>(&callable)` is desugared to a literal block, and for a Hash receiver the block's shape depends on the callable's arity: a 1-param callable gets the `[k, v]` pair as one array, a 2-param one gets `k` and `v` positionally. When the callable is a local or ivar holding a proc/lambda literal, or a `method(:m)`, that arity is visible and every Enumerable name works. When it arrives from an opaque expression the desugar declines, and the call reaches run time unlowered. An Array receiver is unaffected, since its block shape is the same either way. Passing the block literally (`h.map { \|k, v\| ... }`) or writing `&proc { ... }` at the call site always works |
 | A promoted value stored into an int-typed Array (`--int-overflow=promote`) | truncated back to int64 by the store | the array's element type has to widen with the value; blanket-widening every int array costs promote mode more than it buys, so this wants a data-flow rule. Seeding the array with one value past 2^63 (or holding the state in a scalar) keeps the promotion today |
 
+### Bound Methods read out of poly slots
+
+A callable boxed into a poly container (`[obj.method(:m)][0].call(x)`) is
+dispatched at run time, so the call site cannot see the target's C signature.
+Spinel stamps that signature on the `Method` at its statically known bind site
+and the poly path calls it through a legacy `sp_int` register ABI. The return
+kinds it boxes are Integer, String, Bigint, nil, `true`/`false`, Symbol, a typed
+array, and a user object. The parameters must fit the same register, so a few
+argument lists still decline with `NoMethodError` where CRuby answers:
+
+- A pointer argument (a String, an Array, a user object) reaches the target
+  only when the target's parameter is statically that same pointer kind. A
+  pointer argument to an untyped parameter -- one the analyzer seeded as
+  `Integer` because every visible call passed a number -- or a pointer of the
+  wrong kind (`[k.method(:str)][0].call([1, 2, 3])`) declines.
+- A method with a rest parameter always declines: its trailing `sp_PolyArray *`
+  has no slot in the static cast, and the prologue would root the garbage
+  register the cast left there.
+- A splatted call with more than 16 arguments declines; the callable ABI packs
+  at most 16 positional slots. (CRuby raises `ArgumentError` for a fixed-arity
+  target called with the same count, so the answer is still an exception, just
+  a different one.) The same 16-slot cap is why `Method#to_proc` declines a
+  target with more than 16 positional parameters (its per-site trampoline reads
+  one C argument per parameter) and a rest target given more than 16 arguments
+  (the rest loop would drop the surplus): no call could ever supply the missing
+  slots, so both raise `NoMethodError` rather than reading past the argument
+  array.
+- A typed-array adapter value the typed array cannot hold (`arr.method(:push)`
+  given a String, `arr.method(:[]=)` given a String value) declines with
+  `NoMethodError`, matching the poly-slot route. CRuby's Array is
+  heterogeneous and would accept it; the typed array is what cannot. An
+  out-of-kind INDEX still raises CRuby's `TypeError`, and a zero-argument
+  `arr.method(:[]).call()` raises `ArgumentError` rather than reading index 0.
+  A zero-argument `arr.method(:[]).to_proc.call()` raises the same
+  `ArgumentError` through the proc trampoline; the unmodeled two-argument
+  slice form (`arr.method(:[]).to_proc.call(0, 2)`) still answers `arr[0]`
+  where CRuby answers `[arr[0], arr[1]]`.
+  The value declines can mutate before they raise: `arr.method(:push).call(3,
+  "z")` appends `3` and then declines on `"z"`, so a rescued
+  `NoMethodError` leaves the array partially pushed (CRuby's untyped Array
+  would have appended both).
+- A statically known `Method#call` whose target has a rest parameter accepts it
+  only when nothing follows the rest. A post-rest positional, a declared
+  keyword, or a `**kwrest` cannot ride the fixed C cast (the rest arm builds
+  only the parameters up to the rest), so the call declines with
+  `NoMethodError` rather than reading an unpassed register -- `def m(a, *r, c:
+  3); m.call(1, 2, 3)` (CRuby `[1, [2, 3], 3]`). The poly-slot route declines
+  the same targets, and `Method#to_proc` declines the post-rest, `**kwrest`,
+  and required-keyword shapes as well (its generic trampoline would otherwise
+  read the trailing register as the wrong C type). A declared OPTIONAL keyword
+  after the rest is the exception: `to_proc` always applies its default
+  (`def m(a, *r, c: 3)` called `m.to_proc.call(1, 2, 9)` answers `[1, [2, 9],
+  3]`), while `.call` on the same target still declines.
+- Over-arity is not modeled: a bound array operator whose wrapper/adapter C
+  cast has a fixed operand count ignores operands past the ones it models.
+  `ia.method(:[]).call(0, 2, 3)` answers `ia[0]` where CRuby raises
+  `ArgumentError`, and `ia.method(:[]=).call(0, 9, 8)` sets index 0 where CRuby
+  performs the slice assignment. The in-range slice forms (two arguments to
+  `[]`, three to `[]=`) are accepted and ignored the same way. A multi-value
+  `push` through a poly slot (`[ia.method(:push)][0].call(8, 9)`) declines with
+  `NoMethodError` where the static route pushes both values.
+
+A keyword argument passed through a receiver-bound `Method#to_proc`
+(`m.to_proc.call(1, c: 9)`) is not carried: the proc ABI is positional and has
+no keyword channel. A target that declares a required keyword parameter
+declines the whole `to_proc` with `NoMethodError`; a target with only OPTIONAL
+keywords still applies them on a keyword-less call (`def kw(a, b = a + 1,
+c: 3); m.to_proc.call(1)` answers `[1, 2, 3]`), but a call that actually
+passes a trailing keyword hash declines at run time rather than binding the
+hash to the next positional parameter's C slot (`m.to_proc.call(1, c: 9)` used
+to answer `[1, <hash>, 3]`). The class depends on whether the target has a
+spare optional positional slot: with one (`def kw(a, b = a + 1, c: 3)`) the
+hash lands in that slot and the keyword guard raises `NoMethodError`, while
+without one (`def m(a, c: 3)`) the earlier positional count guard fires and
+raises `ArgumentError: wrong number of arguments (given 2, expected 1)`.
+Either way it is an exception and never a positional read of the hash. An
+explicit braced positional `Hash` in that trailing position is
+indistinguishable at the proc ABI and declines the same way
+(`m.to_proc.call({c: 9})`). Call the Method directly (`m.call(1, c: 9)`) for
+keyword arguments.
+
+Required-keyword presence is not enforced through a receiver-bound
+`Method#call`. With `class K; def m(a, c:); [a, c]; end;
+def w(a, **k); [a, k]; end; end`, `K.new.method(:m).call(1)` answers `[1, 0]`
+where CRuby raises `ArgumentError: missing keyword: :c`; its `.to_proc` now
+declines with `NoMethodError` (the positional proc ABI cannot supply the
+keyword, and the trampoline would otherwise read an uninitialized register).
+`K.new.method(:w).call(1)` answers `[1, {}]` as CRuby does; its `.to_proc`
+declines with `NoMethodError`. The direct call gives CRuby's `[1, {}]` for
+`w`, and an ArgumentError for `m` -- but with an arity message (`wrong number
+of arguments (given 1, expected 2)`) rather than `missing keyword`. A
+top-level (receiverless) `method(:m).call(1)` follows the direct call and
+raises that same ArgumentError; `method(:w).call(1)` answers `[1, {}]` as
+CRuby does. The poly-slot route above declines the receiver-bound targets with
+`NoMethodError` instead.
+
+A trailing keyword hash passed to a receiver-bound `Method#call`/`Method#to_proc`
+also declines with `NoMethodError` when a key names no declared keyword
+parameter and the target also declares keyword parameters: CRuby sends such a
+key to `**kwrest` (or raises `ArgumentError` for an unknown keyword), but the
+bound call's fixed positional cast has no slot for that split, and with a
+declared keyword parameter before the `**kwrest` it emitted an `sp_int`
+initialized from a hash pointer (a C build failure). A `**kwrest`-only target
+whose keys are all unknown is unaffected ONLY when the positional arguments
+already fill every parameter before the kwrest, so the trailing hash lands
+exactly on the kwrest slot: `def w(a, **k)` called `w.call(1, z: 2)` answers
+`[1, {z: 2}]` as CRuby does. When a positional parameter before the kwrest is
+still unfilled (`def w(a, b = 5, **k)` called `w.call(1, z: 2)`) the fixed
+positional fallback would bind the hash to a scalar slot, so that shape
+declines with `NoMethodError` (CRuby answers `[1, 5, {z: 2}]`). A call that
+supplies too few or too many positionals now raises CRuby's `ArgumentError`
+regardless of the kwrest (`def w(a, **k)` called `w.call(z: 2)` or
+`w.call(1, 2)`), where a kwrest target used to skip the positional count. Such
+a rejected positional call no longer mis-types the kwrest slot as the
+argument's scalar kind, which previously made a later keyword-hash call emit
+`sp_int` from the hash pointer (a C build failure).
+
+A receiver-bound `Method#call` / `Method#to_proc` whose target has a parameter
+default that WRITES a local the method body READS also declines with
+`NoMethodError`: the default is evaluated in the call-site frame, while the
+body runs in its own function reading its own slot, so the write could never
+reach it (`def m(a, c = (z = a + 1; z)); z; end` answered the body's zeroed
+`z`, 0, where CRuby answers 6). The direct call refuses the same shape at C
+compile time (its generated default names an undeclared `lv_z`).
+
+A module method's optional parameter default is typed in the MODULE's own
+scope, which cannot see the including class's instance-variable types. A
+default reading such an ivar is therefore coerced into the parameter's
+module-inferred slot: `module M; def m(a, b = @o); [a, b]; end; end` included
+by a class with a String `@o` answers `[1, 0]`, not `[1, "hi"]`, and
+`def m(a, b = @f + a)` with a Float `@f` answers `[1, 2]`, not `[1, 2.5]`.
+The bound-Method routes box the field correctly; the loss is the parameter's
+inferred Integer width, shared with the ordinary direct call.
+
+A typed-array adapter Method (`arr.method(:push)`) reports the CRuby arity of
+the Array op it stands in for (`-1`) except for `[]`, whose adapter Method still
+reports `1` through a poly slot where CRuby answers `-1`.
+
+#### Exception protocol from a genuinely poly value
+
+An `Exception` subclass instance held in a genuinely poly value -- read out of
+a heterogeneous container, or returned through a poly `Proc` -- dispatches
+`#class` and `#inspect`, but `#message` raises `NoMethodError` and `#to_s` falls
+back to `#<MyErr:0x...>` instead of the message, where CRuby answers the message
+from both:
+
+```ruby
+class MyErr < StandardError; end
+arr = [MyErr.new("boom"), 5]
+e = arr[0]
+e.class      # => MyErr          (as CRuby)
+e.inspect    # => #<MyErr: boom> (as CRuby)
+e.message    # => NoMethodError  (CRuby: "boom")
+e.to_s       # => #<MyErr:0x...> (CRuby: "boom")
+```
+
+The class and message are carried on the boxed value, but the `#message`/`#to_s`
+arm is only emitted for a receiver whose static type names the exception class.
+The behavior predates and is independent of the bound-Method work above: it
+reproduces through a poly `Proc` result as well.
+
 ### Sockets
 
 `require "socket"` is mandatory (see [require.md](require.md)); without it the
