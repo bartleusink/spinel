@@ -7317,6 +7317,40 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
                       "(_t%d == 0 ? sp_re_match_str : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL; })",
                    pi, r, tn, tn, tn, tn);
       }
+      /* The same three forms with the Regexp arriving as a VALUE -- a
+         parameter, a constant, a local -- whose class the type already
+         says. They went to the integer slice arms, where the Regexp operand
+         was a hard TypeError (#4457: the useragent port's `c[pattern, 0]`,
+         on every request through campfire's browser gate). */
+      else if ((sp_streq(name, "[]") || sp_streq(name, "slice")) && argc == 1 &&
+               comp_ntype(c, argv[0]) == TY_REGEX) {
+        int tp = ++g_tmp;
+        buf_printf(b, "({ mrb_regexp_pattern *_t%d = ", tp); emit_expr(c, argv[0], b);
+        buf_printf(b, "; _t%d && sp_re_match(_t%d, %s) >= 0 ? sp_re_match_str : NULL; })", tp, tp, r);
+      }
+      else if ((sp_streq(name, "[]") || sp_streq(name, "slice")) && argc == 2 &&
+               comp_ntype(c, argv[0]) == TY_REGEX && nt_type(c->nt, argv[1]) &&
+               (sp_streq(nt_type(c->nt, argv[1]), "SymbolNode") ||
+                sp_streq(nt_type(c->nt, argv[1]), "StringNode") ||
+                comp_ntype(c, argv[1]) == TY_STRING)) {
+        int tp = ++g_tmp, tnm = ++g_tmp;
+        const char *nty = nt_type(c->nt, argv[1]);
+        buf_printf(b, "({ mrb_regexp_pattern *_t%d = ", tp); emit_expr(c, argv[0], b);
+        buf_printf(b, "; const char *_t%d = ", tnm);
+        if (sp_streq(nty, "SymbolNode")) buf_printf(b, "\"%s\"", nt_str(c->nt, argv[1], "value") ? nt_str(c->nt, argv[1], "value") : "");
+        else emit_str_expr(c, argv[1], b);
+        buf_printf(b, "; _t%d && sp_re_match(_t%d, %s) >= 0 ? sp_re_named_capture(_t%d, _t%d) : NULL; })",
+                   tp, tp, r, tp, tnm);
+      }
+      else if ((sp_streq(name, "[]") || sp_streq(name, "slice")) && argc == 2 &&
+               comp_ntype(c, argv[0]) == TY_REGEX) {
+        int tp = ++g_tmp, tn = ++g_tmp;
+        buf_printf(b, "({ mrb_regexp_pattern *_t%d = ", tp); emit_expr(c, argv[0], b);
+        buf_printf(b, "; sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
+        buf_printf(b, "; _t%d && sp_re_match(_t%d, %s) >= 0 ? "
+                      "(_t%d == 0 ? sp_re_match_str : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL; })",
+                   tp, tp, r, tn, tn, tn, tn);
+      }
       else if ((sp_streq(name, "[]") || sp_streq(name, "slice")) && argc == 1 &&
                comp_ntype(c, argv[0]) == TY_RANGE &&
                !(nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "RangeNode"))) {
