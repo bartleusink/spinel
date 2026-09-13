@@ -2247,7 +2247,13 @@ first_set_walk(const re_inst *code, uint32_t code_len,
       pc = code[pc].offset;
       continue;
     case RE_CHAR:
-      bm[code[pc].a >> 3] |= (1 << (code[pc].a & 7));
+      /* The bitmap holds the 128 ASCII bytes, and the matcher never skips a
+         byte >= 128 (FIRST_BYTE_OK in re_exec.c), so a non-ASCII leading
+         byte -- the first byte of a multibyte literal, emitted one RE_CHAR
+         per UTF-8 byte -- is accepted without a bit. Indexing the bitmap with
+         it wrote past bm[16] on re_compile's stack (0xE9 >> 3 = 29): a
+         pattern beginning with an accented letter corrupted the frame. */
+      if (code[pc].a < 128) bm[code[pc].a >> 3] |= (1 << (code[pc].a & 7));
       return TRUE;
     case RE_CLASS: {
       const re_charclass *cc = &classes[code[pc].a];
