@@ -654,6 +654,13 @@ int main(int argc, char **argv) {
   if (!write_text_file(c_path, csrc)) { free(csrc); return 1; }
 
   if (c_only) {
+    /* With --print-build as well, the C is written and the ingredient report
+       follows from this same run: `spin pack` used to invoke the compiler
+       twice, once for the C and once for the report, and the second run
+       repeated the whole front end (parse, analyze, codegen: minutes on a
+       large tree, half of a CI job) to print a few lines that were already
+       known at the end of the first (#4456). The cc step below is skipped
+       either way, so the fall-through is the report and nothing more. */
     fprintf(stderr, "Wrote %s\n", c_path);
     if (g_ext_init_name && g_ext_header_text) {
       char h_path[4096];
@@ -672,8 +679,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Wrote %s\n", s_path);
       }
     }
-    free(csrc);
-    return 0;
+    if (!print_build) { free(csrc); return 0; }
   }
 
   /* ---------- link: cc <generated C> -> native binary ---------- */
@@ -932,7 +938,11 @@ int main(int argc, char **argv) {
      NOT here is the compiler and how this build was run: a recipient
      cross-compiling for another target picks their own cc and their own
      optimisation, and the ingredients below are what has to survive that. */
-  if (print_build) { fputs(bi.p ? bi.p : "", stdout); free(cmd.p); free(bi.p); return 0; }
+  if (print_build) {
+    fputs(bi.p ? bi.p : "", stdout); free(cmd.p); free(bi.p);
+    if (c_is_temp) remove(c_path);   /* the report was the point; the C was not asked for */
+    return 0;
+  }
   free(bi.p);
   int cc_rc = system(cmd.p);
   free(cmd.p);

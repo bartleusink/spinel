@@ -1428,17 +1428,17 @@ def cmd_pack(prj, targets, outdir)
   pack_mkdir(File.join(outdir, "lib", "regexp"))
   pack_mkdir(File.join(outdir, "native"))
 
+  # One compiler run writes the C and reports the build ingredients: `-c` and
+  # `--print-build` compose. Two runs (the C, then the report) repeated the
+  # whole front end for a few lines the first run already knew (#4456).
   flags = spin_flags(prj)
   cfile = File.join(outdir, "src", name + ".c")
-  unless system("#{spinel_bin} #{entry} #{flags} -c --force -o #{cfile}")
-    spin_die("pack: the compiler could not translate bin/#{name}.rb")
-  end
-
   tmp = ENV["TMPDIR"].to_s
   tmp = "/tmp" if tmp == ""
   ccf = File.join(tmp, "spin-pack-#{Process.pid}.build")
-  unless system("#{spinel_bin} #{entry} #{flags} --print-build -o #{name} > #{ccf}")
-    spin_die("pack: the compiler could not report the build ingredients")
+  unless system("#{spinel_bin} #{entry} #{flags} -c --force --print-build -o #{cfile} > #{ccf}")
+    system("rm -f #{ccf}")
+    spin_die("pack: the compiler could not translate bin/#{name}.rb")
   end
   report = File.read(ccf)
   system("rm -f #{ccf}")
