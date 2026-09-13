@@ -74,9 +74,16 @@ extern pthread_mutex_t sp_heap_lock;
    exists for exactly this reason and its comment calls the padding essential
    -- and the string heap never got the same treatment, which left it the
    dominant cost of allocation-heavy parallel work. */
+/* The young list is SP_STR_YSUB lists, filled round-robin. A sweep task is
+   one list, so a worker that allocated most of a cycle's strings (a busy
+   request handler among idle workers) has its sweep split across the parked
+   workers instead of being the one slot everyone waits on: the longest slot
+   was the whole parallel phase, four milliseconds of thirty workers idle. */
+#define SP_STR_YSUB 4
 typedef struct {
-  sp_str_hdr *young;        /* per-worker young list head */
-  size_t      young_bytes;  /* live bytes on that list */
+  sp_str_hdr *young[SP_STR_YSUB];   /* per-worker young list heads */
+  unsigned    rr;                   /* which young list the next allocation joins */
+  size_t      young_bytes;  /* live bytes on those lists */
   sp_str_hdr *old;          /* per-worker old list head (swept on a major) */
   size_t      old_bytes;
   /* The byte count at which this worker may next ASK for a collection. The
@@ -89,7 +96,7 @@ typedef struct {
      futex storm at eight (#4334). Raising the mark by one threshold on every
      ask bounds it to one per threshold's worth of allocation. */
   size_t      ask_at;
-  char _pad[SP_CACHELINE - 2 * sizeof(sp_str_hdr *) - 3 * sizeof(size_t)];
+  char _pad[2 * SP_CACHELINE - (SP_STR_YSUB + 1) * sizeof(sp_str_hdr *) - sizeof(unsigned) - 3 * sizeof(size_t)];
 } sp_str_wslot_t;
 extern sp_str_wslot_t sp_str_wslot[SP_MAX_WORKERS];
 #else
@@ -192,7 +199,11 @@ void sp_str_sweep(void);
 int  sp_str_sweep_begin(int *major);
 void sp_str_sweep_end(int major, size_t promoted);
 #ifdef SP_THREADS
-void sp_str_sweep_one(int wid, int major, size_t *promoted);
+void sp_str_sweep_old_one(int wid);
+void sp_str_sweep_young_one(int wid, int sub, sp_str_hdr **keep, sp_str_hdr **tail,
+                            size_t *moved, size_t *held);
+void sp_str_sweep_young_done(int wid, sp_str_hdr *keep, sp_str_hdr *tail, size_t moved, size_t held,
+                             size_t *promoted);
 extern int sp_str_par_done;
 #endif
 void sp_str_lcache_clear(void);
@@ -255,16 +266,16 @@ static inline char *sp_str_alloc(size_t len) {
          allocation later rather than the next allocation. */
       sp_str_wslot[wid].ask_at = SP_GC_CTR_GET(sp_str_wslot[wid].young_bytes) + sp_str_threshold;
     } }
-  h = (sp_str_hdr *)malloc(total);
-  if (!h) sp_oom_die();
+  h = (sp_str_hdr *)sp_slab_alloc_raw(total);
   h->size = (uint32_t)total;
   h->len = (uint32_t)len;
   h->hash = 0;
   /* Publish h->next before the head store so a concurrent GC.stat walk that
      observes the new head reaches a fully-linked node (only pushes touch the
      head; the sweep runs under stop-the-world). */
-  h->next = sp_str_wslot[wid].young;
-  sp_str_wslot[wid].young = h;
+  { unsigned sub = sp_str_wslot[wid].rr++ & (SP_STR_YSUB - 1);
+    h->next = sp_str_wslot[wid].young[sub];
+    sp_str_wslot[wid].young[sub] = h; }
   SP_GC_CTR_ADD(sp_str_wslot[wid].young_bytes, total);
 #else
   SP_HEAP_LOCK();
@@ -272,8 +283,7 @@ static inline char *sp_str_alloc(size_t len) {
   if (SP_GC_CTR_GET(sp_str_heap_bytes) > sp_str_threshold) {
     sp_str_collect_retune();         /* sp_gc_collect runs sp_str_sweep */
   }
-  h = (sp_str_hdr *)malloc(total);
-  if (!h) sp_oom_die();
+  h = (sp_str_hdr *)sp_slab_alloc_raw(total);
   h->next = sp_str_heap;
   h->size = (uint32_t)total;
   h->len = (uint32_t)len;
@@ -304,15 +314,15 @@ static inline char *sp_str_alloc(size_t len) {
    next ordinary allocation collects. */
 static inline char *sp_str_alloc_nogc(size_t len) {
   size_t total = sizeof(sp_str_hdr) + 1 + len + 1;
-  sp_str_hdr *h = (sp_str_hdr *)malloc(total);
-  if (!h) sp_oom_die();
+  sp_str_hdr *h = (sp_str_hdr *)sp_slab_alloc_raw(total);
   h->size = (uint32_t)total;
   h->len = (uint32_t)len;
   h->hash = 0;
 #ifdef SP_THREADS
   { int wid = sp_worker_id;
-    h->next = sp_str_wslot[wid].young;
-    sp_str_wslot[wid].young = h;
+    unsigned sub = sp_str_wslot[wid].rr++ & (SP_STR_YSUB - 1);
+    h->next = sp_str_wslot[wid].young[sub];
+    sp_str_wslot[wid].young[sub] = h;
     SP_GC_CTR_ADD(sp_str_wslot[wid].young_bytes, total); }
 #else
   SP_HEAP_LOCK();

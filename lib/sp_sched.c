@@ -116,9 +116,7 @@ static int            g_stw_active = 0; /* a collection is in progress */
    Its own, not any slot: freeing an object returns it to the arena it was
    allocated from, and a single thread freeing eight workers' objects pays for
    eight arena locks and eight cold metadata sets. */
-static int            g_sweep_go = 0;                 /* collector wants slots swept */
-static int            g_sweep_done = 0;               /* workers finished this round */
-static unsigned char  g_swept[SP_MAX_WORKERS];        /* which slots are claimed */
+static int            g_sweep_go = 0;                 /* collector wants the tasks run */
 static pthread_cond_t g_sweep_cv = PTHREAD_COND_INITIALIZER;
 /* survivors, per slot, spliced onto the shared old heap by the collector */
 static sp_gc_hdr     *g_sw_head[SP_MAX_WORKERS];
@@ -128,9 +126,63 @@ static size_t         g_sw_bytes[SP_MAX_WORKERS];
 static int    g_str_sweep = 0;
 static int    g_str_major = 0;
 static size_t g_str_promoted[SP_MAX_WORKERS];
-static void sp_sweep_one_slot(int wid) {
-  sp_gc_sweep_slot(wid, &g_sw_head[wid], &g_sw_tail[wid], &g_sw_bytes[wid]);
-  if (g_str_sweep) sp_str_sweep_one(wid, g_str_major, &g_str_promoted[wid]);
+/* The sweep is a list of TASKS, not a slot per worker. One busy worker's
+   young lists are the bulk of most cycles on a server (a request handler
+   allocates; the others idle), and with a slot per worker that one worker
+   swept alone while the rest waited: the longest slot WAS the phase, four
+   milliseconds of thirty workers idle. So a slot is several tasks -- its
+   object list, its old string list on a major, and each of its SP_STR_YSUB
+   young string lists -- and every parked worker claims tasks off a counter
+   until none is left. The tasks of one slot touch distinct lists; what they
+   share (the slot's old string head and byte counters) is settled by the
+   collector afterwards from the per-task results. */
+enum { SW_OBJ, SW_STR_OLD, SW_STR_YOUNG };
+typedef struct { short kind, wid, sub; } sp_sw_task;
+#define SW_TASK_MAX (SP_MAX_WORKERS * (2 + SP_STR_YSUB))
+static sp_sw_task     g_sw_tasks[SW_TASK_MAX];
+static int            g_sw_ntasks = 0;
+static int            g_sw_next = 0;    /* claimed by fetch-add, off the lock */
+static int            g_sw_done = 0;    /* completed, under the lock */
+/* per (slot, young list): the sweep's local results, spliced in by the collector */
+static sp_str_hdr    *g_sy_keep[SP_MAX_WORKERS][SP_STR_YSUB];
+static sp_str_hdr    *g_sy_tail[SP_MAX_WORKERS][SP_STR_YSUB];
+static size_t         g_sy_moved[SP_MAX_WORKERS][SP_STR_YSUB];
+static size_t         g_sy_held[SP_MAX_WORKERS][SP_STR_YSUB];
+/* SPINEL_GC_PHASES: the longest single task of each sweep, summed, beside
+   the phase's wall. The gap between the two is the cost of driving the
+   parallel phase itself (waking the parked workers and collecting their
+   reports), which is what to look at when the phase is long and the tasks
+   are not. */
+static unsigned long g_sw_slot_max_us = 0;
+static unsigned long g_sw_task_sum_us = 0;   /* every task's time added: the work the phase spread */
+static unsigned long g_sw_task_max_kind[3];  /* the kind of the longest task, for the report */
+static void sp_sweep_task(const sp_sw_task *t) {
+  double t0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+  switch (t->kind) {
+    case SW_OBJ: sp_gc_sweep_slot(t->wid, &g_sw_head[t->wid], &g_sw_tail[t->wid], &g_sw_bytes[t->wid]); break;
+    case SW_STR_OLD: sp_str_sweep_old_one(t->wid); break;
+    default: sp_str_sweep_young_one(t->wid, t->sub, &g_sy_keep[t->wid][t->sub], &g_sy_tail[t->wid][t->sub],
+                                    &g_sy_moved[t->wid][t->sub], &g_sy_held[t->wid][t->sub]); break;
+  }
+  if (sp_gc_ph_on) {
+    /* microseconds in an integer, so the max is one atomic */
+    unsigned long d = (unsigned long)((sp_monotonic_now() - t0) * 1e6), m;
+    __atomic_fetch_add(&g_sw_task_sum_us, d, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_sw_task_max_kind[t->kind], d, __ATOMIC_RELAXED);
+    do { m = __atomic_load_n(&g_sw_slot_max_us, __ATOMIC_RELAXED); if (d <= m) break; }
+    while (!__atomic_compare_exchange_n(&g_sw_slot_max_us, &m, d, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+  }
+}
+/* Claim and run tasks until the list is exhausted. Off the scheduler lock. */
+static int sp_sweep_run_tasks(void) {
+  int ran = 0;
+  for (;;) {
+    int i = __atomic_fetch_add(&g_sw_next, 1, __ATOMIC_RELAXED);
+    if (i >= g_sw_ntasks) break;
+    sp_sweep_task(&g_sw_tasks[i]);
+    ran++;
+  }
+  return ran;
 }
 static unsigned       g_stw_epoch = 0;  /* bumped each collection; scopes g_nparked to one */
 static SP_TLS int     g_collector_active = 0;  /* this worker is mid-collection (re-entrancy guard) */
@@ -333,13 +385,11 @@ static void sp_stw_park_locked(void) {
        (the collector claims only its own), the mutators are all parked here,
        and holding the lock through a free-heavy walk would serialize exactly
        what this phase exists to parallelize. */
-    if (g_sweep_go && !g_swept[sp_worker_id]) {
-      int wid = sp_worker_id;
-      g_swept[wid] = 1;
+    if (g_sweep_go && __atomic_load_n(&g_sw_next, __ATOMIC_RELAXED) < g_sw_ntasks) {
       SCHED_UNLOCK();
-      sp_sweep_one_slot(wid);
+      int ran = sp_sweep_run_tasks();
       SCHED_LOCK();
-      g_sweep_done++;
+      g_sw_done += ran;
       pthread_cond_signal(&g_sweep_cv);
       continue;
     }
@@ -1037,9 +1087,6 @@ void sp_sched_init(void) {
 static int    g_sw_hi = 1;   /* largest pool seen; bounds the per-collection loops */
 static void sp_sched_par_sweep(void) {
   int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS) n = SP_MAX_WORKERS;
-  int me = sp_worker_id;
-  /* Decide the string sweep once, here, so every worker can do its own slot in
-     the same phase rather than the collector walking all of them afterwards. */
   /* Only the live slots: SP_MAX_WORKERS is 256 and this runs on every
      collection, so clearing the whole array cost more than the sweep saved.
      g_sw_hi is the largest pool ever seen, which bounds the orphan scan below
@@ -1056,38 +1103,62 @@ static void sp_sched_par_sweep(void) {
      minor cycle landed on a string-heap trigger. */
   if (sp_gc_str_minor_only) g_str_major = 0;
   sp_str_par_done = 1;   /* the collector's serial pass must not repeat this */
-  SCHED_LOCK();
+  /* Every slot up to the largest pool seen is on the list: a slot no live
+     worker owns -- past the current pool, or a worker that exited -- still
+     has to be swept or its lists leak, and its string lists count too. The
+     heavy tasks go first so the tail of the phase is short ones. */
   memset(g_str_promoted, 0, (size_t)g_sw_hi * sizeof g_str_promoted[0]);
-  memset(g_swept, 0, (size_t)g_sw_hi * sizeof g_swept[0]);
   memset(g_sw_head, 0, (size_t)g_sw_hi * sizeof g_sw_head[0]);
   memset(g_sw_tail, 0, (size_t)g_sw_hi * sizeof g_sw_tail[0]);
   memset(g_sw_bytes, 0, (size_t)g_sw_hi * sizeof g_sw_bytes[0]);
-  g_sweep_done = 0;
-  g_swept[me] = 1;          /* ours: we sweep it below, off the lock */
+  int nt = 0;
+  if (g_str_sweep) {
+    if (g_str_major)
+      for (int i = 0; i < g_sw_hi; i++)
+        if (sp_str_wslot[i].old) g_sw_tasks[nt++] = (sp_sw_task){ SW_STR_OLD, (short)i, 0 };
+    for (int i = 0; i < g_sw_hi; i++)
+      for (int sub = 0; sub < SP_STR_YSUB; sub++) {
+        g_sy_keep[i][sub] = g_sy_tail[i][sub] = NULL; g_sy_moved[i][sub] = g_sy_held[i][sub] = 0;
+        if (sp_str_wslot[i].young[sub]) g_sw_tasks[nt++] = (sp_sw_task){ SW_STR_YOUNG, (short)i, (short)sub };
+      }
+  }
+  for (int i = 0; i < g_sw_hi; i++)
+    if (sp_gc_wslot[i].young) g_sw_tasks[nt++] = (sp_sw_task){ SW_OBJ, (short)i, 0 };
+  /* The collector's own length cache: every parked worker cleared its own
+     at the park, and until now the collector dropped its entries one by one
+     as it swept its own strings. Its strings may now be swept by any worker,
+     which drops them from THAT worker's (empty) cache, so the collector's
+     entries would name freed strings. Clear it whole, like a park does. */
+  sp_str_lcache_clear();
+  SCHED_LOCK();
+  g_sw_ntasks = nt;
+  __atomic_store_n(&g_sw_next, 0, __ATOMIC_RELEASE);
+  g_sw_done = 0;
+  g_sw_slot_max_us = 0;
   g_sweep_go = 1;
   pthread_cond_broadcast(&g_stw_release);
   SCHED_UNLOCK();
-  sp_sweep_one_slot(me);
+  int ran = sp_sweep_run_tasks();
   SCHED_LOCK();
-  /* Every other participant is parked (the collector waited for that before
-     marking), so exactly n-1 of them will claim a slot. */
-  while (g_sweep_done < n - 1) pthread_cond_wait(&g_sweep_cv, &g_sched_lock);
+  g_sw_done += ran;
+  while (g_sw_done < nt) pthread_cond_wait(&g_sweep_cv, &g_sched_lock);
   g_sweep_go = 0;
   SCHED_UNLOCK();
-  /* Any slot no live worker owns -- an index past the current pool, or one
-     whose worker exited -- still has to be swept, or its list leaks. */
-  /* A slot no live worker owns -- past the current pool, or a worker that
-     exited -- still has to be swept or its lists leak. Its STRING list counts
-     too: a slot can hold strings with no objects left in it. */
-  for (int i = 0; i < g_sw_hi; i++)
-    if (!g_swept[i] && (sp_gc_wslot[i].young ||
-                        (g_str_sweep && (sp_str_wslot[i].young || sp_str_wslot[i].old))))
-      sp_sweep_one_slot(i);
   for (int i = 0; i < g_sw_hi; i++)
     sp_gc_promote_slot(g_sw_head[i], g_sw_tail[i], g_sw_bytes[i]);
+  if (sp_gc_ph_on) {
+    sp_gc_ph_slot_max += (double)g_sw_slot_max_us * 1e-6;
+    sp_gc_ph_task_sum += (double)g_sw_task_sum_us * 1e-6;
+    sp_gc_ph_task_obj += (double)g_sw_task_max_kind[SW_OBJ] * 1e-6;
+    sp_gc_ph_task_sold += (double)g_sw_task_max_kind[SW_STR_OLD] * 1e-6;
+    sp_gc_ph_task_syoung += (double)g_sw_task_max_kind[SW_STR_YOUNG] * 1e-6;
+    g_sw_task_sum_us = 0; memset(g_sw_task_max_kind, 0, sizeof g_sw_task_max_kind);
+  }
   if (g_str_sweep) {
     size_t promoted = 0;
-    for (int i = 0; i < g_sw_hi; i++) promoted += g_str_promoted[i];
+    for (int i = 0; i < g_sw_hi; i++)
+      for (int sub = 0; sub < SP_STR_YSUB; sub++)
+        sp_str_sweep_young_done(i, g_sy_keep[i][sub], g_sy_tail[i][sub], g_sy_moved[i][sub], g_sy_held[i][sub], &promoted);
     sp_str_sweep_end(g_str_major, promoted);
     g_str_sweep = 0;
   }

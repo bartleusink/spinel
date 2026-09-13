@@ -1,0 +1,307 @@
+/* sp_slab.c -- size-class slab allocation for GC objects and heap strings.
+ *
+ * Every object and every heap string used to be one malloc and, when it
+ * died, one free. On a server that allocates nine thousand of them per
+ * request from thirty workers, that was 40% of the CPU: glibc's arena locks
+ * and consolidation on the way in, and a sweep that handed every dead block
+ * back through free() on the way out, cold, from whichever thread ran the
+ * collection. Nothing a faster general allocator fixes -- tcmalloc measured
+ * the same -- because the cost is the per-block call and the cross-thread
+ * free, not the arithmetic.
+ *
+ * Here a block is a slot in a 64 KB chunk of one size class. Allocation
+ * pops the worker's current chunk, or carves the next slot from it; both are
+ * a few instructions with no lock, since a chunk belongs to one worker for
+ * allocation and no other worker allocates from it. A dead block goes back
+ * onto its chunk's free list: the sweep runs stop-the-world, so the pushes
+ * race only each other (the parallel young sweep frees on every worker at
+ * once) and never a pop, and a compare-exchange settles that. When a chunk
+ * has no free slot it is simply dropped by its owner, and the first free into
+ * it puts it back on the owner's available list.
+ *
+ * Every chunk lives inside one address range reserved at startup (16 GB of
+ * untouched, uncommitted pages; smaller where the system refuses), so a free
+ * tells a slab block from a malloc'd one by a range check, and a slot finds
+ * its chunk by masking its address. The range is handed out in 4 MB arenas
+ * whose first chunk holds the arena's chunk headers, so a released chunk
+ * keeps no resident page at all. At the end of a full cycle every chunk that
+ * is entirely free, beyond a small reserve per worker, is given back to the
+ * OS with madvise and re-carved from scratch when next used; that is what
+ * malloc_trim did for these blocks, at a syscall per idle chunk instead of a
+ * walk of thirty arenas.
+ *
+ * SPINEL_GC_SLAB=0 turns this off and every block is a malloc again, which
+ * is the configuration ASAN wants: a slab hides a use-after-free from it. */
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include "sp_gc.h"
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#ifndef MAP_NORESERVE
+#define MAP_NORESERVE 0
+#endif
+
+#define SP_SLAB_ARENA   ((size_t)4 << 20)
+#define SP_SLAB_CHUNK   ((size_t)64 << 10)
+#define SP_SLAB_NCHUNK  (SP_SLAB_ARENA / SP_SLAB_CHUNK)   /* 64; chunk 0 is the header table */
+#define SP_SLAB_NCLS    27
+#define SP_SLAB_MAX     2048
+/* fully free chunks a worker keeps resident across a full cycle (1 MB) */
+#define SP_SLAB_RESERVE 16
+
+#ifdef SP_THREADS
+#define SP_SLAB_NWK SP_MAX_WORKERS
+#define SP_SLAB_WID() (sp_worker_id)
+#else
+#define SP_SLAB_NWK 1
+#define SP_SLAB_WID() 0
+#endif
+
+/* 16-byte steps to 256, then coarser: an object header is 48 bytes and a
+   string header 24, and most blocks are a header plus a few words, so the
+   fine steps are where the population is. Past SP_SLAB_MAX a block is
+   malloc'd as before. */
+static const uint16_t sp_slab_csize[SP_SLAB_NCLS] = {
+  32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256,
+  320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048 };
+static uint8_t sp_slab_cls_of[SP_SLAB_MAX / 16 + 1];   /* (need+15)/16 -> class */
+
+typedef struct sp_slab_chunk {
+  struct sp_slab_chunk *next_avail;   /* the owner's available list, per class */
+  void *free;                         /* freed slots, linked through their first word */
+  char *bump, *end;                   /* not yet carved: [bump, end) */
+  uint32_t nfree;                     /* free slots, carved or not */
+  uint32_t nslots;
+  uint16_t cls, wid;
+  uint8_t on_avail;                   /* listed on the owner's available list */
+  uint8_t in_use;                     /* holds a class; 0 = empty, on the global pool */
+  uint8_t touched;                    /* has resident pages since the last release */
+  uint8_t _pad[64 - 8 * 4 - 4 * 2 - 2 * 2 - 3];
+} sp_slab_chunk;
+typedef char sp_slab_chunk_is_one_line[sizeof(sp_slab_chunk) == 64 ? 1 : -1];
+
+typedef struct sp_slab_arena {
+  sp_slab_chunk ch[SP_SLAB_NCHUNK];   /* ch[0] is this table itself, never carved */
+} sp_slab_arena;
+
+typedef struct {
+  sp_slab_chunk *cur[SP_SLAB_NCLS];
+  sp_slab_chunk *avail[SP_SLAB_NCLS];
+  long taken;        /* chunks this worker started allocating into since the last release */
+  char _pad[64 - ((2 * SP_SLAB_NCLS * sizeof(void *) + sizeof(long)) % 64)];
+} sp_slab_worker;
+
+static sp_slab_worker sp_slab_wk[SP_SLAB_NWK];
+static uintptr_t sp_slab_base = 0, sp_slab_brk = 0;   /* the reservation, and how much is in use */
+static size_t sp_slab_cap = 0;
+static sp_slab_chunk *sp_slab_empty = NULL;   /* chunks holding no class */
+int sp_slab_on = -1;                          /* decided once from the environment */
+#ifdef SP_THREADS
+#include <pthread.h>
+static pthread_mutex_t sp_slab_lock = PTHREAD_MUTEX_INITIALIZER;
+#define SP_SLAB_LOCK()   pthread_mutex_lock(&sp_slab_lock)
+#define SP_SLAB_UNLOCK() pthread_mutex_unlock(&sp_slab_lock)
+#else
+#define SP_SLAB_LOCK()   ((void)0)
+#define SP_SLAB_UNLOCK() ((void)0)
+#endif
+
+/* One reservation, aligned to the arena size so a slot's arena and chunk are
+   address arithmetic. Mapped twice the size and trimmed to the aligned
+   middle; the pages are untouched until a chunk is carved, so the size costs
+   nothing but address space. */
+static void sp_slab_reserve(void) {
+  size_t want = (size_t)16 << 30;
+  while (want >= ((size_t)256 << 20)) {
+    size_t len = want + SP_SLAB_ARENA;
+    void *m = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (m != MAP_FAILED) {
+      uintptr_t lo = (uintptr_t)m, base = (lo + SP_SLAB_ARENA - 1) & ~(SP_SLAB_ARENA - 1);
+      if (base > lo) munmap((void *)lo, base - lo);
+      uintptr_t hi = lo + len, top = base + want;
+      if (hi > top) munmap((void *)top, hi - top);
+      sp_slab_base = sp_slab_brk = base;
+      sp_slab_cap = want;
+      return;
+    }
+    want >>= 2;
+  }
+  sp_slab_on = 0;   /* no range at all: every block is a malloc */
+}
+
+static void sp_slab_init(void) {
+  const char *e = getenv("SPINEL_GC_SLAB");
+  int c = 0;
+  for (unsigned i = 0; i <= SP_SLAB_MAX / 16; i++) {
+    while (c < SP_SLAB_NCLS - 1 && sp_slab_csize[c] < i * 16) c++;
+    sp_slab_cls_of[i] = (uint8_t)c;
+  }
+  sp_slab_on = !(e && *e == '0');
+  if (sp_slab_on) sp_slab_reserve();
+}
+
+static inline int sp_slab_owns(const void *p) {
+  return (uintptr_t)p - sp_slab_base < sp_slab_cap;
+}
+static inline sp_slab_chunk *sp_slab_chunk_of(const void *p) {
+  uintptr_t a = (uintptr_t)p;
+  sp_slab_arena *ar = (sp_slab_arena *)(a & ~(SP_SLAB_ARENA - 1));
+  return &ar->ch[(a & (SP_SLAB_ARENA - 1)) / SP_SLAB_CHUNK];
+}
+static inline char *sp_slab_chunk_base(sp_slab_chunk *ch) {
+  sp_slab_arena *ar = (sp_slab_arena *)((uintptr_t)ch & ~(SP_SLAB_ARENA - 1));
+  return (char *)ar + (size_t)(ch - ar->ch) * SP_SLAB_CHUNK;
+}
+
+/* The next arena of the reservation: its header table is zero already (an
+   untouched page reads as zero), so only the empty list needs writing. */
+static int sp_slab_next_arena(void) {
+  if (sp_slab_brk + SP_SLAB_ARENA > sp_slab_base + sp_slab_cap) return 0;
+  sp_slab_arena *ar = (sp_slab_arena *)sp_slab_brk;
+  sp_slab_brk += SP_SLAB_ARENA;
+  for (int i = 1; i < (int)SP_SLAB_NCHUNK; i++) {
+    ar->ch[i].next_avail = sp_slab_empty;
+    sp_slab_empty = &ar->ch[i];
+  }
+  return 1;
+}
+
+/* The slow path: the worker's current chunk for this class has no slot. NULL
+   when the reservation is exhausted, and the caller mallocs. */
+static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, size_t csize) {
+  sp_slab_chunk *ch = wk->avail[cls];
+  if (ch) {
+    /* The list is pushed only under stop-the-world and popped only by its
+       owner outside it, so a plain pop is race-free. */
+    wk->avail[cls] = ch->next_avail;
+    ch->next_avail = NULL;
+    ch->on_avail = 0;
+  }
+  else {
+    SP_SLAB_LOCK();
+    if (!sp_slab_empty && !sp_slab_next_arena()) { SP_SLAB_UNLOCK(); return NULL; }
+    ch = sp_slab_empty;
+    sp_slab_empty = ch->next_avail;
+    SP_SLAB_UNLOCK();
+    char *base = sp_slab_chunk_base(ch);
+    ch->next_avail = NULL;
+    ch->free = NULL;
+    ch->nslots = (uint32_t)(SP_SLAB_CHUNK / csize);
+    ch->nfree = ch->nslots;
+    ch->bump = base;
+    ch->end = base + (size_t)ch->nslots * csize;
+    ch->cls = (uint16_t)cls;
+    ch->wid = (uint16_t)(wk - sp_slab_wk);
+    ch->on_avail = 0;
+    ch->in_use = 1;
+  }
+  wk->cur[cls] = ch;
+  wk->taken++;
+  void *p = ch->free;
+  if (p) ch->free = *(void **)p;
+  else { p = ch->bump; ch->bump += csize; }
+  ch->nfree--;
+  ch->touched = 1;
+  return p;
+}
+
+void *sp_slab_alloc_raw(size_t need) {
+  if (__builtin_expect(sp_slab_on < 0, 0)) sp_slab_init();
+  if (sp_slab_on && need <= SP_SLAB_MAX) {
+    int cls = sp_slab_cls_of[(need + 15) >> 4];
+    size_t csize = sp_slab_csize[cls];
+    sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
+    sp_slab_chunk *ch = wk->cur[cls];
+    void *p;
+    if (ch && (p = ch->free) != NULL) { ch->free = *(void **)p; ch->nfree--; return p; }
+    if (ch && ch->bump < ch->end) { p = ch->bump; ch->bump += csize; ch->nfree--; ch->touched = 1; return p; }
+    p = sp_slab_refill(wk, cls, csize);
+    if (p) return p;
+  }
+  void *p = malloc(need);
+  if (!p) sp_oom_die();
+  return p;
+}
+
+void *sp_slab_alloc(size_t need) {
+  void *p = sp_slab_alloc_raw(need);
+  memset(p, 0, need);
+  return p;
+}
+
+/* Only from a sweep: every mutator is parked, so the only concurrency is
+   between sweeping workers freeing into the same chunk. */
+void sp_slab_free(void *p) {
+  if (!sp_slab_owns(p)) { free(p); return; }
+  sp_slab_chunk *ch = sp_slab_chunk_of(p);
+#ifdef SP_THREADS
+  void *old;
+  do { old = __atomic_load_n(&ch->free, __ATOMIC_ACQUIRE); *(void **)p = old;
+  } while (!__atomic_compare_exchange_n(&ch->free, &old, p, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+  __atomic_fetch_add(&ch->nfree, 1, __ATOMIC_RELAXED);
+  /* A chunk its owner dropped as full comes back onto the available list on
+     its first free. The owner is parked, so its current chunk is stable. */
+  if (!__atomic_load_n(&ch->on_avail, __ATOMIC_RELAXED) && sp_slab_wk[ch->wid].cur[ch->cls] != ch) {
+    unsigned char was = __atomic_exchange_n(&ch->on_avail, 1, __ATOMIC_ACQ_REL);
+    if (!was) {
+      sp_slab_chunk **head = &sp_slab_wk[ch->wid].avail[ch->cls];
+      sp_slab_chunk *oh;
+      do { oh = __atomic_load_n(head, __ATOMIC_ACQUIRE); ch->next_avail = oh;
+      } while (!__atomic_compare_exchange_n(head, &oh, ch, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    }
+  }
+#else
+  *(void **)p = ch->free; ch->free = p; ch->nfree++;
+  if (!ch->on_avail && sp_slab_wk[0].cur[ch->cls] != ch) {
+    ch->on_avail = 1;
+    ch->next_avail = sp_slab_wk[0].avail[ch->cls];
+    sp_slab_wk[0].avail[ch->cls] = ch;
+  }
+#endif
+}
+
+/* End of a full cycle, stop-the-world, one thread: give the OS every chunk
+   that is entirely free beyond each worker's reserve. The reserve is what the
+   worker went through since the last release, with a margin: a young
+   generation is by construction empty again after every cycle, and releasing
+   it each time only had the kernel fault and zero the same pages back in a
+   moment later (a quarter of the collector's time in page faults). What is
+   kept is the working set; what is released is the excess after a burst.
+   The available lists are rebuilt rather than edited in place, which is also
+   where a fully free chunk leaves its class and returns to the global pool,
+   so a burst of one size does not hold chunks another size needs later. */
+void sp_slab_release(void) {
+  if (sp_slab_on <= 0) return;
+  for (int w = 0; w < SP_SLAB_NWK; w++) {
+    sp_slab_worker *wk = &sp_slab_wk[w];
+    long reserve = wk->taken + wk->taken / 4;
+    if (reserve < SP_SLAB_RESERVE) reserve = SP_SLAB_RESERVE;
+    wk->taken = 0;
+    for (int cls = 0; cls < SP_SLAB_NCLS; cls++) {
+      sp_slab_chunk *keep = NULL, *ch = wk->avail[cls];
+      while (ch) {
+        sp_slab_chunk *nx = ch->next_avail;
+        if (ch->nfree == ch->nslots && reserve <= 0) {
+          char *base = sp_slab_chunk_base(ch);
+          if (ch->touched) madvise(base, SP_SLAB_CHUNK, MADV_DONTNEED);
+          ch->in_use = 0; ch->on_avail = 0; ch->touched = 0;
+          ch->free = NULL; ch->bump = ch->end = NULL; ch->nfree = ch->nslots = 0;
+          ch->next_avail = sp_slab_empty;
+          sp_slab_empty = ch;
+        }
+        else {
+          if (ch->nfree == ch->nslots) reserve--;
+          ch->next_avail = keep;
+          keep = ch;
+        }
+        ch = nx;
+      }
+      wk->avail[cls] = keep;
+    }
+  }
+}

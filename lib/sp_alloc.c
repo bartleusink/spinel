@@ -390,9 +390,10 @@ static void sp_gc_stats_emit(void) {
           "[gcph] marked %llu objs  swept %llu slots\n",
           (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_marked), (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_swept));
   fprintf(stderr,
-          "[gcph] mark %.3fs  old sweep %.3fs  slot sweep %.3fs  "
+          "[gcph] mark %.3fs  old sweep %.3fs  slot sweep %.3fs (longest task %.3fs; tasks total %.3fs = obj %.3fs + str old %.3fs + str young %.3fs)  "
           "remembered clear %.3fs  string sweep %.3fs  trim %.3fs  of %.3fs total\n",
-          sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
+          sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep, sp_gc_ph_slot_max,
+          sp_gc_ph_task_sum, sp_gc_ph_task_obj, sp_gc_ph_task_sold, sp_gc_ph_task_syoung,
           sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim,
           sp_gc_stat_seconds);
   /* The mark, one level down, because "mark grew" has two causes that want
@@ -596,8 +597,7 @@ void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   if (!sp_gc_stress_checked) { sp_gc_stress_checked = 1; const char *e = getenv("SPINEL_GC_STRESS"); if (e && *e && *e != '0') { SP_GC_CTR_SET(sp_gc_threshold, 2048); sp_gc_threshold_init = 2048; sp_gc_stress_pin = 1; } }
   if (SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold)) sp_stw_collect();
   size_t need = sizeof(sp_gc_hdr) + sz;
-  sp_gc_hdr *h = (sp_gc_hdr *)calloc(1, need);
-  if (!h) sp_oom_die();
+  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
   h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
   if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
   SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
@@ -612,8 +612,7 @@ void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
     sp_gc_collect_retune();
   }
   size_t need = sizeof(sp_gc_hdr) + sz;
-  sp_gc_hdr *h = (sp_gc_hdr *)calloc(1, need);
-  if (!h) sp_oom_die();
+  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
   h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
   if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
   SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
@@ -623,8 +622,7 @@ void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
 }
 void *sp_gc_alloc_nogc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   size_t need = sizeof(sp_gc_hdr) + sz;
-  sp_gc_hdr *h = (sp_gc_hdr *)calloc(1, need);
-  if (!h) sp_oom_die();
+  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
   h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
   if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
   SP_HEAP_LOCK();
@@ -656,34 +654,55 @@ void sp_str_lcache_clear(void) {
    holding rather than one it is churning through.
    `promoted` accumulates the moved bytes so the caller's threshold retune can
    count them as survivors and not mistake promotion for reclamation. */
-static void sp_str_sweep_young(sp_str_hdr **head, size_t *bytes,
-                               sp_str_hdr **old_head, size_t *old_bytes,
-                               size_t *promoted) {
+/* Sweep one young list into LOCAL results -- the survivors as a list with
+   its tail, the bytes they carry, and the bytes the list held in all -- so
+   that several young lists of one worker can be swept at once by different
+   workers and their results spliced into the slot afterwards
+   (sp_str_sweep_young_apply). */
+static void sp_str_sweep_young(sp_str_hdr **head, sp_str_hdr **keep_head, sp_str_hdr **keep_tail,
+                               size_t *moved_out, size_t *held_out) {
   sp_str_hdr *h = *head;
-  sp_str_hdr *keep = *old_head;
-  size_t moved = 0;
+  sp_str_hdr *keep = NULL, *tail = NULL;
+  size_t moved = 0, held = 0;
   while (h) {
     sp_str_hdr *next = h->next;
+    __builtin_prefetch(next);
     char *body = (char *)(h + 1);
     unsigned char m = (unsigned char)body[0];
+    held += h->size & SP_STR_SIZE_MASK;
     if (m == 0xfc || m == 0xf1) {
       if (m == 0xfc) body[0] = (char)0xfe;
       h->next = keep;
+      if (!keep) tail = h;
       keep = h;
       moved += h->size & SP_STR_SIZE_MASK;
     }
     else {
-      *bytes -= h->size & SP_STR_SIZE_MASK;
       sp_str_lcache_drop(body + 1);
-      free(h);
+      sp_slab_free(h);
     }
     h = next;
   }
   *head = NULL;
-  *old_head = keep;
-  *bytes -= moved;
+  *keep_head = keep; *keep_tail = tail;
+  *moved_out = moved; *held_out = held;
+}
+/* Splice one young list's survivors into the slot's old generation and
+   settle the counters. Single-threaded per slot: the caller serializes. */
+static void sp_str_sweep_young_apply(sp_str_hdr *keep, sp_str_hdr *tail, size_t moved, size_t held,
+                                     size_t *bytes, sp_str_hdr **old_head, size_t *old_bytes,
+                                     size_t *promoted) {
+  if (keep) { tail->next = *old_head; *old_head = keep; }
+  *bytes -= held;
   *old_bytes += moved;
   *promoted += moved;
+}
+static void sp_str_sweep_young_into(sp_str_hdr **head, size_t *bytes,
+                                    sp_str_hdr **old_head, size_t *old_bytes,
+                                    size_t *promoted) {
+  sp_str_hdr *keep, *tail; size_t moved, held;
+  sp_str_sweep_young(head, &keep, &tail, &moved, &held);
+  sp_str_sweep_young_apply(keep, tail, moved, held, bytes, old_head, old_bytes, promoted);
 }
 
 /* ---- Generational verifier, string side (SPINEL_GC_VERIFY_GEN=1) ----
@@ -715,7 +734,7 @@ void sp_str_verify_begin(void) {
   sp_str_vcand_n = 0;
 #ifdef SP_THREADS
   { int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS) n = SP_MAX_WORKERS;
-    for (int i = 0; i < n; i++) sp_str_vscan(sp_str_wslot[i].young); }
+    for (int i = 0; i < n; i++) for (int sub = 0; sub < SP_STR_YSUB; sub++) sp_str_vscan(sp_str_wslot[i].young[sub]); }
 #else
   sp_str_vscan(sp_str_heap);
 #endif
@@ -746,6 +765,7 @@ static void sp_str_sweep_old(sp_str_hdr **head, size_t *bytes) {
   sp_str_hdr **pp = head;
   while (*pp) {
     sp_str_hdr *h = *pp;
+    __builtin_prefetch(h->next);
     char *body = (char *)(h + 1);
     unsigned char m = (unsigned char)body[0];
     if (m == 0xfc) { body[0] = (char)0xfe; pp = &h->next; }
@@ -754,7 +774,7 @@ static void sp_str_sweep_old(sp_str_hdr **head, size_t *bytes) {
       *pp = h->next;
       *bytes -= h->size & SP_STR_SIZE_MASK;
       sp_str_lcache_drop(body + 1);
-      free(h);
+      sp_slab_free(h);
     }
   }
 }
@@ -767,13 +787,14 @@ static size_t sp_str_sweep_gen(int major) {
   int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS) n = SP_MAX_WORKERS;
   for (int i = 0; i < n; i++) {
     if (major) sp_str_sweep_old(&sp_str_wslot[i].old, &sp_str_wslot[i].old_bytes);
-    sp_str_sweep_young(&sp_str_wslot[i].young, &sp_str_wslot[i].young_bytes,
-                       &sp_str_wslot[i].old, &sp_str_wslot[i].old_bytes, &promoted);
+    for (int sub = 0; sub < SP_STR_YSUB; sub++)
+      sp_str_sweep_young_into(&sp_str_wslot[i].young[sub], &sp_str_wslot[i].young_bytes,
+                              &sp_str_wslot[i].old, &sp_str_wslot[i].old_bytes, &promoted);
   }
 #else
   if (major) sp_str_sweep_old(&sp_str_old, &sp_str_old_bytes);
-  sp_str_sweep_young(&sp_str_heap, &sp_str_heap_bytes,
-                     &sp_str_old, &sp_str_old_bytes, &promoted);
+  sp_str_sweep_young_into(&sp_str_heap, &sp_str_heap_bytes,
+                          &sp_str_old, &sp_str_old_bytes, &promoted);
 #endif
   return promoted;
 }
@@ -802,7 +823,7 @@ void sp_PolyArray_pool_recycle(sp_gc_hdr *h) {
 #endif
   if (n >= SP_POLYARR_POOL_MAX || a->cap > SP_POLYARR_POOL_KEEP_CAP) {
     free(a->data);
-    free(h);
+    sp_slab_free(h);
     return;
   }
 #ifdef SP_THREADS
@@ -940,10 +961,20 @@ void sp_str_sweep_end(int major, size_t promoted) {
    the slow path in glibc and in every other thread-caching allocator. Each
    worker also clears its own length cache, whose entries are keyed by the
    addresses this sweep is about to recycle. */
-void sp_str_sweep_one(int wid, int major, size_t *promoted) {
-  if (major) sp_str_sweep_old(&sp_str_wslot[wid].old, &sp_str_wslot[wid].old_bytes);
-  sp_str_sweep_young(&sp_str_wslot[wid].young, &sp_str_wslot[wid].young_bytes,
-                     &sp_str_wslot[wid].old, &sp_str_wslot[wid].old_bytes, promoted);
+/* The sweep tasks of one slot, for the parallel driver (sp_sched.c): the old
+   list on a major, and each young list into local results that
+   sp_str_sweep_young_done splices in once every task of the slot is over. */
+void sp_str_sweep_old_one(int wid) {
+  sp_str_sweep_old(&sp_str_wslot[wid].old, &sp_str_wslot[wid].old_bytes);
+}
+void sp_str_sweep_young_one(int wid, int sub, sp_str_hdr **keep, sp_str_hdr **tail,
+                            size_t *moved, size_t *held) {
+  sp_str_sweep_young(&sp_str_wslot[wid].young[sub], keep, tail, moved, held);
+}
+void sp_str_sweep_young_done(int wid, sp_str_hdr *keep, sp_str_hdr *tail, size_t moved, size_t held,
+                             size_t *promoted) {
+  sp_str_sweep_young_apply(keep, tail, moved, held, &sp_str_wslot[wid].young_bytes,
+                           &sp_str_wslot[wid].old, &sp_str_wslot[wid].old_bytes, promoted);
 }
 #endif
 static void sp_str_sweep_gated(void) {

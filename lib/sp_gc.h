@@ -329,6 +329,21 @@ static inline void sp_gc_bytes_sub(size_t n) {
 #define SP_GC_HEAP_PUSH(hdr) do { (hdr)->next = sp_gc_heap; sp_gc_heap = (hdr); } while (0)
 #endif
 
+/* ---- Slab allocator for GC objects and heap strings (lib/sp_slab.c) ----
+ * sp_slab_alloc answers a zeroed block of `need` bytes (header included) from
+ * the calling worker's size-class chunks; sp_slab_alloc_raw the same block
+ * unzeroed (a string is filled by its maker). A size past the largest class,
+ * or the allocator off (SPINEL_GC_SLAB=0), falls back to calloc/malloc, and
+ * sp_slab_free tells the two apart by address: every chunk lives inside one
+ * reserved range. A free runs only inside a sweep (stop-the-world), from any
+ * worker. sp_slab_release, at the end of a full cycle, returns fully free
+ * chunks to the OS. */
+void *sp_slab_alloc(size_t need);
+void *sp_slab_alloc_raw(size_t need);
+void  sp_slab_free(void *p);
+void  sp_slab_release(void);
+extern int sp_slab_on;
+
 /* ---- Collector entry points (defined in lib/sp_gc.c) ---- */
 int  sp_gc_verify_on(void);   /* SPINEL_GC_VERIFY is set (diagnostics only) */
 extern const char *sp_gc_dbg_phase;   /* which root group the mark walk is in */
@@ -364,6 +379,8 @@ extern double sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
    fibers) and more GRAPH to trace (the scan row, which grows because those
    fibers hold live objects). Only the first is what slicing the fiber list to
    the parked workers would address (#4384). */
+extern double sp_gc_ph_slot_max;   /* longest single sweep task, summed (sp_sched.c) */
+extern double sp_gc_ph_task_sum, sp_gc_ph_task_obj, sp_gc_ph_task_sold, sp_gc_ph_task_syoung;   /* all tasks' time, by kind */
 extern double sp_gc_ph_mk_roots, sp_gc_ph_mk_fibers,
               sp_gc_ph_mk_globals, sp_gc_ph_mk_scan;
 extern int sp_gc_ph_on;

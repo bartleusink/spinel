@@ -2761,7 +2761,8 @@ sp_StrIntHash*sp_gc_stat(void){
      misses a just-pushed one (benign undercount for an introspection stat). */
   { int nw = sp_active_workers; if (nw < 1) nw = 1; if (nw > SP_MAX_WORKERS) nw = SP_MAX_WORKERS;
     for (int wi = 0; wi < nw; wi++) {
-      for(sp_str_hdr*sh=sp_str_wslot[wi].young; sh; sh=sh->next){ str_bytes+=sh->size & SP_STR_SIZE_MASK; str_count++; }
+      for(int sub=0; sub<SP_STR_YSUB; sub++)
+        for(sp_str_hdr*sh=sp_str_wslot[wi].young[sub]; sh; sh=sh->next){ str_bytes+=sh->size & SP_STR_SIZE_MASK; str_count++; }
       for(sp_str_hdr*sh=sp_str_wslot[wi].old; sh; sh=sh->next){ str_bytes+=sh->size & SP_STR_SIZE_MASK; str_count++; } } }
 #else
   SP_HEAP_LOCK();

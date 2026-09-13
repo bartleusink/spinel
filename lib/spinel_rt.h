@@ -663,7 +663,7 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
     long _c = __atomic_add_fetch(&sp_##CLS##_pool_count, 1, __ATOMIC_RELAXED); \
     if (_c > sp_##CLS##_pool_max) { \
       __atomic_fetch_sub(&sp_##CLS##_pool_count, 1, __ATOMIC_RELAXED); \
-      free(h); __atomic_fetch_add(&sp_##CLS##_pool_freed, 1, __ATOMIC_RELAXED); return; \
+      sp_slab_free(h); __atomic_fetch_add(&sp_##CLS##_pool_freed, 1, __ATOMIC_RELAXED); return; \
     } \
     { sp_gc_hdr *_old; \
       do { _old = __atomic_load_n(&sp_##CLS##_pool_head, __ATOMIC_ACQUIRE); (h)->next = _old; \
@@ -683,7 +683,7 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
 #define SP_POOL_CTR_DEC(c) ((c)--)
 #define SP_POOL_RECYCLE_BODY(CLS, h) \
     if (sp_##CLS##_pool_count >= sp_##CLS##_pool_max) { \
-      free(h); sp_##CLS##_pool_freed++; return; \
+      sp_slab_free(h); sp_##CLS##_pool_freed++; return; \
     } \
     (h)->next = sp_##CLS##_pool_head; \
     sp_##CLS##_pool_head = (h); \

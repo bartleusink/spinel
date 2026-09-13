@@ -422,7 +422,7 @@ size_t sp_gc_ct_swept = 0, sp_gc_ct_marked = 0;
 static void sp_gc_sweep_young(sp_gc_hdr **pp){
   size_t kept=0, promoted=0;
   while(*pp){sp_gc_hdr*h=*pp;SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
-  else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}}
+  else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));sp_slab_free(h);}}
   else if(sp_gc_age_survivors&&!h->aged){h->aged=1;kept+=h->size;pp=&h->next;}   /* first survival: stays young */
   else{*pp=h->next;h->next=sp_gc_old_heap;sp_gc_old_heap=h;h->old=1;sp_gc_old_bytes+=h->size;sp_gc_bytes+=h->size;promoted++;}}
   sp_gc_young_kept_bytes+=kept;
@@ -453,11 +453,12 @@ void sp_gc_sweep_slot(int wid, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_
   size_t swept = 0, kept = 0, promoted = 0;
   while (*pp) {
     sp_gc_hdr *h = *pp;
+    __builtin_prefetch(h->next);
     swept++;
     if (h->marked != sp_gc_mark_gen) {
       *pp = h->next;
       if (h->recycle) { h->recycle(h); }
-      else { if (h->finalize) h->finalize((char *)h + sizeof(sp_gc_hdr)); free(h); }
+      else { if (h->finalize) h->finalize((char *)h + sizeof(sp_gc_hdr)); sp_slab_free(h); }
     }
     else if (sp_gc_age_survivors && !h->aged) {
       h->aged = 1; kept += h->size; pp = &h->next;   /* first survival: stays young */
@@ -604,6 +605,7 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
    total. That is what this found, and #4380 then removed; it reads ~0 now. */
 double sp_gc_ph_mark = 0, sp_gc_ph_oldsweep = 0, sp_gc_ph_slotsweep = 0,
        sp_gc_ph_rembclear = 0, sp_gc_ph_strsweep = 0, sp_gc_ph_trim = 0;
+double sp_gc_ph_slot_max = 0, sp_gc_ph_task_sum = 0, sp_gc_ph_task_obj = 0, sp_gc_ph_task_sold = 0, sp_gc_ph_task_syoung = 0;   /* filled by the threaded sweep driver */
 double sp_gc_ph_mk_roots = 0, sp_gc_ph_mk_fibers = 0,
        sp_gc_ph_mk_globals = 0, sp_gc_ph_mk_scan = 0;
 int sp_gc_ph_on = 0;
@@ -724,8 +726,8 @@ void sp_gc_collect(void){
   if(full){
     size_t old_before=sp_gc_old_bytes;
     sp_gc_hdr**pp=&sp_gc_old_heap;sp_gc_old_bytes=0;
-    while(*pp){sp_gc_hdr*h=*pp;SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
-    else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}}
+    while(*pp){sp_gc_hdr*h=*pp;__builtin_prefetch(h->next);SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
+    else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));sp_slab_free(h);}}
     else{h->dirty=0;sp_gc_old_bytes+=h->size;pp=&h->next;}}
     /* Retune the cadence on what this sweep actually reclaimed. A heap the
        full cycle barely touches is one the minor mark was re-walking for
@@ -952,9 +954,16 @@ void sp_gc_collect(void){
      arena does not need walking more than about once a second: the RSS it
      returns is what the last second freed. */
   if(full){
+    /* the object heap's own chunks first: what the slab hands back here is
+       what malloc_trim used to find in the arena */
+    sp_slab_release();
+    /* What malloc still holds is container buffers; the objects and strings
+       are the slab's. A trim is still a 60 ms walk of every arena on a
+       32-worker box, under stop-the-world, so once in ten seconds is the
+       cadence: 2% of a full-cycle server's collector time instead of 17%. */
     static double last_trim=0;
     double now=sp_gc_stat_now();
-    if(now-last_trim>=1.0){ malloc_trim(0); last_trim=now; }
+    if(now-last_trim>=10.0){ malloc_trim(0); last_trim=now; }
   }
   SP_GC_PH(sp_gc_ph_trim);
   /* Bump BEFORE the retune hook: the hook is where the stats line is printed
