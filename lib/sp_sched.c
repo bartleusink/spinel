@@ -788,7 +788,7 @@ static unsigned long long g_sched_lat_hist[32];
 static double g_sched_lat_max = 0;
 static unsigned long long g_sched_lat_n = 0;
 static int g_lrq_len[SP_MAX_WORKERS], g_lrq_len_max = 0;
-static unsigned long long g_mtx_hist[32], g_mtx_n = 0, g_mtx_fast = 0; static double g_mtx_max = 0;
+static unsigned long long g_mtx_hist[32], g_mtx_n = 0, g_mtx_fast = 0, g_mtx_spin = 0; static double g_mtx_max = 0;
 static unsigned long long g_cv_hist[32], g_cv_n = 0; static double g_cv_max = 0;
 static void sched_hist_add(unsigned long long *h, unsigned long long *n, double *mx, double us) {
   int k = 0; while (k < 31 && us >= (double)(2u << k)) k++;
@@ -1662,7 +1662,7 @@ static void *sp_sysmon_main(void *arg) {
           for (sp_thread *a = g_all; a; a = a->all_next) { if (a->home_wid >= 0) pinned[a->home_wid]++; else unpinned++; }
           fprintf(stderr, "[sched-lat] pinned per worker:"); for (int i = 0; i < sp_active_workers; i++) fprintf(stderr, " %d", pinned[i]); fprintf(stderr, "  unpinned=%d\n", unpinned); }
         sched_hist_print("mutex-wait", g_mtx_hist, g_mtx_n, g_mtx_max);
-        fprintf(stderr, "[mutex-wait] fast-path locks=%llu\n", g_mtx_fast);
+        fprintf(stderr, "[mutex-wait] fast-path locks=%llu spin-acquired=%llu\n", g_mtx_fast, g_mtx_spin);
         sched_hist_print("cv-wait", g_cv_hist, g_cv_n, g_cv_max);
         g_lrq_len_max = 0;
       }
@@ -2430,12 +2430,53 @@ const char *sp_Queue_class_name(sp_queue *q) {
  * opposite orders -- a waiter counts itself and then re-reads `owner`, an
  * unlocker clears `owner` and then re-reads `nwaiters` -- so with sequential
  * consistency at least one of them observes the other and no wake is lost. */
+/* A contended lock spins briefly before it parks. The slow path below is a
+   scheduler-lock round trip to park plus another to be woken, and the wake
+   itself is a scheduling latency (the [mutex-wait] histogram put the median
+   contended acquisition at 64-128 us). A critical section guarding a hash
+   read holds the mutex for a microsecond, so an owner that is RUNNING on
+   another worker will let go long before a park would complete; wait for it
+   in place, for a bounded number of pauses. The spin stops as soon as the
+   owner is not on a CPU: an owner parked on I/O or preempted inside the
+   section will not release it soon, and the only thread running on THIS
+   worker is us, so a running owner is by construction elsewhere. campfire's
+   messages page at 64 connections parked 58k times a second on its
+   fragment-cache shards (3,200 req/s); spinning first restores most of the
+   throughput the parks took. */
+#if defined(__x86_64__) || defined(__i386__)
+#define SP_CPU_RELAX() __builtin_ia32_pause()
+#elif defined(__aarch64__)
+#define SP_CPU_RELAX() __asm__ __volatile__("yield" ::: "memory")
+#else
+#define SP_CPU_RELAX() ((void)0)
+#endif
+#ifndef SP_MUTEX_SPIN
+#define SP_MUTEX_SPIN 256
+#endif
+static inline int sp_mutex_spin_acquire(sp_mutex *m, sp_thread *self) {
+  for (int i = 0; i < SP_MUTEX_SPIN; i++) {
+    sp_thread *o = __atomic_load_n(&m->owner, __ATOMIC_SEQ_CST);
+    if (o == NULL) {
+      sp_thread *expect = NULL;
+      if (__atomic_compare_exchange_n(&m->owner, &expect, self, 0,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return 1;
+      continue;
+    }
+    if (o == self) return 0;   /* reentrancy or a deadlock: the slow path decides */
+    if (__atomic_load_n(&o->state, __ATOMIC_SEQ_CST) != SP_TH_RUNNING) return 0;
+    SP_CPU_RELAX();
+  }
+  return 0;
+}
+
 void sp_Mutex_lock(sp_mutex *m) {
   sp_thread *self = g_current;
   sp_thread *expect = NULL;
   if (__atomic_compare_exchange_n(&m->owner, &expect, self, 0,
                                   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
     { if (sched_lat_enabled()) __atomic_fetch_add(&g_mtx_fast, 1, __ATOMIC_RELAXED); return; }   /* was unlocked: ours, no lock taken */
+  if (sp_mutex_spin_acquire(m, self))
+    { if (sched_lat_enabled()) __atomic_fetch_add(&g_mtx_spin, 1, __ATOMIC_RELAXED); return; }
   SCHED_LOCK();
   /* the owner re-entering its own Monitor just goes deeper */
   if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == self && m->reentrant) { m->depth++; SCHED_UNLOCK(); return; }
