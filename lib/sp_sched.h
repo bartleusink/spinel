@@ -38,6 +38,9 @@ typedef struct sp_thread {
                                     stack; a waker may only enqueue it once off_cpu, otherwise it
                                     could be run on a second worker mid-context-switch */
   unsigned char     wake_pending; /* a wake arrived while still on-cpu; the worker enqueues it */
+  unsigned char     repark_front;  /* next sp_sched_block puts this thread at the HEAD of the wait
+                                      list: a mutex waiter woken but beaten to the exchange keeps
+                                      its place in the arrival order */
   unsigned char     preempt_request; /* sysmon set this thread over its timeslice; it yields at its
                                         next safepoint poll (cooperative preemption, §5) */
   short             home_wid;      /* worker this thread FIRST ran on, -1 before its first run.
@@ -45,6 +48,7 @@ typedef struct sp_thread {
                                       hold compiler-cached addresses of that worker's __thread
                                       data (GC shadow stack, exception stack, ...), so resuming
                                       it on another worker corrupts both workers' TLS. */
+  double            readied_at;  /* SPINEL_SCHED_STATS=2: when it was last put on a run queue */
   struct sp_thread *rq_next;     /* run-queue link while RUNNABLE */
   struct sp_thread *joiners;     /* threads parked in #join/#value on this one */
   struct sp_thread *ev_next;     /* link within the per-DESCRIPTOR waiter list: a readiness

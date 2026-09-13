@@ -209,7 +209,14 @@ typedef struct { pthread_t tid; sp_thread *cur; double since; int active;
                     breaks it out of the wait, since a signal on `cv` no longer
                     reaches it there. `ev_waiting` says which of the two it is on,
                     and like `idle` it is written only under the lock. */
-                 int evfd; int kick[2]; int kick_armed; int ev_waiting; } sp_wslot;
+                 int evfd; int kick[2]; int kick_armed; int ev_waiting;
+                 /* Green threads whose home this worker is (pinned here for life, see
+                    home_wid). A thread's first run fixes its home, so where an
+                    unstarted thread is first run decides the balance for as long as
+                    it lives -- for a server, one connection per thread, that is the
+                    whole run. Counted so sched_pick can place a new thread on the
+                    worker with the fewest. */
+                 int pinned; } sp_wslot;
 static sp_wslot   g_wslot[SP_MAX_WORKERS];   /* per-worker: the green thread it runs + when it started */
 static void sp_recompute_safepoint_flag(void) {   /* PRE: g_sched_lock held */
   SP_SAFEPOINT_SET(g_stw_active || g_npreempt > 0);
@@ -772,8 +779,33 @@ static unsigned char g_report_default = 1;  /* Thread.report_on_exception defaul
 #ifdef SP_THREADS
 static void sp_sched_maybe_grow(void);   /* grow the helper pool toward demand */
 #endif
+/* SPINEL_SCHED_STATS=2: how long a readied thread waited on a run queue before
+   a worker ran it, as a log2 histogram (bucket k: [2^k, 2^(k+1)) us), reported
+   by the monitor every few seconds. The scheduling delay is what a request's
+   tail latency is made of when the CPU is not the bottleneck. */
+static int g_sched_lat_on = -1;
+static unsigned long long g_sched_lat_hist[32];
+static double g_sched_lat_max = 0;
+static unsigned long long g_sched_lat_n = 0;
+static int g_lrq_len[SP_MAX_WORKERS], g_lrq_len_max = 0;
+static unsigned long long g_mtx_hist[32], g_mtx_n = 0, g_mtx_fast = 0; static double g_mtx_max = 0;
+static unsigned long long g_cv_hist[32], g_cv_n = 0; static double g_cv_max = 0;
+static void sched_hist_add(unsigned long long *h, unsigned long long *n, double *mx, double us) {
+  int k = 0; while (k < 31 && us >= (double)(2u << k)) k++;
+  h[k]++; (*n)++; if (us > *mx) *mx = us;
+}
+static void sched_hist_print(const char *tag, unsigned long long *h, unsigned long long n, double mx) {
+  fprintf(stderr, "[%s] n=%llu max=%.0fus  us:", tag, n, mx);
+  for (int k = 0; k < 32; k++) if (h[k]) fprintf(stderr, " [%u]=%llu", 1u << k, h[k]);
+  fprintf(stderr, "\n");
+}
+static int sched_lat_enabled(void) {
+  if (g_sched_lat_on < 0) { const char *e = getenv("SPINEL_SCHED_STATS"); g_sched_lat_on = (e && *e == '2'); }
+  return g_sched_lat_on;
+}
 static void runq_push(sp_runq *q, sp_thread *t) {
   t->state = SP_TH_RUNNABLE; t->rq_next = NULL;
+  if (sched_lat_enabled()) t->readied_at = sp_monotonic_now();
   if (q->tail) q->tail->rq_next = t; else q->head = t;
   q->tail = t; g_runnable++;
 #ifdef SP_THREADS
@@ -804,8 +836,46 @@ static void runq_requeue(sp_thread *t) {
    worker that keeps refilling its own queue (e.g. a thread spawning in a loop)
    cannot starve globally-requeued (preempted / woken) work. */
 static SP_TLS unsigned g_pick_tick = 0;
+#ifdef SP_THREADS
+/* An unstarted thread popped from the global queue is about to be pinned to
+   whichever worker runs it first, for life. Under a helper pool that grows on
+   demand the workers that exist when a server's connections arrive are the
+   busy ones, so every connection was pinned to the first dozen workers and
+   the rest sat idle for the run: 64 connections on 12 of 32 workers, with 7
+   queued on one while 21 workers had nothing (campfire at c=64). Place it on
+   the worker with the fewest pinned threads instead -- spawning one more
+   helper when every worker already carries some and the cap allows -- and
+   hand it over there. Returns 1 when t was given away. */
+static void sp_sched_spawn_helper(void);
+static int sched_place_unstarted(int wid, sp_thread *t) {
+  if (t->home_wid >= 0 || sp_active_workers <= 1) return 0;
+  int best = -1, bestn = 0;
+  for (int i = 1; i < sp_active_workers; i++) {   /* worker 0 (main) runs no general thread */
+    if (!g_wslot[i].active) continue;
+    if (best < 0 || g_wslot[i].pinned < bestn) { best = i; bestn = g_wslot[i].pinned; }
+  }
+  if (best < 0) return 0;
+  if (bestn > 0 && g_helpers_spawned < g_worker_cap && !g_stw_active) {
+    int before = g_helpers_spawned;
+    sp_sched_spawn_helper();
+    if (g_helpers_spawned > before) { best = g_helpers_spawned; bestn = 0; }
+  }
+  if (best == wid || (wid > 0 && g_wslot[wid].pinned <= bestn)) return 0;   /* here is as good */
+  t->home_wid = (short)best; g_wslot[best].pinned++;
+  runq_push(&g_lrq[best], t);
+  sched_wake_home(best);
+  return 1;
+}
+#endif
 static sp_thread *sched_pick(int wid) {
   sp_thread *t;
+#ifdef SP_THREADS
+  /* the global queue holds unstarted threads: place each on its home first */
+  while ((t = g_grq.head) != NULL && t->home_wid < 0) {
+    runq_pop(&g_grq);
+    if (!sched_place_unstarted(wid, t)) { return t; }
+  }
+#endif
   if ((++g_pick_tick % 61u) == 0) { t = runq_pop(&g_grq); if (t) return t; }
   t = runq_pop(&g_lrq[wid]);
   if (t) return t;
@@ -1083,12 +1153,26 @@ static void sp_sched_signal_if_quiescent(void) {
 }
 
 static void run_thread_once(sp_thread *t) { sp_gc_wb((void*)t);   /* PRE/POST: sched lock held */
+  if (sched_lat_enabled() && t->readied_at > 0) {
+    double d = (sp_monotonic_now() - t->readied_at) * 1e6;   /* us */
+    int k = 0; while (k < 31 && d >= (double)(2u << k)) k++;
+    g_sched_lat_hist[k]++; g_sched_lat_n++;
+    if (d > g_sched_lat_max) g_sched_lat_max = d;
+    t->readied_at = 0;
+    int len = 0; for (sp_thread *w = g_lrq[sp_worker_id].head; w; w = w->rq_next) len++;
+    if (len > g_lrq_len_max) g_lrq_len_max = len;
+  }
   sp_thread *saved = g_current;
   g_current = t;
   g_nrunning++;
   t->state = SP_TH_RUNNING;
   t->off_cpu = 0;        /* on-cpu now: no other worker may pick it up */
-  if (t->home_wid < 0) t->home_wid = (short)sp_worker_id;   /* pin to this worker (TLS affinity) */
+  if (t->home_wid < 0) {   /* pin to this worker (TLS affinity) */
+    t->home_wid = (short)sp_worker_id;
+#ifdef SP_THREADS
+    g_wslot[sp_worker_id].pinned++;
+#endif
+  }
 #ifdef SP_THREADS
   /* Publish to the monitor that this worker is now running t, and when -- it uses
      this to enforce the timeslice. Nudge the monitor if it is idle so it starts
@@ -1118,6 +1202,9 @@ static void run_thread_once(sp_thread *t) { sp_gc_wb((void*)t);   /* PRE/POST: s
   if (t->fiber->state == 3) {   /* the body returned (terminated) */
     t->retval = t->fiber->yielded_value;
     t->state = SP_TH_DEAD;
+#ifdef SP_THREADS
+    if (t->home_wid >= 0 && g_wslot[t->home_wid].pinned > 0) g_wslot[t->home_wid].pinned--;
+#endif
     int do_report = 0;
     if (raised) {
       t->has_exc = 1; t->exc_cls = ec; t->exc_msg = em; t->exc_obj = eo;
@@ -1562,6 +1649,24 @@ static void *sp_sysmon_main(void *arg) {
     if (g_stw_active) { pthread_cond_wait(&g_stw_release, &g_sched_lock); continue; }
     g_mon_iters++;
     double now = sp_monotonic_now();
+    if (sched_lat_enabled()) {
+      static double last_report = 0;
+      if (now - last_report >= 5.0) {
+        last_report = now;
+        fprintf(stderr, "[sched-lat] n=%llu max=%.0fus lrq_max=%d  us:", g_sched_lat_n, g_sched_lat_max, g_lrq_len_max);
+        for (int k = 0; k < 32; k++) if (g_sched_lat_hist[k]) fprintf(stderr, " [%u]=%llu", 1u << k, g_sched_lat_hist[k]);
+        fprintf(stderr, "\n");
+        int busyw = 0; for (int i = 0; i < sp_active_workers; i++) if (g_wslot[i].active && g_wslot[i].cur) busyw++;
+        fprintf(stderr, "[sched-lat] workers=%d busy=%d runnable=%d nrunning=%d\n", sp_active_workers, busyw, g_runnable, g_nrunning);
+        { int pinned[SP_MAX_WORKERS] = {0}; int unpinned = 0;
+          for (sp_thread *a = g_all; a; a = a->all_next) { if (a->home_wid >= 0) pinned[a->home_wid]++; else unpinned++; }
+          fprintf(stderr, "[sched-lat] pinned per worker:"); for (int i = 0; i < sp_active_workers; i++) fprintf(stderr, " %d", pinned[i]); fprintf(stderr, "  unpinned=%d\n", unpinned); }
+        sched_hist_print("mutex-wait", g_mtx_hist, g_mtx_n, g_mtx_max);
+        fprintf(stderr, "[mutex-wait] fast-path locks=%llu\n", g_mtx_fast);
+        sched_hist_print("cv-wait", g_cv_hist, g_cv_n, g_cv_max);
+        g_lrq_len_max = 0;
+      }
+    }
     double nearest = 0.0;
     int npf = 1, nio = 0, busy = 0;
     /* Timeslice enforcement, on every turn: it reads the worker slots, not the
@@ -2060,9 +2165,23 @@ static void sp_sched_block(sp_thread **waitlist) {   /* PRE/POST: sched lock hel
   self->state = SP_TH_BLOCKED;
   self->off_cpu = 0;         /* still on-cpu until our worker confirms the switch-out */
   self->wake_pending = 0;
-  self->wait_next = *waitlist;
+  /* Append at the TAIL: sp_sched_wake_one takes the head, so the list is a
+     FIFO and a waiter is served in the order it arrived. Pushed at the head
+     it was a LIFO -- the newest waiter woke first -- and under sustained
+     contention an early waiter never reached the front: campfire's DB-pool
+     condvar and fragment-cache mutexes held requests for seconds at p99 (a
+     2.9 s mutex wait, an 8 s condvar wait at 64 connections) while the median
+     was 4 ms. The walk is O(waiters) under the scheduler lock, which is what
+     one park already costs. */
   self->wait_head = waitlist;   /* so #kill/#raise can unlink it */
-  *waitlist = self;
+  if (self->repark_front) {   /* a mutex waiter that lost the race after its wake: keep its turn */
+    self->repark_front = 0;
+    self->wait_next = *waitlist; *waitlist = self;
+  }
+  else {
+    self->wait_next = NULL;
+    sp_thread **pp = waitlist; while (*pp) pp = &(*pp)->wait_next; *pp = self;
+  }
   if (self == &g_main_thread) {
     sp_sched_pump(NULL, 1);   /* returns (lock held) once a waker marks main RUNNABLE */
     if (self->state != SP_TH_RUNNING) {
@@ -2316,7 +2435,7 @@ void sp_Mutex_lock(sp_mutex *m) {
   sp_thread *expect = NULL;
   if (__atomic_compare_exchange_n(&m->owner, &expect, self, 0,
                                   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
-    return;                                  /* was unlocked: ours, no lock taken */
+    { if (sched_lat_enabled()) __atomic_fetch_add(&g_mtx_fast, 1, __ATOMIC_RELAXED); return; }   /* was unlocked: ours, no lock taken */
   SCHED_LOCK();
   /* the owner re-entering its own Monitor just goes deeper */
   if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == self && m->reentrant) { m->depth++; SCHED_UNLOCK(); return; }
@@ -2336,8 +2455,24 @@ void sp_Mutex_lock(sp_mutex *m) {
     SCHED_UNLOCK();
     return;
   }
-  /* unlock hands ownership to us (sets m->owner) before waking us. */
-  sp_sched_block(&m->waiters);
+  /* The unlocker clears `owner` and wakes us; we take the mutex ourselves
+     with the same exchange the fast path uses, and park again if a running
+     thread took it first. No hand-off: handing a contended mutex to a PARKED
+     waiter made the critical section's throughput the scheduling latency of
+     a wake (milliseconds on a busy worker), and every thread behind it paid
+     that per acquisition -- a lock convoy, 16-64 ms waits on campfire's
+     fragment-cache shards at 64 connections. A waiter that loses the race
+     goes back to the FRONT of the list, so the order of arrival still
+     decides who is offered the mutex next. */
+  double mt0 = sched_lat_enabled() ? sp_monotonic_now() : 0;
+  for (;;) {
+    sp_sched_block(&m->waiters);
+    expect = NULL;
+    if (__atomic_compare_exchange_n(&m->owner, &expect, self, 0,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) break;
+    self->repark_front = 1;   /* re-park at the head (sp_sched_block honours this) */
+  }
+  if (mt0 > 0) sched_hist_add(g_mtx_hist, &g_mtx_n, &g_mtx_max, (sp_monotonic_now() - mt0) * 1e6);
   m->nwaiters--;
   SCHED_UNLOCK();
 }
@@ -2372,13 +2507,7 @@ void sp_Mutex_unlock(sp_mutex *m) {
          listed waiter is a counted one, so the thread that won the race sees
          nwaiters > 0 and cannot take this fast path when it unlocks. */
       SCHED_LOCK();
-      if (m->waiters) {
-        sp_thread *w = m->waiters;
-        sp_thread *free_now = NULL;
-        if (__atomic_compare_exchange_n(&m->owner, &free_now, w, 0,
-                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
-          sp_sched_wake_one(&m->waiters);   /* removes exactly w, now that it owns */
-      }
+      if (m->waiters) sp_sched_wake_one(&m->waiters);   /* it takes the mutex itself, or re-parks */
       SCHED_UNLOCK();
       return;
     }
@@ -2389,7 +2518,8 @@ void sp_Mutex_unlock(sp_mutex *m) {
     SCHED_UNLOCK();
     sp_raise_cls("ThreadError", "Attempt to unlock a mutex which is not locked");
   }
-  __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
+  __atomic_store_n(&m->owner, NULL, __ATOMIC_SEQ_CST);
+  if (m->waiters) sp_sched_wake_one(&m->waiters);
   SCHED_UNLOCK();
 }
 
@@ -2430,8 +2560,11 @@ void sp_CondVar_wait(sp_condvar *cv, sp_mutex *m) {
     SCHED_UNLOCK();
     sp_raise_cls("ThreadError", "Attempt to unlock a mutex which is not locked");
   }
-  __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
+  __atomic_store_n(&m->owner, NULL, __ATOMIC_SEQ_CST);
+  if (m->waiters) sp_sched_wake_one(&m->waiters);
+  double ct0 = sched_lat_enabled() ? sp_monotonic_now() : 0;
   sp_sched_block(&cv->waiters);                /* park (drops+retakes the lock) */
+  if (ct0 > 0) sched_hist_add(g_cv_hist, &g_cv_n, &g_cv_max, (sp_monotonic_now() - ct0) * 1e6);
   SCHED_UNLOCK();
   sp_Mutex_lock(m);   /* re-acquire (may block again on the mutex) */
 }
@@ -2449,7 +2582,8 @@ void sp_CondVar_wait_nb(sp_condvar *cv, sp_mutex *m) {
     SCHED_UNLOCK();
     sp_raise_cls("ThreadError", "Attempt to unlock a mutex which is not locked");
   }
-  __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
+  __atomic_store_n(&m->owner, NULL, __ATOMIC_SEQ_CST);
+  if (m->waiters) sp_sched_wake_one(&m->waiters);
   SCHED_UNLOCK();
   sp_Mutex_lock(m);
 }
