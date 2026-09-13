@@ -5970,6 +5970,15 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                        infer_type(c, argv[0]) == TY_NIL ||
                        infer_type(c, argv[0]) == TY_REGEX);
     int is_pred = nt_ref(nt, id, "block") < 0 && poly_pred_kind(name, argc);
+    /* String#encode when a user class also owns `encode`: the TAG_STR receiver
+       needs a pre-arm, or a genuine String falls to the switch's raising
+       default -- `content.encode("UTF-8", "binary", invalid: :replace, ...)`
+       on an untyped value raised NoMethodError naming String once Active
+       Storage's Variation#encode existed (#4452). The same transcode the
+       typed and the unshadowed poly receivers take (sp_str_encode); the
+       positionals and keywords come from the evaluated temps below. */
+    int is_strencode = sp_streq(name, "encode") && argc >= 1 && !has_splat_arg &&
+                       nt_ref(nt, id, "block") < 0;
     /* A trailing KeywordHashNode carries the call's keyword arguments: split
        it off so the user-method arms match keyword params by NAME, not by
        position (the whole hash used to flow into the *rest / first keyword
@@ -6237,6 +6246,39 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         buf_puts(b, ", ");
         if (atmp_ty[1] == TY_POLY) buf_puts(b, a1); else emit_boxed_text(c, atmp_ty[1], a1, b);
         buf_puts(b, "); }\nelse ");
+      }
+      /* encode(enc[, from][, invalid:, undef:, replace:]) on a TAG_STR receiver */
+      if (is_strencode && pos_argc <= 2 && (ret == TY_POLY || ret == TY_STRING)) {
+        Buf eb; memset(&eb, 0, sizeof eb);
+        buf_printf(&eb, "sp_str_encode(_t%d.v.s", tv);
+        for (int a = 0; a < 2; a++) {
+          buf_puts(&eb, ", ");
+          if (a < pos_argc) {
+            char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
+            if (atmp_ty[a] == TY_POLY) buf_puts(&eb, tn); else emit_boxed_text(c, atmp_ty[a], tn, &eb);
+          }
+          else buf_puts(&eb, "sp_box_nil()");
+        }
+        static const char *const EKW[] = { "invalid", "undef", "replace" };
+        for (int k = 0; k < 3; k++) {
+          buf_puts(&eb, ", ");
+          int found = -1;
+          for (int e = 0; e < kwn; e++) {
+            int key = nt_ref(nt, kwels[e], "key");
+            const char *kn = key >= 0 ? nt_str(nt, key, "value") : NULL;
+            if (kn && sp_streq(kn, EKW[k])) { found = e; break; }
+          }
+          if (found >= 0) {
+            char tn[32]; snprintf(tn, sizeof tn, "_t%d", kwtmp[found]);
+            if (kwty[found] == TY_POLY) buf_puts(&eb, tn); else emit_boxed_text(c, kwty[found], tn, &eb);
+          }
+          else buf_puts(&eb, "sp_box_nil()");
+        }
+        buf_puts(&eb, ")");
+        buf_printf(b, "if (_t%d.tag == SP_TAG_STR) { _t%d = ", tv, tr);
+        if (ret == TY_POLY) buf_printf(b, "sp_box_str(%s)", eb.p); else buf_puts(b, eb.p);
+        buf_puts(b, "; }\nelse ");
+        free(eb.p);
       }
       /* split(sep) on a TAG_STR receiver. A nil separator splits on
          whitespace, as CRuby's does. */
