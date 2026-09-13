@@ -164,7 +164,7 @@ static int sp_slab_next_arena(void) {
   if (sp_slab_brk + SP_SLAB_ARENA > sp_slab_base + sp_slab_cap) return 0;
   sp_slab_arena *ar = (sp_slab_arena *)sp_slab_brk;
   sp_slab_brk += SP_SLAB_ARENA;
-  for (int i = 1; i < (int)SP_SLAB_NCHUNK; i++) {
+  for (int i = (int)SP_SLAB_NCHUNK - 1; i >= 1; i--) {   /* pops then ascend in address */
     ar->ch[i].next_avail = sp_slab_empty;
     sp_slab_empty = &ar->ch[i];
   }
@@ -275,6 +275,36 @@ void sp_slab_free(void *p) {
    The available lists are rebuilt rather than edited in place, which is also
    where a fully free chunk leaves its class and returns to the global pool,
    so a burst of one size does not hold chunks another size needs later. */
+/* The available lists are rebuilt in ADDRESS order. A chunk joins the list
+   whenever a sweep frees its first slot, in whatever order the sweep meets
+   them, and after a few cycles consecutive refills of one class hopped
+   across the heap: a 72 MB tree benchmark (gcbench) ran 30% slower on
+   16 KB chunks than on glibc, whose coalescing hands back one run of
+   addresses, and 15% faster once the refills walked the chunks in order. */
+static int sp_slab_chunk_cmp(const void *a, const void *b) {
+  uintptr_t x = (uintptr_t)*(sp_slab_chunk *const *)a, y = (uintptr_t)*(sp_slab_chunk *const *)b;
+  return x < y ? -1 : x > y;
+}
+static sp_slab_chunk **sp_slab_sortbuf = NULL;
+static size_t sp_slab_sortcap = 0;
+static sp_slab_chunk *sp_slab_sort_avail(sp_slab_chunk *head) {
+  size_t n = 0;
+  for (sp_slab_chunk *ch = head; ch; ch = ch->next_avail) {
+    if (n == sp_slab_sortcap) {
+      size_t c = sp_slab_sortcap ? sp_slab_sortcap * 2 : 256;
+      sp_slab_chunk **nb = (sp_slab_chunk **)realloc(sp_slab_sortbuf, c * sizeof *nb);
+      if (!nb) return head;   /* unsorted is still correct */
+      sp_slab_sortbuf = nb; sp_slab_sortcap = c;
+    }
+    sp_slab_sortbuf[n++] = ch;
+  }
+  if (n < 2) return head;
+  qsort(sp_slab_sortbuf, n, sizeof *sp_slab_sortbuf, sp_slab_chunk_cmp);
+  for (size_t i = 0; i + 1 < n; i++) sp_slab_sortbuf[i]->next_avail = sp_slab_sortbuf[i + 1];
+  sp_slab_sortbuf[n - 1]->next_avail = NULL;
+  return sp_slab_sortbuf[0];
+}
+
 void sp_slab_release(void) {
   if (sp_slab_on <= 0) return;
   /* SPINEL_GC_PHASES: the slab's footprint every 64th release -- chunks in
@@ -323,7 +353,7 @@ void sp_slab_release(void) {
         }
         ch = nx;
       }
-      wk->avail[cls] = keep;
+      wk->avail[cls] = sp_slab_sort_avail(keep);
     }
   }
 }
