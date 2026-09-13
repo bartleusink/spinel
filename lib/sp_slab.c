@@ -9,7 +9,7 @@
  * the same -- because the cost is the per-block call and the cross-thread
  * free, not the arithmetic.
  *
- * Here a block is a slot in a 64 KB chunk of one size class. Allocation
+ * Here a block is a slot in a 16 KB chunk of one size class. Allocation
  * pops the worker's current chunk, or carves the next slot from it; both are
  * a few instructions with no lock, since a chunk belongs to one worker for
  * allocation and no other worker allocates from it. A dead block goes back
@@ -46,11 +46,11 @@
 #endif
 
 #define SP_SLAB_ARENA   ((size_t)4 << 20)
-#define SP_SLAB_CHUNK   ((size_t)64 << 10)
-#define SP_SLAB_NCHUNK  (SP_SLAB_ARENA / SP_SLAB_CHUNK)   /* 64; chunk 0 is the header table */
+#define SP_SLAB_CHUNK   ((size_t)16 << 10)
+#define SP_SLAB_NCHUNK  (SP_SLAB_ARENA / SP_SLAB_CHUNK)   /* 256; chunk 0 is the header table (256 x 64 B) */
 #define SP_SLAB_NCLS    27
 #define SP_SLAB_MAX     2048
-/* fully free chunks a worker keeps resident across a full cycle (1 MB) */
+/* fully free chunks a worker keeps resident across a full cycle, at least (256 KB) */
 #define SP_SLAB_RESERVE 16
 
 #ifdef SP_THREADS
@@ -301,7 +301,7 @@ void sp_slab_release(void) {
   }
   for (int w = 0; w < SP_SLAB_NWK; w++) {
     sp_slab_worker *wk = &sp_slab_wk[w];
-    long reserve = wk->taken + wk->taken / 4;
+    long reserve = wk->taken;
     if (reserve < SP_SLAB_RESERVE) reserve = SP_SLAB_RESERVE;
     wk->taken = 0;
     for (int cls = 0; cls < SP_SLAB_NCLS; cls++) {
