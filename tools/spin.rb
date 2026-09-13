@@ -578,6 +578,20 @@ def native_objs_for(name, dir, version)
     m = File.mtime(c).to_i
     hnew = m if m > hnew
   end
+  # The runtime headers are part of the object's inputs: a package's C is
+  # compiled against spinel_rt.h and the structures the allocators inline
+  # (sp_alloc.h's per-worker string slot, sp_gc.h's object heap), and an
+  # object built before a layout change writes the old layout into the new
+  # runtime -- silently, until a string comes back wrong. The Makefile lists
+  # the same four for the bundled packages; the cache keys on them too.
+  if hdr != ""
+    ["spinel/runtime.h", "spinel_rt.h", "sp_alloc.h", "sp_gc.h", "sp_types.h"].each do |h|
+      f = File.join(hdr, h)
+      next unless File.exist?(f)
+      m = File.mtime(f).to_i
+      hnew = m if m > hnew
+    end
+  end
   objs = []
   cs.split("\n").each do |c|
     rel = c[dir.length + 1..-1].to_s
