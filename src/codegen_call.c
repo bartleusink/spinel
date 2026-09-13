@@ -5376,6 +5376,34 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           else emit_unbox_text(c, ret, pcall, b);
           buf_puts(b, "; }\nelse ");
         } }
+      /* A boxed Mutex reaching a dispatch that exists because a user class
+         also defines `synchronize`: without an arm the Mutex fell to the
+         raise. The static arm (the lock/ensure shape in the synchronize
+         emitter) cannot serve it here, the block being a materialized proc
+         shared by every arm, so the runtime arm locks around the proc. */
+      if (sp_streq(name, "synchronize") && argc == 0 && nt_ref(nt, id, "block") >= 0) {
+        if (blk_tmp0 < 0) {
+          int cblk2 = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
+          if (cblk2 >= 0) {
+            blk_tmp0 = ++g_tmp;
+            Buf pb2; memset(&pb2, 0, sizeof pb2);
+            if (!emit_forwarded_proc_arg(c, cblk2, &pb2)) emit_proc_literal(c, cblk2, &pb2);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_Proc *_t%d = %s;\n", blk_tmp0, pb2.p ? pb2.p : "NULL");
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", blk_tmp0);
+            free(pb2.p);
+          }
+        }
+        if (blk_tmp0 >= 0) {
+          char mcall[96];
+          snprintf(mcall, sizeof mcall, "sp_Mutex_synchronize_proc((sp_mutex *)_t%d.v.p, _t%d)", tv, blk_tmp0);
+          buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_MUTEX) { _t%d = ", tv, tv, tr);
+          if (ret == TY_POLY) buf_puts(b, mcall);
+          else emit_unbox_text(c, ret, mcall, b);
+          buf_puts(b, "; }\nelse ");
+        }
+      }
       /* a boxed Proc/Curry/Method in a slot a user `call`/`[]` shadows (#4395) */
       emit_poly_callable_prearm(c, name, 0, NULL, NULL, tv, tr, ret, b);
       int cls0_d = -1, cls0_rd = -1;
@@ -30082,8 +30110,8 @@ else {
     /* A real Mutex#synchronize takes the lock around the block and releases it
        with ensure semantics: the unlock runs on normal completion, on an
        exception in the block (then re-raised), and on a non-local unwind passing
-       through it (proc-return / throw, then resumed). A Monitor/other receiver
-       keeps the inline no-op behaviour. (A bare `return` -- a C return out of the
+       through it (proc-return / throw, then resumed). A receiver of any other
+       static type keeps the inline no-op behaviour. (A bare `return` -- a C return out of the
        inlined body -- is not yet covered; it would need deferred-return plumbing
        like begin..ensure.) */
     /* Full ensure semantics for a Mutex receiver: the unlock runs on normal
@@ -30091,7 +30119,14 @@ else {
        g_ensure_stack mechanism), on an exception (then re-raised), and on a
        non-local unwind passing through (proc-return / throw, then resumed). The
        eid names the deferred-return/exception slots that emit_return targets. */
-    int is_mx = recv >= 0 && comp_ntype(c, recv) == TY_MUTEX && g_ensure_depth < MAX_ENSURE_DEPTH;
+    /* A poly receiver (`LOCKS[i].synchronize { }`, a Mutex read out of a
+       container) takes the same lock/ensure shape through a runtime check of
+       the boxed value: the inline no-op left the critical section unlocked
+       whenever the static type could not see the Mutex (campfire's fragment
+       cache shards, a hash corrupted under concurrent writes). The check
+       raises CRuby's NoMethodError for a value that is not a Mutex. */
+    TyKind rty = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+    int is_mx = recv >= 0 && (rty == TY_MUTEX || rty == TY_POLY) && g_ensure_depth < MAX_ENSURE_DEPTH;
     int mtmp = 0, eid = 0, has_retval = 0;
     buf_puts(b, "({ ");
     /* result temp is declared before the setjmp so it survives the block scope;
@@ -30100,7 +30135,9 @@ else {
     if (is_mx) {
       mtmp = ++g_tmp; eid = ++g_tmp;
       has_retval = (g_ret_type != TY_VOID && g_ret_type != TY_UNKNOWN);
-      buf_printf(b, "sp_mutex *_t%d = ", mtmp); emit_expr(c, recv, b);
+      buf_printf(b, "sp_mutex *_t%d = ", mtmp);
+      if (rty == TY_POLY) { buf_puts(b, "sp_poly_mutex_recv("); emit_boxed(c, recv, b); buf_puts(b, ")"); }
+      else emit_expr(c, recv, b);
       buf_printf(b, "; sp_Mutex_lock(_t%d); ", mtmp);
       buf_printf(b, "int _retf%d = 0; int _excf%d = 0; const char *_excmsg%d = NULL, *_exccls%d = NULL; ",
                  eid, eid, eid, eid);

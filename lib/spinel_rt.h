@@ -11208,6 +11208,52 @@ static int sp_exc_protect(void (*fn)(void *), void *ctx) {
   sp_explicit_cause = NULL; sp_explicit_cause_set = 0;
   return 1;
 }
+/* ---- Mutex#synchronize on a boxed receiver ----
+   The receiver of `LOCKS[i].synchronize { ... }` is a poly value: the static
+   arm in codegen (a TY_MUTEX receiver) cannot see it, and the generated
+   critical section used to run with NO lock at all when the value turned out
+   to be a Mutex (campfire's fragment cache shards, corrupted under load).
+   sp_poly_mutex_recv answers the mutex behind the value, or raises the
+   NoMethodError CRuby raises for a receiver without #synchronize; the
+   generated lock/ensure code then follows the static shape.
+   sp_Mutex_synchronize_proc is the dispatch-side arm for the same call when
+   a user class also defines synchronize (the block is then a materialized
+   proc shared by every arm): lock, run the proc, unlock on every exit --
+   normal completion, an exception (re-raised with its object), and a
+   non-local unwind passing through (then resumed). */
+static sp_mutex *sp_poly_mutex_recv(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MUTEX && v.v.p) return (sp_mutex *)v.v.p;
+  sp_raise_nomethod(sp_nomethod_msg("synchronize", v));
+  return NULL;
+}
+static sp_RbVal sp_Mutex_synchronize_proc(sp_mutex *m, sp_Proc *blk) {
+  SP_GC_ROOT(m); SP_GC_ROOT(blk);
+  sp_RbVal r = sp_box_nil();
+  SP_GC_ROOT_RBVAL(r);
+  const char *ecls = NULL, *emsg = NULL; void *eobj = NULL; int excf = 0;
+  SP_GC_ROOT_STR(emsg); SP_GC_ROOT(eobj);
+  sp_Mutex_lock(m);
+  sp_exc_check_depth();
+  sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;
+  sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;
+  if (setjmp(sp_exc_stack[sp_exc_top - 1]) == 0) {
+    _sp_proc_poly_ret = sp_box_nil();
+    sp_proc_call(blk, 0, NULL);
+    r = _sp_proc_poly_ret;
+    sp_exc_top--;
+  }
+  else {
+    sp_exc_top--;
+    sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];
+    if (sp_unwind_kind == SP_UNWIND_NONE) {
+      excf = 1; emsg = sp_exc_msg[sp_exc_top]; ecls = sp_exc_cls[sp_exc_top]; eobj = sp_exc_obj[sp_exc_top];
+    }
+  }
+  sp_Mutex_unlock(m);
+  if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume();
+  if (excf) { sp_pending_exc_obj = eobj; sp_raise_cls(ecls, emsg); }
+  return r;
+}
 typedef struct { sp_RbVal obj; int which; int had; sp_RbVal ans; } sp_obj_conv_probe;
 static void sp_obj_conv_probe_run(void *p) {
   sp_obj_conv_probe *c = (sp_obj_conv_probe *)p;
