@@ -19423,7 +19423,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     }
     /* A top-level def has a self-less C ABI (fn(args)); an object-bound method
        is fn(self, args). The bound method carries a NULL self for the former. */
-  bm_emit_call:
+  bm_emit_call:;
     /* An unresolved target (a Method that arrived through a parameter or a
        slot) has no static return type: the bind site stamped the kind of its
        C return, and the call reads it the way the poly-slot arms do -- the
