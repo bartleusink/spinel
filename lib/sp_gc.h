@@ -394,6 +394,8 @@ extern void (*sp_gc_par_sweep_hook)(void);
 void sp_gc_promote_slot(sp_gc_hdr *head, sp_gc_hdr *tail, size_t bytes);
 #endif
 void sp_gc_enforce_mem_limit(void);
+extern int sp_gc_trim_wanted;   /* set by a full cycle; the trimmer thread clears it with a malloc_trim */
+extern int sp_gc_trimmer_on;
 /* Collect + re-tune the threshold, assuming exclusive heap access (see
    sp_alloc.c). sp_stw_collect (sp_sched.c, threaded build) stops the world then
    runs sp_gc_collect_retune; the single-threaded allocator calls it directly

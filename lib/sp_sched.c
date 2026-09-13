@@ -1164,6 +1164,35 @@ static void sp_sched_par_sweep(void) {
   }
 }
 
+/* The trimmer: malloc_trim beside the running program rather than under
+   stop-the-world (see the full-cycle tail of sp_gc_collect). It wakes once a
+   second and trims when a full cycle has asked since the last one. */
+#if defined(__GLIBC__)
+#include <malloc.h>
+static void *sp_trim_thread_main(void *arg) {
+  (void)arg;
+  sigset_t blk; sigemptyset(&blk); sigaddset(&blk, g_preempt_sig);
+  pthread_sigmask(SIG_BLOCK, &blk, NULL);
+  for (;;) {
+    struct timespec ts = { 1, 0 };
+    nanosleep(&ts, NULL);
+    if (g_shutdown) break;
+    if (__atomic_exchange_n(&sp_gc_trim_wanted, 0, __ATOMIC_ACQ_REL)) malloc_trim(0);
+  }
+  return NULL;
+}
+static void sp_trim_thread_start(void) {
+  pthread_t t;
+  pthread_attr_t at; pthread_attr_init(&at);
+  pthread_attr_setstacksize(&at, 256 * 1024);
+  pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&t, &at, sp_trim_thread_main, NULL) == 0) sp_gc_trimmer_on = 1;
+  pthread_attr_destroy(&at);
+}
+#else
+static void sp_trim_thread_start(void) {}
+#endif
+
 static int sp_worker_count(void);   /* defined below; the pool size */
 static void sp_sched_ensure_workers(void) {
   if (g_workers_started) return;
@@ -1175,6 +1204,7 @@ static void sp_sched_ensure_workers(void) {
      the pool may still be one at this point; the driver itself falls back to
      the serial sweep whenever there is nobody parked to help. */
   sp_gc_par_sweep_hook = sp_sched_par_sweep;
+  sp_trim_thread_start();
 }
 #endif
 

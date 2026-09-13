@@ -113,6 +113,8 @@ size_t sp_gc_old_live = 0;   /* what the last full found live in the old generat
 #define SP_GC_OLD_GROWTH_SLACK (4u * 1024u * 1024u)
 static int sp_gc_full_interval_fixed = 0;   /* SPINEL_GC_FULL_INTERVAL pins it */
 int sp_gc_full_runs = 0;    /* read by GC.stat (lib/sp_cold.c) */
+int sp_gc_trim_wanted = 0;  /* a full cycle asks the trimmer thread for a malloc_trim (sp_sched.c) */
+int sp_gc_trimmer_on = 0;   /* the trimmer thread is running */
 /* High-water mark of the remembered set, for GC.stat. A minor collection
    walks every entry and runs its scan, so a workload that stores into most
    of its old heap makes the minor do the full mark's work plus the
@@ -961,9 +963,23 @@ void sp_gc_collect(void){
        are the slab's. A trim is still a 60 ms walk of every arena on a
        32-worker box, under stop-the-world, so once in ten seconds is the
        cadence: 2% of a full-cycle server's collector time instead of 17%. */
-    static double last_trim=0;
+    static double last_trim=0, trim_every=-1;
+    if(trim_every<0){ const char*e=getenv("SPINEL_GC_TRIM_SEC"); trim_every=(e&&*e)?atof(e):1.0; }
     double now=sp_gc_stat_now();
-    if(now-last_trim>=10.0){ malloc_trim(0); last_trim=now; }
+    if(trim_every>0&&now-last_trim>=trim_every){
+      last_trim=now;
+#ifdef SP_THREADS
+      /* Not here: a trim walks every arena, 60 ms on a 32-worker box, and
+         under stop-the-world that was the longest pause the server had (p99
+         147 ms against 105 without it). The trimmer thread (sp_sched.c) does
+         it beside the running program, where a mutator that lands on the
+         arena being walked waits a few milliseconds for that arena alone. */
+      if (sp_gc_trimmer_on) __atomic_store_n(&sp_gc_trim_wanted, 1, __ATOMIC_RELEASE);
+      else malloc_trim(0);   /* no worker pool yet, so no trimmer: a single-threaded program on the mt archive */
+#else
+      malloc_trim(0);
+#endif
+    }
   }
   SP_GC_PH(sp_gc_ph_trim);
   /* Bump BEFORE the retune hook: the hook is where the stats line is printed

@@ -277,6 +277,28 @@ void sp_slab_free(void *p) {
    so a burst of one size does not hold chunks another size needs later. */
 void sp_slab_release(void) {
   if (sp_slab_on <= 0) return;
+  /* SPINEL_GC_PHASES: the slab's footprint every 64th release -- chunks in
+     use, of which fully free (the reserve), and the bytes their live slots
+     hold -- so the resident set can be read against what is live. */
+  if (sp_gc_ph_on) {
+    static int tick = 0;
+    if ((++tick & 63) == 0) {
+      size_t nuse = 0, nempty = 0, live = 0, untouched = 0;
+      for (uintptr_t a = sp_slab_base; a < sp_slab_brk; a += SP_SLAB_ARENA) {
+        sp_slab_arena *ar = (sp_slab_arena *)a;
+        for (int i = 1; i < (int)SP_SLAB_NCHUNK; i++) {
+          sp_slab_chunk *ch = &ar->ch[i];
+          if (!ch->in_use) { if (!ch->touched) untouched++; continue; }
+          nuse++;
+          if (ch->nfree == ch->nslots) nempty++;
+          live += (size_t)(ch->nslots - ch->nfree) * sp_slab_csize[ch->cls];
+        }
+      }
+      fprintf(stderr, "[slab] arenas %zu  chunks in use %zu (fully free %zu)  live in slots %.1f MB  resident chunks %.1f MB\n",
+              (size_t)((sp_slab_brk - sp_slab_base) / SP_SLAB_ARENA), nuse, nempty,
+              live / 1048576.0, nuse * (SP_SLAB_CHUNK / 1048576.0));
+    }
+  }
   for (int w = 0; w < SP_SLAB_NWK; w++) {
     sp_slab_worker *wk = &sp_slab_wk[w];
     long reserve = wk->taken + wk->taken / 4;
