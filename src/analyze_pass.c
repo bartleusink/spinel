@@ -2897,6 +2897,22 @@ int infer_write_types(Compiler *c) {
       else lv->oa_pin = TY_UNKNOWN;
     }
 
+  /* The same again for the empty-`{}` argument a TY_POLY parameter widened to
+     the PolyPoly hash (#3158). The caller's own element writes (`h["k"] = v`)
+     re-derive the slot as the narrower StrStr kind every round, and the
+     reverse binding widened it back on the next -- to the cap, and the
+     callee's writes through the reference were dropped, which is the very
+     bug the binding exists to fix. A slot that no longer derives as a hash
+     at all has lost the precondition and the pin with it. */
+  for (int s = 0; s < c->nscopes; s++)
+    for (int i = 0; i < c->scopes[s].nlocals; i++) {
+      LocalVar *lv = &c->scopes[s].locals[i];
+      if (!lv->poly_hash_pin) continue;
+      if (lv->type == TY_UNKNOWN || lv->type == TY_POLY || ty_is_hash(lv->type))
+        lv->type = TY_POLY_POLY_HASH;
+      else lv->poly_hash_pin = 0;
+    }
+
   /* A slot this round could not derive AT ALL keeps what it had. The reset at
      the top exists so a slot can narrow when better evidence arrives, and a
      narrowed slot is concrete -- so restoring the stash where the answer came
@@ -3118,7 +3134,7 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
           (al->type == TY_UNKNOWN || al->type == TY_POLY || ty_is_hash(al->type)) &&
           al->type != TY_POLY_POLY_HASH &&
           local_all_writes_empty_hash(c, asc, an)) {
-        al->type = TY_POLY_POLY_HASH; changed = 1;
+        al->type = TY_POLY_POLY_HASH; al->poly_hash_pin = 1; changed = 1;
       }
     }
     /* Reverse binding for an ARRAY argument: the callee mutates the very array

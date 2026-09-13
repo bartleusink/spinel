@@ -105,6 +105,13 @@ typedef struct {
                        whole accumulation. Durable, like str_shared: the type
                        is re-asserted after the fixpoint, which a later
                        assign-based pass would otherwise overwrite. */
+  int poly_hash_pin; /* an empty-`{}` local handed to a TY_POLY parameter: the
+                       callee writes through the reference with the boxed
+                       accessors, which only persist to a PolyPoly hash, so the
+                       reverse binding types the caller's slot PolyPoly (#3158).
+                       Durable, like oa_pin: the slot's own element writes
+                       re-derive a narrower kind every round, and the binding
+                       widened it back -- to the cap. */
   TyKind oa_pin;    /* the pointer-array type the narrowing pass gave this slot,
                        re-asserted on every fixpoint round. infer_write_types
                        clears every local back to UNKNOWN and re-derives it from
