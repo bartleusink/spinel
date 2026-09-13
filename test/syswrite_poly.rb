@@ -58,8 +58,11 @@ raise "syswrite returned #{n.inspect}, expected 15" unless n == 15
 # Drain the server side and confirm the NUL survived the write: a
 # strlen-based write would have stopped at the NUL and seen 5 bytes.
 # read_nonblock is used because the client end is still open, so a
-# blocking read would park the process waiting for more data.
+# blocking read would park the process waiting for more data. The bytes
+# may not have crossed the loopback yet when accept returns (macOS delivers
+# them a moment later), so wait for readability first.
 client = server.accept
+IO.select([client], nil, nil, 5)
 begin
   got = client.read_nonblock(64)
 rescue IO::WaitReadable
@@ -97,6 +100,7 @@ raise "poly syswrite returned #{n2.inspect}, expected 2" unless n2 == 2
 
 # Drain and confirm the converted value reached the descriptor.
 client2 = server2.accept
+IO.select([client2], nil, nil, 5)
 begin
   got2 = client2.read_nonblock(64)
 rescue IO::WaitReadable
@@ -114,6 +118,7 @@ raise "poly server saw #{got2.inspect}, expected '42'" unless got2 == "42"
 n3 = sock.syswrite("he\x00llo multi")
 raise "poly syswrite returned #{n3.inspect}, expected 12" unless n3 == 12
 
+IO.select([client2], nil, nil, 5)
 begin
   got3 = client2.read_nonblock(64)
 rescue IO::WaitReadable
