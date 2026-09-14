@@ -6980,6 +6980,22 @@ else {
         }
         if (ret == TY_POLY) buf_printf(b, " _t%d = _t%d;", tr, tv);
         buf_puts(b, " break;");
+        /* This branch is kept out of the shared default below, so a receiver
+           no arm claimed left the result at its nil initializer: `nil.push(1)`
+           answered nil with nothing raised (#4485). A Queue is the one other
+           builtin with a push, and sp_poly_shl owns it. */
+        buf_printf(b, " default: if (!(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_QUEUE))"
+                      " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d));", tv, tv, name, tv);
+        for (int a = 0; a < argc; a++) {
+          char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
+          Buf ab; memset(&ab, 0, sizeof ab);
+          if (atmp_ty[a] == TY_POLY) buf_puts(&ab, tn);
+          else emit_boxed_text(c, atmp_ty[a], tn, &ab);
+          buf_printf(b, " sp_poly_shl(_t%d, %s);", tv, ab.p ? ab.p : "sp_box_nil()");
+          free(ab.p);
+        }
+        if (ret == TY_POLY) buf_printf(b, " _t%d = _t%d;", tr, tv);
+        buf_puts(b, " break;");
       }
       if (is_ppack) {
         int upk = sp_streq(name, "unpack1");
@@ -7038,9 +7054,13 @@ else {
           else emit_boxed_text(c, atmp_ty[0], tn5, &ab5);
           /* not a user Enumerable -> the answer the switch used to fall
              through to (false), so no other receiver changes */
-          buf_printf(b, " default: { int _ui%d = sp_poly_user_include(_t%d, %s);"
+          /* nil, a number and a boolean have no include?/key?/member? at
+             all: they are not user Enumerables either, so the -1 read as
+             false (#4485). A String took the tag arm ahead of the switch. */
+          buf_printf(b, " default: { sp_poly_coll_chk(_t%d, \"%s\");"
+                        " int _ui%d = sp_poly_user_include(_t%d, %s);"
                         " _t%d = %s_ui%d > 0%s; break; }",
-                     tv, tv, ab5.p ? ab5.p : "sp_box_nil()", tr, ibo, tv, ibc);
+                     tv, name, tv, tv, ab5.p ? ab5.p : "sp_box_nil()", tr, ibo, tv, ibc);
           free(ab5.p); }
         TyKind at = infer_type(c, argv[0]);
         if (at == TY_INT) {
@@ -29121,6 +29141,10 @@ else {
     int ta = ++g_tmp, tn = ++g_tmp, tcnt = ++g_tmp, ti = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, recv, b);
     buf_puts(b, "; "); emit_poly_iter_obj_normalize(c, ta, b);
+    /* the same receiver check the each emitter makes: nil is no collection,
+       and a zero-length loop answered `nil.any?` false and `nil.all?` true
+       (#4485) */
+    buf_printf(b, "sp_poly_iter_check(_t%d, \"%s\"); ", ta, name);
     buf_printf(b, "sp_int _t%d = sp_poly_arr_len_ex(_t%d); sp_int _t%d = 0;"
                   " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
                   " if (sp_poly_truthy(sp_poly_each_elem(_t%d, _t%d))) _t%d++; ",
@@ -29143,6 +29167,7 @@ else {
     buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, recv, b);
     buf_printf(b, "; sp_Class _t%d = ", tc2); emit_expr(c, argv[0], b);
     buf_puts(b, "; "); emit_poly_iter_obj_normalize(c, ta, b);
+    buf_printf(b, "sp_poly_iter_check(_t%d, \"%s\"); ", ta, name);
     buf_printf(b, "sp_int _t%d = sp_poly_arr_len_ex(_t%d); sp_int _t%d = 0;"
                   " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
                   " if (sp_poly_is_a(sp_poly_each_elem(_t%d, _t%d), _t%d)) _t%d++; ",

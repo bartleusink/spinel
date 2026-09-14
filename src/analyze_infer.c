@@ -1391,7 +1391,13 @@ static TyKind infer_call_inner(Compiler *c, int id) {
        receiver for a poly one too, so the two agree. */
     if (rt == TY_POLY && nt_ref(nt, id, "block") >= 0 &&
         (sp_streq(name, "each") || sp_streq(name, "each_with_index") ||
-         sp_streq(name, "reverse_each") || sp_streq(name, "each_entry")))
+         sp_streq(name, "reverse_each") || sp_streq(name, "each_entry") ||
+         /* the three Hash walks take the same poly iterator emission, which
+            hands back the boxed receiver; typed through the face table they
+            read as a Hash and the chained inspect was handed an sp_RbVal,
+            a C error (#4485) */
+         sp_streq(name, "each_pair") || sp_streq(name, "each_key") ||
+         sp_streq(name, "each_value")))
       return TY_POLY;
     if (ty_is_hash(rt) &&
         (sp_streq(name, "each_value") || sp_streq(name, "each_key") ||

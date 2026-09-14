@@ -5041,6 +5041,10 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
        walk answered nil from its recycled memory (#3801). */
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", trecv2);
+    /* nil is no collection: the length read below gave it a zero-trip loop
+       and `nil.map { }` answered [] (#4485) */
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_poly_iter_check(_t%d, \"%s\");\n", trecv2, name);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = sp_poly_length(_t%d);\n", tn2, trecv2);
     emit_indent(g_pre, g_indent);

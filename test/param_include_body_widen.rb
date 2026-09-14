@@ -21,7 +21,13 @@ class Box
 end
 
 b = Box.new
-puts consume(b.v)
+# the uninitialized ivar is nil, and nil has no include?: CRuby raises, and
+# so does the widened param's dispatch (#4485)
+begin
+  puts consume(b.v)
+rescue NoMethodError => e
+  puts e.class
+end
 b.v = [:y, :x, :z]
 puts consume(b.v)
 b.v = [:a, :b]

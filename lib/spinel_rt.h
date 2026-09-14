@@ -2665,6 +2665,19 @@ static sp_RbVal sp_poly_hash_get_pair_val(sp_RbVal h, sp_RbVal key, sp_bool *fou
   return sp_box_nil();
 }
 SP_NORETURN SP_COLD static void sp_raise_poly_nomethod(const char *m, sp_RbVal v);  /* fwd */
+/* A collection method reached through a boxed receiver that is nil, a number
+   or a boolean: none of those classes define it, and the helpers that answered
+   as though nil were an empty collection (`nil[0]` nil, `nil.empty?` true,
+   `nil.sum` 0, `nil["k"] = 1` absorbed) let a chain carry on past the point
+   CRuby stops at with NoMethodError (#4485). A String or Symbol is let
+   through: the helper's own arms decide for those. Answers the receiver so a
+   call site can wrap its receiver expression in place. */
+static SP_INLINE sp_RbVal sp_poly_coll_chk(sp_RbVal v, const char *m) {
+  if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT ||
+      v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_BOOL)
+    sp_raise_poly_nomethod(m, v);
+  return v;
+}
 /* `length` on a boxed receiver: nil, a number and a user object have none, and
    sp_poly_length answers 0 for all three -- so `v.length` on a nil read out of
    a hash miss answered 0 instead of raising NoMethodError (#3974). */
@@ -6280,6 +6293,7 @@ static sp_bool sp_PolyPolyHash_has_value(sp_PolyPolyHash*h,sp_RbVal v){if(!h)ret
    index path all apply a curried receiver through it */
 static sp_RbVal sp_curry_call_poly(sp_Curry *c, sp_int argc, const sp_RbVal *args);
 static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
+  sp_poly_coll_chk(v, "[]");
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_sym(key)});
@@ -6409,6 +6423,7 @@ static void sp_PolyPolyHash_clear(sp_PolyPolyHash*h){if(!h)return;for(sp_int i=0
    `&:clear`): empty the container in place, dispatching on its runtime kind and
    returning the receiver (#3199). */
 static sp_RbVal sp_poly_clear(sp_RbVal v) {
+  sp_poly_coll_chk(v, "clear");
   if (v.tag != SP_TAG_OBJ || !v.v.p) return v;
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY:      ((sp_IntArray *)v.v.p)->len = 0; break;
@@ -6616,6 +6631,7 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
     const char *s = v.tag == SP_TAG_STR ? (v.v.s ? v.v.s : sp_str_empty) : sp_poly_to_s(v);
     return (key && sp_str_include(s, key)) ? sp_box_str(key) : sp_box_nil();
   }
+  sp_poly_coll_chk(v, "[]");
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
@@ -6988,6 +7004,9 @@ static SP_INLINE sp_RbVal sp_poly_arr_get_aon(sp_RbVal a, sp_int i) {
    same reason sp_poly_arr_get_hash's does: it is the rare receiver, and
    inlining it grows every hot index site by the whole element-kind switch. */
 static SP_NOINLINE sp_RbVal sp_poly_arr_get_aon_cold(sp_RbVal a, sp_int i) {
+  /* the proof behind this read is "a poly array or nil", and nil's `[]` is
+     NoMethodError, not a miss (#4485) */
+  sp_poly_coll_chk(a, "[]");
   if (a.tag != SP_TAG_OBJ || !a.v.p) return sp_box_nil();
   if (!sp_poly_is_array_kind(a.cls_id)) return sp_box_nil();
   sp_int n = sp_poly_arr_len(a);
@@ -7095,6 +7114,9 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
     sp_int slots[1]; slots[0] = i;
     return sp_poly_callable_call(a, 1, slots);
   }
+  /* nil, a Float and a boolean have no `[]` at all; only the Integer and
+     String arms above are scalar receivers with one (#4485) */
+  sp_poly_coll_chk(a, "[]");
   return sp_poly_arr_get(a, i);
 }
 /* dig chain step: containers index, nil short-circuits, anything else (an
@@ -7312,6 +7334,9 @@ static void sp_poly_dig_check(sp_RbVal v) {
                                        sp_poly_class_name(v)));
 }
 static sp_RbVal sp_poly_dig_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
+  /* only a nil reached PART WAY through the walk ends it quietly; a nil
+     RECEIVER has no dig (#4485) */
+  sp_poly_coll_chk(recv, "dig");
   sp_RbVal cur = recv;
   for (sp_int i = 0; i < n; i++) {
     if (cur.tag == SP_TAG_NIL) return cur;
@@ -7602,6 +7627,7 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
   return sp_poly_to_i(sp_poly_arr_get_hash(a, i));
 }
 static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
+  sp_poly_coll_chk(v, "[]=");
   if (v.tag != SP_TAG_OBJ) return val;
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  sp_IntArray_set((sp_IntArray*)v.v.p, idx,
@@ -7626,6 +7652,7 @@ static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
 }
 /* poly_val[str_key] = val: runtime dispatch for poly recv `[]=` with string key. */
 static sp_RbVal sp_poly_set_str(sp_RbVal v, const char *key, sp_RbVal val) {
+  sp_poly_coll_chk(v, "[]=");
   if (v.tag != SP_TAG_OBJ) return val;
   /* An Array indexed by a String is a TypeError, not a write to be dropped:
      the static path raises it, and a boxed receiver reaching the same call
@@ -7684,6 +7711,7 @@ static void sp_poly_hash_merge_into(sp_RbVal dst, sp_RbVal src) {
 }
 /* poly_val[sym_key] = val: runtime dispatch for poly recv `[]=` with symbol key. */
 static sp_RbVal sp_poly_set_sym(sp_RbVal v, sp_sym key, sp_RbVal val) {
+  sp_poly_coll_chk(v, "[]=");
   if (v.tag != SP_TAG_OBJ) return val;
   if (sp_poly_is_array_kind(v.cls_id))
     sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));
@@ -7700,6 +7728,7 @@ static sp_RbVal sp_poly_set_sym(sp_RbVal v, sp_sym key, sp_RbVal val) {
 }
 /* poly_val[int_idx] = val: runtime dispatch for poly recv `[]=` with int index. */
 static sp_RbVal sp_poly_arr_set(sp_RbVal v, sp_int idx, sp_RbVal val) {
+  sp_poly_coll_chk(v, "[]=");
   if (v.tag != SP_TAG_OBJ) return val;
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  sp_IntArray_set((sp_IntArray*)v.v.p, idx,
@@ -7766,6 +7795,7 @@ static sp_RbVal sp_poly_arr_widen_and_set(sp_RbVal v, sp_int idx, sp_RbVal val) 
 }
 /* poly_val[poly_key] = val: fully dynamic dispatch for poly recv + poly key. */
 static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
+  sp_poly_coll_chk(v, "[]=");
   if (v.tag != SP_TAG_OBJ) return val;
   /* Every array arm below wants an integer index. A Float converts through
      #to_int, and anything else is the TypeError the static path raises rather
@@ -8123,6 +8153,7 @@ static sp_RbVal sp_poly_sum(sp_RbVal v) {
      past the switch below and answered 0 (#3446). */
   if (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v))
     return sp_box_int(sp_str_sum_bits(sp_poly_strbuf_deref(v).v.s, 16));
+  sp_poly_coll_chk(v, "sum");
   if (v.tag != SP_TAG_OBJ) return sp_box_int(0);
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  return sp_box_int(sp_IntArray_sum((sp_IntArray *)v.v.p, 0));
@@ -8313,6 +8344,7 @@ static sp_RbVal sp_poly_arr_sample_n(sp_RbVal v, sp_int n) {
 }
 /* Array#values_at indexes; Hash#values_at looks the keys up. */
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
+  sp_poly_coll_chk(v, "values_at");
   SP_GC_ROOT_RBVAL(v); SP_GC_ROOT(idx);
   int is_hash = v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id);
   sp_int alen = is_hash ? 0 : sp_poly_arr_len(v);
@@ -8416,6 +8448,7 @@ static sp_SymPolyHash *sp_time_deconstruct_all(sp_Time t) {
   return h;
 }
 static sp_RbVal sp_poly_first(sp_RbVal v) {
+  sp_poly_coll_chk(v, "first");
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
   { sp_PolyArray *ps = sp_poly_hash_pairs_or_null(v);
     if (ps) return ps->len > 0 ? ps->data[0] : sp_box_nil(); }
@@ -8430,6 +8463,7 @@ static sp_RbVal sp_poly_first(sp_RbVal v) {
   return sp_poly_arr_get(v, 0);
 }
 static sp_RbVal sp_poly_last(sp_RbVal v) {
+  sp_poly_coll_chk(v, "last");
   /* Range#last is the end, exclusivity untouched: (1...5).last is 5. A
      stepped range's last is the last element it enumerates. Before the
      user_elems read, which materializes the Range and would answer the

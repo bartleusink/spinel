@@ -5375,6 +5375,11 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
                #dig; only the first receiver is known to be a container, so
                every later step has to check what it landed on (#3567). */
             buf_printf(b, " sp_poly_dig_check(_t%d);", tr);
+            /* the reads below raise NoMethodError for a nil receiver now
+               (#4485); a nil met part way through a dig is the walk's end,
+               so the key is still evaluated (CRuby takes every argument
+               first) and the read is skipped */
+
             /* Past the first key the receiver `_tr` is whatever the previous
                step returned (a nested hash, an Array element, ...), whose key
                type is not the top hash's key type. So `{a:[10,20]}.dig(:a,1)`
@@ -5385,24 +5390,24 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
             if (dkt == TY_SYMBOL) {
               buf_printf(b, " sp_sym _t%d = ", tk);
               emit_expr(c, argv[di], b);
-              buf_printf(b, "; _t%d = sp_poly_get_sym(_t%d, _t%d);", tr, tr, tk);
+              buf_printf(b, "; if (_t%d.tag != SP_TAG_NIL) _t%d = sp_poly_get_sym(_t%d, _t%d);", tr, tr, tr, tk);
             }
             else if (dkt == TY_STRING) {
               buf_printf(b, " const char *_t%d = ", tk);
               emit_expr(c, argv[di], b);
-              buf_printf(b, "; _t%d = sp_poly_get_str(_t%d, _t%d);", tr, tr, tk);
+              buf_printf(b, "; if (_t%d.tag != SP_TAG_NIL) _t%d = sp_poly_get_str(_t%d, _t%d);", tr, tr, tr, tk);
             }
             else if (dkt == TY_POLY) {
               /* A poly sub-key is stored as sp_RbVal, not sp_int; dispatch on
                  both the runtime receiver and key kind. */
               buf_printf(b, " sp_RbVal _t%d = ", tk);
               emit_expr(c, argv[di], b);
-              buf_printf(b, "; _t%d = sp_poly_index_poly(_t%d, _t%d);", tr, tr, tk);
+              buf_printf(b, "; if (_t%d.tag != SP_TAG_NIL) _t%d = sp_poly_index_poly(_t%d, _t%d);", tr, tr, tr, tk);
             }
             else {
               buf_printf(b, " sp_int _t%d = ", tk);
               emit_int_expr(c, argv[di], b);
-              buf_printf(b, "; _t%d = sp_poly_arr_get_hash(_t%d, _t%d);", tr, tr, tk);
+              buf_printf(b, "; if (_t%d.tag != SP_TAG_NIL) _t%d = sp_poly_arr_get_hash(_t%d, _t%d);", tr, tr, tr, tk);
             }
           }
           buf_printf(b, " _t%d; })", tr);
@@ -12772,7 +12777,9 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         }
       }
       if (!has_user_cnt && argc == 0 && cblk < 0) {
-        buf_puts(b, "sp_poly_length("); emit_expr(c, recv, b); buf_puts(b, ")");
+        /* nil has no count; sp_poly_length alone answered 0 for it (#4485) */
+        buf_puts(b, "sp_poly_length(sp_poly_coll_chk("); emit_expr(c, recv, b);
+        buf_puts(b, ", \"count\"))");
         return 1;
       }
     }
@@ -12800,7 +12807,10 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
              answers 0 for one, which would make every such object empty.
              Raise instead, as Ruby does. */
           buf_puts(b, "({ sp_RbVal _ep = "); emit_boxed(c, recv, b);
-          buf_puts(b, "; sp_poly_is_user_obj(_ep) ? (sp_raise_poly_nomethod(\"empty?\", _ep), 0)"
+          /* nil, a number and a boolean have none either, and read as empty
+             through the same 0 (#4485) */
+          buf_puts(b, "; sp_poly_coll_chk(_ep, \"empty?\");"
+                      " sp_poly_is_user_obj(_ep) ? (sp_raise_poly_nomethod(\"empty?\", _ep), 0)"
                       " : (sp_poly_length(_ep) == 0); })");
         }
         else if (sp_streq(name, "size")) {
@@ -13586,8 +13596,10 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   }
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "join") &&
       !user_defines_or_reads(c, name)) {
-    buf_puts(b, "sp_poly_join("); emit_expr(c, recv, b);
-    buf_puts(b, ", "); if (argc >= 1) emit_str_expr_nilable(c, argv[0], b); else buf_puts(b, "sp_str_empty");
+    /* the helper renders a non-container as its to_s, which is right for a
+       nested element and wrong for the receiver: nil has no join (#4485) */
+    buf_puts(b, "sp_poly_join(sp_poly_coll_chk("); emit_expr(c, recv, b);
+    buf_puts(b, ", \"join\"), "); if (argc >= 1) emit_str_expr_nilable(c, argv[0], b); else buf_puts(b, "sp_str_empty");
     buf_puts(b, ")"); return 1;
   }
   /* poly receiver: clamp(lo, hi) tag-dispatches int/float at runtime; the range

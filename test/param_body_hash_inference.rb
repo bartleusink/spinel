@@ -32,10 +32,10 @@
 # The combination addresses Sam's composition concern: typed
 # callers continue to build the right hash variant; untyped
 # callers cast their nil/int values to NULL of the param's
-# pointer type, the body's `row["k"]` safely returns nil, and
-# the consumer gets `nil.to_s -> ""` (CRuby raises NoMethodError
-# on nil[:k] -- we don't match the raise, but the silent
-# emit-0 is gone).
+# pointer type, and the body's `row["k"]` raises NoMethodError
+# on the nil, as CRuby does (#4485; the read used to answer nil
+# and the consumer printed `nil.to_s -> ""`). The silent emit-0
+# is gone either way.
 
 # Single untyped caller: param widens from body usage alone, no
 # type_seeds.rb seeding required.
@@ -48,7 +48,11 @@ class Box
 end
 
 b = Box.new
-consume(b.contents)  # untyped (uninit ivar = nil); body inference widens param
+begin
+  consume(b.contents)  # untyped (uninit ivar = nil); body inference widens param
+rescue NoMethodError => e
+  puts e.class         # the read on nil raises, as in CRuby (#4485)
+end
 
 # Mixed callers: typed hash literal + untyped value -- previously
 # the typed caller's widening would lock the param at sp_StrPolyHash*
@@ -59,7 +63,12 @@ def fetch(row)
 end
 
 fetch({"title" => "Real Hash"})
-fetch(b.contents)
+# the nil caller reaches the body's read, which raises as CRuby's does (#4485)
+begin
+  fetch(b.contents)
+rescue NoMethodError => e
+  puts e.class
+end
 fetch({"title" => "Another Real"})
 
 # Symbol-keyed lookup widens to sym_poly_hash via the same
@@ -69,4 +78,8 @@ def grab(opts)
 end
 
 grab({name: "Sym Hash"})
-grab(b.contents)
+begin
+  grab(b.contents)
+rescue NoMethodError => e
+  puts e.class
+end
