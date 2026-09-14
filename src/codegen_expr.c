@@ -1769,7 +1769,13 @@ void emit_expr(Compiler *c, int id, Buf *b) {
          sentinel keeps the comma expression well-typed for the value position. */
       buf_puts(b, "(sp_exc_stage_key(sp_box_str((&(\"\\xff\" \"noreason\")[1]))), "
                   "sp_raise_cls(\"LocalJumpError\", \"no block given (yield)\"), ");
-      buf_puts(b, comp_ntype(c, id) == TY_POLY ? "sp_box_nil())" : "SP_INT_NIL)");
+      /* the sentinel in the slot's own C type: this dead arm still has to
+         assign to whatever the yield's value was typed as (a String local
+         took an sp_int and the C build stopped) */
+      { TyKind yt = comp_ntype(c, id);
+        if (yt == TY_POLY || yt == TY_UNKNOWN || yt == TY_NIL || yt == TY_VOID) buf_puts(b, "sp_box_nil())");
+        else if (yt == TY_INT) buf_puts(b, "SP_INT_NIL)");
+        else { buf_puts(b, default_value(yt)); buf_puts(b, ")"); } }
       return;
     }
     emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1, comp_ntype(c, id));
@@ -1778,6 +1784,27 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   if (is_block_call(c, id)) {           /* block.call used for its value */
     emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1, comp_ntype(c, id));
     return;
+  }
+  /* `blk.nil?` / `!blk` on an inlined method's own block parameter: the
+     block is spliced, not a value, so the answer is whether this site has
+     one (a forwarded real proc answers by its pointer). The read itself
+     would name lv_<blk>, which no inline site declares (#4477). */
+  {
+    const char *pn = nt_str(nt, id, "name");
+    int pr = nt_ref(nt, id, "receiver");
+    if (pn && (sp_streq(pn, "nil?") || sp_streq(pn, "!")) && pr >= 0 &&
+        nt_kind(nt, pr) == NK_LocalVariableReadNode) {
+      int pan = 0; int paa = nt_ref(nt, id, "arguments");
+      if (paa >= 0) nt_arr(nt, paa, "arguments", &pan);
+      const char *rn = nt_str(nt, pr, "name");
+      Scope *ps = rn ? comp_scope_of(c, pr) : NULL;
+      if (pan == 0 && ps && ps->yields && ps->blk_param && rn && sp_streq(ps->blk_param, rn)) {
+        if (g_block_id >= 0) buf_puts(b, "0");
+        else if (g_yield_proc_ref) buf_printf(b, "((%s) == NULL)", g_yield_proc_ref);
+        else buf_puts(b, "1");
+        return;
+      }
+    }
   }
   if (is_blockless_block_param_call(c, id)) {
     /* A forwarded real proc (caller nil-checks its &block): <blk>.call(args)

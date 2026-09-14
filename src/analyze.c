@@ -13225,9 +13225,24 @@ void analyze_program(Compiler *c) {
     if (!pty) continue;
     if (sp_streq(pty, "CallNode")) {
       const char *cn = nt_str(c->nt, p, "name");
+      int r = nt_ref(c->nt, p, "receiver");
       if (cn && sp_streq(cn, "call")) {
-        int r = nt_ref(c->nt, p, "receiver");
         if (r >= 0 && r < c->nt->count) blk_call_recv[r] = 1;
+      }
+      /* `blk.nil?` / `!blk` only ASK about the block; the block goes
+         nowhere. `__blk.call unless __blk.nil?` is how an ingested Rails
+         helper forwards an anonymous block, and reading the nil? test as an
+         escape kept the helper out of line, lifted its caller's block into a
+         proc, and celled the caller's String buffer -- which took the
+         by-reference ABI away from the buffer, so every append the caller
+         made vanished (#4477). A bare `if blk` is NOT approved here: the
+         methods it would newly inline include forwarders called without a
+         block, whose `inner(&blk)` then names a block that no inline site
+         declares (block_forward_nilcheck, toplevel_extend_block_param). */
+      else if (cn && (sp_streq(cn, "nil?") || sp_streq(cn, "!"))) {
+        int an = 0; int aa = nt_ref(c->nt, p, "arguments");
+        if (aa >= 0) nt_arr(c->nt, aa, "arguments", &an);
+        if (an == 0 && r >= 0 && r < c->nt->count) blk_call_recv[r] = 1;
       }
     }
     else if (sp_streq(pty, "BlockArgumentNode")) {

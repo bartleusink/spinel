@@ -170,6 +170,15 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       snprintf(yprocbuf, sizeof yprocbuf, "%s", g_yield_proc_ref);
       fwd_yield_proc = yprocbuf;
     }
+    /* The same forward at a site that has NO block and no proc either: the
+       enclosing method was called blockless, so the callee's `yield` has
+       nothing to run. Such a site is normally dead (`capture(&__blk) unless
+       __blk.nil?`) but is emitted all the same, and reading the virtual
+       parameter as a local named an undeclared lv_<blk> (#4477). */
+    else if (g_block_id < 0 && pn && !g_yield_proc_ref &&
+             g_block_param_name && sp_streq(pn, g_block_param_name)) {
+      /* nothing to forward: fall through with block = -1 below */
+    }
     else if (g_block_id < 0 && plv && plv->type == TY_PROC) {
       snprintf(yprocbuf, sizeof yprocbuf, "lv_%s", rename_local(pn));
       fwd_yield_proc = yprocbuf;
