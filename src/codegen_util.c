@@ -677,6 +677,60 @@ static int subtree_has_param_named(const NodeTable *nt, int id, const char *nm) 
   return 0;
 }
 
+/* A FRESH cell for a captured block variable, at the top of an invocation:
+   the capture struct copies the current cell pointer at proc creation, so
+   per-iteration closures each keep their own binding. `cellv` names the
+   cell variable -- the frame's `_cell_x`, or the capture slot when the body
+   is inlined inside a proc function (#4127). */
+static void emit_fresh_cell(Compiler *c, LocalVar *lv, const char *cellv, Buf *b, int indent) {
+  emit_indent(b, indent);
+  if (lv->type == TY_FLOAT) {
+    buf_printf(b, "%s = (sp_float *)sp_gc_alloc(sizeof(sp_float), NULL, NULL); *%s = 0.0;\n", cellv, cellv);
+  }
+  else if (lv->type == TY_POLY) {
+    buf_printf(b, "%s = (sp_RbVal *)sp_gc_alloc(sizeof(sp_RbVal), NULL, sp_cell_scan_rbval); *%s = sp_box_nil();\n", cellv, cellv);
+  }
+  else if (cell_value_struct(lv->type)) {
+    /* a by-value struct rides a cell of its own type, as the two cell
+       prologues already say; without this arm the reset fell through to
+       the sp_int else and assigned an sp_int * to an sp_Class * */
+    const char *vs = cell_value_struct(lv->type);
+    buf_printf(b, "%s = (%s *)sp_gc_alloc(sizeof(%s), NULL, NULL); *%s = %s;\n",
+               cellv, vs, vs, cellv, cell_value_struct_empty(lv->type));
+  }
+  else if (lv->type != TY_PROC && lv->type != TY_INT && lv->type != TY_BOOL &&
+           lv->type != TY_SYMBOL && lv->type != TY_UNKNOWN && cell_is_typed_ptr(c, lv)) {
+    const char *cell_scan = cell_scan_fn(lv->type);
+    buf_printf(b, "%s = (", cellv); emit_ctype(c, lv->type, b);
+    buf_puts(b, " *)sp_gc_alloc(sizeof(");
+    emit_ctype(c, lv->type, b);
+    buf_printf(b, "), NULL, %s); *%s = NULL;\n", cell_scan, cellv);
+  }
+  else if (lv->type == TY_PROC) {
+    /* an int cell holding a collectable Proc still needs a scan (#4077) */
+    buf_printf(b, "%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, sp_cell_scan_procint); *%s = 0;\n", cellv, cellv);
+  }
+  else {
+    buf_printf(b, "%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, NULL); *%s = 0;\n", cellv, cellv);
+  }
+  /* The fresh cell is young and the capture struct it was just stored
+     into can be old (the enclosing proc outlived a promotion), so the
+     store is recorded -- after it, since the allocation above can
+     collect and clear a record made before it. The `_cell_x` form is
+     a frame local and needs nothing. */
+  if (cellv[0] == '(') {
+    emit_indent(b, indent);
+    buf_puts(b, "sp_gc_wb((void *)_cap);\n");
+  }
+}
+/* Which C expression names a scope's cell variable from here. */
+static const char *cell_var_name(const char *rn, char *buf, size_t cap) {
+  if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, rn))
+    snprintf(buf, cap, "((%s *)_cap)->c_%s", g_cap_struct, rn);
+  else
+    snprintf(buf, cap, "_cell_%s", rn);
+  return buf;
+}
 void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent) {
   if (blk < 0) return;
   const char *locs = nt_str(c->nt, blk, "locals");
@@ -717,6 +771,12 @@ void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent) {
              through the capture struct, and the slot is not this frame's at
              all -- there the capture fill is still the only publish. */
           if (!(g_cap_struct && g_cap_names && nameset_has(g_cap_names, prn))) {
+            /* A fresh cell first, as a captured block-local gets below: the
+               parameter is bound anew by every iteration too, and one shared
+               cell had every proc a `&blk` callee stored answer the last
+               value the parameter took (#4462). */
+            char pcell_buf[160];
+            emit_fresh_cell(c, plv, cell_var_name(prn, pcell_buf, sizeof pcell_buf), b, indent);
             emit_indent(b, indent);
             if (plv->type == TY_PROC)
               buf_printf(b, "*_cell_%s = (sp_int)(uintptr_t)lv_%s;\n", prn, prn);
@@ -747,54 +807,8 @@ void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent) {
              this iteration copies the slot at creation, so it keeps this
              iteration's binding. */
           char cellv_buf[160];
-          const char *cellv = rn2;
-          if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, rn2)) {
-            snprintf(cellv_buf, sizeof cellv_buf, "((%s *)_cap)->c_%s", g_cap_struct, rn2);
-            cellv = cellv_buf;
-          }
-          else {
-            snprintf(cellv_buf, sizeof cellv_buf, "_cell_%s", rn2);
-            cellv = cellv_buf;
-          }
-          emit_indent(b, indent);
-          if (lv->type == TY_FLOAT) {
-            buf_printf(b, "%s = (sp_float *)sp_gc_alloc(sizeof(sp_float), NULL, NULL); *%s = 0.0;\n", cellv, cellv);
-          }
-          else if (lv->type == TY_POLY) {
-            buf_printf(b, "%s = (sp_RbVal *)sp_gc_alloc(sizeof(sp_RbVal), NULL, sp_cell_scan_rbval); *%s = sp_box_nil();\n", cellv, cellv);
-          }
-          else if (cell_value_struct(lv->type)) {
-            /* a by-value struct rides a cell of its own type, as the two cell
-               prologues already say; without this arm the reset fell through to
-               the sp_int else and assigned an sp_int * to an sp_Class * */
-            const char *vs = cell_value_struct(lv->type);
-            buf_printf(b, "%s = (%s *)sp_gc_alloc(sizeof(%s), NULL, NULL); *%s = %s;\n",
-                       cellv, vs, vs, cellv, cell_value_struct_empty(lv->type));
-          }
-          else if (lv->type != TY_PROC && lv->type != TY_INT && lv->type != TY_BOOL &&
-                   lv->type != TY_SYMBOL && lv->type != TY_UNKNOWN && cell_is_typed_ptr(c, lv)) {
-            const char *cell_scan = cell_scan_fn(lv->type);
-            buf_printf(b, "%s = (", cellv); emit_ctype(c, lv->type, b);
-            buf_puts(b, " *)sp_gc_alloc(sizeof(");
-            emit_ctype(c, lv->type, b);
-            buf_printf(b, "), NULL, %s); *%s = NULL;\n", cell_scan, cellv);
-          }
-          else if (lv->type == TY_PROC) {
-            /* an int cell holding a collectable Proc still needs a scan (#4077) */
-            buf_printf(b, "%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, sp_cell_scan_procint); *%s = 0;\n", cellv, cellv);
-          }
-          else {
-            buf_printf(b, "%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, NULL); *%s = 0;\n", cellv, cellv);
-          }
-          /* The fresh cell is young and the capture struct it was just stored
-             into can be old (the enclosing proc outlived a promotion), so the
-             store is recorded -- after it, since the allocation above can
-             collect and clear a record made before it. The `_cell_x` form is
-             a frame local and needs nothing. */
-          if (cellv != rn2 && cellv[0] == '(') {
-            emit_indent(b, indent);
-            buf_puts(b, "sp_gc_wb((void *)_cap);\n");
-          }
+          const char *cellv = cell_var_name(rn2, cellv_buf, sizeof cellv_buf);
+          emit_fresh_cell(c, lv, cellv, b, indent);
         }
         else if (lv && lv->type != TY_UNKNOWN && !lv->is_cell) {
           emit_indent(b, indent);
