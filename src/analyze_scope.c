@@ -2494,7 +2494,35 @@ void register_ffi_decls(Compiler *c) {
           int ucp = nt_ref(nt, ucn, "constant_path");
           const char *ucpty = ucp >= 0 ? nt_type(nt, ucp) : NULL;
           const char *ucpn = ucp >= 0 ? nt_str(nt, ucp, "name") : NULL;
-          if (ucpty && sp_streq(ucpty, "ConstantReadNode") && ucpn && sp_streq(ucpn, leaf))
+          if (!ucpn || !sp_streq(ucpn, leaf)) continue;
+          /* rebuild the definition's own qualified spelling; a bare
+             `class Buffer`, a differently-qualified `class Other::Buffer`,
+             and a root-anchored `class ::Buffer` all share the leaf key
+             without BEING this class */
+          char qn[256];
+          qn[0] = 0;
+          if (ucpty && sp_streq(ucpty, "ConstantPathNode")) {
+            const char *segs[8];
+            int nseg = 0, ok = 1;
+            for (int par = nt_ref(nt, ucp, "parent"); par >= 0 && ok; ) {
+              const char *pty = nt_type(nt, par);
+              const char *pn = nt_str(nt, par, "name");
+              if (!pty || !pn || nseg >= 8) { ok = 0; break; }
+              segs[nseg++] = pn;
+              if (sp_streq(pty, "ConstantReadNode")) break;
+              if (!sp_streq(pty, "ConstantPathNode")) { ok = 0; break; }
+              par = nt_ref(nt, par, "parent");   /* -1 = root anchor: done */
+            }
+            if (ok) {
+              for (int si = nseg - 1; si >= 0; si--) {
+                if (qn[0]) strncat(qn, "::", sizeof qn - strlen(qn) - 1);
+                strncat(qn, segs[si], sizeof qn - strlen(qn) - 1);
+              }
+              if (qn[0]) strncat(qn, "::", sizeof qn - strlen(qn) - 1);
+            }
+          }
+          strncat(qn, leaf, sizeof qn - strlen(qn) - 1);
+          if (!sp_streq(qn, clsname))
             ffi_decl_error(c, ucn,
                            "this class shares its name with a native class declared under a "
                            "qualified path (constant lookups are leaf-keyed, so the two would "
