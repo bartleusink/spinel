@@ -9653,13 +9653,17 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
     if (recv >= 0 && ty_is_object(rt) && c->classes[ty_object_class(rt)].is_native_class) {
       int nmi = comp_native_method_find(c, ty_object_class(rt), "==", 1, 0);
       if (nmi >= 0) {
+        /* the operand boxes after the receiver and may allocate; a fresh
+           receiver (a slice the comparison itself built) has to sit in a
+           rooted temp across that, which is emit_cmp_self's whole job */
+        Buf selfb = emit_cmp_self(c, recv, rt);
         if (!eq) buf_puts(b, "(!");
-        buf_printf(b, "%s(", c->native_methods[nmi].csym);
-        emit_expr(c, recv, b);
+        buf_printf(b, "%s(%s", c->native_methods[nmi].csym, selfb.p ? selfb.p : "");
         buf_puts(b, ", ");
         emit_boxed(c, argv[0], b);
         buf_puts(b, ")");
         if (!eq) buf_puts(b, ")");
+        free(selfb.p);
         return 1;
       }
     }
@@ -25833,7 +25837,7 @@ else {
     if (sp_streq(name, "[]") && argc == 1 && cat_ok) {
       buf_puts(b, "sp_warning_aref(");
       if (sp_streq(nt_type(nt, argv[0]), "SymbolNode"))
-        buf_printf(b, "\"%s\"", nt_str(nt, argv[0], "value"));
+        emit_str_literal(b, nt_str(nt, argv[0], "value"));   /* escapes " and \ */
       else { buf_puts(b, "sp_sym_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       buf_puts(b, ")");
       return;
@@ -25844,7 +25848,7 @@ else {
       emit_boxed(c, argv[1], b);
       buf_puts(b, "; sp_warning_aset(");
       if (sp_streq(nt_type(nt, argv[0]), "SymbolNode"))
-        buf_printf(b, "\"%s\"", nt_str(nt, argv[0], "value"));
+        emit_str_literal(b, nt_str(nt, argv[0], "value"));
       else { buf_puts(b, "sp_sym_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       buf_printf(b, ", sp_poly_truthy(_t%d)); _t%d; })", tv, tv);
       return;

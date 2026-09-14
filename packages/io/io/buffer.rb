@@ -149,8 +149,10 @@ class IO::Buffer
 
   def each(type = :U8, offset = 0, count = nil)
     width = IO::Buffer.size_of(type)
+    raise ArgumentError, "Offset can't be negative!" if offset < 0
+    raise ArgumentError, "The given offset is bigger than the buffer size!" if offset > size
     n = 0
-    while offset + width <= size
+    while offset <= size - width
       break if count && n >= count
       yield offset, get_value(type, offset)
       offset += width
@@ -160,6 +162,8 @@ class IO::Buffer
   end
 
   def each_byte(offset = 0, count = nil)
+    raise ArgumentError, "Offset can't be negative!" if offset < 0
+    raise ArgumentError, "The given offset is bigger than the buffer size!" if offset > size
     n = 0
     while offset < size
       break if count && n >= count

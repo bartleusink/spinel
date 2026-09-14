@@ -50,6 +50,23 @@ static const char *iob_val_name(sp_RbVal v) {
     case SP_TAG_STR:  return "String";
     case SP_TAG_SYM:  return "Symbol";
     case SP_TAG_CLASS: return "Class";
+    case SP_TAG_OBJ:
+      switch (v.cls_id) {
+        case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:
+        case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_PTR_ARRAY:
+        case SP_BUILTIN_SYM_ARRAY: case SP_BUILTIN_POLY_ARRAY:
+          return "Array";
+        case SP_BUILTIN_STR_INT_HASH: case SP_BUILTIN_STR_STR_HASH:
+        case SP_BUILTIN_INT_STR_HASH: case SP_BUILTIN_SYM_INT_HASH:
+        case SP_BUILTIN_SYM_STR_HASH: case SP_BUILTIN_STR_POLY_HASH:
+        case SP_BUILTIN_SYM_POLY_HASH: case SP_BUILTIN_POLY_POLY_HASH:
+          return "Hash";
+        case SP_BUILTIN_RANGE: return "Range";
+        case SP_BUILTIN_TIME:  return "Time";
+        case SP_BUILTIN_PROC:  return "Proc";
+        case SP_BUILTIN_IO:    return "IO";
+        default: return "Object";
+      }
     default: return "Object";
   }
 }
@@ -61,10 +78,24 @@ static uint8_t *iob_base(sp_IOBuffer *b) {
   return b->data;
 }
 
+/* A slice whose root was freed, transferred, or shrunk below the view's
+   range must not be read through: CRuby raises InvalidatedError there, and
+   the stale base would be NULL or past the live allocation. */
+static int iob_slice_invalid(sp_IOBuffer *b) {
+  return b->source && (!b->source->data || b->off > b->source->size - b->size);
+}
+static uint8_t *iob_ptr(sp_IOBuffer *b) {
+  if (iob_slice_invalid(b))
+    sp_raise_cls("IO::Buffer::InvalidatedError", "Buffer has been invalidated!");
+  return iob_base(b);
+}
+
+/* Overflow-safe: `off + len > size` wraps for large operands, so compare
+   against the remaining room instead (both are non-negative here). */
 static void iob_range(sp_IOBuffer *b, int64_t off, int64_t len) {
   if (off < 0) iob_arg("Offset can't be negative!");
   if (len < 0) iob_arg("Length can't be negative!");
-  if (off + len > b->size) iob_arg("Specified offset+length is bigger than the buffer size!");
+  if (off > b->size || len > b->size - off) iob_arg("Specified offset+length is bigger than the buffer size!");
 }
 
 /* ---- the type table ---- */
@@ -100,10 +131,10 @@ static int iob_decode_type(sp_RbVal type) {
 
 static uint8_t *iob_value_ptr(sp_IOBuffer *b, int64_t off, int width) {
   if (off < 0) iob_arg("Offset can't be negative!");
-  if (off + width > b->size)
+  if (b->size < width || off > b->size - width)
     iob_arg(sp_sprintf("Type extends beyond end of buffer! (offset=%lld > size=%lld)",
                        (long long)off, (long long)b->size));
-  return iob_base(b) + off;
+  return iob_ptr(b) + off;
 }
 
 /* ---- raw loads/stores (byte-assembled: host-endian agnostic) ---- */
@@ -356,26 +387,29 @@ sp_int sp_IOBuffer_set_f(sp_IOBuffer *b, sp_int ty, sp_int off, double v) {
 
 /* ---- strings ---- */
 
-static const char *iob_get_string(sp_IOBuffer *b, int64_t off, int64_t len) {
+/* The bare-offset arm gets its own message only when the LENGTH was
+   defaulted (CRuby: get_string(9) names the offset, get_string(9, 0) the
+   offset+length). */
+static const char *iob_get_string(sp_IOBuffer *b, int64_t off, int64_t len, int len_given) {
   SP_GC_ROOT(b);
   iob_readable(b);
   if (off < 0) iob_arg("Offset can't be negative!");
-  if (off > b->size) iob_arg("The given offset is bigger than the buffer size!");
+  if (!len_given) {
+    if (off > b->size) iob_arg("The given offset is bigger than the buffer size!");
+    len = b->size - off;
+  }
   if (len < 0) iob_arg("Length can't be negative!");
-  if (off + len > b->size) iob_arg("Specified offset+length is bigger than the buffer size!");
+  if (off > b->size || len > b->size - off) iob_arg("Specified offset+length is bigger than the buffer size!");
   char *r = sp_str_alloc_raw((size_t)len + 1);
-  if (len > 0) memcpy(r, iob_base(b) + off, (size_t)len);
+  if (len > 0) memcpy(r, iob_ptr(b) + off, (size_t)len);
   r[len] = '\0';
   sp_str_set_len(r, (size_t)len);
   sp_str_mark_binary(r);
   return r;
 }
-const char *sp_IOBuffer_get_string0(sp_IOBuffer *b) { return iob_get_string(b, 0, b->size); }
-const char *sp_IOBuffer_get_string1(sp_IOBuffer *b, sp_int off) {
-  /* the off>size arm raises before the (then negative) default length is read */
-  return iob_get_string(b, off, b->size - off);
-}
-const char *sp_IOBuffer_get_string2(sp_IOBuffer *b, sp_int off, sp_int len) { return iob_get_string(b, off, len); }
+const char *sp_IOBuffer_get_string0(sp_IOBuffer *b) { return iob_get_string(b, 0, 0, 0); }
+const char *sp_IOBuffer_get_string1(sp_IOBuffer *b, sp_int off) { return iob_get_string(b, off, 0, 0); }
+const char *sp_IOBuffer_get_string2(sp_IOBuffer *b, sp_int off, sp_int len) { return iob_get_string(b, off, len, 1); }
 
 static sp_int iob_set_string(sp_IOBuffer *b, const char *s, int64_t off, int64_t len, int64_t soff, int len_given) {
   iob_writable(b);
@@ -385,9 +419,10 @@ static sp_int iob_set_string(sp_IOBuffer *b, const char *s, int64_t off, int64_t
   if (soff > slen) iob_arg("The given source offset is bigger than the source itself!");
   if (!len_given) len = slen - soff;
   if (len < 0) iob_arg("Length can't be negative!");
-  if (soff + len > slen) iob_arg("The computed source range exceeds the size of the source buffer!");
-  if (off + len > b->size) iob_arg("Specified offset+length is bigger than the buffer size!");
-  if (len > 0) memmove(iob_base(b) + off, s + soff, (size_t)len);
+  /* destination range before source range, as CRuby orders them */
+  if (off > b->size || len > b->size - off) iob_arg("Specified offset+length is bigger than the buffer size!");
+  if (len > slen - soff) iob_arg("The computed source range exceeds the size of the source buffer!");
+  if (len > 0) memmove(iob_ptr(b) + off, s + soff, (size_t)len);
   return len;
 }
 sp_int sp_IOBuffer_set_string1(sp_IOBuffer *b, const char *s) { return iob_set_string(b, s, 0, 0, 0, 0); }
@@ -406,7 +441,7 @@ sp_IOBuffer *sp_IOBuffer_resize(sp_IOBuffer *b, sp_int size) {
   if (size < 0) iob_arg("Size can't be negative!");
   if (b->source) {
     /* a slice detaches into its own (internal) allocation */
-    uint8_t *base = iob_base(b);
+    uint8_t *base = iob_ptr(b);
     uint8_t *d = NULL;
     if (size > 0) {
       d = (uint8_t *)calloc(1, (size_t)size);
@@ -439,7 +474,7 @@ sp_IOBuffer *sp_IOBuffer_resize(sp_IOBuffer *b, sp_int size) {
 static sp_IOBuffer *iob_clear(sp_IOBuffer *b, int64_t v, int64_t off, int64_t len) {
   iob_writable(b);
   iob_range(b, off, len);
-  if (len > 0) memset(iob_base(b) + off, (int)(uint8_t)v, (size_t)len);
+  if (len > 0) memset(iob_ptr(b) + off, (int)(uint8_t)v, (size_t)len);
   return b;
 }
 sp_IOBuffer *sp_IOBuffer_clear0(sp_IOBuffer *b) { return iob_clear(b, 0, 0, b->size); }
@@ -461,11 +496,14 @@ static sp_int iob_copy(sp_IOBuffer *b, sp_RbVal srcv, int64_t off, int64_t len, 
   iob_readable(src);
   if (off < 0) iob_arg("Offset can't be negative!");
   if (soff < 0) iob_arg("Source offset can't be negative!");
+  if (soff > src->size) iob_arg("The given source offset is bigger than the source itself!");
   if (!len_given) len = src->size - soff;
   if (len < 0) iob_arg("Length can't be negative!");
-  if (soff + len > src->size) iob_arg("The computed source range exceeds the size of the source buffer!");
-  if (off + len > b->size) iob_arg("Specified offset+length is bigger than the buffer size!");
-  if (len > 0) memmove(iob_base(b) + off, iob_base(src) + soff, (size_t)len);
+  /* destination range before source range, as CRuby orders them */
+  if (off > b->size || len > b->size - off) iob_arg("Specified offset+length is bigger than the buffer size!");
+  if (len > src->size - soff)
+    iob_arg("The computed source range exceeds the size of the source buffer!");
+  if (len > 0) memmove(iob_ptr(b) + off, iob_ptr(src) + soff, (size_t)len);
   return len;
 }
 sp_int sp_IOBuffer_copy1(sp_IOBuffer *b, sp_RbVal src) { return iob_copy(b, src, 0, 0, 0, 0); }
@@ -476,6 +514,8 @@ sp_int sp_IOBuffer_copy4(sp_IOBuffer *b, sp_RbVal src, sp_int off, sp_int len, s
 static sp_IOBuffer *iob_slice(sp_IOBuffer *b, int64_t off, int64_t len) {
   SP_GC_ROOT(b);
   iob_readable(b);
+  if (iob_slice_invalid(b))
+    sp_raise_cls("IO::Buffer::InvalidatedError", "Buffer has been invalidated!");
   iob_range(b, off, len);
   sp_IOBuffer *s = iob_alloc_obj(b->cls_id);
   s->source = b->source ? b->source : b;
@@ -524,7 +564,7 @@ sp_IOBuffer *sp_IOBuffer_dup_m(sp_IOBuffer *b) {
   SP_GC_ROOT(b);
   iob_readable(b);
   sp_IOBuffer *d = iob_alloc_obj(b->cls_id);
-  uint8_t *base = iob_base(b);
+  uint8_t *base = b->source ? iob_ptr(b) : b->data;
   if (base) {
     d->data = (uint8_t *)malloc(b->size > 0 ? (size_t)b->size : 1);
     if (!d->data) sp_oom_die();
@@ -542,7 +582,7 @@ static sp_int iob_cmp_core(sp_IOBuffer *b, sp_IOBuffer *o) {
   iob_readable(o);
   int64_t n = b->size < o->size ? b->size : o->size;
   if (n > 0) {
-    int c = memcmp(iob_base(b), iob_base(o), (size_t)n);
+    int c = memcmp(iob_ptr(b), iob_ptr(o), (size_t)n);
     if (c) return c < 0 ? -1 : 1;
   }
   return b->size < o->size ? -1 : b->size > o->size ? 1 : 0;
@@ -577,17 +617,29 @@ static size_t iob_hexline(char *out, const uint8_t *base, int64_t addr, int64_t 
 static const char *iob_hexdump(sp_IOBuffer *b, int64_t off, int64_t len, int64_t width, int len_given) {
   SP_GC_ROOT(b);
   iob_readable(b);
+  if (b->source && iob_slice_invalid(b))
+    sp_raise_cls("IO::Buffer::InvalidatedError", "Buffer has been invalidated!");
   if (!iob_base(b)) return NULL;
   if (off < 0) iob_arg("Offset can't be negative!");
   if (width < 1) iob_arg("Width must be at least 1!");
   if (!len_given) len = b->size - off;
   if (len < 0) iob_arg("Length can't be negative!");
   if (off > b->size) off = b->size;
-  if (off + len > b->size) len = b->size - off;
+  if (len > b->size - off) len = b->size - off;
   int64_t end = off + len;
   int64_t nlines = len > 0 ? (len + width - 1) / width : 0;
-  size_t line_max = 16 + (size_t)width * 4 + 2;
-  char *tmp = (char *)malloc(nlines > 0 ? (size_t)nlines * line_max : 1);
+  /* per line: the address prefix ("0x" + up to 16 hex digits + two spaces),
+     width * 3 hex slots, a separator, width ASCII chars, the newline and
+     NUL -- and `width` is caller data, so every derived size is checked
+     before it reaches malloc (a huge width made the product wrap and the
+     sprintf write past a too-small block). */
+  uint64_t line_max, total;
+  if (__builtin_mul_overflow((uint64_t)width, (uint64_t)4, &line_max) ||
+      __builtin_add_overflow(line_max, (uint64_t)40, &line_max) ||
+      __builtin_mul_overflow((uint64_t)(nlines > 0 ? nlines : 1), line_max, &total) ||
+      total > (uint64_t)1 << 40)
+    sp_oom_die();
+  char *tmp = (char *)malloc((size_t)total);
   if (!tmp) sp_oom_die();
   size_t used = 0;
   const uint8_t *base = iob_base(b);
@@ -639,7 +691,7 @@ const char *sp_IOBuffer_inspect(sp_IOBuffer *b) {
   char hd[256];
   size_t n = iob_header(b, hd, sizeof hd);
   int64_t shown = b->size < 256 ? b->size : 256;
-  if (!iob_base(b) || shown == 0) {
+  if (!iob_base(b) || iob_slice_invalid(b) || shown == 0) {
     char *r0 = sp_str_alloc_raw(n + 1);
     memcpy(r0, hd, n + 1);
     sp_str_set_len(r0, n);
@@ -664,9 +716,11 @@ const char *sp_IOBuffer_inspect(sp_IOBuffer *b) {
 
 /* ---- predicates ---- */
 
-sp_bool sp_IOBuffer_null_p(sp_IOBuffer *b) { return iob_base(b) == NULL; }
+/* a slice's own base pointer is never the null buffer, even when its root
+   was freed (CRuby: null? false, valid? false there) */
+sp_bool sp_IOBuffer_null_p(sp_IOBuffer *b) { return b->source ? 0 : b->data == NULL; }
 sp_bool sp_IOBuffer_empty_p(sp_IOBuffer *b) { return b->size == 0; }
-sp_bool sp_IOBuffer_valid_p(sp_IOBuffer *b) { (void)b; return 1; }
+sp_bool sp_IOBuffer_valid_p(sp_IOBuffer *b) { return !iob_slice_invalid(b); }
 sp_bool sp_IOBuffer_external_p(sp_IOBuffer *b) { return (b->flags & SP_IOB_EXTERNAL) != 0; }
 sp_bool sp_IOBuffer_internal_p(sp_IOBuffer *b) { return (b->flags & SP_IOB_INTERNAL) != 0; }
 sp_bool sp_IOBuffer_mapped_p(sp_IOBuffer *b) { return (b->flags & SP_IOB_MAPPED) != 0; }
@@ -696,7 +750,7 @@ static sp_IOBuffer *iob_bitop(sp_IOBuffer *b, sp_RbVal otherv, iob_bop op) {
   if (n > 0) {
     r->data = (uint8_t *)malloc((size_t)n);
     if (!r->data) sp_oom_die();
-    const uint8_t *pa = iob_base(b), *pb = iob_base(o);
+    const uint8_t *pa = iob_ptr(b), *pb = iob_ptr(o);
     for (int64_t i = 0; i < n; i++) r->data[i] = op(pa[i], pb[i % o->size]);
     r->size = n;
     r->flags = SP_IOB_INTERNAL;
@@ -710,7 +764,7 @@ sp_IOBuffer *sp_IOBuffer_not(sp_IOBuffer *b) {
   SP_GC_ROOT(b);
   iob_readable(b);
   sp_IOBuffer *r = iob_alloc_obj(b->cls_id);
-  if (b->size > 0 && iob_base(b)) {
+  if (b->size > 0 && (b->source ? iob_ptr(b) : b->data)) {
     r->data = (uint8_t *)malloc((size_t)b->size);
     if (!r->data) sp_oom_die();
     const uint8_t *p = iob_base(b);
@@ -726,8 +780,8 @@ static sp_IOBuffer *iob_bitop_ip(sp_IOBuffer *b, sp_RbVal otherv, iob_bop op) {
   iob_writable(b);
   iob_readable(o);
   if (o->size == 0) sp_raise_cls("IO::Buffer::MaskError", "Zero-length mask given!");
-  uint8_t *pa = iob_base(b);
-  const uint8_t *pb = iob_base(o);
+  uint8_t *pa = iob_ptr(b);
+  const uint8_t *pb = iob_ptr(o);
   for (int64_t i = 0; i < b->size; i++) pa[i] = op(pa[i], pb[i % o->size]);
   return b;
 }
@@ -736,7 +790,7 @@ sp_IOBuffer *sp_IOBuffer_or_ip(sp_IOBuffer *b, sp_RbVal other) { return iob_bito
 sp_IOBuffer *sp_IOBuffer_xor_ip(sp_IOBuffer *b, sp_RbVal other) { return iob_bitop_ip(b, other, bop_xor); }
 sp_IOBuffer *sp_IOBuffer_not_ip(sp_IOBuffer *b) {
   iob_writable(b);
-  uint8_t *p = iob_base(b);
+  uint8_t *p = b->size > 0 ? iob_ptr(b) : NULL;
   for (int64_t i = 0; i < b->size; i++) p[i] = (uint8_t)~p[i];
   return b;
 }
