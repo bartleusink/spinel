@@ -6973,6 +6973,8 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
       }
       else if (ivt == TY_INT_ARRAY_ARRAY)
         buf_printf(b, "(%s ? sp_IntArrayPtrArray_inspect(%s) : \"nil\")", expr, expr);
+      else if (ivt == TY_FLOAT_ARRAY_ARRAY)
+        buf_printf(b, "(%s ? sp_FloatArrayPtrArray_inspect(%s) : \"nil\")", expr, expr);
       else if (ty_is_array(ivt) && ivt != TY_POLY_ARRAY && array_kind(ivt))
         buf_printf(b, "(%s ? sp_%sArray_inspect(%s) : \"nil\")", expr, array_kind(ivt), expr);
       else if (ivt == TY_POLY_ARRAY)
