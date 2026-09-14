@@ -1259,9 +1259,11 @@ rbs-seed-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	grep -Eq 'sp_PtrArray[[:space:]]+\*[[:space:]]*iv_ints' "$$tmp/na.c" || { echo "rbs-seed-test: FAIL (Array[Array[Integer]] seed did not reach the table)"; ok=0; }; \
 	grep -Eq 'sp_PtrArray[[:space:]]+\*[[:space:]]*iv_flts' "$$tmp/na.c" || { echo "rbs-seed-test: FAIL (Array[Array[Float]] seed did not reach the table)"; ok=0; }; \
 	if grep -q 'warning: --rbs' "$$tmp/na.err"; then echo "rbs-seed-test: FAIL (honoured nested seed still warned)"; sed -n 1,2p "$$tmp/na.err"; ok=0; fi; \
-	$(SPINEL) test/rbs-seed/nested_array_ivar.rb --rbs test/rbs-seed/sig -o "$$tmp/na" 2>/dev/null && \
-	  { "$$tmp/na" > "$$tmp/na.out" 2>/dev/null; cmp -s "$$tmp/na.out" test/rbs-seed/nested_array_ivar.expected || \
-	    { echo "rbs-seed-test: FAIL (nested array seed output mismatch)"; diff -u test/rbs-seed/nested_array_ivar.expected "$$tmp/na.out" || true; ok=0; }; }; \
+	if $(SPINEL) test/rbs-seed/nested_array_ivar.rb --rbs test/rbs-seed/sig -o "$$tmp/na" 2>/dev/null; then \
+	  "$$tmp/na" > "$$tmp/na.out" 2>/dev/null; \
+	  cmp -s "$$tmp/na.out" test/rbs-seed/nested_array_ivar.expected || \
+	    { echo "rbs-seed-test: FAIL (nested array seed output mismatch)"; diff -u test/rbs-seed/nested_array_ivar.expected "$$tmp/na.out" || true; ok=0; }; \
+	else echo "rbs-seed-test: FAIL (nested array seed binary did not build)"; ok=0; fi; \
 	$(SPINEL) test/rbs-seed/boundary.rb --rbs test/rbs-seed/sig \
 	  -c --no-line-map -o "$$tmp/b.c" 2>/dev/null; \
 	if $(CC) -O0 -Ilib $(RBS_SEED_STRICT) "$$tmp/b.c" $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/b" 2>"$$tmp/b.err"; then \
