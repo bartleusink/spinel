@@ -10493,6 +10493,15 @@ int emit_value_recv_call(Compiler *c, int id, Buf *b) {
       emit_expr(c, argv[0], b);
       buf_printf(b, "; sp_time_cmp(_t%d, _t%d) %s 0; })", tt, tu, name);
     }
+    /* a poly operand (a `Time | nil` local past its nil guard, #4465) is
+       checked at run time: a Time compares, anything else raises as below */
+    else if ((sp_streq(name, "<") || sp_streq(name, ">") || sp_streq(name, "<=") ||
+              sp_streq(name, ">=")) && argc == 1 &&
+             (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[0]) == TY_UNKNOWN)) {
+      int tt = ++g_tmp, tu = ++g_tmp;
+      buf_printf(b, "({ sp_Time _t%d = %s; sp_RbVal _t%d = ", tt, r, tu); emit_boxed(c, argv[0], b);
+      buf_printf(b, "; sp_poly_time_cmp_arg(_t%d, _t%d) %s 0; })", tt, tu, name);
+    }
     /* a relational comparison against a non-Time operand: CRuby's Comparable
        raises ArgumentError (its <=> returned nil). Evaluate the operand first. */
     else if ((sp_streq(name, "<") || sp_streq(name, ">") || sp_streq(name, "<=") ||

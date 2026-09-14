@@ -8517,6 +8517,13 @@ static sp_RbVal sp_poly_thread_status(sp_RbVal v) {
   sp_raise_nomethod(sp_nomethod_msg("status", v));
   return sp_box_nil();
 }
+/* A typed Time compared against a boxed operand: a Time in the box
+   compares, anything else is Comparable's failure (#4465). */
+static int sp_poly_time_cmp_arg(sp_Time a, sp_RbVal b) {
+  if (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && b.v.p) return sp_time_cmp(a, *(sp_Time *)b.v.p);
+  sp_raise_cls("ArgumentError", "comparison of Time with an incompatible value failed");
+  return 0;
+}
 static sp_RbVal sp_poly_fiber_join(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) {
     sp_Thread_join((sp_thread *)v.v.p);

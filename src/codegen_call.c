@@ -29353,6 +29353,14 @@ else {
         buf_printf(b, "; sp_time_cmp(_t%d, _t%d) %s 0; })", tt, tu, name);
         return;
       }
+      /* a poly operand is a Time or not at run time (#4465) */
+      if (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[0]) == TY_UNKNOWN) {
+        int tt = ++g_tmp, tu = ++g_tmp;
+        buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = ", tt); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_RbVal _t%d = ", tu); emit_boxed(c, argv[0], b);
+        buf_printf(b, "; sp_poly_time_cmp_arg(_t%d, _t%d) %s 0; })", tt, tu, name);
+        return;
+      }
       buf_puts(b, "({ (void)("); emit_expr(c, argv[0], b);
       buf_puts(b, "); sp_raise_cls(\"ArgumentError\", \"comparison of Time with an incompatible value failed\"); 0; })");
       return;
