@@ -6014,13 +6014,22 @@ static int stmts_diverge(Compiler *c, int st) {
   return nm && (sp_streq(nm, "raise") || sp_streq(nm, "fail") || sp_streq(nm, "throw") ||
                 sp_streq(nm, "exit") || sp_streq(nm, "abort") || sp_streq(nm, "exit!"));
 }
-/* The statements a branch node carries, for the divergence test above. */
-static int branch_stmts(Compiler *c, int b) {
-  if (b < 0) return -1;
+/* Whether a branch node produces no value: a statement list that ends in a
+   raise, or an `elsif` chain EVERY arm of which does -- including the arm
+   that is not written, so a chain without an `else` never diverges as a
+   whole, its fall-through being the implicit nil. Judging the chain by its
+   first arm's statements alone typed `if a then 1 elsif b then raise end` as
+   the Integer of the `if` arm, and the fall-through emitted a boxed nil
+   into that Integer's slot (#4464). */
+static int branch_diverges(Compiler *c, int b) {
+  if (b < 0) return 0;
   NodeKind k = nt_kind(c->nt, b);
-  if (k == NK_ElseNode || k == NK_IfNode || k == NK_UnlessNode)
-    return nt_ref(c->nt, b, "statements");
-  return k == NK_StatementsNode ? b : -1;
+  if (k == NK_ElseNode) return stmts_diverge(c, nt_ref(c->nt, b, "statements"));
+  if (k == NK_IfNode || k == NK_UnlessNode) {
+    int sub = nt_ref(c->nt, b, k == NK_UnlessNode ? "else_clause" : "subsequent");
+    return stmts_diverge(c, nt_ref(c->nt, b, "statements")) && branch_diverges(c, sub);
+  }
+  return k == NK_StatementsNode ? stmts_diverge(c, b) : 0;
 }
 
 /* An empty `[]` / `{}` carries no element type of its own, so it caches
@@ -6606,8 +6615,8 @@ TyKind infer_uncached(Compiler *c, int id) {
       if (take_then) return then_b >= 0 ? infer_type(c, then_b) : TY_NIL;
       return else_b >= 0 ? infer_type(c, else_b) : TY_NIL;
     }
-    int tdiv = stmts_diverge(c, branch_stmts(c, then_b));
-    int ediv = stmts_diverge(c, branch_stmts(c, else_b));
+    int tdiv = branch_diverges(c, then_b);
+    int ediv = branch_diverges(c, else_b);
     /* both arms diverging leaves nothing to type: fall through to the plain
        unify rather than answering UNKNOWN out of nowhere */
     if (tdiv && !ediv) return an_branch_ty(c, else_b);
