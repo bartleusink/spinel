@@ -14,6 +14,8 @@
  *   - Nominal class instances → obj_<QualifiedName>
  *   - Array[T] where T is in subset → str_array / int_array /
  *     float_array / sym_array / obj_X_ptr_array / poly_array
+ *   - Array[Array[Integer]] / Array[Array[Float]] → int_array_array /
+ *     float_array_array (a request the narrowing pass answers, not a pin)
  *   - Hash[K, V] → str_int_hash / sym_str_hash / str_poly_hash etc.
  *   - Optional T (T?) → <subset>?    (recursive)
  *   - Union T | nil → T?    (any other union → skip)
@@ -193,10 +195,26 @@ static const char *array_tag_for_elem(const char *elem) {
     if (strcmp(elem, "float") == 0)  return "float_array";
     if (strcmp(elem, "string") == 0) return "str_array";
     if (strcmp(elem, "symbol") == 0) return "sym_array";
-    if (strncmp(elem, "obj_", 4) == 0) {
-        /* obj_Foo → obj_Foo_ptr_array (heuristic, mirrors spinel's
-         * array-of-objects shape). Caller must append _ptr_array. */
-        return NULL;
+    /* Array[Array[Integer]] / Array[Array[Float]]: map_type has already
+     * reduced the element, so the nested case is the element tag being an
+     * array tag itself. Without these two the pair fell to poly_array, and
+     * because a poly_array seed PINS the ivar it stopped the very pass that
+     * produces the unboxed table -- so writing the accurate signature made
+     * the program slower, with nothing said. Only these two nest: the other
+     * array kinds have no table form to ask for. */
+    if (strcmp(elem, "int_array") == 0)   return "int_array_array";
+    if (strcmp(elem, "float_array") == 0) return "float_array_array";
+    {
+        size_t l = strlen(elem);
+        int is_obj_arr = l >= 10 && strcmp(elem + l - 10, "_ptr_array") == 0;
+        if (strncmp(elem, "obj_", 4) == 0 && !is_obj_arr) {
+            /* obj_Foo → obj_Foo_ptr_array (heuristic, mirrors spinel's
+             * array-of-objects shape). Caller must append _ptr_array. */
+            return NULL;
+        }
+        /* an array OF object arrays has no table form, so it is an
+         * `Array[<other>]` like any other: poly_array, per the documented
+         * rule, rather than a dropped signature */
     }
     return "poly_array";
 }
@@ -299,7 +317,12 @@ static bool map_class_instance(rbs_parser_t *p, rbs_types_class_instance_t *ci,
             sbuf_free(&name);
             return false;
         }
-        if (strncmp(elem.buf, "obj_", 4) == 0) {
+        /* `Array[Foo]` is obj_Foo_ptr_array. `Array[Array[Foo]]` is NOT
+         * obj_Foo_ptr_array_ptr_array -- there is no table of object arrays,
+         * and that tag named nothing any consumer accepts, so it was a seed
+         * that could only ever be dropped. Nest only where a table exists. */
+        if (strncmp(elem.buf, "obj_", 4) == 0
+            && !(elem.len >= 10 && strcmp(elem.buf + elem.len - 10, "_ptr_array") == 0)) {
             sbuf_set(out, elem.buf, elem.len);
             sbuf_append_cstr(out, "_ptr_array");
         }

@@ -274,11 +274,20 @@ typedef struct {
                             together with ivar_int_table, which is the pin every
                             re-derivation site honours; this is the type the
                             per-round re-assert restores (#4444). */
-  unsigned char *ivar_oa_seed;  /* an --rbs `Array[Class]` seed asked for the
-                                   pointer array (1 + the class index). It is
-                                   not a pin: the narrowing pass decides from
-                                   the uses, and a request it could not honour
-                                   is reported after the fixpoint (#4444). */
+  int *ivar_oa_seed;            /* an --rbs seed asked for one of the unboxed
+                                   pointer arrays: 1 + the class index for
+                                   `Array[Class]`, or SEED_OA_INT_TABLE /
+                                   SEED_OA_FLT_TABLE for `Array[Array[Integer]]`
+                                   / `Array[Array[Float]]`. It is not a pin: the
+                                   narrowing pass decides from the uses, and a
+                                   request it could not honour is reported after
+                                   the fixpoint (#4444). Pinning a nested array
+                                   instead would be worse than saying nothing --
+                                   the seed's own type would stop the pass that
+                                   produces it, so the accurate declaration made
+                                   the code slower. */
+#define SEED_OA_INT_TABLE (-1)
+#define SEED_OA_FLT_TABLE (-2)
   unsigned char *ivar_int_table;  /* the slot is a table of int arrays, narrowed
                                      to TY_INT_ARRAY_ARRAY while the fixpoint
                                      runs so a parameter bound from `@t[k][j]`

@@ -2611,6 +2611,21 @@ static TyKind parse_seed_type(Compiler *c, const char *tok) {
    handed out would leave codegen with no arm -- so the ivar seed arm records
    it as a request the pass answers, and every other arm drops it as before
    (#4444). Answers the element class, or -1 for any other token. */
+/* `Array[Array[Integer]]` / `Array[Array[Float]]` arrive as int_array_array /
+   float_array_array. Like obj_X_ptr_array they name a kind only
+   narrow_object_arrays produces, so they are requests rather than pins -- and
+   here the distinction is not a nicety. parse_seed_type would have to answer
+   TY_POLY_ARRAY for them (the tags map to no scalar kind), which PINS the ivar,
+   and a pinned ivar is skipped by the very pass that would have narrowed it: a
+   correct declaration made the program slower, silently. Answers the request,
+   or 0 for any other token. */
+static int seed_nested_array_req(const char *tok) {
+  if (!tok) return 0;
+  if (sp_streq(tok, "int_array_array"))   return SEED_OA_INT_TABLE;
+  if (sp_streq(tok, "float_array_array")) return SEED_OA_FLT_TABLE;
+  return 0;
+}
+
 static int seed_obj_array_class(Compiler *c, const char *tok) {
   size_t n = tok ? strlen(tok) : 0;
   char buf[128];
@@ -2868,12 +2883,13 @@ static void apply_rbs_seeds(Compiler *c, const char *path) {
     }
     else if (sp_streq(kw, "ivar") && a1 && a2 && cur_ci >= 0) {
       int oac = seed_obj_array_class(c, a2);
-      TyKind t = oac >= 0 ? TY_UNKNOWN : parse_seed_type(c, a2);
-      if (oac >= 0) {   /* a request for narrow_object_arrays, not a pin */
+      int nreq = oac >= 0 ? 0 : seed_nested_array_req(a2);
+      TyKind t = (oac >= 0 || nreq) ? TY_UNKNOWN : parse_seed_type(c, a2);
+      if (oac >= 0 || nreq) {   /* a request for narrow_object_arrays, not a pin */
         char ivn[300];
         snprintf(ivn, sizeof ivn, "%s%s", a1[0] == '@' ? "" : "@", a1);
         int idx = comp_ivar_intern(&c->classes[cur_ci], ivn);
-        c->classes[cur_ci].ivar_oa_seed[idx] = (unsigned char)(oac + 1);
+        c->classes[cur_ci].ivar_oa_seed[idx] = nreq ? nreq : oac + 1;
       }
       else if (t != TY_UNKNOWN) {
         ClassInfo *ci = &c->classes[cur_ci];
@@ -14808,12 +14824,35 @@ void analyze_program(Compiler *c) {
   for (int ci = 0; ci < c->nclasses; ci++) {
     ClassInfo *cl = &c->classes[ci];
     for (int iv = 0; iv < cl->nivars; iv++) {
-      if (!cl->ivar_oa_seed[iv] || ty_is_obj_array(cl->ivar_types[iv])) continue;
-      int want = cl->ivar_oa_seed[iv] - 1;
+      int req = cl->ivar_oa_seed[iv];
+      if (!req) continue;
+      TyKind got = cl->ivar_types[iv];
+      const char *asked;
+      if (req == SEED_OA_INT_TABLE)      { if (got == TY_INT_ARRAY_ARRAY) continue; asked = "Array[Integer]"; }
+      else if (req == SEED_OA_FLT_TABLE) { if (got == TY_FLOAT_ARRAY_ARRAY) continue; asked = "Array[Float]"; }
+      else {
+        if (ty_is_obj_array(got)) continue;
+        int want = req - 1;
+        asked = want >= 0 && want < c->nclasses ? c->classes[want].name : "?";
+      }
+      /* A nested request can fail two ways, and they want different advice. The
+         slot may have stayed boxed -- a use the unboxed form has no emitter for
+         -- or it may have narrowed to the OTHER table kind, which is not a
+         missing emitter at all but the signature and the code disagreeing about
+         the element type. Saying "stays a boxed array" for the second is simply
+         untrue, and would send the reader looking for a use to remove. */
+      if (req < 0 && ty_is_ptr_array(got)) {
+        fprintf(stderr, "warning: --rbs: %s %s: Array[%s] asked for, but the element type the code "
+                        "gives it is %s -- the signature and the program disagree\n",
+                cl->name, cl->ivars[iv], asked,
+                got == TY_INT_ARRAY_ARRAY ? "Array[Integer]"
+                                          : got == TY_FLOAT_ARRAY_ARRAY ? "Array[Float]" : "another array");
+        continue;
+      }
       fprintf(stderr, "warning: --rbs: %s %s: Array[%s] stays a boxed array; every use of it must be "
                       "one the unboxed array supports ([], []=, push, length, empty?, first, last, "
                       "min, max, sort) from the class's own instance methods or its attr_reader\n",
-              cl->name, cl->ivars[iv], want >= 0 && want < c->nclasses ? c->classes[want].name : "?");
+              cl->name, cl->ivars[iv], asked);
     }
   }
 
