@@ -2482,6 +2482,25 @@ void register_ffi_decls(Compiler *c) {
       const char *leaf = strrchr(clsname, ':');
       leaf = leaf ? leaf + 1 : clsname;
       int ex = comp_class_index(c, leaf);
+      /* Any class body spelled under the BARE leaf (`class Buffer`) shares
+         the leaf key with a qualified declaration ("IO::Buffer"), and the
+         leaf-keyed class table would silently merge the user's class into
+         the native one (native flag, c_struct, display name all
+         overwritten -- whichever registers first). Refuse that loudly. A
+         reopen spelled with the same qualified path (the binding's own
+         `class IO::Buffer ... end`) is the class and passes. */
+      if (leaf != clsname) {
+        NT_FOREACH_KIND(nt, NK_ClassNode, ucn) {
+          int ucp = nt_ref(nt, ucn, "constant_path");
+          const char *ucpty = ucp >= 0 ? nt_type(nt, ucp) : NULL;
+          const char *ucpn = ucp >= 0 ? nt_str(nt, ucp, "name") : NULL;
+          if (ucpty && sp_streq(ucpty, "ConstantReadNode") && ucpn && sp_streq(ucpn, leaf))
+            ffi_decl_error(c, ucn,
+                           "this class shares its name with a native class declared under a "
+                           "qualified path (constant lookups are leaf-keyed, so the two would "
+                           "merge); rename the class");
+        }
+      }
       int cid;
       if (ex >= 0) cid = ex;
       else { comp_class_new(c, leaf, -1); cid = c->nclasses - 1; }

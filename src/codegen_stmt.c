@@ -961,7 +961,10 @@ else {
     }
     if (bad_cat[0]) {
       emit_indent(b, indent);
-      buf_printf(b, "sp_raise_cls(\"ArgumentError\", \"unknown category: %s\");\n", bad_cat);
+      /* the category text is Ruby-sourced: emit it as an escaped literal */
+      buf_puts(b, "sp_raise_cls(\"ArgumentError\", sp_sprintf(\"unknown category: %s\", ");
+      emit_str_literal(b, bad_cat);
+      buf_puts(b, "));\n");
     }
     return 1;
   }
