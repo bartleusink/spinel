@@ -159,6 +159,12 @@ const char *sp_sym_to_s(sp_sym id);
 #else
 static const char *sp_sym_to_s(sp_sym id);
 #endif
+/* Warning module category flags (lib/sp_cold.c): Warning[] / Warning[]= /
+   Warning.warn, plus the Kernel#warn `category:` gate. */
+sp_bool sp_warning_aref(const char *cat);
+void sp_warning_aset(const char *cat, sp_bool v);
+sp_bool sp_warning_enabled(const char *cat);
+void sp_warning_warn(const char *msg);
 /* Capacity of the runtime symbol-intern pool the generated TU declares
    (sp_dyn_syms). 8 bytes/entry, so the default is a 64 KB static buffer holding
    symbols minted at runtime (String#to_sym, :"#{interp}"). Embedded targets that

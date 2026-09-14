@@ -2775,6 +2775,13 @@ else {
         nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "GC") &&
         (sp_streq(name, "start") || sp_streq(name, "compact")))
       return TY_NIL;
+    /* Warning[] / Warning[]= / Warning.warn (codegen_call.c's arm) */
+    if (rty && sp_streq(rty, "ConstantReadNode") &&
+        nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "Warning")) {
+      if (sp_streq(name, "[]")) return TY_BOOL;
+      if (sp_streq(name, "[]=")) return TY_POLY;   /* the assignment's value: the RHS, boxed */
+      if (sp_streq(name, "warn")) return TY_NIL;
+    }
     if (rty && sp_streq(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "GC") &&
         sp_streq(name, "stat"))

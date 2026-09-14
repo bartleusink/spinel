@@ -3996,3 +3996,38 @@ const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src,
   if (to == 2) sp_str_mark_binary(res);
   return res;
 }
+
+/* ---- Warning module: category flags (Warning[] / Warning[]=) ----
+   CRuby's defaults with no -W flag: only :experimental starts on. Kernel#warn
+   consults these through sp_warning_enabled when a literal `category:` is
+   given, so `Warning[:deprecated] = true` really un-suppresses those. */
+static const char *const sp_warn_cats[] = {
+  "deprecated", "experimental", "performance", "strict_unused_block", NULL
+};
+static sp_bool sp_warn_flags[4] = { 0, 1, 0, 0 };
+
+static int sp_warning_cat_idx(const char *cat) {
+  for (int i = 0; sp_warn_cats[i]; i++)
+    if (strcmp(cat, sp_warn_cats[i]) == 0) return i;
+  return -1;
+}
+sp_bool sp_warning_aref(const char *cat) {
+  int i = sp_warning_cat_idx(cat);
+  if (i < 0) sp_raise_cls("ArgumentError", sp_sprintf("unknown category: %s", cat));
+  return sp_warn_flags[i];
+}
+void sp_warning_aset(const char *cat, sp_bool v) {
+  int i = sp_warning_cat_idx(cat);
+  if (i < 0) sp_raise_cls("ArgumentError", sp_sprintf("unknown category: %s", cat));
+  sp_warn_flags[i] = v;
+}
+/* Kernel#warn's guard: an unknown name answers "print it" (the category
+   validity is the caller's ArgumentError, raised before this is consulted). */
+sp_bool sp_warning_enabled(const char *cat) {
+  int i = sp_warning_cat_idx(cat);
+  return i < 0 ? 1 : sp_warn_flags[i];
+}
+/* Warning.warn: the message as-is (no newline appended), to stderr. */
+void sp_warning_warn(const char *msg) {
+  if (msg) fputs(msg, stderr);
+}

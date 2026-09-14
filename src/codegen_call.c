@@ -25751,6 +25751,44 @@ else {
     }
   }
 
+  /* Warning[category] / Warning[category] = flag / Warning.warn(msg): the
+     category flags live in the runtime (sp_warning_*, lib/sp_cold.c), so a
+     program can silence or re-enable a category at run time and Kernel#warn's
+     `category:` gate reads the same flags. */
+  if (recv >= 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "Warning")) {
+    /* the category argument as a C string: a literal symbol becomes a string
+       literal; a symbol-typed expression resolves through the symbol table */
+    int cat_ok = argc >= 1 && nt_type(nt, argv[0]) &&
+                 (sp_streq(nt_type(nt, argv[0]), "SymbolNode") ||
+                  comp_ntype(c, argv[0]) == TY_SYMBOL);
+    if (sp_streq(name, "[]") && argc == 1 && cat_ok) {
+      buf_puts(b, "sp_warning_aref(");
+      if (sp_streq(nt_type(nt, argv[0]), "SymbolNode"))
+        buf_printf(b, "\"%s\"", nt_str(nt, argv[0], "value"));
+      else { buf_puts(b, "sp_sym_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      buf_puts(b, ")");
+      return;
+    }
+    if (sp_streq(name, "[]=") && argc == 2 && cat_ok) {
+      int tv = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", tv);
+      emit_boxed(c, argv[1], b);
+      buf_puts(b, "; sp_warning_aset(");
+      if (sp_streq(nt_type(nt, argv[0]), "SymbolNode"))
+        buf_printf(b, "\"%s\"", nt_str(nt, argv[0], "value"));
+      else { buf_puts(b, "sp_sym_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      buf_printf(b, ", sp_poly_truthy(_t%d)); _t%d; })", tv, tv);
+      return;
+    }
+    if (sp_streq(name, "warn") && argc >= 1) {
+      buf_puts(b, "sp_warning_warn(");
+      emit_str_expr(c, argv[0], b);
+      buf_puts(b, ")");
+      return;
+    }
+  }
+
   /* Math module functions -> C math.h equivalents */
   if (recv >= 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "Math")) {
