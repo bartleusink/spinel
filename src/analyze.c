@@ -7348,7 +7348,7 @@ static int narrow_object_arrays(Compiler *c) {
       if (cl->ivar_types[iv] != TY_POLY_ARRAY || cl->ivar_int_table[iv]) continue;
       if (class_ivar_pinned(cl, ivn)) continue;
       const char *bare = ivn + 1;
-      if (comp_is_writer(cl, bare) || comp_is_sg_writer(cl, bare) || comp_is_sg_reader(cl, bare)) continue;
+      if (comp_is_sg_writer(cl, bare) || comp_is_sg_reader(cl, bare)) continue;
       int inherited = 0;
       for (int k = cl->parent; k >= 0; k = c->classes[k].parent)
         if (comp_ivar_index(&c->classes[k], ivn) >= 0) { inherited = 1; break; }
@@ -7469,6 +7469,59 @@ static int narrow_object_arrays(Compiler *c) {
     int si = lv ? oa_find(sl, n, sidx, lv) : -1;
     if (si >= 0) sl[si].alive = 0;
   }
+
+  /* 3a. a route that INVOKES an ivar's writer. A writer stores whatever it is
+         handed, and a synthesized `attr_accessor`/`attr_writer` one does so
+         with no node in the tree -- so unlike every other write source, an
+         unvetted one leaves nothing behind for step 5a to classify and kill
+         the slot with. Every route is named here instead: `o.t = v` and the
+         multi-target form carry the setter name, the op-assign forms carry the
+         BARE name (they read and write through both), and a `:t=` symbol
+         anywhere is `send`/`method`/`define_method`/`alias`. Matching the name
+         without resolving the receiver is the conservatism step 3 uses too.
+
+         This replaces a blanket bail on any class DECLARING a writer (#4444),
+         which cost the narrowing to writers that are never called -- ones
+         spinel does not even emit. A method absent from the output should not
+         change the output's types.
+
+         Collected as DISTINCT names first, then matched against the slots
+         once: a scan of every slot per setter call is the O(nodes x slots)
+         shape that took a 100k-line program from seconds to minutes (the same
+         trap ivslot above was introduced for). Distinct setter names are tens,
+         not thousands. */
+  int nwn = 0, cwn = 0; char **wn = NULL;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty) continue;
+    int trim;   /* the node names the SETTER (trim the `=`) or the attribute */
+    if (sp_streq(ty, "CallNode") || sp_streq(ty, "CallTargetNode") ||
+        sp_streq(ty, "SymbolNode")) trim = 1;
+    else if (sp_streq(ty, "CallOperatorWriteNode") || sp_streq(ty, "CallAndWriteNode") ||
+             sp_streq(ty, "CallOrWriteNode")) trim = 0;
+    else continue;
+    const char *nm = sp_streq(ty, "SymbolNode") ? nt_str(nt, id, "value") : nt_str(nt, id, "name");
+    if (!nm) continue;
+    char attr[300];
+    if (trim) {
+      if (!setter_base_name(nm, attr, sizeof attr)) continue;
+    } else {
+      if (strlen(nm) >= sizeof attr) continue;
+      strcpy(attr, nm);
+    }
+    int seen = 0;
+    for (int k = 0; k < nwn && !seen; k++) if (sp_streq(wn[k], attr)) seen = 1;
+    if (seen) continue;
+    if (nwn >= cwn) { cwn = cwn ? cwn * 2 : 16; wn = (char **)realloc(wn, sizeof(char *) * (size_t)cwn); if (!wn) { fprintf(stderr, "oom\n"); exit(1); } }
+    wn[nwn++] = strdup(attr);
+  }
+  for (int i = 0; nwn && i < n; i++) {
+    if (sl[i].ici < 0 || !sl[i].alive) continue;
+    const char *bare = c->classes[sl[i].ici].ivars[sl[i].iiv] + 1;
+    for (int k = 0; k < nwn; k++) if (sp_streq(wn[k], bare)) { sl[i].alive = 0; break; }
+  }
+  for (int k = 0; k < nwn; k++) free(wn[k]);
+  free(wn);
 
   /* 4. CallNodes: classify slot-as-receiver (supported op + element evidence)
         and slot-as-arg (positional into a resolvable free method -> edge). */
@@ -7651,13 +7704,18 @@ static int narrow_object_arrays(Compiler *c) {
          `super` reaches it with no call node at all. Retyping its C return
          under either would hand back something the caller cannot read. */
   /* the `attr_reader :items` declaration itself names the reader with a
-     symbol; that one is the reader's definition, not a dynamic route to it */
+     symbol; that one is the reader's definition, not a dynamic route to it.
+     `attr_accessor`/`attr_writer` name it the same way -- their WRITER is
+     what has to be vetted, and step 3a does that by its own `:items=` name,
+     so treating the declaration here as a dynamic route would kill every
+     accessor slot for the bare symbol it is spelled with. */
   char *attr_sym = (char *)calloc(nc, 1);
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "CallNode") || nt_ref(nt, id, "receiver") >= 0) continue;
     const char *cn = nt_str(nt, id, "name");
-    if (!cn || !(sp_streq(cn, "attr_reader") || sp_streq(cn, "attr"))) continue;
+    if (!cn || !(sp_streq(cn, "attr_reader") || sp_streq(cn, "attr") ||
+                 sp_streq(cn, "attr_accessor") || sp_streq(cn, "attr_writer"))) continue;
     int aa = nt_ref(nt, id, "arguments"); int aan = 0;
     const int *aav = aa >= 0 ? nt_arr(nt, aa, "arguments", &aan) : NULL;
     for (int k = 0; k < aan; k++) if (aav[k] >= 0 && aav[k] < nc) attr_sym[aav[k]] = 1;
