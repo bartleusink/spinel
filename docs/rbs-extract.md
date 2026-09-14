@@ -189,6 +189,8 @@ the field layouts coincide by construction.
 | `Array[String]`                        | `str_array`                           |
 | `Array[Symbol]`                        | `sym_array`                           |
 | `Array[Foo]`                           | `obj_Foo_ptr_array`                   |
+| `Array[Array[Integer]]`                | `int_array_array`                     |
+| `Array[Array[Float]]`                  | `float_array_array`                   |
 | `Array[<other>]`                       | `poly_array`                          |
 | `Hash[String, Integer]`                | `str_int_hash`                        |
 | `Hash[String, String]`                 | `str_str_hash`                        |
@@ -198,6 +200,26 @@ the field layouts coincide by construction.
 | `Hash[Symbol, <other>]`                | `sym_poly_hash`                       |
 | `T?`                                   | `<T>?`  (recursive)                   |
 | `T \| nil` / `nil \| T`                | `<T>?`                                |
+
+### `Array[Array[Integer]]` and `Array[Array[Float]]` on an instance variable
+
+These are the two nested element types with an unboxed table form (`sp_PtrArray`
+of `sp_IntArray*` / `sp_FloatArray*`). Like `obj_Foo_ptr_array` they are a
+**request, not a pin**, and here the distinction is load-bearing rather than a
+nicety: neither tag maps to a scalar kind, so pinning would have to pin the ivar
+to a boxed poly array — and a pinned ivar is skipped by the very pass that
+produces the table. Writing the accurate signature therefore used to make the
+program *slower*, with nothing said about it.
+
+The narrowing runs with or without the seed. What the seed adds is a warning
+when the request cannot be honoured, which matters because the narrowing is
+otherwise invisible: a table that quietly falls back to the boxed array is
+byte-identical in behaviour and several times slower. The warning distinguishes
+the two ways it can fail — a use the unboxed form has no emitter for, and a
+signature whose element type disagrees with the one the code gives the table.
+
+Every other nesting stays `poly_array`: there is no table of string arrays,
+symbol arrays, object arrays, or of tables.
 
 ### `Array[Foo]` on an instance variable
 

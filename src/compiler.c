@@ -337,7 +337,7 @@ int comp_ivar_intern(ClassInfo *ci, const char *name) {
     ci->ivar_str_shared = realloc(ci->ivar_str_shared, (size_t)ci->civars);
     ci->ivar_int_table = realloc(ci->ivar_int_table, (size_t)ci->civars);
     ci->ivar_oa_type = realloc(ci->ivar_oa_type, sizeof(TyKind) * (size_t)ci->civars);
-    ci->ivar_oa_seed = realloc(ci->ivar_oa_seed, (size_t)ci->civars);
+    ci->ivar_oa_seed = realloc(ci->ivar_oa_seed, sizeof(int) * (size_t)ci->civars);
     ci->ivar_nullable_int = realloc(ci->ivar_nullable_int, (size_t)ci->civars);
     ci->ivar_nullable_int_elem = realloc(ci->ivar_nullable_int_elem, (size_t)ci->civars);
     ci->ivar_arr_elem_arr_or_nil = realloc(ci->ivar_arr_elem_arr_or_nil, (size_t)ci->civars);
