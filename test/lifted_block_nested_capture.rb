@@ -56,7 +56,10 @@ acc = 0
 F.run { |i| 2.times { acc += i } }
 puts acc                       # 8
 
-# a simple worker-pool: several threads, each joined, accumulate distinct slots
+# a simple worker-pool: several threads, each joined, accumulate distinct slots.
+# The three run at once, so the shared Array is appended under a Mutex: a
+# bare `<<` from three threads is the documented container race (a dropped
+# element), and it showed up as `[0, 1]` about once in fifty runs.
 module P
   def self.each_index(n, &blk)
     threads = []
@@ -65,5 +68,6 @@ module P
   end
 end
 seen = []
-P.each_index(3) { |i| seen << i }
+lock = Mutex.new
+P.each_index(3) { |i| lock.synchronize { seen << i } }
 puts seen.sort.inspect         # [0, 1, 2]
