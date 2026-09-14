@@ -9,6 +9,9 @@
 #include <unistd.h>     /* sysconf (worker count) */
 #include <time.h>       /* clock_gettime (Kernel#sleep) */
 #include <errno.h>      /* EINTR (sleep fallback) */
+#ifdef __linux__
+#include <sys/prctl.h>  /* PR_SET_NAME (the sweeper threads' name) */
+#endif
 #include <sys/wait.h>   /* waitpid (sp_sched_wait_child) */
 #include <signal.h>     /* preemption signal (SIGURG by default) */
 #include <strings.h>    /* strcasecmp (SPINEL_PREEMPT_SIGNAL by name) */
@@ -1298,7 +1301,7 @@ static void *sp_cs_sweeper_main(void *arg) {
   sp_gc_in_sweeper = 1;
   sp_worker_id = CS_SWEEPER_WID;
 #ifdef __linux__
-  pthread_setname_np(pthread_self(), "sp-sweeper");
+  prctl(PR_SET_NAME, "sp-sweeper", 0, 0, 0);   /* pthread_setname_np needs _GNU_SOURCE; this does not (#4469) */
 #endif
   unsigned seen = 0;
   for (;;) {

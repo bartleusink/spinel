@@ -26,6 +26,7 @@ size_t sp_str_verify_end(void);
 void sp_str_verify_probe_arm(void);
 int sp_str_verify_probe_hit(void);
 void sp_str_verify_probe_done(void);
+int  sp_str_sweep_begin(int *major);   /* lib/sp_alloc.c: the string heap's gate, taken here before the concurrent sweep starts */
 
 /* ---- Globals shared with the generated TU (declared extern in sp_gc.h) ---- */
 SP_TLS void **sp_gc_roots[SP_GC_STACK_MAX];   /* per-worker (SP_TLS); see sp_gc.h */
