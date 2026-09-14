@@ -5480,6 +5480,32 @@ int64_t sp_bigint_to_int(sp_Bigint *b) {
   return (int64_t)v;
 }
 
+/* IO::Buffer's u64 lane (lib/sp_iobuffer.c): a full unsigned-64 constructor,
+   and the magnitude reader its range checks decide from. */
+sp_Bigint *sp_bigint_new_u64(uint64_t v) {
+  sp_Bigint *b = sp_bigint_alloc();
+  mpz_init(sp_mpz_ctx, &b->mpz);
+  mpz_set_uint64(sp_mpz_ctx, &b->mpz, v);
+  return b;
+}
+
+/* |b| into *out when it fits 64 bits; 0 (out untouched) when it doesn't.
+   The sign is the caller's question (sp_bigint_sign). */
+int sp_bigint_mag_u64(sp_Bigint *b, uint64_t *out) {
+  if (b == NULL) { *out = 0; return 1; }
+  mpz_t *z = &b->mpz;
+  uint64_t v = 0;
+  for (size_t i = 0; i < z->sz; i++) {
+    if (i * DIG_SIZE >= 64) {
+      if (z->p[i] != 0) return 0;
+      continue;
+    }
+    v |= ((uint64_t)z->p[i]) << (i * DIG_SIZE);
+  }
+  *out = v;
+  return 1;
+}
+
 /* Convert a bigint to the nearest double. Unlike sp_bigint_to_int, which keeps
    only the low limbs and so truncates any value beyond int64, this folds every
    limb in (most-significant first, Horner-style) so the full magnitude reaches

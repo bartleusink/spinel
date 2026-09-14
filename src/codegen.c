@@ -5665,6 +5665,10 @@ const char *class_ruby_name(Compiler *c, int ci) {
   /* a synthesized singleton subclass answers with its parent's name (CRuby's
      singleton class is invisible to #class / inspect / #name). */
   ci = singleton_visible_ci(c, ci);
+  /* a native_struct declared under a qualified name ("IO::Buffer") carries
+     it here directly -- the class is leaf-keyed and has no enclosing-class
+     chain to rebuild the path from (see register_ffi_decls) */
+  if (c->classes[ci].ruby_name_cache) return c->classes[ci].ruby_name_cache;
   /* collect ancestry: max 16 levels deep */
   int chain[16]; int depth = 0;
   for (int k = ci; k >= 0 && depth < 16; ) {
@@ -6864,6 +6868,15 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "static const char *sp_obj_to_s_sw(int cls_id, void *p) {\n  switch (cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *tci = &c->classes[i];
+    /* a native class binding its own to_s (IO::Buffer): dispatch to the
+       declared C symbol so a boxed instance renders like a typed receiver */
+    if (tci->is_native_class && tci->c_struct) {
+      int nts = comp_native_method_find(c, i, "to_s", 0, 0);
+      if (nts >= 0 && sp_streq(c->native_methods[nts].ret, "string"))
+        buf_printf(b, "    case %d: return %s((%s *)p);\n",
+                   i, c->native_methods[nts].csym, tci->c_struct);
+      continue;
+    }
     if (is_builtin_reopen(tci->name) || tci->is_native_class) continue;
     if (comp_ty_value_obj(c, ty_object(i))) continue;
     int tdef = -1;
@@ -6912,6 +6925,14 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "static const char *sp_obj_inspect_sw(int cls_id, void *p) {\n");
   buf_puts(b, "  switch (cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
+    /* native classes with a bound #inspect, same as the to_s dispatcher */
+    if (c->classes[i].is_native_class && c->classes[i].c_struct) {
+      int nin = comp_native_method_find(c, i, "inspect", 0, 0);
+      if (nin >= 0 && sp_streq(c->native_methods[nin].ret, "string"))
+        buf_printf(b, "    case %d: return %s((%s *)p);\n",
+                   i, c->native_methods[nin].csym, c->classes[i].c_struct);
+      continue;
+    }
     if (!class_inspectable(c, i)) continue;
     ClassInfo *ci = &c->classes[i];
     /* a user #inspect wins over the default ivar walk, so a contained
@@ -9389,8 +9410,17 @@ char *codegen_program(const NodeTable *nt) {
     /* forward-declare each native class's package struct (incomplete: the TU
        holds only pointers) so the method externs below can name it. */
     for (int nci = 0; nci < cf->nclasses; nci++)
-      if (cf->classes[nci].is_native_class && cf->classes[nci].c_struct)
+      if (cf->classes[nci].is_native_class && cf->classes[nci].c_struct) {
         buf_printf(&b, "typedef struct %s_s %s;\n", cf->classes[nci].c_struct, cf->classes[nci].c_struct);
+        /* A native_struct's C name need not be sp_<class> (IO::Buffer is
+           class "Buffer" over sp_IOBuffer), but the self-parameter and cast
+           emitters spell instances sp_<c_name>; alias that spelling to the
+           declared struct so both name the same type. */
+        char sp_name[160];
+        snprintf(sp_name, sizeof sp_name, "sp_%s", cf->classes[nci].c_name ? cf->classes[nci].c_name : "");
+        if (!sp_streq(sp_name, cf->classes[nci].c_struct))
+          buf_printf(&b, "typedef %s %s;\n", cf->classes[nci].c_struct, sp_name);
+      }
     /* native_method/native_new externs: prototype each C-backed method so the
        generated TU needs no package header. A constructor returns the struct
        pointer and takes cls_id first (the compiler stamps the assigned id); an

@@ -1423,6 +1423,23 @@ int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         comp_method_in_chain(c, cid, "hash", NULL) < 0) { *out = TY_INT; return 1; }
     /* native class (C-backed): a declared instance method returns its spec type */
     if (cls->is_native_class) {
+      /* IO::Buffer#get_value with a LITERAL type symbol lowers to a typed
+         accessor (the codegen fold); the site's type follows the symbol:
+         floats are Float, u64 stays boxed (a value above 2^63-1 is a
+         Bignum), every other integer type is a machine int. The conditions
+         mirror the fold's exactly (a literal the fold declines keeps the
+         generic binding's boxed type). */
+      if (cls->c_struct && sp_streq(cls->c_struct, "sp_IOBuffer") &&
+          sp_streq(name, "get_value") && argc == 2 &&
+          nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "SymbolNode") &&
+          infer_type(c, argv[1]) == TY_INT) {
+        int it = comp_iob_sym_type(nt_str(c->nt, argv[0], "value"));
+        if (it >= 0) {
+          *out = comp_iob_ty_is_float(it) ? TY_FLOAT
+               : comp_iob_ty_is_64(it) ? TY_POLY : TY_INT;
+          return 1;
+        }
+      }
       TyKind natys[8];
       int nta = argc < 8 ? argc : 8;
       for (int a = 0; a < nta; a++) natys[a] = infer_type(c, argv[a]);

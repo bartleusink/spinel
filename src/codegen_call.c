@@ -9610,6 +9610,22 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_printf(b, "), %d)", eq ? 0 : 1);
       return 1;
     }
+    /* a native class binding its own == (IO::Buffer) takes every operand
+       shape -- including the non-buffer operands CRuby answers with
+       TypeError, which the identity/strict-false arms below would eat */
+    if (recv >= 0 && ty_is_object(rt) && c->classes[ty_object_class(rt)].is_native_class) {
+      int nmi = comp_native_method_find(c, ty_object_class(rt), "==", 1, 0);
+      if (nmi >= 0) {
+        if (!eq) buf_puts(b, "(!");
+        buf_printf(b, "%s(", c->native_methods[nmi].csym);
+        emit_expr(c, recv, b);
+        buf_puts(b, ", ");
+        emit_boxed(c, argv[0], b);
+        buf_puts(b, ")");
+        if (!eq) buf_puts(b, ")");
+        return 1;
+      }
+    }
     /* cross-type: primitive vs user-object */
     if ((eq_family(rt) && ty_is_object(a0)) || (eq_family(a0) && ty_is_object(rt))) {
       TyKind obj_t = ty_is_object(a0) ? a0 : rt;
@@ -21076,7 +21092,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     for (int k = 0; k < c->nclasses && !iocand; k++)
       if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
           comp_reader_in_chain(c, k, name, NULL) ||
-          c->classes[k].is_native_class)   /* a native class's methods are not in scopes */
+          /* a native class's methods are not in scopes: consult its declared
+             bindings. The old blanket test disabled this whole arm whenever
+             ANY native class existed -- IO::Buffer's implicit splice made
+             that every program touching it, and `fds[1].write(s)` answered
+             NoMethodError naming IO, which is what it was. */
+          (c->classes[k].is_native_class && comp_native_method_find(c, k, name, argc, 0) >= 0))
         iocand = 1;
     if (!iocand) {
       int tio2 = ++g_tmp;
@@ -22606,6 +22627,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       int new_cls = (g_emitting_class_id >= 0) ? g_emitting_class_id : encl->class_id;
       if (sp_streq(name, "new")) {
         ClassInfo *ncls = &c->classes[new_cls];
+        /* a native class's bare `new` uses the declared constructor, exactly
+           as the receiver `Klass.new(...)` path does */
+        if (ncls->is_native_class) {
+          int nargc; const int *nargv = call_args(nt, id, &nargc);
+          if (emit_native_ctor(c, id, new_cls, nargc, nargv, b)) return;
+        }
         int initm = comp_method_in_chain(c, new_cls, "initialize", NULL);
         /* A Data/Struct class has no user `initialize`; its generated constructor
            takes one arg per member. Fill member-wise -- positionally, or by
@@ -23306,10 +23333,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         return;
       }
       /* a native-bound class's struct is opaque in the generated TU (no
-         cls_id deref possible); its class is statically known */
+         cls_id deref possible); its class is statically known. The carried
+         name is the qualified Ruby one (a native_struct may declare
+         "IO::Buffer" over a leaf-keyed class). */
       if (_cidx >= 0 && c->classes[_cidx].is_native_class) {
+        const char *_nqn = class_ruby_name(c, _cidx);
         buf_puts(b, "((void)("); emit_expr(c, recv, b);
-        buf_printf(b, "), ((sp_Class){(sp_int)%d, SPL(\"%s\")}))", _cidx, c->classes[_cidx].name);
+        buf_printf(b, "), ((sp_Class){(sp_int)%d, SPL(\"%s\")}))", _cidx,
+                   _nqn ? _nqn : c->classes[_cidx].name);
         return;
       }
       /* an exception subclass shares sp_Exception's layout (no cls_id
@@ -28784,7 +28815,8 @@ else {
   /* default Object#<=>: 0 when the operands are the same object, nil otherwise
      (identity). Only for a reference user object with no user `<=>` (#2686). */
   if (sp_streq(name, "<=>") && argc == 1 && recv >= 0 && ty_is_object(rt) &&
-      !comp_ty_value_obj(c, rt) && comp_method_in_chain(c, ty_object_class(rt), "<=>", NULL) < 0) {
+      !comp_ty_value_obj(c, rt) && comp_method_in_chain(c, ty_object_class(rt), "<=>", NULL) < 0 &&
+      comp_native_method_find(c, ty_object_class(rt), "<=>", 1, 0) < 0) {
     const char *cn = c->classes[ty_object_class(rt)].c_name;
     if (comp_ntype(c, argv[0]) == rt) {
       int ta = ++g_tmp, tb = ++g_tmp;

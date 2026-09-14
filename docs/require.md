@@ -127,6 +127,12 @@ spinelgem under `packages/<name>/` beside the compiler (`packages/set/set.rb` wi
 its `spin.toml`); `lib/` holds only the C runtime. The `require` pulls in
 the package's file like any other package — pre-installed just means no fetch.
 
+Two of these are also spliced **implicitly**, because CRuby provides them with
+no require at all: a program that references `Set` (or calls `.to_set`) gets
+`require "set"` prepended, and one that references `IO::Buffer` gets
+`require "io/buffer"` (packages/io) the same way. Writing the require
+explicitly is fine too — the splice only fills it in when absent.
+
 ## Providing your own feature
 
 You can provide a feature yourself and have `require "name"` resolve it, through

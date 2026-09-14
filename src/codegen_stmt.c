@@ -131,6 +131,14 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
                ti, ti, ta, ti, ta, ti);
     free(ab.p);
   }
+  else if (ty_is_object(t) && c->classes[ty_object_class(t)].is_native_class &&
+           comp_native_method_find(c, ty_object_class(t), "to_s", 0, 0) >= 0) {
+    /* a native class binding its own to_s (IO::Buffer) */
+    int nts = comp_native_method_find(c, ty_object_class(t), "to_s", 0, 0);
+    buf_printf(b, "{ const char *_ps = %s(", c->native_methods[nts].csym);
+    emit_expr(c, arg, b);
+    buf_puts(b, "); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
+  }
   else if (ty_is_object(t) && obj_str_cname(c, ty_object_class(t), 0)) {
     /* an object with #to_s (user-defined or a generated struct/data one) */
     const char *cn = obj_str_cname(c, ty_object_class(t), 0);
