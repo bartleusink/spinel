@@ -63,6 +63,61 @@ static int pure_forwarding_target(Compiler *c, int mi, int depth) {
 #define SP_INLINE_DEPTH_MAX 64
 static int g_inline_depth = 0;
 
+/* --- inline parameter aliasing ------------------------------------------
+   An inlined (yielding) method's String parameter that the body APPENDS to
+   is bound as an alias of the caller's variable, not a copy: the copy shares
+   the buffer only until the first reallocation, after which the caller's
+   variable still names the old bytes. `wrap_into(io, name) { io << "x" }`
+   handed the caller back only what its own block appended (#4476), and a
+   second nesting lost the outer expansion's post-yield append (#4479).
+   The alias is a pointer to the caller's slot, declared under the callee's
+   renamed cell name, and the parameter's is_cell is held at 1 while the
+   expansion is emitted so the body reads and writes through it. */
+static int inline_str_mutator_name(const char *nm) {
+  size_t l = nm ? strlen(nm) : 0;
+  if (!l) return 0;
+  return sp_streq(nm, "<<") || sp_streq(nm, "concat") || sp_streq(nm, "replace") ||
+         sp_streq(nm, "prepend") || sp_streq(nm, "insert") || sp_streq(nm, "clear") ||
+         sp_streq(nm, "[]=") || (l > 1 && nm[l - 1] == '!');
+}
+/* Does scope mi's body plainly rebind `name`? A rebind is the callee's own
+   local binding and must not reach the caller, so such a parameter is copied
+   as before. */
+static int inline_param_rebound(Compiler *c, int mi, const char *name) {
+  const NodeTable *nt = c->nt;
+  for (int q = 0; q < nt->count; q++) {
+    if (c->nscope[q] != mi) continue;
+    NodeKind k = nt_kind(nt, q);
+    if (k != NK_LocalVariableWriteNode && k != NK_LocalVariableOperatorWriteNode &&
+        k != NK_LocalVariableOrWriteNode && k != NK_LocalVariableAndWriteNode &&
+        k != NK_LocalVariableTargetNode) continue;
+    const char *wn = nt_str(nt, q, "name");
+    if (wn && sp_streq(wn, name)) return 1;
+  }
+  return 0;
+}
+/* Does scope mi's body mutate `name` in place, or hand it on as a call
+   argument (where a callee may)? */
+static int inline_param_mutated(Compiler *c, int mi, const char *name) {
+  const NodeTable *nt = c->nt;
+  for (int q = 0; q < nt->count; q++) {
+    if (c->nscope[q] != mi || nt_kind(nt, q) != NK_CallNode) continue;
+    int r = nt_ref(nt, q, "receiver");
+    if (r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode) {
+      const char *rn = nt_str(nt, r, "name");
+      if (rn && sp_streq(rn, name) && inline_str_mutator_name(nt_str(nt, q, "name"))) return 1;
+    }
+    int aa = nt_ref(nt, q, "arguments"); int an = 0;
+    const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &an) : NULL;
+    for (int k = 0; k < an; k++) {
+      if (nt_kind(nt, av[k]) != NK_LocalVariableReadNode) continue;
+      const char *vn = nt_str(nt, av[k], "name");
+      if (vn && sp_streq(vn, name)) return 1;
+    }
+  }
+  return 0;
+}
+
 int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -325,6 +380,40 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   }
   int din = indent + 1;
 
+  /* Which parameters this expansion binds as ALIASES of the caller's
+     variables (see inline_param_mutated above): a String the body mutates,
+     passed as a plain local read, not rebound by the body, and not celled
+     for a capture of its own. Decided before the locals are declared, since
+     an aliased parameter gets no local of its own. */
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  unsigned alias_mask = 0;
+  {
+    int pargc = argc;
+    if (argc > 0 && argv && nt_type(nt, argv[argc - 1]) &&
+        sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) pargc = argc - 1;
+    for (int i = 0; i < m->nparams && i < 32; i++) {
+      if (i >= pargc || (m->rest_idx >= 0 && i >= m->rest_idx)) continue;
+      NodeKind ak = nt_kind(nt, argv[i]);
+      if (ak == NK_InstanceVariableReadNode) {
+        /* an ivar buffer: the object's own slot, from an instance method of a
+           heap class (a value type is a struct copy with no slot to lend) */
+        Scope *as = comp_scope_of(c, argv[i]);
+        if (!as || as->class_id < 0 || as->is_cmethod || comp_ntype(c, argv[i]) != TY_STRING ||
+            comp_ty_value_obj(c, ty_object(as->class_id)) || !g_self) continue;
+      }
+      else if (ak != NK_LocalVariableReadNode) continue;
+      LocalVar *lv = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+      if (!lv || !lv->is_param || lv->is_block_param || lv->type != TY_STRING) continue;
+      if (lv->is_cell && !lv->inline_alias) continue;
+      if (inline_param_rebound(c, mi, m->pnames[i]) || !inline_param_mutated(c, mi, m->pnames[i])) continue;
+      alias_mask |= 1u << i;
+      lv->inline_alias++;
+      lv->is_cell = 1;
+    }
+  }
+
   /* declare method locals under renamed names */
   for (int i = 0; i < m->nlocals; i++) {
     LocalVar *lv = &m->locals[i];
@@ -333,13 +422,15 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_y%d_%s", tag, lv->name);
     const char *rn = g_ren_to[g_nren];
     g_nren++;
+    if (lv->is_param && lv->inline_alias) {
+      int pi = -1;
+      for (int k = 0; k < m->nparams; k++) if (m->pnames[k] && sp_streq(m->pnames[k], lv->name)) { pi = k; break; }
+      if (pi >= 0 && (alias_mask & (1u << pi))) continue;   /* the alias is declared at the binding */
+    }
     emit_inlined_local_decl(c, lv, rn, b, din);
   }
 
   /* bind params to call args (args are in the call-site scope: renames off) */
-  int args = nt_ref(nt, id, "arguments");
-  int argc = 0;
-  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
   /* `bar(...)` inside a `def foo(...)` forwarder: bind this (inlined) target's
      params from the enclosing forwarder's synth __fwd_* params, not from a
      literal ForwardingArgumentsNode (which has no value of its own). */
@@ -373,7 +464,9 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   int kwh_slot = kwh_positional_slot(c, m, kwh, pos_argc);
   for (int i = 0; i < m->nparams; i++) {
     emit_indent(b, din);
-    { char rn[128]; snprintf(rn, sizeof rn, "_y%d_%s", tag, m->pnames[i]);
+    int aliased = i < 32 && (alias_mask & (1u << i));
+    if (aliased) buf_printf(b, "const char **_cell__y%d_%s = &(", tag, m->pnames[i]);
+    else { char rn[128]; snprintf(rn, sizeof rn, "_y%d_%s", tag, m->pnames[i]);
       emit_inlined_param_target(c, m, m->pnames[i], rn, b); }
     /* hide THIS inline's renames only: args are call-site expressions,
        and the call site may itself be an outer inlined body whose locals
@@ -422,6 +515,26 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     }
     /* Anything past the rest that is not one of its posts is a keyword (or
        **kwrest) param: it binds by name, never positionally. */
+    else if (aliased && nt_kind(nt, argv[i]) == NK_InstanceVariableReadNode) {
+      /* the slot itself, and the owner pinned as a byref call pins it: the
+         store lands inside this expansion, past any dirty bit (#4378) */
+      const char *ivn = nt_str(nt, argv[i], "name");
+      buf_printf(b, "%s%siv_%s); sp_gc_pin_remembered((void *)%s)", g_self, g_self_deref, iv_c(ivn + 1), g_self);
+    }
+    else if (aliased) {
+      emit_expr(c, argv[i], b); buf_puts(b, ")");
+      /* The caller's variable may be a heap cell (captured by a proc): the
+         body will store through it from inside this expansion, which is the
+         placement a dirty bit cannot cover, so pin the cell as a byref call
+         would (#4391); a stack slot, or a cell the caller itself was lent,
+         is not ours to pin. */
+      { const char *avn = nt_str(nt, argv[i], "name");
+        LocalVar *alv = avn ? scope_local(comp_scope_of(c, argv[i]), avn) : NULL;
+        if (alv && alv->is_cell && !alv->byref_out && !alv->inline_alias &&
+            !(g_cap_struct && g_cap_names && nameset_has(g_cap_names, avn)))
+          buf_printf(b, "; sp_gc_pin_remembered((void *)_cell_%s)", rename_local(avn));
+      }
+    }
     else if (i < pos_argc && !(m->rest_idx >= 0 && i > m->rest_idx))
       emit_arg_or_default(c, m, i, argv[i], b);
     else if (i == kwh_slot)
@@ -530,6 +643,11 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   if (as_expr) { emit_indent(b, indent); buf_puts(b, "})"); }
   else { emit_indent(b, indent); buf_puts(b, "}\n"); }
 
+  for (int i = 0; i < m->nparams && i < 32; i++) {
+    if (!(alias_mask & (1u << i))) continue;
+    LocalVar *lv = scope_local(m, m->pnames[i]);
+    if (lv && --lv->inline_alias == 0) lv->is_cell = 0;
+  }
   g_nren = saved_nren;
   g_block_id = saved_block;
   g_yield_proc_ref = saved_ypr;

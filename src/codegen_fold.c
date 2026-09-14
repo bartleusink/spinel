@@ -6338,7 +6338,7 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
            already decided. Pinning here would offer a stack address to
            sp_gc_pin_remembered, which reads a header off it -- the fault
            #4391's first half was. */
-        int fwd = clv0 && clv0->byref_out;
+        int fwd = clv0 && (clv0->byref_out || clv0->inline_alias);   /* an inline alias is a forward too: it points at whatever the caller lent */
         if (g_cap_struct && g_cap_names && vn && nameset_has(g_cap_names, vn)) {
           /* inside a proc body: the capture struct holds the cell pointer */
           if (!fwd) {
@@ -6356,9 +6356,11 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
              store rather than after (#4391) */
           if (!fwd) {
             emit_indent(g_pre, g_indent);
-            buf_printf(g_pre, "sp_gc_pin_remembered((void *)_cell_%s);\n", vn);
+            buf_printf(g_pre, "sp_gc_pin_remembered((void *)_cell_%s);\n", rename_local(vn));
           }
-          buf_printf(out, "_cell_%s", vn);
+          /* renamed like the plain slot below: inside an inlined body the
+             cell is the inline's own (or its alias of the caller's) */
+          buf_printf(out, "_cell_%s", rename_local(vn));
           return;
         }
         if (clv && clv->type == TY_STRING) {

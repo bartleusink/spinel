@@ -49,6 +49,14 @@ typedef struct {
                        shared-object semantics. Implies is_cell (body reads and
                        writes go through *_cell_<name>), but the cell is the
                        caller's slot -- no heap cell is allocated on entry. */
+  int inline_alias; /* (params of a yielding method, codegen only) how many
+                       inline expansions currently in progress bind this
+                       parameter as an ALIAS of the caller's variable rather
+                       than a copy: is_cell is held at 1 for their duration so
+                       the body's reads and writes go through *_cell_<name>,
+                       which the expansion points at the caller's slot. A
+                       String the body appends to has to be the caller's, not
+                       a copy that goes stale on the first reallocation. */
   int init_guarded; /* (consts) initialized via `CONST = Class.new(...)`: reads
                        during the init raise NameError (uninitialized constant) */
   int rbs_seeded;   /* param type pinned from an --rbs advisory seed: the
