@@ -1133,7 +1133,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/proc_cell_capture_marked.rb \
                   test/gc_minor_byref_lent_slot.rb \
                   test/gc_minor_barrier_holders.rb \
-                  test/bound_method_fresh_receiver.rb
+                  test/bound_method_fresh_receiver.rb \
+                  test/thread_new_args_rooted_across_fiber_alloc.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every
@@ -1154,10 +1155,13 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	      echo "gc-minor-test: FAIL ($$bn: SPINEL_GC_MINOR=$$mode output mismatch)"; \
 	      diff -u "$$src.expected" "$$tmp/$$bn.$$mode" | head -10; ok=0; fi; \
 	  done; \
-	  SPINEL_GC_MINOR=1 SPINEL_GC_VERIFY_GEN=1 SPINEL_GC_STRESS=1 $(TIMEOUT60) "$$tmp/$$bn" > /dev/null 2> "$$tmp/$$bn.verify"; \
+	  SPINEL_GC_MINOR=1 SPINEL_GC_VERIFY_GEN=1 SPINEL_GC_STRESS=1 $(TIMEOUT60) "$$tmp/$$bn" > "$$tmp/$$bn.stress" 2> "$$tmp/$$bn.verify"; \
 	  if grep -q "generational check" "$$tmp/$$bn.verify"; then \
 	    echo "gc-minor-test: FAIL ($$bn: a holder the barrier did not record)"; \
 	    head -4 "$$tmp/$$bn.verify"; ok=0; fi; \
+	  if ! cmp -s "$$tmp/$$bn.stress" "$$src.expected"; then \
+	    echo "gc-minor-test: FAIL ($$bn: output differs under SPINEL_GC_STRESS)"; \
+	    diff -u "$$src.expected" "$$tmp/$$bn.stress" | head -10; ok=0; fi; \
 	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi

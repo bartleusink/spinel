@@ -8586,9 +8586,17 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
            first param on entry; it is handed to the scheduler as the thread arg. */
         /* __FILE__/__LINE__ resolve through the emitted #line directives to
            the Ruby creation site, which #inspect carries (#3126) */
-        buf_puts(b, "sp_Thread_spawn_fiber_at(");
+        /* The fiber and the argument are both allocations, and each is the
+           other's sibling argument: a root taken inside a statement expression
+           is popped at its closing brace, before the sibling is evaluated, so
+           the argument array of `Thread.new(lo, hi) { |a, b| }` sat unrooted
+           through the fiber's allocation and a collection there freed it --
+           the next Thread.new was handed the same array, and two threads ran
+           with one's arguments. Both go into temps rooted for the whole call. */
+        int tfb = ++g_tmp, targ = ++g_tmp;
+        buf_printf(b, "({ sp_Fiber *_t%d = ", tfb);
         emit_fiber_new(c, id, b, 0, -1);
-        buf_puts(b, ", ");
+        buf_printf(b, "; SP_GC_ROOT(_t%d); sp_RbVal _t%d = ", tfb, targ);
         /* a block with >1 param takes the args positionally: pack them into a
            poly array the fiber body binds element-by-element (#2976) */
         int tblk = nt_ref(nt, id, "block");
@@ -8606,6 +8614,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         }
         else if (argc >= 1) emit_boxed(c, argv[0], b);
         else buf_puts(b, "sp_box_nil()");
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_Thread_spawn_fiber_at(_t%d, _t%d", targ, tfb, targ);
         /* the Ruby creation site, straight from the node -- the C __FILE__
            macro would name the generated C under --no-line-map (#3126) */
         {
@@ -8613,7 +8622,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
           int bln = (int)nt_int(nt, id, "node_line", 0);
           buf_puts(b, ", \"");
           emit_c_escaped(b, bpath && *bpath ? bpath : "source.rb");
-          buf_printf(b, "\", %d)", bln);
+          buf_printf(b, "\", %d); })", bln);
         }
         return 1;
       }
