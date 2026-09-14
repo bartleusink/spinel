@@ -31,7 +31,9 @@
  * walk of thirty arenas.
  *
  * SPINEL_GC_SLAB=0 turns this off and every block is a malloc again, which
- * is the configuration ASAN wants: a slab hides a use-after-free from it. */
+ * is the configuration ASAN wants: a slab hides a use-after-free from it.
+ * With jemalloc as the process's malloc it is off by default (see
+ * sp_slab_jemalloc_present); SPINEL_GC_SLAB=1 turns it on there. */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -134,6 +136,22 @@ static void sp_slab_reserve(void) {
   sp_slab_on = 0;   /* no range at all: every block is a malloc */
 }
 
+/* Is jemalloc the process's malloc? Its thread caches already do what the
+   slab does, and measured beside them the slab is a loss (campfire's room
+   page 2,680 req/s with jemalloc alone against 2,470 with the slab on top:
+   the per-free atomics land on caches that were already free-list pops),
+   where on glibc it is a gain (2,140 against 1,940). So the slab defaults
+   off when jemalloc is present, and SPINEL_GC_SLAB=1 asks for it anyway.
+   Detection is jemalloc's own mallctl symbol, resolved by the dynamic linker
+   from a linked or preloaded jemalloc; nothing else defines it. */
+#if defined(__APPLE__)
+#include <dlfcn.h>
+static int sp_slab_jemalloc_present(void) { return dlsym(RTLD_DEFAULT, "mallctl") != NULL; }
+#else
+extern int mallctl(const char *, void *, size_t *, void *, size_t) __attribute__((weak));
+static int sp_slab_jemalloc_present(void) { return mallctl != NULL; }
+#endif
+
 static void sp_slab_init(void) {
   const char *e = getenv("SPINEL_GC_SLAB");
   int c = 0;
@@ -141,7 +159,8 @@ static void sp_slab_init(void) {
     while (c < SP_SLAB_NCLS - 1 && sp_slab_csize[c] < i * 16) c++;
     sp_slab_cls_of[i] = (uint8_t)c;
   }
-  sp_slab_on = !(e && *e == '0');
+  if (e && *e) sp_slab_on = (*e != '0');
+  else sp_slab_on = !sp_slab_jemalloc_present();
   if (sp_slab_on) sp_slab_reserve();
 }
 
