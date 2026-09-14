@@ -62,6 +62,29 @@ int an_poly_raw_argc(const char *name) {
 }
 
 TyKind an_face_kind(void) { return g_face_kind; }
+
+/* Per-tree memo for infer_type. The arms of infer_call_inner each re-ask the
+   receiver's type, and the receiver of a call is often a call itself: on a
+   left-leaning chain (`R0 | R1 | ... | R16`, the OR-of-flags idiom) every
+   level multiplied the levels below it and one statement took time
+   exponential in the chain's length (#4467). Within ONE top-level infer_type
+   tree the answer for a node cannot move -- the tables it is derived from
+   only change between trees -- so a generation stamped at each depth-0 entry
+   collapses the repeats to one compute per node, and the fixpoint's
+   re-inference across trees is untouched because every top-level call opens
+   a fresh generation.
+   The transient modes are the exception: a pinned face (g_face_node), the
+   builtin-only re-derivation (an_builtin_only), an instance_eval rebind
+   (an_ie_class_id) and a `then`-block param pin (g_infer_blv_pin) make the
+   SAME node answer differently for their duration, so while any is active
+   the memo is neither consulted nor fed. */
+static unsigned g_imemo_gen = 0;
+static unsigned *g_imemo_stamp = NULL;
+static TyKind *g_imemo_val = NULL;
+static int g_imemo_cap = 0;
+static int g_infer_depth = 0;
+static int g_infer_blv_pin = 0;
+
 #define SP_NMEMO_SZ 16384
 static unsigned g_narrow_gen = 1;
 static struct { unsigned gen; long key; signed char val; } g_nmemo[SP_NMEMO_SZ];
@@ -5855,7 +5878,9 @@ else {
       LocalVar *blv = (bs && bp0) ? scope_local(bs, bp0) : NULL;
       TyKind saved_blv = blv ? blv->type : TY_UNKNOWN;
       if (blv && rt != TY_UNKNOWN) blv->type = rt;
+      g_infer_blv_pin++;
       TyKind result = infer_type(c, bbb[bbn - 1]);
+      g_infer_blv_pin--;
       if (blv) blv->type = saved_blv;
       return result;
     }
@@ -6985,7 +7010,20 @@ TyKind infer_type(Compiler *c, int id) {
      duration, and the cache is left untouched so the receiver's own type is
      unaffected. */
   if (id == g_face_node) return g_face_kind;
+  /* A depth-0 entry opens a fresh memo generation: nothing carries over from
+     the previous tree, so the fixpoint sees every table change. */
+  if (g_infer_depth == 0 && ++g_imemo_gen == 0) {
+    if (g_imemo_stamp)
+      memset(g_imemo_stamp, 0, sizeof(unsigned) * (size_t)g_imemo_cap);
+    g_imemo_gen = 1;
+  }
+  int memo_ok = g_face_node < 0 && !an_builtin_only && an_ie_class_id < 0 &&
+                g_infer_blv_pin == 0;
+  if (memo_ok && id < g_imemo_cap && g_imemo_stamp[id] == g_imemo_gen)
+    return g_imemo_val[id];
+  g_infer_depth++;
   TyKind t = infer_uncached(c, id);
+  g_infer_depth--;
   /* The builtin-only re-derivation (see an_builtin_only) asks what this call
      would be if no user class owned the name. That answer is not the node's
      real type, and neither are the child types derived under it, so the cache
@@ -7015,6 +7053,20 @@ TyKind infer_type(Compiler *c, int id) {
     if (sn_op && sp_streq(sn_op, "&.") && sn_recv >= 0) t = TY_POLY;
   }
   if (!an_builtin_only) c->ntype[id] = t;
+  /* memo_ok still holds here: every mode section inside infer_uncached
+     restores its flag before returning, so t is the mode-free answer. */
+  if (memo_ok) {
+    if (id >= g_imemo_cap) {
+      int ncap = c->nt->count > id + 1 ? c->nt->count : id + 1;
+      g_imemo_stamp = realloc(g_imemo_stamp, sizeof(unsigned) * (size_t)ncap);
+      g_imemo_val = realloc(g_imemo_val, sizeof(TyKind) * (size_t)ncap);
+      memset(g_imemo_stamp + g_imemo_cap, 0,
+             sizeof(unsigned) * (size_t)(ncap - g_imemo_cap));
+      g_imemo_cap = ncap;
+    }
+    g_imemo_stamp[id] = g_imemo_gen;
+    g_imemo_val[id] = t;
+  }
   return t;
 }
 
