@@ -38,3 +38,15 @@ end
 pool = Pool.new
 3.times { |i| pool.post { i * 10 } }
 p pool.run
+
+# the parameter reassigned in the body: the procs of that iteration share
+# the reassignment (one cell per iteration), later iterations do not
+q = []
+3.times { |i| keep(q) { i }; i += 100; keep(q) { i } }
+p q.map { |pr| pr.call }
+t = []
+3.times { |i| keep(t) { i }; i = i + 100 }
+p t.map { |pr| pr.call }
+u = []
+2.times { |i| [1].each { |j| keep(u) { i }; i += 10 } }
+p u.map { |pr| pr.call }

@@ -4336,8 +4336,10 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
     }
     for (int i = 0; i < ncap; i++) {
       LocalVar *lv = encl ? scope_local(encl, caps.v[i]) : NULL;
-      if (!(g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i])))
-        emit_cell_shadow_store(c, encl, caps.v[i], g_pre, g_indent);
+      /* No shadow publish here: the cell was published at the binding, at
+         the top of the body, and the body may have REASSIGNED it since --
+         `keep { i }; i += 100; keep { i }` had the second fill copy the
+         loop's stale slot over the 100 the first proc was to see. */
       emit_indent(g_pre, g_indent);
       if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i]))
         buf_printf(g_pre, "_t%d->c_%s = ((%s *)_cap)->c_%s;\n", tc, caps.v[i], g_cap_struct, caps.v[i]);
@@ -5576,8 +5578,7 @@ else if (orecv >= 0 && onm) {
          cell arrived through that proc's own capture struct, and the nested
          proc has to forward it from there (#3416). */
       for (int i = 0; i < ncap; i++) {
-        if (!(g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i])))
-          emit_cell_shadow_store(c, bs, caps.v[i], g_pre, g_indent);
+        /* no shadow publish here either: see the fiber/thread fill above */
         emit_indent(g_pre, g_indent);
         if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i]))
           buf_printf(g_pre, "_capv_%d->c_%s = ((%s *)_cap)->c_%s;\n", pid, caps.v[i], g_cap_struct, caps.v[i]);

@@ -1122,9 +1122,15 @@ void mark_proc_captures(Compiler *c) {
          slice"), and this proc closes over it -- the enclosing proc's prologue
          materializes the cell (#2648). Only proc-fn enclosers: an inlined
          iterator block's params bind in the loop, where no cell exists yet. */
+      /* The binding-site walk below runs whether or not a write already
+         settled `owned`: a param of an INLINED iteration block that the body
+         also REASSIGNS is owned by the write, but the loop still binds it by
+         writing the plain C slot, so it needs the shadow slot all the same
+         (the cell alone left `lv_i` undeclared, and the C build failed). */
       int shadow = 0;
-      if (!owned) {
-        for (int q = 0; q < nt->count && !owned; q++) {
+      {
+        int owned_q = 0;
+        for (int q = 0; q < nt->count && !owned_q; q++) {
           if (q == id) continue;
           /* An INLINED iteration block binds its params in the loop, where the
              emitters write the plain C slot -- so celling one needs the slot
@@ -1156,8 +1162,9 @@ void mark_proc_captures(Compiler *c) {
           }
           if (!has) continue;
           int qb = a_proc_body(c, q);
-          if (qb >= 0 && a_subtree_contains(nt, qb, id, 0)) { owned = 1; shadow = !q_is_proc; }
+          if (qb >= 0 && a_subtree_contains(nt, qb, id, 0)) { owned_q = 1; shadow = !q_is_proc; }
         }
+        if (owned_q) owned = 1;
       }
       if (owned) {
         /* A fiber/generator now cells a captured heap object too (string /
