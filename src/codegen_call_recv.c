@@ -561,7 +561,18 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     }
     if (sp_streq(name, "[]=") && argc == 2) {
       int tv = ++g_tmp;
-      buf_printf(b, "({ %s *_t%d = ", ecn, tv); emit_expr(c, argv[1], b);
+      buf_printf(b, "({ %s *_t%d = ", ecn, tv);
+      /* A poly value carries its pointer under a tag, and the slot takes the
+         pointer, not the sp_RbVal -- the same unboxing the push arm below does
+         for the same reason (#4293). Without it `t[i] = f(x)`, where f's return
+         widened to poly, initialized a typed element pointer from an sp_RbVal
+         and the C did not compile. */
+      if (comp_ntype(c, argv[1]) == TY_POLY) {
+        buf_printf(b, "(%s *)sp_poly_obj_ptr(", ecn);
+        emit_expr(c, argv[1], b);
+        buf_puts(b, ")");
+      }
+      else emit_expr(c, argv[1], b);
       buf_puts(b, "; sp_PtrArray_set("); emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_int_expr(c, argv[0], b); buf_printf(b, ", _t%d); _t%d; })", tv, tv);
       return 1;
