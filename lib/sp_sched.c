@@ -164,6 +164,7 @@ static void sp_sweep_task(const sp_sw_task *t) {
     default: sp_str_sweep_young_one(t->wid, t->sub, &g_sy_keep[t->wid][t->sub], &g_sy_tail[t->wid][t->sub],
                                     &g_sy_moved[t->wid][t->sub], &g_sy_held[t->wid][t->sub]); break;
   }
+  sp_slab_free_flush();
   if (sp_gc_ph_on) {
     /* microseconds in an integer, so the max is one atomic */
     unsigned long d = (unsigned long)((sp_monotonic_now() - t0) * 1e6), m;
@@ -173,6 +174,12 @@ static void sp_sweep_task(const sp_sw_task *t) {
     while (!__atomic_compare_exchange_n(&g_sw_slot_max_us, &m, d, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
   }
 }
+static int g_cs_help = 0;           /* parked workers may claim the concurrent sweep's tasks */
+static int g_cs_ntasks = 0, g_cs_finished = 0;   /* the concurrent sweep's task list (below) */
+static int g_cs_unclaimed = 0;                   /* tasks nobody has taken yet */
+static void sp_cs_help_run(void);
+static void sp_cs_owner_run(int wid);
+static int g_cs_owner_env = -1;                  /* SPINEL_GC_OWNER=0: the sweeper threads take every list */
 /* Claim and run tasks until the list is exhausted. Off the scheduler lock. */
 static int sp_sweep_run_tasks(void) {
   int ran = 0;
@@ -393,9 +400,28 @@ static void sp_stw_park_locked(void) {
       pthread_cond_signal(&g_sweep_cv);
       continue;
     }
+    /* The previous concurrent sweep is not done and the collector asked for
+       hands: what the sweeper threads have not claimed yet is claimed here,
+       under the barrier, by everyone who is parked. */
+    if (g_cs_help && __atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) {
+      SCHED_UNLOCK();
+      sp_cs_help_run();
+      SCHED_LOCK();
+      continue;
+    }
     pthread_cond_wait(&g_stw_release, &g_sched_lock);
   }
   if (g_stw_epoch == my_epoch) g_nparked--;
+  /* Released: this worker's own young lists from the collection that just
+     ended are swept HERE, by their owner, before it runs any program. The
+     slots it frees are the ones it allocates from next, still in its own
+     cache from the walk; swept by another core they came back cold, and the
+     mutators measured slower than under the stop-the-world sweep. */
+  if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) {
+    SCHED_UNLOCK();
+    sp_cs_owner_run(sp_worker_id);
+    SCHED_LOCK();
+  }
 }
 #else
 #define SCHED_LOCK()    ((void)0)
@@ -460,10 +486,12 @@ static void sp_stw_collect_impl(int force) {
   g_stw_epoch++;     /* new epoch; a previous collection's stragglers won't be counted */
   g_nparked = 0;     /* this collection's park count starts fresh */
   SP_SAFEPOINT_SET(1);
+  double bt0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
   /* wake idle workers (and main waiting in its pump) so they park at the barrier
      rather than sit through the collection without publishing their roots. */
   sched_wake_all_workers();   /* reaches an ev_waiting main and workers too */
   while (g_nparked < sp_active_workers - 1) pthread_cond_wait(&g_stw_request, &g_sched_lock);
+  if (sp_gc_ph_on) sp_gc_ph_park += sp_monotonic_now() - bt0;
   /* Our own root fiber holds this worker's suspended context (the main thread's
      top-level locals if it triggered the collection while pumping a green
      thread). We do not park, so record it here for the mark like a parked worker
@@ -477,13 +505,19 @@ static void sp_stw_collect_impl(int force) {
   /* exclusive: every other worker is parked at a safepoint with roots published */
   g_collector_active = 1;
   sp_gc_collect_retune_all();   /* sweeps both heaps; marks parked fibers via sp_sched_globals_mark */
+  /* an explicit GC.start answers once everything unreachable is gone: the
+     concurrent sweep it started is finished here, still under the barrier */
+  if (force && sp_gc_conc_wait_hook) sp_gc_conc_wait_hook();
   g_collector_active = 0;
   SCHED_LOCK();
   g_n_parked_fiber = 0;
   g_stw_active = 0;
   sp_recompute_safepoint_flag();   /* keep the flag set if a preempt is still pending */
   pthread_cond_broadcast(&g_stw_release);
+  if (sp_gc_ph_on) sp_gc_ph_barrier += sp_monotonic_now() - bt0;
   SCHED_UNLOCK();
+  /* the collector's own young lists, like every released worker's */
+  if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sp_cs_owner_run(sp_worker_id);
 #else
   (void)force;
   sp_gc_collect_retune();
@@ -1084,6 +1118,296 @@ void sp_sched_init(void) {
    stopped and every other worker parked in sp_stw_park_locked. Waking them
    through g_stw_release is safe: their loop re-tests g_stw_active, so a
    wake that is not a release puts them back to sleep. */
+/* ---- The concurrent sweep ----
+   The mark runs under the barrier and the sweep does not. At the end of the
+   mark the collector detaches every worker's young lists (objects; the
+   SP_STR_YSUB string lists) and, on a full cycle, the old lists, replaces
+   them with empty ones, and makes the detached lists a task list; the world
+   resumes while it is swept. Who sweeps what: a worker's own young lists are
+   swept by that worker, right after it is released and before it runs any
+   program (sp_cs_owner_run), so the slots it frees are the ones it allocates
+   from next and are still in its own cache from the walk (swept by another
+   core they came back cold, and the mutators measured slower than under the
+   stop-the-world sweep); the old lists, whose slots nobody is about to
+   reuse, go to a small pool of sweeper threads. Whatever is unclaimed when
+   the next collection stops the world is finished there by everyone who is
+   parked (sp_sched_conc_wait, the first thing sp_gc_collect does), so the
+   apply that follows sees a complete sweep. What is applied under the
+   barrier is only what the mutators must not see half-done: the survivors
+   spliced onto the old lists and the string budget retune. The pooled dead
+   are pushed onto their pools by the sweep itself (see sp_gc_sweep_list);
+   done at the barrier they cost it more than the sweep had shed.
+
+   What makes the sweep safe beside the mutators: a mutator never reads a
+   GC list link; the mark promoted every survivor before the world resumed
+   (sp_gc_conc_promote), so the write barrier records stores into them and
+   the sweeper never writes the flag word the barrier writes; a dead object is
+   unreachable, so its finalizer races nothing; a string's mark byte is reset
+   with a compare-and-swap (a freeze can land on the same byte); freed slab
+   slots are pushed in per-chunk batches with a compare-and-swap that the
+   owner's pop also uses; and the length caches were cleared when the workers
+   parked, so no cache names a string the sweep frees. */
+#define CS_OBJ 0
+#define CS_OBJ_OLD 1
+#define CS_STR_YOUNG 2
+#define CS_STR_OLD 3
+#define CS_TASK_MAX (SP_MAX_WORKERS * (2 + SP_STR_YSUB) + 1)
+#define CS_SWEEPER_MAX 32
+static pthread_mutex_t g_cs_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_cs_go = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t  g_cs_done = PTHREAD_COND_INITIALIZER;
+static int      g_cs_nsweepers = 0;
+static unsigned g_cs_gen = 0;        /* bumped per sweep started; sweepers wait for a new one */
+static int      g_cs_pending = 0;    /* a sweep is in flight */
+static int      g_cs_full = 0, g_cs_str_sweep = 0, g_cs_str_major = 0;
+static sp_sw_task g_cs_tasks[CS_TASK_MAX];
+/* the detached lists (inputs) and the per-slot results */
+static sp_gc_hdr  *g_cs_obj[SP_MAX_WORKERS];
+static sp_gc_hdr  *g_cs_obj_old = NULL, *g_cs_obj_old_tail = NULL;
+static sp_str_hdr *g_cs_str_young[SP_MAX_WORKERS][SP_STR_YSUB];
+static sp_str_hdr *g_cs_str_old[SP_MAX_WORKERS];
+static sp_gc_hdr  *g_cs_pro_head[SP_MAX_WORKERS], *g_cs_pro_tail[SP_MAX_WORKERS];
+static sp_str_hdr *g_cs_sy_keep[SP_MAX_WORKERS][SP_STR_YSUB], *g_cs_sy_tail[SP_MAX_WORKERS][SP_STR_YSUB];
+static size_t      g_cs_sy_moved[SP_MAX_WORKERS][SP_STR_YSUB];
+static size_t      g_cs_so_freed[SP_MAX_WORKERS];
+static unsigned long g_cs_task_us = 0;   /* SPINEL_GC_PHASES: sweeper time, summed */
+static int      g_cs_hi = 1;         /* slots in use, plus the sweepers' own */
+#define CS_SWEEPER_WID (SP_MAX_WORKERS - 1)   /* a sweeper's worker id: its own slot, should a finalizer allocate */
+
+static double g_cs_t0 = 0;              /* SPINEL_GC_PHASES: when the sweep started */
+static unsigned long g_cs_task_max_us = 0;
+static void sp_cs_run_task(const sp_sw_task *t) {
+  size_t dummy = 0;
+  double t0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+  switch (t->kind) {
+    case CS_OBJ:
+      sp_gc_sweep_list(&g_cs_obj[t->wid], 1, &g_cs_pro_head[t->wid], &g_cs_pro_tail[t->wid], &dummy);
+      break;
+    case CS_OBJ_OLD:
+      sp_gc_sweep_old_list(&g_cs_obj_old, &dummy, &g_cs_obj_old_tail);
+      break;
+    case CS_STR_YOUNG: {
+      size_t held = 0;
+      sp_str_sweep_young_list(&g_cs_str_young[t->wid][t->sub], &g_cs_sy_keep[t->wid][t->sub],
+                              &g_cs_sy_tail[t->wid][t->sub], &g_cs_sy_moved[t->wid][t->sub], &held);
+      break; }
+    default:
+      g_cs_so_freed[t->wid] = sp_str_sweep_old_list(&g_cs_str_old[t->wid]);
+      break;
+  }
+  sp_slab_free_flush();
+  if (sp_gc_ph_on) {
+    unsigned long d = (unsigned long)((sp_monotonic_now() - t0) * 1e6), m;
+    do { m = __atomic_load_n(&g_cs_task_max_us, __ATOMIC_RELAXED); if (d <= m) break; }
+    while (!__atomic_compare_exchange_n(&g_cs_task_max_us, &m, d, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+  }
+}
+/* Who takes a task: a worker's own young lists (CS_OBJ, CS_STR_YOUNG of a
+   live slot) are the owner's, so the freed slots come back warm to the core
+   that allocates from them; the old lists and the sweepers' own slot are
+   the sweeper threads'; under the barrier anyone takes what is left. */
+static unsigned char g_cs_claimed[CS_TASK_MAX];
+static int sp_cs_task_is_owned(const sp_sw_task *t) {
+  return (t->kind == CS_OBJ || t->kind == CS_STR_YOUNG) && t->wid != CS_SWEEPER_WID;
+}
+#define CS_RUN_SWEEPER 0
+#define CS_RUN_OWNER   1
+#define CS_RUN_ANY     2
+static int sp_cs_run_tasks(int mode, int wid) {
+  int ran = 0;
+  double t0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+  for (int i = 0; i < g_cs_ntasks; i++) {
+    if (__atomic_load_n(&g_cs_claimed[i], __ATOMIC_RELAXED)) continue;
+    const sp_sw_task *t = &g_cs_tasks[i];
+    int owned = g_cs_owner_env && sp_cs_task_is_owned(t);
+    if (mode == CS_RUN_SWEEPER && owned) continue;
+    if (mode == CS_RUN_OWNER && (!owned || t->wid != wid)) continue;
+    unsigned char z = 0;
+    if (!__atomic_compare_exchange_n(&g_cs_claimed[i], &z, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) continue;
+    __atomic_fetch_sub(&g_cs_unclaimed, 1, __ATOMIC_RELAXED);
+    sp_cs_run_task(t);
+    ran++;
+  }
+  if (sp_gc_ph_on && ran) __atomic_fetch_add(&g_cs_task_us, (unsigned long)((sp_monotonic_now() - t0) * 1e6), __ATOMIC_RELAXED);
+  return ran;
+}
+static void sp_cs_finish(int ran) {
+  if (!ran) return;
+  pthread_mutex_lock(&g_cs_lock);
+  g_cs_finished += ran;
+  if (g_cs_finished >= g_cs_ntasks) {
+    if (sp_gc_ph_on) sp_gc_ph_conc_wall += sp_monotonic_now() - g_cs_t0;
+    pthread_cond_broadcast(&g_cs_done);
+  }
+  pthread_mutex_unlock(&g_cs_lock);
+}
+/* The owner's share, run by the released worker with the world running. */
+static void sp_cs_owner_run(int wid) {
+  int was = sp_gc_in_sweeper;
+  sp_gc_in_sweeper = 1;
+  int ran = sp_cs_run_tasks(CS_RUN_OWNER, wid);
+  sp_gc_in_sweeper = was;
+  sp_cs_finish(ran);
+}
+/* A parked worker (or the collector) finishing the sweep under the barrier:
+   it sweeps like a sweeper thread does, with the byte accounting off, since
+   the collector recounts the bytes the mark saw. */
+static void sp_cs_help_run(void) {
+  int was = sp_gc_in_sweeper;
+  sp_gc_in_sweeper = 1;
+  int ran = sp_cs_run_tasks(CS_RUN_ANY, -1);
+  sp_gc_in_sweeper = was;
+  sp_cs_finish(ran);
+}
+static void *sp_cs_sweeper_main(void *arg) {
+  (void)arg;
+  sigset_t blk; sigemptyset(&blk); sigaddset(&blk, g_preempt_sig);
+  pthread_sigmask(SIG_BLOCK, &blk, NULL);
+  sp_gc_in_sweeper = 1;
+  sp_worker_id = CS_SWEEPER_WID;
+#ifdef __linux__
+  pthread_setname_np(pthread_self(), "sp-sweeper");
+#endif
+  unsigned seen = 0;
+  for (;;) {
+    pthread_mutex_lock(&g_cs_lock);
+    while (g_cs_gen == seen && !g_shutdown) pthread_cond_wait(&g_cs_go, &g_cs_lock);
+    if (g_shutdown) { pthread_mutex_unlock(&g_cs_lock); break; }
+    seen = g_cs_gen;
+    pthread_mutex_unlock(&g_cs_lock);
+    sp_cs_finish(sp_cs_run_tasks(CS_RUN_SWEEPER, -1));
+  }
+  return NULL;
+}
+/* Under the barrier, at the end of the mark: detach and hand off. */
+static void sp_sched_conc_start(int full, int str_sweep, int str_major) {
+  int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS - 1) n = SP_MAX_WORKERS - 1;
+  if (n > g_cs_hi) g_cs_hi = n;
+  int nt = 0;
+  g_cs_full = full; g_cs_str_sweep = str_sweep; g_cs_str_major = str_major;
+  /* The collector's own length cache: every parked worker cleared its own at
+     the park; this thread did not park, and it may name strings the sweep
+     is about to free, whose addresses a later allocation reuses. */
+  sp_str_lcache_clear();
+  /* every slot ever used, plus the sweepers' own: a finalizer that
+     allocated would have pushed onto CS_SWEEPER_WID's lists */
+  int slots[SP_MAX_WORKERS]; int ns = 0;
+  for (int i = 0; i < g_cs_hi; i++) slots[ns++] = i;
+  slots[ns++] = CS_SWEEPER_WID;
+  for (int k = 0; k < ns; k++) {
+    int i = slots[k];
+    g_cs_pro_head[i] = g_cs_pro_tail[i] = NULL;
+    g_cs_obj[i] = sp_gc_wslot[i].young; sp_gc_wslot[i].young = NULL;
+    if (g_cs_obj[i]) g_cs_tasks[nt++] = (sp_sw_task){ CS_OBJ, (short)i, 0 };
+    if (str_sweep) {
+      g_cs_so_freed[i] = 0;
+      if (str_major) {
+        g_cs_str_old[i] = sp_str_wslot[i].old; sp_str_wslot[i].old = NULL;
+        if (g_cs_str_old[i]) g_cs_tasks[nt++] = (sp_sw_task){ CS_STR_OLD, (short)i, 0 };
+      }
+      for (int sub = 0; sub < SP_STR_YSUB; sub++) {
+        g_cs_sy_keep[i][sub] = g_cs_sy_tail[i][sub] = NULL; g_cs_sy_moved[i][sub] = 0;
+        g_cs_str_young[i][sub] = sp_str_wslot[i].young[sub]; sp_str_wslot[i].young[sub] = NULL;
+        if (g_cs_str_young[i][sub]) g_cs_tasks[nt++] = (sp_sw_task){ CS_STR_YOUNG, (short)i, (short)sub };
+      }
+      /* the young generation left with its lists; the trigger counts what
+         the slot holds from here */
+      SP_GC_CTR_SET(sp_str_wslot[i].young_bytes, 0);
+      sp_str_wslot[i].ask_at = 0;
+    }
+  }
+  if (full) {
+    g_cs_obj_old = sp_gc_old_detach();
+    if (g_cs_obj_old) g_cs_tasks[nt++] = (sp_sw_task){ CS_OBJ_OLD, 0, 0 };
+  }
+  pthread_mutex_lock(&g_cs_lock);
+  if (sp_gc_ph_on) g_cs_t0 = sp_monotonic_now();
+  g_cs_ntasks = nt; g_cs_finished = 0;
+  memset(g_cs_claimed, 0, (size_t)nt);
+  __atomic_store_n(&g_cs_unclaimed, nt, __ATOMIC_RELEASE);
+  g_cs_pending = 1;
+  g_cs_gen++;
+  pthread_cond_broadcast(&g_cs_go);
+  pthread_mutex_unlock(&g_cs_lock);
+}
+/* Under the barrier, at the start of the next collection (or the end of an
+   explicit one): join the sweepers and apply what they produced. */
+static void sp_sched_conc_wait(void) {
+  if (!g_cs_pending) return;
+  if (__atomic_load_n(&g_cs_finished, __ATOMIC_ACQUIRE) < g_cs_ntasks) {
+    /* Not done yet: the world is stopped, so every parked worker is idle.
+       Hand them the unclaimed tasks (thirty hands finish in a fraction of
+       what eight sweepers need), take some ourselves, then join. */
+    double t0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+    SCHED_LOCK();
+    g_cs_help = 1;
+    pthread_cond_broadcast(&g_stw_release);
+    SCHED_UNLOCK();
+    sp_cs_help_run();
+    pthread_mutex_lock(&g_cs_lock);
+    while (g_cs_finished < g_cs_ntasks) pthread_cond_wait(&g_cs_done, &g_cs_lock);
+    pthread_mutex_unlock(&g_cs_lock);
+    SCHED_LOCK();
+    g_cs_help = 0;
+    SCHED_UNLOCK();
+    if (sp_gc_ph_on) { sp_gc_ph_conc_wait += sp_monotonic_now() - t0; sp_gc_ph_conc_waits++; }
+  }
+  if (sp_gc_ph_on) { sp_gc_ph_task_sum += (double)g_cs_task_us * 1e-6; g_cs_task_us = 0;
+                     sp_gc_ph_slot_max += (double)g_cs_task_max_us * 1e-6; g_cs_task_max_us = 0; }
+  double at0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+  /* the swept old list comes back first, then the survivors go in front of it */
+  if (g_cs_full) { sp_gc_old_attach(g_cs_obj_old, g_cs_obj_old_tail); g_cs_obj_old = g_cs_obj_old_tail = NULL; }
+  int slots[SP_MAX_WORKERS]; int ns = 0;
+  for (int i = 0; i < g_cs_hi; i++) slots[ns++] = i;
+  slots[ns++] = CS_SWEEPER_WID;
+  for (int k = 0; k < ns; k++) {
+    int i = slots[k];
+    /* bytes: the mark counted them into the old total already */
+    sp_gc_promote_slot(g_cs_pro_head[i], g_cs_pro_tail[i], 0);
+    g_cs_pro_head[i] = g_cs_pro_tail[i] = NULL;
+  }
+  if (sp_gc_ph_on) { double t = sp_monotonic_now(); sp_gc_ph_apply_obj += t - at0; at0 = t; }
+  if (g_cs_str_sweep) {
+    size_t promoted = 0;
+    size_t young_now = sp_str_bytes_total();
+    for (int k = 0; k < ns; k++) {
+      int i = slots[k];
+      if (g_cs_str_major) {
+        /* the old list was detached whole; what the sweep left of it is
+           the old list again, and the young survivors go in front */
+        sp_str_wslot[i].old = g_cs_str_old[i]; g_cs_str_old[i] = NULL;
+        sp_str_wslot[i].old_bytes = sp_str_wslot[i].old_bytes > g_cs_so_freed[i] ? sp_str_wslot[i].old_bytes - g_cs_so_freed[i] : 0;
+      }
+      for (int sub = 0; sub < SP_STR_YSUB; sub++)
+        sp_str_sweep_young_done(i, g_cs_sy_keep[i][sub], g_cs_sy_tail[i][sub], g_cs_sy_moved[i][sub], 0, &promoted);
+    }
+    sp_str_sweep_end_excluding(g_cs_str_major, promoted, young_now);
+  }
+  if (sp_gc_ph_on) { double t = sp_monotonic_now(); sp_gc_ph_apply_str += t - at0; at0 = t; }
+  if (g_cs_full) sp_slab_release();
+  if (sp_gc_ph_on) sp_gc_ph_apply_release += sp_monotonic_now() - at0;
+  g_cs_pending = 0;
+}
+static void sp_cs_start_sweepers(void) {
+  { const char *o = getenv("SPINEL_GC_OWNER"); g_cs_owner_env = !(o && *o == '0'); }
+  const char *e = getenv("SPINEL_GC_SWEEPERS");
+  int want = e && *e ? atoi(e) : 0;
+  if (want <= 0) { want = g_worker_cap > 0 ? g_worker_cap : 1; if (want > 8) want = 8; }
+  if (want > CS_SWEEPER_MAX) want = CS_SWEEPER_MAX;
+  pthread_attr_t at; pthread_attr_init(&at);
+  pthread_attr_setstacksize(&at, 1024 * 1024);
+  pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+  for (int i = 0; i < want; i++) {
+    pthread_t t;
+    if (pthread_create(&t, &at, sp_cs_sweeper_main, NULL) == 0) g_cs_nsweepers++;
+  }
+  pthread_attr_destroy(&at);
+  if (g_cs_nsweepers > 0) {
+    sp_gc_conc_sweep_hook = sp_sched_conc_start;
+    sp_gc_conc_wait_hook = sp_sched_conc_wait;
+  }
+}
+
 static int    g_sw_hi = 1;   /* largest pool seen; bounds the per-collection loops */
 static void sp_sched_par_sweep(void) {
   int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS) n = SP_MAX_WORKERS;
@@ -1205,6 +1529,7 @@ static void sp_sched_ensure_workers(void) {
      the serial sweep whenever there is nobody parked to help. */
   sp_gc_par_sweep_hook = sp_sched_par_sweep;
   sp_trim_thread_start();
+  sp_cs_start_sweepers();
 }
 #endif
 
@@ -2141,7 +2466,8 @@ static void sp_sched_start_workers(void) {
      themselves are spawned on demand (sp_sched_maybe_grow), not here -- main
      stays worker 0 and starts as the only participant (sp_active_workers 1). */
   g_worker_cap = sp_worker_count();
-  if (g_worker_cap > SP_MAX_WORKERS - 1) g_worker_cap = SP_MAX_WORKERS - 1;
+  /* main is worker 0 and the last slot belongs to the sweeper threads */
+  if (g_worker_cap > SP_MAX_WORKERS - 2) g_worker_cap = SP_MAX_WORKERS - 2;
   /* Install the preemption signal handler before any worker can be targeted.
      SA_RESTART so an in-flight library syscall resumes rather than failing with
      EINTR -- the yield itself is cooperative (at the next safepoint poll), the

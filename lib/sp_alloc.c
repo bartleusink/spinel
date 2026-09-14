@@ -33,7 +33,7 @@
 sp_str_wslot_t sp_str_wslot[SP_MAX_WORKERS];     /* zero-init: NULL lists, 0 bytes */
 /* Aggregate live string bytes across every worker's list. Called only off the
    fast path (collection trigger uses the per-worker slice; sweep/retune here). */
-static size_t sp_str_bytes_total(void) {
+size_t sp_str_bytes_total(void) {
   size_t s = 0;
   int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS) n = SP_MAX_WORKERS;
   for (int i = 0; i < n; i++) s += SP_GC_CTR_GET(sp_str_wslot[i].young_bytes);
@@ -396,6 +396,15 @@ static void sp_gc_stats_emit(void) {
           sp_gc_ph_task_sum, sp_gc_ph_task_obj, sp_gc_ph_task_sold, sp_gc_ph_task_syoung,
           sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim,
           sp_gc_stat_seconds);
+  if (sp_gc_ph_barrier > 0)
+    fprintf(stderr, "[gcph] barrier: %.3fs from stop to release, of which %.3fs waiting for the workers to park\n",
+            sp_gc_ph_barrier, sp_gc_ph_park);
+  if (sp_gc_ph_conc_wall > 0)
+    fprintf(stderr, "[gcph] concurrent sweep: %.3fs wall beside the program (longest task %.3fs); %llu collections waited %.3fs for the previous sweep (not in the total above)\n",
+            sp_gc_ph_conc_wall, sp_gc_ph_slot_max, sp_gc_ph_conc_waits, sp_gc_ph_conc_wait);
+  if (sp_gc_ph_conc_wall > 0)
+    fprintf(stderr, "[gcph] concurrent sweep, applied under the barrier: objects %.3fs  strings %.3fs  slab release %.3fs\n",
+            sp_gc_ph_apply_obj, sp_gc_ph_apply_str, sp_gc_ph_apply_release);
   /* The mark, one level down, because "mark grew" has two causes that want
      different answers: more ROOTS to scan and more GRAPH to trace. `fibers` is
      every live fiber's saved roots, walked serially, and it grows with the
@@ -518,11 +527,17 @@ void sp_gc_retune_object(size_t before) {
    geometrically for long-lived strings. The single-threaded build works in
    absolute bytes (N == 1). */
 static size_t sp_str_gate_old = 0;   /* the old total at the gate, for `before` */
+/* Young bytes to leave out of the retune's "after": the concurrent sweep
+   retunes at the next barrier, by which time the young lists hold a cycle of
+   new allocation that the swept generation never contained. */
+static size_t sp_str_retune_young_exclude = 0;
 static void sp_str_retune(size_t before, size_t promoted) {
   if (sp_gc_stress_pin || sp_gc_str_budget_fixed) { sp_str_threshold = sp_str_threshold_init; return; }
 #ifdef SP_THREADS
   int nw = sp_active_workers; if (nw < 1) nw = 1;
-  size_t after = (sp_str_bytes_total() + sp_str_old_total()) / (size_t)nw;
+  size_t yb = sp_str_bytes_total();
+  yb = yb > sp_str_retune_young_exclude ? yb - sp_str_retune_young_exclude : 0;
+  size_t after = (yb + sp_str_old_total()) / (size_t)nw;
   before = (before + sp_str_gate_old) / (size_t)nw;
   (void)promoted;   /* already inside old_total by the time we run */
 #else
@@ -671,7 +686,10 @@ static void sp_str_sweep_young(sp_str_hdr **head, sp_str_hdr **keep_head, sp_str
     unsigned char m = (unsigned char)body[0];
     held += h->size & SP_STR_SIZE_MASK;
     if (m == 0xfc || m == 0xf1) {
-      if (m == 0xfc) body[0] = (char)0xfe;
+      /* Beside the mutators (a sweeper thread) the reset is a compare-and-
+         swap: a `freeze` that lands on the same byte in the same moment wins,
+         where a plain store could put its 0xfe over the 0xf1. */
+      if (m == 0xfc) { if (sp_gc_in_sweeper) { unsigned char ex = 0xfc; __atomic_compare_exchange_n((unsigned char *)body, &ex, (unsigned char)0xfe, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); } else body[0] = (char)0xfe; }
       h->next = keep;
       if (!keep) tail = h;
       keep = h;
@@ -768,7 +786,7 @@ static void sp_str_sweep_old(sp_str_hdr **head, size_t *bytes) {
     __builtin_prefetch(h->next);
     char *body = (char *)(h + 1);
     unsigned char m = (unsigned char)body[0];
-    if (m == 0xfc) { body[0] = (char)0xfe; pp = &h->next; }
+    if (m == 0xfc) { if (sp_gc_in_sweeper) { unsigned char ex = 0xfc; __atomic_compare_exchange_n((unsigned char *)body, &ex, (unsigned char)0xfe, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); } else body[0] = (char)0xfe; pp = &h->next; }
     else if (m == 0xf1) { pp = &h->next; }
     else {
       *pp = h->next;
@@ -905,6 +923,11 @@ int sp_str_sweep_begin(int *major) {
   }
   return 1;
 }
+void sp_str_sweep_end_excluding(int major, size_t promoted, size_t young_exclude) {
+  sp_str_retune_young_exclude = young_exclude;
+  sp_str_sweep_end(major, promoted);
+  sp_str_retune_young_exclude = 0;
+}
 void sp_str_sweep_end(int major, size_t promoted) {
   if (major) {
     sp_gc_str_majors++;
@@ -961,6 +984,19 @@ void sp_str_sweep_end(int major, size_t promoted) {
    the slow path in glibc and in every other thread-caching allocator. Each
    worker also clears its own length cache, whose entries are keyed by the
    addresses this sweep is about to recycle. */
+/* The list forms, for the concurrent driver (sp_sched.c): the lists were
+   detached from their slots under the barrier, so they arrive as plain
+   pointers, and the old sweep answers the bytes it freed for the slot's
+   counter to take at the next barrier. */
+void sp_str_sweep_young_list(sp_str_hdr **head, sp_str_hdr **keep, sp_str_hdr **tail, size_t *moved, size_t *held) {
+  sp_str_sweep_young(head, keep, tail, moved, held);
+}
+size_t sp_str_sweep_old_list(sp_str_hdr **head) {
+  size_t bytes = (size_t)-1 / 2;   /* a counter the sweep decrements; the difference is what it freed */
+  size_t start = bytes;
+  sp_str_sweep_old(head, &bytes);
+  return start - bytes;
+}
 /* The sweep tasks of one slot, for the parallel driver (sp_sched.c): the old
    list on a major, and each young list into local results that
    sp_str_sweep_young_done splices in once every task of the slot is over. */

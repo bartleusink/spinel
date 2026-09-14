@@ -130,6 +130,8 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_OBJ_BUDGET` | the default GATES the widening on what the last collection cost. `obj` pins it off (the object heap alone, as spinel did before 2026-09-09), `walk` pins it on (everything a mark walks). `fixed` is a separate axis: it stops re-aiming the budget after each collection and holds it at its floor |
 | `SPINEL_GC_STR_BUDGET` | `fixed` does the same for the STRING budget |
 | `SPINEL_GC_SLAB` | `0` turns the slab allocator off: every object and heap string is then its own malloc, which is what ASAN needs to see a use-after-free (the slab hides one). On by default with glibc's malloc, where it is worth 10% on a server; off by default when jemalloc is the process's malloc (linked or preloaded), whose thread caches already do the slab's work and beside which it measured 8% slower. `1` turns it on regardless |
+| `SPINEL_GC_CONC` | `0` sweeps under the stop-the-world barrier instead of beside the program, which is also what the verifiers (`SPINEL_GC_VERIFY`, `SPINEL_GC_VERIFY_GEN`) and aging (`SPINEL_GC_AGE`) do on their own, since they read the heap the sweep is rewriting |
+| `SPINEL_GC_SWEEPERS` | how many sweeper threads sweep the old lists (default the worker count, at most 8). `SPINEL_GC_OWNER=0` hands them the young lists too, instead of each worker sweeping its own |
 | `SPINEL_GC_TRIM_SEC` | how often the container buffers glibc still holds are given back to the OS with `malloc_trim` (default 1, `0` never). A trim walks every arena, tens of milliseconds on a many-core box; it runs on its own thread beside the program, but a worker that allocates from the arena being walked waits for it, so a longer interval buys latency for memory: on a 32-core server `10` took the room page's p99 from 122 to 102 ms and its RSS from 950 MB to 1.4 GB |
 | `SPINEL_GC_STR_MAJOR_KB` | the string OLD generation's own gate: how much old string it takes to make the next string sweep a MAJOR (default 1024). Only a major reclaims an old string |
 | `SPINEL_GC_STR_MAJOR` | the major's policy. By default it runs on a SCHEDULE (a major every N string sweeps, N adapted from the survival ratio) with the size test demoted to a backstop, which is how the object heap has always run its full collection. `size` restores the gate that shipped before it -- a size test re-aimed to twice what the last major left. `fixed` pins both the cadence and the backstop where the floor put them |
@@ -241,8 +243,17 @@ of the multi-worker penalty. On one allocation-bound benchmark that took
 eight workers from 1.7x **slower** than a single worker to roughly par.
 
 CPU-bound threads scale nearly linearly (measured 8.25x on eight
-workers). Allocation-bound ones scale too, though not as steeply: the
-object sweep runs on the parked workers, each freeing what it allocated,
-which took eight workers from 0.36s to 0.13s on one benchmark. The string
-sweep is still serial and is what now bounds that shape; raising
-`SPINEL_GC_THRESHOLD_KB` is the other lever available today.
+workers). Allocation-bound ones scale too, though not as steeply.
+
+The sweep does not stop the world. Once the mark is done the collector
+detaches every worker's young lists (and, on a full cycle, the old ones),
+replaces them with empty lists, and resumes the program. Each worker then
+sweeps its own young lists before it runs any program, so the memory it
+frees is the memory it allocates from next, still warm in its cache; the
+old lists go to a pool of sweeper threads that run beside the program.
+What the sweep produces that the program must not see mid-way (the
+survivors, the budget for the next cycle) is applied at the next stop;
+an explicit `GC.start` waits for the sweep before it returns. The pause
+is the mark alone. On a 32-core box running a Rails-shaped server the
+stop-the-world sweep was 30% of the wall clock; without it the same
+server answers 9-17% more requests a second with a p99 25-50% lower.

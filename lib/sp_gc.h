@@ -74,6 +74,7 @@ typedef struct { int tag; int cls_id; union { sp_int i; const char *s; sp_float 
    switch. Plain globals in the single-threaded build. */
 extern SP_TLS void **sp_gc_roots[SP_GC_STACK_MAX];
 extern SP_TLS int sp_gc_nroots;
+extern SP_TLS int sp_gc_in_sweeper;   /* set on a sweeper thread: finalizers skip the per-worker byte accounting */
 
 /* GC root tracking. SP_GC_ROOT registers a stack-resident root with a
    cleanup-attribute sentinel so it auto-pops when its declaring scope ends.
@@ -280,12 +281,14 @@ extern void (*sp_gc_mark_suspended_fibers_hook)(void);
 #ifdef SP_THREADS
 #define SP_GC_FLUSH_QUANTUM (16u * 1024u)
 static inline void sp_gc_bytes_add(size_t n) {
+  if (sp_gc_in_sweeper) return;   /* a finalizer on a sweeper thread: the mark already counted the live total */
   size_t *d = &sp_gc_wslot[sp_worker_id].flush_delta;
   size_t v = *d + n;
   if (v >= SP_GC_FLUSH_QUANTUM) { SP_GC_CTR_ADD(sp_gc_bytes, v); *d = 0; }
   else *d = v;
 }
 static inline void sp_gc_bytes_sub(size_t n) {
+  if (sp_gc_in_sweeper) return;
   size_t *d = &sp_gc_wslot[sp_worker_id].flush_delta;
   if (*d >= n) { *d -= n; }
   else { size_t rem = n - *d; *d = 0; SP_GC_CTR_SUB(sp_gc_bytes, rem); }
@@ -341,6 +344,7 @@ static inline void sp_gc_bytes_sub(size_t n) {
 void *sp_slab_alloc(size_t need);
 void *sp_slab_alloc_raw(size_t need);
 void  sp_slab_free(void *p);
+void  sp_slab_free_flush(void);   /* end of a sweep task: publish this thread's batched frees */
 void  sp_slab_release(void);
 extern int sp_slab_on;
 
@@ -381,6 +385,7 @@ extern double sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
    the parked workers would address (#4384). */
 extern double sp_gc_ph_slot_max;   /* longest single sweep task, summed (sp_sched.c) */
 extern double sp_gc_ph_task_sum, sp_gc_ph_task_obj, sp_gc_ph_task_sold, sp_gc_ph_task_syoung;   /* all tasks' time, by kind */
+extern double sp_gc_ph_conc_wait, sp_gc_ph_conc_wall, sp_gc_ph_barrier, sp_gc_ph_park, sp_gc_ph_apply_obj, sp_gc_ph_apply_str, sp_gc_ph_apply_release; extern unsigned long long sp_gc_ph_conc_waits;
 extern double sp_gc_ph_mk_roots, sp_gc_ph_mk_fibers,
               sp_gc_ph_mk_globals, sp_gc_ph_mk_scan;
 extern int sp_gc_ph_on;
@@ -389,7 +394,17 @@ void sp_gc_collect(void);
 /* Sweep one worker's young list on that worker (see sp_gc.c). Survivors come
    back as a local list for the collector to splice into the old heap. */
 void sp_gc_sweep_slot(int wid, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_t *out_bytes);
+void sp_gc_sweep_list(sp_gc_hdr **pp, int conc, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_t *out_bytes);
+void sp_gc_sweep_old_list(sp_gc_hdr **pp, size_t *out_live, sp_gc_hdr **out_tail);
 extern void (*sp_gc_par_sweep_hook)(void);
+/* The concurrent sweep (see sp_gc.c): the driver installs both or neither. */
+extern void (*sp_gc_conc_sweep_hook)(int full, int str_sweep, int str_major);
+extern void (*sp_gc_conc_wait_hook)(void);
+extern int sp_gc_conc_on;
+/* The old object list, for the driver: detach it whole for a full cycle's
+   sweep, attach a list (survivors, or the swept remainder) back. */
+sp_gc_hdr *sp_gc_old_detach(void);
+void sp_gc_old_attach(sp_gc_hdr *head, sp_gc_hdr *tail);
 /* Splice one worker's survivors onto the shared old heap. Collector-only. */
 void sp_gc_promote_slot(sp_gc_hdr *head, sp_gc_hdr *tail, size_t bytes);
 #endif

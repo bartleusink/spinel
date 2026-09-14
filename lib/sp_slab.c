@@ -190,18 +190,57 @@ static int sp_slab_next_arena(void) {
   return 1;
 }
 
+/* Pop a freed slot off a chunk. The owner is the only popper, so the
+   compare-and-swap has no ABA case to lose to; what it races is a sweeper
+   pushing beside the running program (the concurrent sweep, sp_sched.c),
+   whose push is the same exchange. Single-threaded, the plain pop. */
+static inline void *sp_slab_pop(sp_slab_chunk *ch) {
+#ifdef SP_THREADS
+  void *p = __atomic_load_n(&ch->free, __ATOMIC_ACQUIRE);
+  while (p) {
+    void *nx = *(void **)p;
+    if (__atomic_compare_exchange_n(&ch->free, &p, nx, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
+  }
+  return p;
+#else
+  void *p = ch->free;
+  if (p) ch->free = *(void **)p;
+  return p;
+#endif
+}
+
 /* The slow path: the worker's current chunk for this class has no slot. NULL
    when the reservation is exhausted, and the caller mallocs. */
 static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, size_t csize) {
-  sp_slab_chunk *ch = wk->avail[cls];
-  if (ch) {
-    /* The list is pushed only under stop-the-world and popped only by its
-       owner outside it, so a plain pop is race-free. */
-    wk->avail[cls] = ch->next_avail;
+  sp_slab_chunk *ch;
+  void *p = NULL;
+  for (;;) {
+#ifdef SP_THREADS
+    /* pushed by a sweeper beside the running program (a compare-and-swap),
+       popped only by the owner: the same exchange, with no ABA to lose to */
+    ch = __atomic_load_n(&wk->avail[cls], __ATOMIC_ACQUIRE);
+    while (ch) {
+      sp_slab_chunk *nx = ch->next_avail;
+      if (__atomic_compare_exchange_n(&wk->avail[cls], &ch, nx, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
+    }
+#else
+    ch = wk->avail[cls];
+    if (ch) wk->avail[cls] = ch->next_avail;
+#endif
+    if (!ch) break;
     ch->next_avail = NULL;
-    ch->on_avail = 0;
+    __atomic_store_n(&ch->on_avail, 0, __ATOMIC_RELEASE);
+    /* A sweeper decides "not the current chunk" from a read that races with
+       this function installing exactly that chunk, so the chunk we are
+       allocating from can land on the list too. It has already been used up
+       from the front by then: take a slot if one is left, else drop it and
+       move on. Bumping past `end` here handed out the neighbouring chunk's
+       memory. */
+    p = sp_slab_pop(ch);
+    if (!p && ch->bump < ch->end) { p = ch->bump; ch->bump += csize; }
+    if (p) break;
   }
-  else {
+  if (!ch) {
     SP_SLAB_LOCK();
     if (!sp_slab_empty && !sp_slab_next_arena()) { SP_SLAB_UNLOCK(); return NULL; }
     ch = sp_slab_empty;
@@ -218,13 +257,11 @@ static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, size_t csiz
     ch->wid = (uint16_t)(wk - sp_slab_wk);
     ch->on_avail = 0;
     ch->in_use = 1;
+    p = ch->bump; ch->bump += csize;
   }
-  wk->cur[cls] = ch;
+  __atomic_store_n(&wk->cur[cls], ch, __ATOMIC_RELEASE);
   wk->taken++;
-  void *p = ch->free;
-  if (p) ch->free = *(void **)p;
-  else { p = ch->bump; ch->bump += csize; }
-  ch->nfree--;
+  __atomic_fetch_sub(&ch->nfree, 1, __ATOMIC_RELAXED);
   ch->touched = 1;
   return p;
 }
@@ -237,8 +274,8 @@ void *sp_slab_alloc_raw(size_t need) {
     sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
     sp_slab_chunk *ch = wk->cur[cls];
     void *p;
-    if (ch && (p = ch->free) != NULL) { ch->free = *(void **)p; ch->nfree--; return p; }
-    if (ch && ch->bump < ch->end) { p = ch->bump; ch->bump += csize; ch->nfree--; ch->touched = 1; return p; }
+    if (ch && (p = sp_slab_pop(ch)) != NULL) { __atomic_fetch_sub(&ch->nfree, 1, __ATOMIC_RELAXED); return p; }
+    if (ch && ch->bump < ch->end) { p = ch->bump; ch->bump += csize; __atomic_fetch_sub(&ch->nfree, 1, __ATOMIC_RELAXED); ch->touched = 1; return p; }
     p = sp_slab_refill(wk, cls, csize);
     if (p) return p;
   }
@@ -253,19 +290,35 @@ void *sp_slab_alloc(size_t need) {
   return p;
 }
 
-/* Only from a sweep: every mutator is parked, so the only concurrency is
-   between sweeping workers freeing into the same chunk. */
-void sp_slab_free(void *p) {
-  if (!sp_slab_owns(p)) { free(p); return; }
-  sp_slab_chunk *ch = sp_slab_chunk_of(p);
+/* Only from a sweep. Under the stop-the-world sweep the only concurrency is
+   between sweeping workers freeing into the same chunk; under the concurrent
+   sweep the chunk's owner is running and allocating from it at the same time,
+   which is why the free list, the chunk's presence on the available list and
+   the owner's current chunk are all exchanged atomically. */
+/* Frees are batched per chunk: a sweep walks its list in allocation order,
+   which is bump order within a chunk, so runs of dead slots from one chunk
+   are long, and the run goes onto the chunk's free list with ONE exchange.
+   The exchange lands on the line the owner pops from; under the concurrent
+   sweep the owner is allocating from that very chunk, and an exchange per
+   slot had the line bouncing between the two cores on every allocation
+   (the mutators measured 30% slower while a sweep ran). */
+static SP_TLS struct { sp_slab_chunk *ch; void *head, *tail; uint32_t n; } sp_slab_fb;
+
+void sp_slab_free_flush(void) {
+  sp_slab_chunk *ch = sp_slab_fb.ch;
+  if (!ch) return;
+  sp_slab_fb.ch = NULL;
 #ifdef SP_THREADS
   void *old;
-  do { old = __atomic_load_n(&ch->free, __ATOMIC_ACQUIRE); *(void **)p = old;
-  } while (!__atomic_compare_exchange_n(&ch->free, &old, p, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
-  __atomic_fetch_add(&ch->nfree, 1, __ATOMIC_RELAXED);
+  do { old = __atomic_load_n(&ch->free, __ATOMIC_ACQUIRE); *(void **)sp_slab_fb.tail = old;
+  } while (!__atomic_compare_exchange_n(&ch->free, &old, sp_slab_fb.head, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+  __atomic_fetch_add(&ch->nfree, sp_slab_fb.n, __ATOMIC_RELAXED);
   /* A chunk its owner dropped as full comes back onto the available list on
-     its first free. The owner is parked, so its current chunk is stable. */
-  if (!__atomic_load_n(&ch->on_avail, __ATOMIC_RELAXED) && sp_slab_wk[ch->wid].cur[ch->cls] != ch) {
+     its first free. The owner's current chunk is read racily: when it is
+     mid-refill the chunk it is installing can be pushed here too, and refill
+     drops it again when it finds it empty. */
+  if (!__atomic_load_n(&ch->on_avail, __ATOMIC_RELAXED) &&
+      __atomic_load_n(&sp_slab_wk[ch->wid].cur[ch->cls], __ATOMIC_RELAXED) != ch) {
     unsigned char was = __atomic_exchange_n(&ch->on_avail, 1, __ATOMIC_ACQ_REL);
     if (!was) {
       sp_slab_chunk **head = &sp_slab_wk[ch->wid].avail[ch->cls];
@@ -275,13 +328,24 @@ void sp_slab_free(void *p) {
     }
   }
 #else
-  *(void **)p = ch->free; ch->free = p; ch->nfree++;
+  *(void **)sp_slab_fb.tail = ch->free; ch->free = sp_slab_fb.head; ch->nfree += sp_slab_fb.n;
   if (!ch->on_avail && sp_slab_wk[0].cur[ch->cls] != ch) {
     ch->on_avail = 1;
     ch->next_avail = sp_slab_wk[0].avail[ch->cls];
     sp_slab_wk[0].avail[ch->cls] = ch;
   }
 #endif
+}
+
+void sp_slab_free(void *p) {
+  if (!sp_slab_owns(p)) { free(p); return; }
+  sp_slab_chunk *ch = sp_slab_chunk_of(p);
+  if (ch != sp_slab_fb.ch) {
+    sp_slab_free_flush();
+    sp_slab_fb.ch = ch; sp_slab_fb.head = sp_slab_fb.tail = p; sp_slab_fb.n = 1;
+    return;
+  }
+  *(void **)p = sp_slab_fb.head; sp_slab_fb.head = p; sp_slab_fb.n++;
 }
 
 /* End of a full cycle, stop-the-world, one thread: give the OS every chunk
@@ -325,6 +389,7 @@ static sp_slab_chunk *sp_slab_sort_avail(sp_slab_chunk *head) {
 }
 
 void sp_slab_release(void) {
+  sp_slab_free_flush();
   if (sp_slab_on <= 0) return;
   /* SPINEL_GC_PHASES: the slab's footprint every 64th release -- chunks in
      use, of which fully free (the reserve), and the bytes their live slots

@@ -198,8 +198,12 @@ void sp_str_sweep(void);
    workers that own the slots (see sp_alloc.c). */
 int  sp_str_sweep_begin(int *major);
 void sp_str_sweep_end(int major, size_t promoted);
+void sp_str_sweep_end_excluding(int major, size_t promoted, size_t young_exclude);   /* the concurrent sweep's deferred end */
 #ifdef SP_THREADS
 void sp_str_sweep_old_one(int wid);
+void sp_str_sweep_young_list(sp_str_hdr **head, sp_str_hdr **keep, sp_str_hdr **tail, size_t *moved, size_t *held);
+size_t sp_str_sweep_old_list(sp_str_hdr **head);
+size_t sp_str_bytes_total(void);   /* every worker's young string bytes */
 void sp_str_sweep_young_one(int wid, int sub, sp_str_hdr **keep, sp_str_hdr **tail,
                             size_t *moved, size_t *held);
 void sp_str_sweep_young_done(int wid, sp_str_hdr *keep, sp_str_hdr *tail, size_t moved, size_t held,
