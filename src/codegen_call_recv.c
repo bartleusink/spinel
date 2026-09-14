@@ -9192,7 +9192,10 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
      renderer is emitted inline over a stack temp. */
   if (recv >= 0 && ty_is_object(rt) && !c->classes[ty_object_class(rt)].is_struct &&
       (sp_streq(name, "to_s") || sp_streq(name, "inspect")) && argc == 0 &&
-      !obj_str_cname(c, ty_object_class(rt), sp_streq(name, "inspect"))) {
+      !obj_str_cname(c, ty_object_class(rt), sp_streq(name, "inspect")) &&
+      /* a native class may bind its own to_s/inspect (IO::Buffer does);
+         that declared method wins over the default renderer */
+      comp_native_method_find(c, ty_object_class(rt), name, 0, 0) < 0) {
     int cid2 = ty_object_class(rt);
     ClassInfo *ci2 = &c->classes[cid2];
     int want_ins = sp_streq(name, "inspect");
@@ -9853,6 +9856,48 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
        symbol, receiver first. `string?` returns are wrapped nil-safe. Overload
        selection is type-keyed (putc(65) vs putc("A")). */
     if (c->classes[cid].is_native_class) {
+      /* IO::Buffer fast path: get_value/set_value with a LITERAL type symbol
+         lowers to the typed accessor (sp_IOBuffer_get_i and friends) --
+         no symbol decode, no boxing on the argument or the result. The
+         wasm-memory / binary-protocol access pattern this class exists for
+         is exactly this shape, in a hot loop. Conditions mirror the
+         analyzer's special-case (analyze_infer_recv.c); any declined shape
+         falls through to the generic boxed binding below. */
+      if (c->classes[cid].c_struct && sp_streq(c->classes[cid].c_struct, "sp_IOBuffer") &&
+          argc >= 2 && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "SymbolNode") &&
+          comp_ntype(c, argv[1]) == TY_INT) {
+        int it = comp_iob_sym_type(nt_str(nt, argv[0], "value"));
+        if (it >= 0 && sp_streq(name, "get_value") && argc == 2) {
+          if (comp_iob_ty_is_64(it)) {
+            buf_puts(b, "sp_IOBuffer_get_x(");
+            emit_expr(c, recv, b);
+            buf_printf(b, ", %d, ", it);
+          }
+          else {
+            buf_printf(b, "sp_IOBuffer_get_%s(", comp_iob_ty_is_float(it) ? "f" : "i");
+            emit_expr(c, recv, b);
+            buf_printf(b, ", %d, ", it);
+          }
+          emit_int_expr(c, argv[1], b);
+          buf_puts(b, ")");
+          return 1;
+        }
+        if (it >= 0 && sp_streq(name, "set_value") && argc == 3) {
+          TyKind vt = comp_ntype(c, argv[2]);
+          int f = comp_iob_ty_is_float(it);
+          if ((f && (vt == TY_FLOAT || vt == TY_INT)) || (!f && vt == TY_INT)) {
+            buf_printf(b, "sp_IOBuffer_set_%s(", f ? "f" : "i");
+            emit_expr(c, recv, b);
+            buf_printf(b, ", %d, ", it);
+            emit_int_expr(c, argv[1], b);
+            buf_puts(b, ", ");
+            if (f) emit_float_expr(c, argv[2], b);
+            else emit_int_expr(c, argv[2], b);
+            buf_puts(b, ")");
+            return 1;
+          }
+        }
+      }
       TyKind natys[8];
       int nta = argc < 8 ? argc : 8;
       for (int a = 0; a < nta; a++) natys[a] = comp_ntype(c, argv[a]);

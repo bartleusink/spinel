@@ -131,6 +131,14 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
                ti, ti, ta, ti, ta, ti);
     free(ab.p);
   }
+  else if (ty_is_object(t) && c->classes[ty_object_class(t)].is_native_class &&
+           comp_native_method_find(c, ty_object_class(t), "to_s", 0, 0) >= 0) {
+    /* a native class binding its own to_s (IO::Buffer) */
+    int nts = comp_native_method_find(c, ty_object_class(t), "to_s", 0, 0);
+    buf_printf(b, "{ const char *_ps = %s(", c->native_methods[nts].csym);
+    emit_expr(c, arg, b);
+    buf_puts(b, "); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
+  }
   else if (ty_is_object(t) && obj_str_cname(c, ty_object_class(t), 0)) {
     /* an object with #to_s (user-defined or a generated struct/data one) */
     const char *cn = obj_str_cname(c, ty_object_class(t), 0);
@@ -844,15 +852,19 @@ else {
        with a trailing newline. The trailing keyword hash carries options:
          - a forwarded `**opts` (AssocSplat) is an options bundle: evaluate the
            splat values for side effects and otherwise ignore them;
-         - `category:` selects a warning category. CRuby suppresses the
-           `:deprecated` category by default (Warning[:deprecated] == false with
-           no -W:deprecated), so a literal `category: :deprecated` prints nothing
-           (messages are still evaluated for side effects); other categories print
-           normally;
+         - `category:` selects a warning category, gated at run time through
+           the Warning flags (sp_warning_*, lib/sp_cold.c): a category the
+           program disabled -- or :deprecated/:performance, off by default --
+           prints nothing, while `Warning[cat] = true` re-enables it. The
+           messages are evaluated for side effects either way, and an unknown
+           literal category raises CRuby's ArgumentError;
          - `uplevel:` prefixes each line with the caller's source location, which
            needs a runtime line-granularity call stack spinel does not have.
            Emitting any prefix would be a wrong location, so it loud-rejects. */
-    int kw_idx = -1, suppress = 0;
+    int kw_idx = -1;
+    const char *cat_guard = NULL;   /* literal known category: runtime-gated */
+    int cat_dyn = 0;                /* tmp holding a dynamic category name */
+    char bad_cat[64]; bad_cat[0] = 0;   /* literal unknown category: ArgumentError */
     if (argc > 0) {
       int last = argv[argc - 1];
       const char *lt = nt_type(c->nt, last);
@@ -874,10 +886,25 @@ else {
             unsupported(c, elems[e], "warn(uplevel:) caller-location prefix (no runtime source-line stack)");
           }
           else if (kname && sp_streq(kname, "category")) {
+            /* the category gates printing through the runtime Warning flags
+               (sp_warning_*, settable via Warning[cat] = ...); an unknown
+               literal category is CRuby's ArgumentError, raised after the
+               positional messages evaluate */
             const char *vty = val >= 0 ? nt_type(c->nt, val) : NULL;
             const char *vname = (vty && sp_streq(vty, "SymbolNode")) ? nt_str(c->nt, val, "value") : NULL;
-            if (vname && sp_streq(vname, "deprecated"))
-              suppress = 1;
+            if (vname && (sp_streq(vname, "deprecated") || sp_streq(vname, "experimental") ||
+                          sp_streq(vname, "performance") || sp_streq(vname, "strict_unused_block")))
+              cat_guard = vname;
+            else if (vname)
+              snprintf(bad_cat, sizeof bad_cat, "%s", vname);
+            else if (val >= 0 && comp_ntype(c, val) == TY_SYMBOL) {
+              cat_dyn = ++g_tmp;
+              emit_indent(b, indent);
+              buf_printf(b, "const char *_t%d = sp_sym_to_s(", cat_dyn);
+              emit_expr(c, val, b);
+              /* validate now (unknown raises), read the flag at each print */
+              buf_printf(b, "); (void)sp_warning_aref(_t%d);\n", cat_dyn);
+            }
             else if (val >= 0) { emit_indent(b, indent); buf_puts(b, "(void)("); emit_expr(c, val, b); buf_puts(b, ");\n"); }
           }
           else if (val >= 0) { emit_indent(b, indent); buf_puts(b, "(void)("); emit_expr(c, val, b); buf_puts(b, ");\n"); }
@@ -891,9 +918,13 @@ else {
     int redirect = serr && ty_is_object(serr->type) && ty_object_class(serr->type) >= 0 &&
                    c->classes[ty_object_class(serr->type)].c_name &&
                    sp_streq(c->classes[ty_object_class(serr->type)].c_name, "StringIO");
+    /* the runtime gate expression, when a category was given */
+    char guard[64]; guard[0] = 0;
+    if (cat_guard) snprintf(guard, sizeof guard, "sp_warning_enabled(\"%s\")", cat_guard);
+    else if (cat_dyn) snprintf(guard, sizeof guard, "sp_warning_aref(_t%d)", cat_dyn);
     for (int k = 0; k < argc; k++) {
       if (k == kw_idx) continue;
-      if (suppress) { emit_indent(b, indent); buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, ");\n"); continue; }
+      if (bad_cat[0]) { emit_indent(b, indent); buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, ");\n"); continue; }
       TyKind at = comp_ntype(c, argv[k]);
       if (redirect) {
         /* stringify into a temp, then branch on the live $stderr redirect */
@@ -906,17 +937,31 @@ else {
         else { buf_puts(b, "sp_poly_to_s("); emit_boxed(c, argv[k], b); buf_puts(b, ")"); }
         buf_puts(b, ";\n");
         emit_indent(b, indent);
+        if (guard[0]) buf_printf(b, "if (%s) {\n", guard);
         buf_printf(b, "if (gv_stderr) { sp_StringIO_write(gv_stderr, _t%d); sp_StringIO_write(gv_stderr, \"\\n\"); }"
                       "\nelse { fputs(_t%d, stderr); fputc('\\n', stderr); }\n", wt, wt);
+        if (guard[0]) { emit_indent(b, indent); buf_puts(b, "}\n"); }
         continue;
       }
       /* every message renders like puts: an Array writes one line per element,
          anything else its to_s, and a message already ending in a newline does
          not get a second one (#3728) */
       (void)at;
+      if (guard[0]) {
+        /* the message still evaluates when the category is off */
+        int wt2 = ++g_tmp;
+        emit_indent(b, indent); buf_printf(b, "{ sp_RbVal _t%d = ", wt2);
+        emit_boxed(c, argv[k], b);
+        buf_printf(b, "; if (%s) sp_poly_warn_line(_t%d, stderr); }\n", guard, wt2);
+        continue;
+      }
       emit_indent(b, indent); buf_puts(b, "sp_poly_warn_line(");
       emit_boxed(c, argv[k], b);
       buf_puts(b, ", stderr);\n");
+    }
+    if (bad_cat[0]) {
+      emit_indent(b, indent);
+      buf_printf(b, "sp_raise_cls(\"ArgumentError\", \"unknown category: %s\");\n", bad_cat);
     }
     return 1;
   }

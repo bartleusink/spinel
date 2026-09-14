@@ -648,6 +648,7 @@ static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
    method-tail path already routes both to the value path (codegen_stmt.c);
    a spliced block's tail needed the same, or the statement expression took
    whatever the last emitted statement happened to leave (#4155). */
+static int call_targets_yielding_method(Compiler *c, int id);
 static int block_tail_needs_value_form(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) return 0;
@@ -655,6 +656,11 @@ static int block_tail_needs_value_form(Compiler *c, int id) {
   if (!nm) return 0;
   if (sp_streq(nm, "tap") || sp_streq(nm, "then") || sp_streq(nm, "yield_self"))
     return nt_ref(nt, id, "receiver") >= 0;
+  /* a block-driving call to a user method that yields is spliced inline;
+     its STATEMENT form is a plain compound whose value is void, so a block
+     whose value it is must take the expression form (`wrap { M.build(n) {
+     ... } }` assigned a void ({...}) to wrap's slot). */
+  if (call_targets_yielding_method(c, id)) return 1;
   return iter_value_answers_recv(c, id) && tail_iter_receiver(c, id) < 0;
 }
 

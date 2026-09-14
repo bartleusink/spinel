@@ -664,6 +664,10 @@ int comp_native_method_find(Compiler *c, int class_id, const char *name, int arg
 int comp_native_method_find_typed(Compiler *c, int class_id, const char *name, int argc, int kind,
                                   const TyKind *argtys);
 TyKind native_spec_to_ty(const char *spec);
+/* IO::Buffer type-symbol table (index-compatible with lib/sp_iobuffer.h) */
+int comp_iob_sym_type(const char *name);
+int comp_iob_ty_is_float(int t);
+int comp_iob_ty_is_64(int t);
 
 /* Global variables and top-level constants. *_intern finds or creates. */
 LocalVar *comp_gvar(Compiler *c, const char *name);

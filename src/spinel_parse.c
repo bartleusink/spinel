@@ -1841,6 +1841,69 @@ static int source_references_set(const char *src) {
   return 0;
 }
 
+/* Whether `src` references `IO::Buffer` in CODE, with the same
+   comment/string skipping as source_references_set above. The needle is
+   already two qualified segments, so the boundary check is only that the
+   match is not embedded in a longer identifier (`IO::BufferPool`) or
+   preceded by one (`MyIO::Buffer` still matches -- a false positive only
+   splices the declarations needlessly). Drives the implicit
+   `require "io/buffer"` splice below: CRuby provides IO::Buffer without a
+   require, so Spinel mirrors it the way it mirrors Set. */
+static int sp_iob_word_at(const char *src, const char *p) {
+  char prev = p == src ? 0 : p[-1];
+  char next = p[10];   /* strlen("IO::Buffer") */
+  int prev_ok = !((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
+                  (prev >= '0' && prev <= '9') || prev == '_' || prev == '.');
+  int next_ok = !((next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') ||
+                  (next >= '0' && next <= '9') || next == '_');
+  return prev_ok && next_ok;
+}
+static int source_references_io_buffer(const char *src) {
+  const char *p = src;
+  int bol = 1;
+  while (*p) {
+    if (bol && strncmp(p, "=begin", 6) == 0) {
+      const char *e = strstr(p, "\n=end");
+      if (!e) return 0;
+      p = e + 5;
+      continue;
+    }
+    bol = 0;
+    if (*p == '#') {
+      while (*p && *p != '\n') p++;
+      continue;
+    }
+    if (*p == '\'') {
+      p++;
+      while (*p && *p != '\'') { if (*p == '\\' && p[1]) p++; p++; }
+      if (*p) p++;
+      continue;
+    }
+    if (*p == '"') {
+      p++;
+      while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) { p += 2; continue; }
+        if (p[0] == '#' && p[1] == '{') {
+          const char *q = p + 2;
+          int depth = 1;
+          while (*q && depth) { if (*q == '{') depth++; else if (*q == '}') depth--; q++; }
+          for (const char *r = p + 2; r < q; r++)
+            if (strncmp(r, "IO::Buffer", 10) == 0 && sp_iob_word_at(src, r)) return 1;
+          p = q;
+          continue;
+        }
+        p++;
+      }
+      if (*p) p++;
+      continue;
+    }
+    if (strncmp(p, "IO::Buffer", 10) == 0 && sp_iob_word_at(src, p)) return 1;
+    if (*p == '\n') bol = 1;
+    p++;
+  }
+  return 0;
+}
+
 /* ---- require-gate: features enabled by a `require "name"` ----
    SPINEL_REQUIRE_GATE: when set, a require-gated stdlib feature (stringio,
    io/console, ...) is provided only if its `require` textually appears in the
@@ -3269,6 +3332,31 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
       ins = nl + 1;
     }
     const char *head = "require \"set\"\n";
+    size_t sl = strlen(source), hl = strlen(head), off = (size_t)(ins - source);
+    char *ns = (char *)malloc(sl + hl + 1);
+    if (ns) {
+      memcpy(ns, source, off);
+      memcpy(ns + off, head, hl);
+      memcpy(ns + off + hl, source + off, sl - off + 1);
+      free(source);
+      source = ns;
+    }
+  }
+  /* CRuby provides IO::Buffer with no require at all (it is core). Mirror
+     it the way Set is mirrored just above: when the program references
+     `IO::Buffer` and never requires "io/buffer", prepend the require so the
+     bundled binding (packages/io/io/buffer.rb) splices ahead of its uses. */
+  if (!strstr(source, "require \"io/buffer\"") && !strstr(source, "require 'io/buffer'") &&
+      source_references_io_buffer(source)) {
+    const char *ins = source;
+    while (*ins) {
+      const char *q = ins; while (*q == ' ' || *q == '\t') q++;
+      if (*q != '#') break;
+      const char *nl = strchr(ins, '\n');
+      if (!nl) { ins = ins + strlen(ins); break; }
+      ins = nl + 1;
+    }
+    const char *head = "require \"io/buffer\"\n";
     size_t sl = strlen(source), hl = strlen(head), off = (size_t)(ins - source);
     char *ns = (char *)malloc(sl + hl + 1);
     if (ns) {

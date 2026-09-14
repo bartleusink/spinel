@@ -347,6 +347,13 @@ const char *sp_exc_parent_of_name(const char *cls) {
        too deep to serialize raises, and `rescue JSON::ParserError` catches it
        in CRuby because it is a ParserError */
     {"JSON::NestingError",    "JSON::ParserError"},
+    /* IO::Buffer's errors (lib/sp_iobuffer.c raises them by name): all
+       RuntimeError subclasses in CRuby, except MaskError < ArgumentError */
+    {"IO::Buffer::AccessError",      "RuntimeError"},
+    {"IO::Buffer::LockedError",      "RuntimeError"},
+    {"IO::Buffer::AllocationError",  "RuntimeError"},
+    {"IO::Buffer::InvalidatedError", "RuntimeError"},
+    {"IO::Buffer::MaskError",        "ArgumentError"},
     {"FiberError",            "StandardError"},
     {"UncaughtThrowError",    "ArgumentError"},
     {"SyntaxError",           "ScriptError"},

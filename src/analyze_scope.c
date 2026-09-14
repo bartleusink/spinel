@@ -2475,13 +2475,20 @@ void register_ffi_decls(Compiler *c) {
       const char *cstruct = ffi_arg_str(nt, av[1]);
       const char *freesym = na >= 3 ? ffi_arg_str(nt, av[2]) : NULL;
       if (!clsname || !cstruct) continue;
-      int ex = comp_class_index(c, clsname);
+      /* A qualified declaration ("IO::Buffer") registers by its LEAF -- the
+         constant-path lookups are leaf-keyed throughout -- and keeps the
+         qualified spelling as the Ruby-visible name (class_ruby_name), so
+         `b.class` and sp_class_to_s render it as CRuby does. */
+      const char *leaf = strrchr(clsname, ':');
+      leaf = leaf ? leaf + 1 : clsname;
+      int ex = comp_class_index(c, leaf);
       int cid;
       if (ex >= 0) cid = ex;
-      else { comp_class_new(c, clsname, -1); cid = c->nclasses - 1; }
+      else { comp_class_new(c, leaf, -1); cid = c->nclasses - 1; }
       if (native_cid < 0) native_cid = cid;
       ClassInfo *nc = &c->classes[cid];
       nc->is_native_class = 1;
+      if (leaf != clsname && !nc->ruby_name_cache) nc->ruby_name_cache = strdup(clsname);
       free(nc->c_struct); nc->c_struct = strdup(cstruct);
       if (freesym) { free(nc->native_free); nc->native_free = strdup(freesym); }
     }
@@ -2566,7 +2573,9 @@ void register_ffi_decls(Compiler *c) {
          follow it belong to. */
       if (sp_streq(dname, "native_struct")) {
         const char *sname = an >= 1 ? ffi_arg_str(nt, args[0]) : NULL;
-        int scid = sname ? comp_class_index(c, sname) : -1;
+        const char *sleaf = sname ? strrchr(sname, ':') : NULL;
+        sleaf = sleaf ? sleaf + 1 : sname;
+        int scid = sleaf ? comp_class_index(c, sleaf) : -1;
         if (scid >= 0) native_cid = scid;
         continue;
       }

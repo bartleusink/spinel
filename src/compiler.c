@@ -1065,6 +1065,26 @@ int comp_native_method_find(Compiler *c, int class_id, const char *name, int arg
   return comp_native_method_find_typed(c, class_id, name, argc, kind, NULL);
 }
 
+/* IO::Buffer's type-symbol table, index-compatible with lib/sp_iobuffer.h's
+   SP_IOB_TY_* enum. Shared by the analyzer (a literal-symbol get_value's
+   return type follows the symbol) and the codegen fold that lowers such a
+   call to the typed accessor. */
+static const char *const iob_ty_names[] = {
+  "U8", "S8", "u16", "s16", "U16", "S16", "u32", "s32", "U32", "S32",
+  "u64", "s64", "U64", "S64", "f32", "f64", "F32", "F64", NULL
+};
+int comp_iob_sym_type(const char *name) {
+  if (!name) return -1;
+  for (int i = 0; iob_ty_names[i]; i++)
+    if (sp_streq(name, iob_ty_names[i])) return i;
+  return -1;
+}
+int comp_iob_ty_is_float(int t) { return t >= 14 && t <= 17; }
+/* the 64-bit integer types stay BOXED through the fold: u64 values above
+   2^63-1 are Bignums, and an s64 load of INT64_MIN would collide with the
+   runtime's SP_INT_NIL sentinel in an unboxed slot */
+int comp_iob_ty_is_64(int t) { return t >= 10 && t <= 13; }    /* u64/s64/U64/S64 */
+
 /* Type-keyed variant: among same-name same-arity bindings, prefer one whose
    arg specs match the call's inferred arg types (putc(65) -> the [:int]
    binding, putc("A") -> [:string]). argtys may be NULL (arity-only). */
