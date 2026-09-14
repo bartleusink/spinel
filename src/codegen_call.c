@@ -5877,6 +5877,34 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         if (ret == TY_POLY) emit_boxed_text(c, TY_STRING, jv, b);
         else buf_puts(b, jv);
         buf_puts(b, "; break;");
+        /* and a Thread, whose join is the wait: the arm answers the thread
+           itself, as Thread#join does, where the arrays answer a string; a
+           user class owning `join` (a model's path joiner) took this arm away
+           from every `threads.each { |x| x.join }` in the program (#4466) */
+        snprintf(jv, sizeof jv, "sp_poly_fiber_join(_t%d)", tv);
+        buf_printf(b, " case SP_BUILTIN_THREAD: _t%d = ", tr);
+        if (ret == TY_POLY) buf_puts(b, jv);
+        else if (ret == TY_STRING) buf_printf(b, "(%s, sp_str_empty)", jv);   /* the slot is the arrays' string; the wait still happens */
+        else emit_unbox_text(c, ret, jv, b);
+        buf_puts(b, "; break;");
+      }
+      /* the same for the names a pool polls on its workers (#4463) */
+      if (argc == 0 && sp_streq(name, "alive?")) {
+        char av[80];
+        snprintf(av, sizeof av, "sp_poly_fiber_alive(_t%d)", tv);
+        buf_printf(b, " case SP_BUILTIN_THREAD: case SP_BUILTIN_FIBER: _t%d = ", tr);
+        if (ret == TY_POLY) emit_boxed_text(c, TY_BOOL, av, b);
+        else if (ret == TY_BOOL) buf_puts(b, av);
+        else emit_unbox_text(c, ret, av, b);
+        buf_puts(b, "; break;");
+      }
+      if (argc == 0 && sp_streq(name, "status")) {
+        char sv[80];
+        snprintf(sv, sizeof sv, "sp_poly_thread_status(_t%d)", tv);
+        buf_printf(b, " case SP_BUILTIN_THREAD: _t%d = ", tr);
+        if (ret == TY_POLY) buf_puts(b, sv);
+        else emit_unbox_text(c, ret, sv, b);
+        buf_puts(b, "; break;");
       }
       /* IO#flush on a poly value: the zero-arg sibling of the write arm in
          the argument-carrying dispatch. A Socket or File reaches this switch
@@ -30174,6 +30202,10 @@ else {
        dispatch on the boxed Fiber when no user class defines the name (#1261). */
     else if (sp_streq(name, "value") || sp_streq(name, "resume")) pm = "sp_poly_fiber_value";
     else if (sp_streq(name, "join")) pm = "sp_poly_fiber_join";
+    /* and #alive? / #status, which a pool polls through its worker Array
+       (#4463); these answer their own C types, not a boxed value */
+    else if (sp_streq(name, "alive?")) pm = "sp_poly_fiber_alive";
+    else if (sp_streq(name, "status")) pm = "sp_poly_thread_status";
     if (pm) {
       /* Attr readers count as user definitions too: `attr_accessor :value`
          must shadow the builtin helper exactly like `def value` does, or the
@@ -30185,7 +30217,11 @@ else {
           if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
               comp_reader_in_chain(c, k, name, NULL)) ncand++;
       if (ncand == 0) {
+        TyKind want = comp_ntype(c, id);
+        int is_alive = sp_streq(name, "alive?");
+        if (is_alive && want == TY_POLY) buf_puts(b, "sp_box_bool(");
         buf_printf(b, "%s(", pm); emit_expr(c, recv, b); buf_puts(b, ")");
+        if (is_alive && want == TY_POLY) buf_puts(b, ")");
         return;
       }
     }

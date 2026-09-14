@@ -8500,6 +8500,23 @@ static sp_RbVal sp_poly_join_timeout(sp_RbVal v, double seconds, const char *arg
   return sp_box_nil();
 }
 
+/* `alive?` and `status` on a boxed Thread (or `alive?` on a boxed Fiber):
+   the names a pool's `@workers.all? { |w| !w.alive? }` reaches through an
+   Array element (#4463). A value of any other kind has no such method. */
+sp_bool  sp_Thread_alive(sp_thread *t);
+sp_RbVal sp_Thread_status(sp_thread *t);
+sp_bool  sp_Fiber_alive(sp_Fiber *f);
+static sp_bool sp_poly_fiber_alive(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) return sp_Thread_alive((sp_thread *)v.v.p);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FIBER) return sp_Fiber_alive((sp_Fiber *)v.v.p);
+  sp_raise_nomethod(sp_nomethod_msg("alive?", v));
+  return 0;
+}
+static sp_RbVal sp_poly_thread_status(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) return sp_Thread_status((sp_thread *)v.v.p);
+  sp_raise_nomethod(sp_nomethod_msg("status", v));
+  return sp_box_nil();
+}
 static sp_RbVal sp_poly_fiber_join(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) {
     sp_Thread_join((sp_thread *)v.v.p);

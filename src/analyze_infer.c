@@ -4792,7 +4792,8 @@ else {
           (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat")))
         return an_poly_concrete(c, name, TY_POLY_ARRAY);
       /* Fiber/Thread/IO/File instance methods: fallback when no user class defines `name`. */
-      if (sp_streq(name, "resume") || sp_streq(name, "value") || sp_streq(name, "join"))
+      if (sp_streq(name, "resume") || sp_streq(name, "value") || sp_streq(name, "join") ||
+          sp_streq(name, "status"))
         return an_poly_concrete(c, name, TY_POLY);
       if (sp_streq(name, "alive?") || sp_streq(name, "dead?") || sp_streq(name, "closed?") ||
           sp_streq(name, "eof?") || sp_streq(name, "tty?") || sp_streq(name, "isatty") ||
