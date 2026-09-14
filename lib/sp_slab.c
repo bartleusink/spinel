@@ -422,7 +422,7 @@ void sp_slab_release(void) {
       sp_slab_chunk *keep = NULL, *ch = wk->avail[cls];
       while (ch) {
         sp_slab_chunk *nx = ch->next_avail;
-        if (ch->nfree == ch->nslots && reserve <= 0) {
+        if (__atomic_load_n(&ch->nfree, __ATOMIC_RELAXED) == ch->nslots && reserve <= 0) {
           char *base = sp_slab_chunk_base(ch);
           if (ch->touched) madvise(base, SP_SLAB_CHUNK, MADV_DONTNEED);
           ch->in_use = 0; ch->on_avail = 0; ch->touched = 0;
@@ -431,7 +431,7 @@ void sp_slab_release(void) {
           sp_slab_empty = ch;
         }
         else {
-          if (ch->nfree == ch->nslots) reserve--;
+          if (__atomic_load_n(&ch->nfree, __ATOMIC_RELAXED) == ch->nslots) reserve--;
           ch->next_avail = keep;
           keep = ch;
         }

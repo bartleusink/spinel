@@ -91,9 +91,21 @@ static sp_gc_hdr *sp_gc_old_heap = NULL;
    (an A* frontier of [vertex, priority] pairs) then overflowed the C stack
    and crashed the process mid-collection. */
 #define SP_GC_MARK_STACK_MAX (1024*64)
-static void **sp_gc_mark_stack = NULL;
-static int sp_gc_mark_top = 0;
-static int sp_gc_mark_cap = 0;
+/* Per thread: the collector's, and under the parallel mark each helper's
+   own; a scan pushes onto the stack of the thread running it. */
+static SP_TLS void **sp_gc_mark_stack = NULL;
+static SP_TLS int sp_gc_mark_top = 0;
+static SP_TLS int sp_gc_mark_cap = 0;
+/* What this thread's marking counted, folded into the totals when its
+   drain ends (a shared counter per marked object would bounce a line
+   between the markers on every object). */
+static SP_TLS size_t sp_gc_mkl_marked = 0, sp_gc_mkl_bytes = 0, sp_gc_mkl_young = 0;
+static int sp_gc_par_mark = 0;   /* the drain is running on several threads */
+static SP_TLS int sp_gc_mk_is_collector=0;
+unsigned long long sp_gc_ph_mk_by_helpers=0, sp_gc_ph_mk_spills=0, sp_gc_ph_mk_takes=0;
+double sp_gc_ph_mk_drain=0, sp_gc_ph_mk_join=0, sp_gc_ph_mk_idle=0;
+int sp_gc_par_mark_on = -1;      /* SPINEL_GC_PAR_MARK=0 turns it off */
+static void sp_gc_mkl_fold(void);
 static sp_gc_hdr **sp_gc_vsnap = NULL;
 static size_t sp_gc_vsnap_n = 0, sp_gc_vsnap_cap = 0;
 static size_t sp_gc_max_bytes = 0;
@@ -253,9 +265,168 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
  * the static header-bearing table (the 1-byte binary substrings): nothing
  * before it is an sp_gc_hdr, so reaching for one and calling its scan hook
  * jumps into the payload byte. */
-void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(sp_gc_young_probe_on){if(!h->old)sp_gc_young_probe_hit=1;return;}if(sp_gc_root_phase&&!h->old)h->aged=1;if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;sp_gc_mk_bytes+=h->size;if(!h->old){sp_gc_mk_young_bytes+=h->size;if(sp_gc_conc_promote)h->old=1;/* promoted here, under the barrier: the concurrent sweep will not write the bit */}/* plain: the mark runs on the collector alone, only the SWEEP is parallel */if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
+
+static double sp_gc_stat_now(void);
+#ifdef SP_THREADS
+#include <pthread.h>
+#if defined(__x86_64__) || defined(__i386__)
+#define SP_GC_CPU_RELAX() __builtin_ia32_pause()
+#elif defined(__aarch64__)
+#define SP_GC_CPU_RELAX() __asm__ __volatile__("yield" ::: "memory")
+#else
+#define SP_GC_CPU_RELAX() ((void)0)
+#endif
+/* ---- The parallel mark ----
+   The roots are walked by the collector alone (they are few, and the root
+   phase has state of its own); the DRAIN, which is the mark's time, runs on
+   the collector plus the parked workers the scheduler lends it
+   (sp_gc_par_mark_hook). Work moves between markers in chunks: a marker whose
+   stack is full spills half of it onto a shared chunk list, and one whose
+   stack is empty takes a chunk from it. The drain is over when the list is
+   empty and no marker holds work. */
+#define SP_GC_MK_CHUNK 16
+typedef struct sp_gc_mk_chunk { struct sp_gc_mk_chunk *next; int n; void *obj[SP_GC_MK_CHUNK]; } sp_gc_mk_chunk;
+static pthread_mutex_t sp_gc_mk_lock = PTHREAD_MUTEX_INITIALIZER;
+static sp_gc_mk_chunk *sp_gc_mk_work = NULL, *sp_gc_mk_free = NULL;
+static int sp_gc_mk_nwork = 0;    /* chunks on the work list (read without the lock to avoid taking it for nothing) */
+static int sp_gc_mk_busy = 0;     /* markers holding work */
+static void sp_gc_mark_spill_n(int out) {
+  int i = 0;
+  pthread_mutex_lock(&sp_gc_mk_lock);
+  while (i < out) {
+    sp_gc_mk_chunk *c = sp_gc_mk_free;
+    if (c) sp_gc_mk_free = c->next;
+    else { pthread_mutex_unlock(&sp_gc_mk_lock); c = (sp_gc_mk_chunk *)malloc(sizeof *c); if (!c) sp_oom_die(); pthread_mutex_lock(&sp_gc_mk_lock); }
+    int n = out - i; if (n > SP_GC_MK_CHUNK) n = SP_GC_MK_CHUNK;
+    memcpy(c->obj, sp_gc_mark_stack + i, (size_t)n * sizeof(void *)); c->n = n; i += n;
+    c->next = sp_gc_mk_work; sp_gc_mk_work = c; __atomic_fetch_add(&sp_gc_mk_nwork, 1, __ATOMIC_RELAXED); sp_gc_ph_mk_spills++;
+  }
+  pthread_mutex_unlock(&sp_gc_mk_lock);
+  memmove(sp_gc_mark_stack, sp_gc_mark_stack + out, (size_t)(sp_gc_mark_top - out) * sizeof(void *));
+  sp_gc_mark_top -= out;
+}
+/* The OLDER half of the stack goes out: what is left on top is what the
+   scan that pushed it is about to need, and stays hot on this thread. */
+static void sp_gc_mark_spill(void) { sp_gc_mark_spill_n(sp_gc_mark_top / 2); }
+/* Before the helpers are woken: everything the root walk pushed goes out
+   as chunks, so there is work for them the moment they arrive. A stack that
+   only spilled when full (64K entries) never did on a live set of 30K
+   objects, and eight helpers spun while the collector marked alone. */
+void sp_gc_mark_par_begin(void) { if (sp_gc_mark_top > 0) sp_gc_mark_spill_n(sp_gc_mark_top); }
+static int sp_gc_mk_markers = 1;   /* seats the scheduler hands out, plus the collector */
+void sp_gc_mark_par_markers(int n) { sp_gc_mk_markers = n; }
+static int sp_gc_mark_take(void) {
+  if (__atomic_load_n(&sp_gc_mk_nwork, __ATOMIC_RELAXED) == 0) return 0;
+  pthread_mutex_lock(&sp_gc_mk_lock);
+  sp_gc_mk_chunk *c = sp_gc_mk_work;
+  if (c) { sp_gc_mk_work = c->next; __atomic_fetch_sub(&sp_gc_mk_nwork, 1, __ATOMIC_RELAXED); sp_gc_ph_mk_takes++; }
+  pthread_mutex_unlock(&sp_gc_mk_lock);
+  if (!c) return 0;
+  memcpy(sp_gc_mark_stack + sp_gc_mark_top, c->obj, (size_t)c->n * sizeof(void *));
+  sp_gc_mark_top += c->n;
+  pthread_mutex_lock(&sp_gc_mk_lock);
+  c->next = sp_gc_mk_free; sp_gc_mk_free = c;
+  pthread_mutex_unlock(&sp_gc_mk_lock);
+  return 1;
+}
+/* One marker's drain, run by the collector and by every helper. Returns when
+   the whole mark is done: no chunk to take and nobody holding work. */
+void sp_gc_mark_par_run(void) {
+  if (!sp_gc_mark_stack) { sp_gc_mark_stack = (void **)malloc(sizeof(void *) * SP_GC_MARK_STACK_MAX); if (!sp_gc_mark_stack) sp_oom_die(); sp_gc_mark_cap = SP_GC_MARK_STACK_MAX; sp_gc_mark_top = 0; }
+  __atomic_fetch_add(&sp_gc_mk_busy, 1, __ATOMIC_ACQ_REL);
+  for (;;) {
+    while (sp_gc_mark_top > 0) {
+      /* share while there is little on the list and a lot here: a marker
+         that hoards a deep stack leaves the others spinning */
+      if (sp_gc_mark_top > 2 * SP_GC_MK_CHUNK && __atomic_load_n(&sp_gc_mk_nwork, __ATOMIC_RELAXED) < sp_gc_mk_markers) sp_gc_mark_spill();
+      void *obj = sp_gc_mark_stack[--sp_gc_mark_top];
+      sp_gc_hdr *h = (sp_gc_hdr *)((char *)obj - sizeof(sp_gc_hdr));
+      if (h->scan) h->scan(obj);
+    }
+    if (sp_gc_mark_take()) continue;
+    __atomic_fetch_sub(&sp_gc_mk_busy, 1, __ATOMIC_ACQ_REL);
+    double i0 = (sp_gc_ph_on && sp_gc_mk_is_collector) ? sp_gc_stat_now() : 0;
+    for (;;) {
+      if (__atomic_load_n(&sp_gc_mk_nwork, __ATOMIC_ACQUIRE) > 0) break;
+      if (__atomic_load_n(&sp_gc_mk_busy, __ATOMIC_ACQUIRE) == 0) { if (i0) sp_gc_ph_mk_idle += sp_gc_stat_now() - i0; sp_gc_mkl_fold(); return; }
+      SP_GC_CPU_RELAX();
+    }
+    if (i0) sp_gc_ph_mk_idle += sp_gc_stat_now() - i0;
+    __atomic_fetch_add(&sp_gc_mk_busy, 1, __ATOMIC_ACQ_REL);
+  }
+}
+void (*sp_gc_par_mark_hook)(void) = NULL;
+void sp_gc_hdr_flags_check(void) {
+  sp_gc_hdr h; memset(&h, 0, sizeof h);
+  h.marked = 0x5a5a5a5; h.old = 1; h.aged = 1;
+  unsigned w = *sp_gc_hdr_flags(&h);
+  if (w != (0x5a5a5a5u | SP_GC_FL_OLD | SP_GC_FL_AGED) || sizeof(sp_gc_hdr) != 48) {
+    fprintf(stderr, "spinel: sp_gc_hdr flag layout is not the one the parallel mark assumes (word %08x)\n", w);
+    abort();
+  }
+}
+#endif
+/* The drain: on the collector alone, or on the collector and the helpers the
+   scheduler lends it. The verifiers and probes read state the helpers do not
+   keep, so they drain serially. */
+static void sp_gc_mark_drain_all(void) {
+#ifdef SP_THREADS
+  if (sp_gc_par_mark_hook && sp_gc_par_mark_on && !sp_gc_verify && !sp_gc_verify_gen && !sp_gc_verify_probe_on && !sp_gc_young_probe_on && !sp_gc_age_on) {
+    sp_gc_par_mark = 1; sp_gc_mk_is_collector = 1;
+    sp_gc_par_mark_hook();   /* lends helpers, runs sp_gc_mark_par_run itself, joins them */
+    sp_gc_mkl_fold();        /* the collector's share, while par_mark still says which it is */
+    sp_gc_par_mark = 0; sp_gc_mk_is_collector = 0;
+    return;
+  }
+#endif
+  sp_gc_mark_drain();
+}
+void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){
+#ifdef SP_THREADS
+  __atomic_store_n((unsigned char*)obj-1,(unsigned char)0xfc,__ATOMIC_RELAXED);   /* several markers may set it; a plain byte store, spelled so TSan reads it as intended */
+#else
+  ((char*)obj)[-1]=(char)0xfc;
+#endif
+  return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(sp_gc_young_probe_on){if(!h->old)sp_gc_young_probe_hit=1;return;}if(sp_gc_root_phase&&!h->old)h->aged=1;
+#ifdef SP_THREADS
+  if(sp_gc_par_mark){
+    /* Several threads mark at once: the stamp is claimed with an exchange
+       on the flag word, so an object is counted and scanned by exactly one
+       of them. Nothing else writes the word under the barrier. */
+    unsigned *w=sp_gc_hdr_flags(h);unsigned o=__atomic_load_n(w,__ATOMIC_RELAXED);
+    for(;;){
+      if((o&SP_GC_FL_MARK_MASK)==sp_gc_mark_gen)return;
+      if(sp_gc_minor&&(o&SP_GC_FL_OLD))return;
+      unsigned nw=(o&~SP_GC_FL_MARK_MASK)|sp_gc_mark_gen;
+      if(sp_gc_conc_promote&&!(o&SP_GC_FL_OLD))nw|=SP_GC_FL_OLD;
+      if(__atomic_compare_exchange_n(w,&o,nw,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED))break;
+    }
+    sp_gc_mkl_marked++;sp_gc_mkl_bytes+=h->size;if(!(o&SP_GC_FL_OLD))sp_gc_mkl_young+=h->size;
+  }
+  else
+#endif
+  {if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_mkl_marked++;sp_gc_mkl_bytes+=h->size;if(!h->old){sp_gc_mkl_young+=h->size;if(sp_gc_conc_promote)h->old=1;/* promoted here, under the barrier: the concurrent sweep will not write the bit */}}
+  if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap){
+#ifdef SP_THREADS
+    if(sp_gc_par_mark){sp_gc_mark_spill();}
+    else
+#endif
+    if(sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}}
 if(sp_gc_mark_stack&&sp_gc_mark_top<sp_gc_mark_cap){sp_gc_mark_stack[sp_gc_mark_top++]=obj;}
 else{h->scan(obj);}}}
+/* The thread's counts, folded in. The collector folds its own at the end of
+   the mark; a helper folds when its drain ends. */
+static void sp_gc_mkl_fold(void){
+#ifdef SP_THREADS
+  if(sp_gc_par_mark&&!sp_gc_mk_is_collector)__atomic_fetch_add(&sp_gc_ph_mk_by_helpers,sp_gc_mkl_marked,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_ct_marked,sp_gc_mkl_marked,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_mk_bytes,sp_gc_mkl_bytes,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_mk_young_bytes,sp_gc_mkl_young,__ATOMIC_RELAXED);
+#else
+  sp_gc_ct_marked+=sp_gc_mkl_marked;sp_gc_mk_bytes+=sp_gc_mkl_bytes;sp_gc_mk_young_bytes+=sp_gc_mkl_young;
+#endif
+  sp_gc_mkl_marked=0;sp_gc_mkl_bytes=0;sp_gc_mkl_young=0;
+}
 
 void sp_gc_mark_drain(void){
   while(sp_gc_mark_top>0){void*obj=sp_gc_mark_stack[--sp_gc_mark_top];
@@ -294,7 +465,8 @@ else{void*obj=*e;if(obj)sp_gc_mark(obj);}}
   SP_GC_MK_PH(sp_gc_ph_mk_fibers);
   if(vd)sp_gc_dbg_phase="globals";if(sp_gc_mark_globals_hook)sp_gc_mark_globals_hook();
   SP_GC_MK_PH(sp_gc_ph_mk_globals);
-  sp_gc_mark_drain();
+  sp_gc_mark_drain_all();
+  sp_gc_mkl_fold();
   SP_GC_MK_PH(sp_gc_ph_mk_scan);
   if(vd){sp_gc_dbg_phase="?";sp_gc_dbg_ctx=NULL;}}
 
@@ -662,6 +834,7 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
 double sp_gc_ph_mark = 0, sp_gc_ph_oldsweep = 0, sp_gc_ph_slotsweep = 0,
        sp_gc_ph_rembclear = 0, sp_gc_ph_strsweep = 0, sp_gc_ph_trim = 0;
 double sp_gc_ph_slot_max = 0, sp_gc_ph_task_sum = 0, sp_gc_ph_task_obj = 0, sp_gc_ph_task_sold = 0, sp_gc_ph_task_syoung = 0;   /* filled by the threaded sweep driver */
+unsigned long long sp_gc_ph_mk_helpers = 0, sp_gc_ph_mk_drains = 0;
 double sp_gc_ph_conc_wait = 0, sp_gc_ph_conc_wall = 0, sp_gc_ph_barrier = 0, sp_gc_ph_park = 0, sp_gc_ph_apply_obj = 0, sp_gc_ph_apply_str = 0, sp_gc_ph_apply_release = 0; unsigned long long sp_gc_ph_conc_waits = 0;   /* joining the previous sweep under the barrier */
 double sp_gc_ph_mk_roots = 0, sp_gc_ph_mk_fibers = 0,
        sp_gc_ph_mk_globals = 0, sp_gc_ph_mk_scan = 0;
@@ -755,6 +928,7 @@ void sp_gc_collect(void){
      driver, and not under the diagnostic modes that read the lists between
      mark and sweep (verify, the generational verifier, aging's young probe). */
   if(sp_gc_conc_on<0){ const char*e=getenv("SPINEL_GC_CONC"); sp_gc_conc_on=!(e&&*e=='0'); }
+  if(sp_gc_par_mark_on<0){ const char*e=getenv("SPINEL_GC_PAR_MARK"); sp_gc_par_mark_on=!(e&&*e=='0'); }
   int conc = sp_gc_conc_on && sp_gc_conc_sweep_hook && !sp_gc_verify && !sp_gc_verify_gen &&
              !sp_gc_age_on;
   sp_gc_conc_promote = conc;
@@ -782,7 +956,8 @@ void sp_gc_collect(void){
       if(ph->scan) ph->scan(sp_gc_pinned[pi]);
     }
     if(sp_gc_verify){sp_gc_dbg_phase="minor-drain";sp_gc_dbg_ctx=NULL;}
-    sp_gc_mark_drain();
+    sp_gc_mark_drain_all();
+    sp_gc_mkl_fold();
     if(sp_gc_verify){sp_gc_dbg_phase="?";sp_gc_dbg_ctx=NULL;}
   }
   sp_gc_minor = 0;

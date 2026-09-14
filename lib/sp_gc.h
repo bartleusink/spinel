@@ -11,6 +11,7 @@
 #ifndef SP_GC_H
 #define SP_GC_H
 
+#include <stddef.h>
 #include "sp_types.h"
 
 /* ---- Value tag constants + the boxed value (sp_RbVal) ----
@@ -385,6 +386,8 @@ extern double sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
    the parked workers would address (#4384). */
 extern double sp_gc_ph_slot_max;   /* longest single sweep task, summed (sp_sched.c) */
 extern double sp_gc_ph_task_sum, sp_gc_ph_task_obj, sp_gc_ph_task_sold, sp_gc_ph_task_syoung;   /* all tasks' time, by kind */
+extern unsigned long long sp_gc_ph_mk_helpers, sp_gc_ph_mk_drains;
+extern double sp_gc_ph_mk_drain, sp_gc_ph_mk_join, sp_gc_ph_mk_idle;
 extern double sp_gc_ph_conc_wait, sp_gc_ph_conc_wall, sp_gc_ph_barrier, sp_gc_ph_park, sp_gc_ph_apply_obj, sp_gc_ph_apply_str, sp_gc_ph_apply_release; extern unsigned long long sp_gc_ph_conc_waits;
 extern double sp_gc_ph_mk_roots, sp_gc_ph_mk_fibers,
               sp_gc_ph_mk_globals, sp_gc_ph_mk_scan;
@@ -397,6 +400,25 @@ void sp_gc_sweep_slot(int wid, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_
 void sp_gc_sweep_list(sp_gc_hdr **pp, int conc, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_t *out_bytes);
 void sp_gc_sweep_old_list(sp_gc_hdr **pp, size_t *out_live, sp_gc_hdr **out_tail);
 extern void (*sp_gc_par_sweep_hook)(void);
+/* The parallel mark: the scheduler lends parked workers to the drain. */
+extern void (*sp_gc_par_mark_hook)(void);
+void sp_gc_mark_par_run(void);
+void sp_gc_mark_par_begin(void);
+void sp_gc_mark_par_markers(int n);
+extern int sp_gc_par_mark_on;
+/* The header's flag word: `marked` (27 bits) and the five bits after it,
+   which the C bit-fields lay out from the low end of one 32-bit unit on
+   every target spinel runs on. The parallel mark claims a stamp with an
+   exchange on this word; sp_gc_hdr_flags_check aborts at start-up if the
+   compiler laid the fields out differently. */
+#define SP_GC_FL_MARK_MASK 0x07ffffffu
+#define SP_GC_FL_FROZEN    (1u << 27)
+#define SP_GC_FL_PINNED    (1u << 28)
+#define SP_GC_FL_OLD       (1u << 29)
+#define SP_GC_FL_DIRTY     (1u << 30)
+#define SP_GC_FL_AGED      (1u << 31)
+static inline unsigned *sp_gc_hdr_flags(sp_gc_hdr *h) { return (unsigned *)((char *)h + offsetof(sp_gc_hdr, size) + sizeof(size_t)); }
+void sp_gc_hdr_flags_check(void);
 /* The concurrent sweep (see sp_gc.c): the driver installs both or neither. */
 extern void (*sp_gc_conc_sweep_hook)(int full, int str_sweep, int str_major);
 extern void (*sp_gc_conc_wait_hook)(void);

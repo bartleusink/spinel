@@ -174,8 +174,17 @@ static void sp_sweep_task(const sp_sw_task *t) {
     while (!__atomic_compare_exchange_n(&g_sw_slot_max_us, &m, d, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
   }
 }
+/* The parallel mark: parked workers lent to the collector's drain. */
+static int      g_mk_go = 0;          /* a drain wants helpers */
+static unsigned g_mk_gen = 0;         /* one per drain; a worker helps a drain once */
+static int      g_mk_joined = 0;      /* helpers that took a seat this drain */
+static int      g_mk_active = 0;      /* helpers still inside the drain */
+static int      g_mk_max = 0;         /* seats: SPINEL_GC_MARKERS, default min(cores, 8) */
+static pthread_cond_t g_mk_cv = PTHREAD_COND_INITIALIZER;   /* the collector waits for active == 0 */
+static SP_TLS unsigned g_mk_seen = 0;
 static int g_cs_help = 0;           /* parked workers may claim the concurrent sweep's tasks */
 static int g_cs_ntasks = 0, g_cs_finished = 0;   /* the concurrent sweep's task list (below) */
+static int g_cs_running = 0;                     /* sweeper threads and barrier helpers inside the task list */
 static int g_cs_unclaimed = 0;                   /* tasks nobody has taken yet */
 static void sp_cs_help_run(void);
 static void sp_cs_owner_run(int wid);
@@ -398,6 +407,19 @@ static void sp_stw_park_locked(void) {
       SCHED_LOCK();
       g_sw_done += ran;
       pthread_cond_signal(&g_sweep_cv);
+      continue;
+    }
+    /* The collector's drain wants helpers: take a seat if one is left, run
+       the drain to its end, and come back here. */
+    if (g_mk_go && g_mk_seen != g_mk_gen) {
+      g_mk_seen = g_mk_gen;
+      if (g_mk_joined < g_mk_max) {
+        g_mk_joined++; g_mk_active++;
+        SCHED_UNLOCK();
+        sp_gc_mark_par_run();
+        SCHED_LOCK();
+        if (--g_mk_active == 0) pthread_cond_broadcast(&g_mk_cv);
+      }
       continue;
     }
     /* The previous concurrent sweep is not done and the collector asked for
@@ -1231,19 +1253,28 @@ static int sp_cs_run_tasks(int mode, int wid) {
   if (sp_gc_ph_on && ran) __atomic_fetch_add(&g_cs_task_us, (unsigned long)((sp_monotonic_now() - t0) * 1e6), __ATOMIC_RELAXED);
   return ran;
 }
+/* Leaving the task list: count what was run, and count ourselves out.
+   The collector reuses the task array for the next sweep only once nobody is
+   scanning it (g_cs_running), not merely once every task is done: a thread
+   still walking the array for something to claim would otherwise read the
+   next sweep's entries as they are written. */
 static void sp_cs_finish(int ran) {
-  if (!ran) return;
   pthread_mutex_lock(&g_cs_lock);
-  g_cs_finished += ran;
-  if (g_cs_finished >= g_cs_ntasks) {
+  /* release: the collector may find both counters at rest with an acquire
+     load and proceed without the lock, and it then reads what the tasks wrote */
+  int fin = __atomic_add_fetch(&g_cs_finished, ran, __ATOMIC_RELEASE);
+  int running = __atomic_sub_fetch(&g_cs_running, 1, __ATOMIC_RELEASE);
+  if (fin >= g_cs_ntasks && running == 0) {
     if (sp_gc_ph_on) sp_gc_ph_conc_wall += sp_monotonic_now() - g_cs_t0;
     pthread_cond_broadcast(&g_cs_done);
   }
   pthread_mutex_unlock(&g_cs_lock);
 }
+static void sp_cs_enter(void) { pthread_mutex_lock(&g_cs_lock); __atomic_fetch_add(&g_cs_running, 1, __ATOMIC_RELAXED); pthread_mutex_unlock(&g_cs_lock); }
 /* The owner's share, run by the released worker with the world running. */
 static void sp_cs_owner_run(int wid) {
   int was = sp_gc_in_sweeper;
+  sp_cs_enter();
   sp_gc_in_sweeper = 1;
   int ran = sp_cs_run_tasks(CS_RUN_OWNER, wid);
   sp_gc_in_sweeper = was;
@@ -1254,6 +1285,7 @@ static void sp_cs_owner_run(int wid) {
    the collector recounts the bytes the mark saw. */
 static void sp_cs_help_run(void) {
   int was = sp_gc_in_sweeper;
+  sp_cs_enter();
   sp_gc_in_sweeper = 1;
   int ran = sp_cs_run_tasks(CS_RUN_ANY, -1);
   sp_gc_in_sweeper = was;
@@ -1274,6 +1306,7 @@ static void *sp_cs_sweeper_main(void *arg) {
     while (g_cs_gen == seen && !g_shutdown) pthread_cond_wait(&g_cs_go, &g_cs_lock);
     if (g_shutdown) { pthread_mutex_unlock(&g_cs_lock); break; }
     seen = g_cs_gen;
+    __atomic_fetch_add(&g_cs_running, 1, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&g_cs_lock);
     sp_cs_finish(sp_cs_run_tasks(CS_RUN_SWEEPER, -1));
   }
@@ -1322,7 +1355,7 @@ static void sp_sched_conc_start(int full, int str_sweep, int str_major) {
   }
   pthread_mutex_lock(&g_cs_lock);
   if (sp_gc_ph_on) g_cs_t0 = sp_monotonic_now();
-  g_cs_ntasks = nt; g_cs_finished = 0;
+  g_cs_ntasks = nt; __atomic_store_n(&g_cs_finished, 0, __ATOMIC_RELAXED);
   memset(g_cs_claimed, 0, (size_t)nt);
   __atomic_store_n(&g_cs_unclaimed, nt, __ATOMIC_RELEASE);
   g_cs_pending = 1;
@@ -1334,7 +1367,7 @@ static void sp_sched_conc_start(int full, int str_sweep, int str_major) {
    explicit one): join the sweepers and apply what they produced. */
 static void sp_sched_conc_wait(void) {
   if (!g_cs_pending) return;
-  if (__atomic_load_n(&g_cs_finished, __ATOMIC_ACQUIRE) < g_cs_ntasks) {
+  if (__atomic_load_n(&g_cs_finished, __ATOMIC_ACQUIRE) < g_cs_ntasks || __atomic_load_n(&g_cs_running, __ATOMIC_ACQUIRE) > 0) {
     /* Not done yet: the world is stopped, so every parked worker is idle.
        Hand them the unclaimed tasks (thirty hands finish in a fraction of
        what eight sweepers need), take some ourselves, then join. */
@@ -1345,7 +1378,7 @@ static void sp_sched_conc_wait(void) {
     SCHED_UNLOCK();
     sp_cs_help_run();
     pthread_mutex_lock(&g_cs_lock);
-    while (g_cs_finished < g_cs_ntasks) pthread_cond_wait(&g_cs_done, &g_cs_lock);
+    while (__atomic_load_n(&g_cs_finished, __ATOMIC_RELAXED) < g_cs_ntasks || __atomic_load_n(&g_cs_running, __ATOMIC_RELAXED) > 0) pthread_cond_wait(&g_cs_done, &g_cs_lock);
     pthread_mutex_unlock(&g_cs_lock);
     SCHED_LOCK();
     g_cs_help = 0;
@@ -1387,6 +1420,28 @@ static void sp_sched_conc_wait(void) {
   if (g_cs_full) sp_slab_release();
   if (sp_gc_ph_on) sp_gc_ph_apply_release += sp_monotonic_now() - at0;
   g_cs_pending = 0;
+}
+/* Under the barrier, at the end of the root walk: lend the parked workers
+   to the drain, drain with them, and join them before the mark is declared
+   done (a late helper that found nothing must still be out of the drain). */
+static void sp_sched_par_mark(void) {
+  sp_gc_mark_par_begin();
+  SCHED_LOCK();
+  g_mk_gen++; g_mk_joined = 0; g_mk_go = 1;
+  /* as many wake-ups as there are seats: a broadcast had thirty parked
+     workers take the scheduler lock in turn to find no seat, and that
+     procession cost more than the drain */
+  for (int i = 0; i < g_mk_max; i++) pthread_cond_signal(&g_stw_release);
+  SCHED_UNLOCK();
+  double t0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+  sp_gc_mark_par_run();
+  double t1 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+  SCHED_LOCK();
+  g_mk_go = 0;
+  while (g_mk_active > 0) pthread_cond_wait(&g_mk_cv, &g_sched_lock);
+  if (sp_gc_ph_on) { double t2 = sp_monotonic_now(); sp_gc_ph_mk_drain += t1 - t0; sp_gc_ph_mk_join += t2 - t1; }
+  if (sp_gc_ph_on) { sp_gc_ph_mk_helpers += (unsigned long long)g_mk_joined; sp_gc_ph_mk_drains++; }
+  SCHED_UNLOCK();
 }
 static void sp_cs_start_sweepers(void) {
   { const char *o = getenv("SPINEL_GC_OWNER"); g_cs_owner_env = !(o && *o == '0'); }
@@ -1528,6 +1583,15 @@ static void sp_sched_ensure_workers(void) {
      the pool may still be one at this point; the driver itself falls back to
      the serial sweep whenever there is nobody parked to help. */
   sp_gc_par_sweep_hook = sp_sched_par_sweep;
+  /* Seats for the parallel mark. Four helpers took a server's drain from
+     2.0 ms to 0.7 ms; eight did no better and sixteen were slower, since
+     every helper is a parked worker woken from a futex and the wake-ups
+     and the chunk list's lock are the drain's fixed cost. */
+  { const char *e = getenv("SPINEL_GC_MARKERS"); int m = e && *e ? atoi(e) : 0;
+    if (m <= 0) { m = g_worker_cap > 0 ? g_worker_cap : 1; if (m > 4) m = 4; }
+    g_mk_max = m; sp_gc_mark_par_markers(m + 1); }
+  sp_gc_hdr_flags_check();
+  sp_gc_par_mark_hook = sp_sched_par_mark;
   sp_trim_thread_start();
   sp_cs_start_sweepers();
 }

@@ -397,8 +397,14 @@ static void sp_gc_stats_emit(void) {
           sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim,
           sp_gc_stat_seconds);
   if (sp_gc_ph_barrier > 0)
-    fprintf(stderr, "[gcph] barrier: %.3fs from stop to release, of which %.3fs waiting for the workers to park\n",
-            sp_gc_ph_barrier, sp_gc_ph_park);
+    fprintf(stderr, "[gcph] barrier: %.3fs from stop to release, of which %.3fs waiting for the workers to park; parallel mark on %llu drains, %.1f helpers each\n",
+            sp_gc_ph_barrier, sp_gc_ph_park, sp_gc_ph_mk_drains,
+            sp_gc_ph_mk_drains ? (double)sp_gc_ph_mk_helpers / (double)sp_gc_ph_mk_drains : 0.0);
+  { extern unsigned long long sp_gc_ph_mk_by_helpers, sp_gc_ph_mk_spills, sp_gc_ph_mk_takes;
+    if (sp_gc_ph_mk_drains)
+      fprintf(stderr, "[gcph] parallel mark: %llu of %llu objects marked by helpers; %llu chunks spilled, %llu taken; collector drain %.3fs (idle in it %.3fs) join %.3fs\n",
+              sp_gc_ph_mk_by_helpers, (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_marked), sp_gc_ph_mk_spills, sp_gc_ph_mk_takes,
+              sp_gc_ph_mk_drain, sp_gc_ph_mk_idle, sp_gc_ph_mk_join); }
   if (sp_gc_ph_conc_wall > 0)
     fprintf(stderr, "[gcph] concurrent sweep: %.3fs wall beside the program (longest task %.3fs); %llu collections waited %.3fs for the previous sweep (not in the total above)\n",
             sp_gc_ph_conc_wall, sp_gc_ph_slot_max, sp_gc_ph_conc_waits, sp_gc_ph_conc_wait);
