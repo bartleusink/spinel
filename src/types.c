@@ -147,6 +147,7 @@ const char *ty_name(TyKind t) {
     case TY_STR_ARRAY:   return "str_array";
     case TY_POLY_ARRAY:  return "poly_array";
     case TY_INT_ARRAY_ARRAY: return "int_array_array";
+    case TY_FLOAT_ARRAY_ARRAY: return "float_array_array";
     case TY_STR_INT_HASH: return "str_int_hash";
     case TY_STR_STR_HASH: return "str_str_hash";
     case TY_INT_INT_HASH: return "int_int_hash";
@@ -231,7 +232,8 @@ int ty_never_callable(TyKind t) {
 }
 int ty_is_array(TyKind t) {
   return t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY ||
-         t == TY_STR_ARRAY || t == TY_POLY_ARRAY || t == TY_INT_ARRAY_ARRAY;
+         t == TY_STR_ARRAY || t == TY_POLY_ARRAY || t == TY_INT_ARRAY_ARRAY ||
+         t == TY_FLOAT_ARRAY_ARRAY;
 }
 TyKind ty_array_of(TyKind elem) {
   switch (elem) {
@@ -255,13 +257,15 @@ TyKind ty_array_elem(TyKind arr) {
     case TY_FLOAT_ARRAY:     return TY_FLOAT;
     case TY_STR_ARRAY:       return TY_STRING;
     case TY_INT_ARRAY_ARRAY: return TY_INT_ARRAY;
+    case TY_FLOAT_ARRAY_ARRAY: return TY_FLOAT_ARRAY;
     default:                 return TY_POLY;
   }
 }
-/* ty_array_of deliberately does NOT map TY_INT_ARRAY -> TY_INT_ARRAY_ARRAY:
-   like TY_OBJ_ARRAY, the nested-int-array type is produced only by the
-   post-fixpoint narrow pass, never by forward inference (a forward mapping
-   would cascade the nested type through the fixpoint and destabilize it). */
+/* ty_array_of deliberately does NOT map TY_INT_ARRAY -> TY_INT_ARRAY_ARRAY, nor
+   TY_FLOAT_ARRAY -> TY_FLOAT_ARRAY_ARRAY: like TY_OBJ_ARRAY, the nested types are
+   produced only by the post-fixpoint narrow pass, never by forward inference (a
+   forward mapping would cascade the nested type through the fixpoint and
+   destabilize it). */
 
 TyKind ty_unify(TyKind a, TyKind b) {
   if (a == b) return a;

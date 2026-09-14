@@ -6744,21 +6744,26 @@ static void oa_uf_union(OAS *sl, int a, int b) {
   int ra = oa_uf_find(sl, a), rb = oa_uf_find(sl, b);
   if (ra != rb) sl[ra].uf = rb;
 }
-/* Element-class sentinel: the array's elements are themselves int-arrays
-   (ExtField-style int[4]), narrowing the container to TY_INT_ARRAY_ARRAY
-   rather than an object-pointer array. Distinct from -1 (none) / -2 (conflict)
-   and from any user class id (>= 0), so oa_cls_join composes it unchanged. */
+/* Element-class sentinels: the array's elements are themselves int-arrays
+   (ExtField-style int[4]) or float-arrays (a numeric table), narrowing the
+   container to TY_INT_ARRAY_ARRAY / TY_FLOAT_ARRAY_ARRAY rather than an
+   object-pointer array. Distinct from -1 (none) / -2 (conflict) and from any
+   user class id (>= 0), so oa_cls_join composes them unchanged -- and distinct
+   from EACH OTHER, so a component mixing int rows and float rows joins to -2
+   and stays boxed, as two user classes would. */
 #define OA_CLS_IA (-1000)
-/* the single user-object class of a node's value, an int-array sentinel, or -1
-   if neither a lone object nor a lone int-array. */
+#define OA_CLS_FA (-1001)
+#define OA_CLS_IS_NESTED(x) ((x) == OA_CLS_IA || (x) == OA_CLS_FA)
+/* the single user-object class of a node's value, a nested scalar-array
+   sentinel, or -1 if neither a lone object nor a lone scalar array. */
 static int oa_obj_class_of(Compiler *c, int node) {
   TyKind t = infer_type(c, node);
   if (ty_is_object(t)) return ty_object_class(t);
-  if (t == TY_INT_ARRAY) {
-    /* A literal whose elements are not all settled reads as an int array while
-       the fixpoint runs -- an UNKNOWN element unifies away -- and `[obj, -1]`
-       looked like one until `obj` acquired its class. Narrowing on that
-       evidence pinned the container to a table of int arrays, and the pin
+  if (t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY) {
+    /* A literal whose elements are not all settled reads as a scalar array
+       while the fixpoint runs -- an UNKNOWN element unifies away -- and
+       `[obj, -1]` looked like one until `obj` acquired its class. Narrowing on
+       that evidence pinned the container to a table of int arrays, and the pin
        survived the rounds that knew better (#3781). Take no evidence until
        every element has a type. */
     const NodeTable *nt = c->nt;
@@ -6768,7 +6773,7 @@ static int oa_obj_class_of(Compiler *c, int node) {
       for (int k = 0; k < en; k++)
         if (infer_type(c, els[k]) == TY_UNKNOWN) return -1;
     }
-    return OA_CLS_IA;
+    return t == TY_INT_ARRAY ? OA_CLS_IA : OA_CLS_FA;
   }
   /* A value of another CONCRETE type is evidence against one class: a String
      or an Integer pushed or `[]=`-stored into the array puts something in it
@@ -7158,6 +7163,7 @@ static int narrow_locals_from_arrays(Compiler *c) {
            read is that type's nil (SP_INT_NIL / NULL), which it models */
         TyKind ec = ty_is_obj_array(rt) ? ty_object(ty_obj_array_class(rt))
                   : (rt == TY_INT_ARRAY_ARRAY) ? TY_INT_ARRAY
+                  : (rt == TY_FLOAT_ARRAY_ARRAY) ? TY_FLOAT_ARRAY
                   : (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY || rt == TY_STR_ARRAY)
                     ? ty_array_elem(rt) : TY_UNKNOWN;
         if (ec == TY_UNKNOWN) { ok = 0; break; }
@@ -7200,11 +7206,11 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
     for (int e = 0; e < en; e++) {
       const char *ety = nt_type(nt, el[e]);
       int ec = (ety && sp_streq(ety, "SplatNode")) ? -2 : oa_obj_class_of(c, el[e]);
-      /* OA_CLS_IA (int-array element) is a negative SENTINEL, not an
-         "invalid" -1/-2: it is real evidence, so it must not kill the slot
-         (an `[[a,b],[c,d]]` array-of-int-array literal narrows like a pushed
-         one already does -- the push arm never had this < 0 guard). */
-      if (ec < 0 && ec != OA_CLS_IA) { sl[S].alive = 0; break; }
+      /* OA_CLS_IA / OA_CLS_FA (a nested scalar array) are negative SENTINELS,
+         not an "invalid" -1/-2: they are real evidence, so they must not kill
+         the slot (an `[[a,b],[c,d]]` array-of-int-array literal narrows like a
+         pushed one already does -- the push arm never had this < 0 guard). */
+      if (ec < 0 && !OA_CLS_IS_NESTED(ec)) { sl[S].alive = 0; break; }
       sl[S].cls = oa_cls_join(sl[S].cls, ec);
     }
     return;
@@ -7252,7 +7258,7 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
       int gn = 0;
       const int *gs = gbody >= 0 ? nt_arr(nt, gbody, "body", &gn) : NULL;
       int ec = (gs && gn > 0) ? oa_obj_class_of(c, gs[gn - 1]) : -1;
-      if (ec < 0 && ec != OA_CLS_IA) sl[S].alive = 0;
+      if (ec < 0 && !OA_CLS_IS_NESTED(ec)) sl[S].alive = 0;
       else sl[S].cls = oa_cls_join(sl[S].cls, ec);
     }
     /* a call whose own value is a tracked slot: join the two. */
@@ -7283,7 +7289,8 @@ static int narrow_object_arrays(Compiler *c) {
          field also carries the element-narrowing's decision (a local bound
          from a container read), and resetting one of those to a poly ARRAY
          made the two passes trade the slot every round (#3781) */
-      if (pn == TY_INT_ARRAY_ARRAY || ty_is_obj_array(pn)) sc->locals[li].type = TY_POLY_ARRAY;
+      if (pn == TY_INT_ARRAY_ARRAY || pn == TY_FLOAT_ARRAY_ARRAY ||
+          ty_is_obj_array(pn)) sc->locals[li].type = TY_POLY_ARRAY;
     }
   }
   /* 1. candidate slots: POLY_ARRAY locals/params (skip block params + rbs). */
@@ -7309,7 +7316,8 @@ static int narrow_object_arrays(Compiler *c) {
         transplanted ones) and returns pinned by a seed stay out. */
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
-    if (sc->ret_oa_pin == TY_INT_ARRAY_ARRAY || ty_is_obj_array(sc->ret_oa_pin))
+    if (sc->ret_oa_pin == TY_INT_ARRAY_ARRAY || sc->ret_oa_pin == TY_FLOAT_ARRAY_ARRAY ||
+        ty_is_obj_array(sc->ret_oa_pin))
       sc->ret = TY_POLY_ARRAY;   /* same reset */
     if (sc->ret != TY_POLY_ARRAY || !sc->name || sc->def_node < 0) continue;
     if (sc->ret_rbs_seeded || sc->ret_specialized) continue;
@@ -7783,17 +7791,17 @@ static int narrow_object_arrays(Compiler *c) {
       continue;
     }
     TyKind nty;
-    if (sl[r].cls == OA_CLS_IA) {
-      /* array-of-int-array: the codegen supports index/push/[]=/length/first/
-         last but not the boxed sort/min/max comparators yet, so a component
-         that used those (needs_cmp) stays on the poly path for now. */
+    if (OA_CLS_IS_NESTED(sl[r].cls)) {
+      /* a nested scalar array: the codegen supports index/push/[]=/length/
+         first/last but not the boxed sort/min/max comparators yet, so a
+         component that used those (needs_cmp) stays on the poly path for now. */
       if (sl[r].needs_cmp) {
         if (sl[i].ici >= 0) continue;
         if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
         else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
         continue;
       }
-      nty = TY_INT_ARRAY_ARRAY;
+      nty = sl[r].cls == OA_CLS_IA ? TY_INT_ARRAY_ARRAY : TY_FLOAT_ARRAY_ARRAY;
     }
     else {
       /* a component using no-block sort/min/max narrows only when the element

@@ -537,15 +537,16 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
      directly -- no sp_RbVal box, no cls-id dispatch. Only the op set the pass
      admits reaches here; the pass and this block stay in lockstep. */
   if (recv >= 0 && ty_is_ptr_array(rt)) {
-    int is_ia = (rt == TY_INT_ARRAY_ARRAY);
-    int ecls = is_ia ? -1 : ty_obj_array_class(rt);
-    /* element C type: the indexed pointer type. For an int-array-array the
-       element is an sp_IntArray*; for an object array it is the class's own
-       struct, which for a native class is the name its `native_struct`
-       declared rather than one derived from the Ruby name. Copied out of
-       class_ctype's rotating buffer, since it is held across emit calls. */
+    const char *nested = ty_ptr_array_elem_ctype(rt);
+    int ecls = nested ? -1 : ty_obj_array_class(rt);
+    /* element C type: the indexed pointer type. For a nested scalar-array kind
+       the element is an sp_IntArray or sp_FloatArray pointer; for an object
+       array it is the class's own struct, which for a native class is the name
+       its `native_struct` declared rather than one derived from the Ruby name.
+       Copied out of class_ctype's rotating buffer, since it is held across emit
+       calls. */
     char ecbuf[192];
-    snprintf(ecbuf, sizeof ecbuf, "%s", is_ia ? "sp_IntArray" : class_ctype(c, ecls));
+    snprintf(ecbuf, sizeof ecbuf, "%s", nested ? nested : class_ctype(c, ecls));
     const char *ecn = ecbuf;
     if ((sp_streq(name, "[]") || sp_streq(name, "at")) && argc == 1) {
       buf_printf(b, "((%s *)sp_PtrArray_get(", ecn);
@@ -560,7 +561,18 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     }
     if (sp_streq(name, "[]=") && argc == 2) {
       int tv = ++g_tmp;
-      buf_printf(b, "({ %s *_t%d = ", ecn, tv); emit_expr(c, argv[1], b);
+      buf_printf(b, "({ %s *_t%d = ", ecn, tv);
+      /* A poly value carries its pointer under a tag, and the slot takes the
+         pointer, not the sp_RbVal -- the same unboxing the push arm below does
+         for the same reason (#4293). Without it `t[i] = f(x)`, where f's return
+         widened to poly, initialized a typed element pointer from an sp_RbVal
+         and the C did not compile. */
+      if (comp_ntype(c, argv[1]) == TY_POLY) {
+        buf_printf(b, "(%s *)sp_poly_obj_ptr(", ecn);
+        emit_expr(c, argv[1], b);
+        buf_puts(b, ")");
+      }
+      else emit_expr(c, argv[1], b);
       buf_puts(b, "; sp_PtrArray_set("); emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_int_expr(c, argv[0], b); buf_printf(b, ", _t%d); _t%d; })", tv, tv);
       return 1;
@@ -595,18 +607,18 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     /* no-block comparisons via the boxed comparator (user `<=>` through the
        cmp hook); the narrowing pass admits these only when the element class
        has `<=>` and (for sort) the result lands in a modeled consumer. */
-    if (!is_ia && sp_streq(name, "sort") && argc == 0 && nt_ref(nt, id, "block") < 0) {
+    if (!nested && sp_streq(name, "sort") && argc == 0 && nt_ref(nt, id, "block") < 0) {
       buf_puts(b, "sp_PtrArray_sort_obj("); emit_expr(c, recv, b);
       buf_printf(b, ", %d)", ecls);
       return 1;
     }
-    if (!is_ia && sp_streq(name, "sort!") && argc == 0 && nt_ref(nt, id, "block") < 0) {
+    if (!nested && sp_streq(name, "sort!") && argc == 0 && nt_ref(nt, id, "block") < 0) {
       int tr = ++g_tmp;
       buf_printf(b, "({ sp_PtrArray *_t%d = ", tr); emit_expr(c, recv, b);
       buf_printf(b, "; sp_PtrArray_sort_obj_bang(_t%d, %d); _t%d; })", tr, ecls, tr);
       return 1;
     }
-    if (!is_ia && (sp_streq(name, "min") || sp_streq(name, "max")) && argc == 0 &&
+    if (!nested && (sp_streq(name, "min") || sp_streq(name, "max")) && argc == 0 &&
         nt_ref(nt, id, "block") < 0) {
       buf_printf(b, "((%s *)sp_PtrArray_minmax_obj(", ecn);
       emit_expr(c, recv, b);
