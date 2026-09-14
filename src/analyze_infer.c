@@ -7068,8 +7068,14 @@ TyKind infer_type(Compiler *c, int id) {
   if (memo_ok) {
     if (id >= g_imemo_cap) {
       int ncap = c->nt->count > id + 1 ? c->nt->count : id + 1;
-      g_imemo_stamp = realloc(g_imemo_stamp, sizeof(unsigned) * (size_t)ncap);
-      g_imemo_val = realloc(g_imemo_val, sizeof(TyKind) * (size_t)ncap);
+      unsigned *nstamp = realloc(g_imemo_stamp, sizeof(unsigned) * (size_t)ncap);
+      TyKind *nval = realloc(g_imemo_val, sizeof(TyKind) * (size_t)ncap);
+      /* a grown side is kept either way (the old pointer is gone); the cap
+         only moves when both grew, and on failure the memo -- an optimization
+         -- just does not record this node */
+      if (nstamp) g_imemo_stamp = nstamp;
+      if (nval) g_imemo_val = nval;
+      if (!nstamp || !nval) return t;
       memset(g_imemo_stamp + g_imemo_cap, 0,
              sizeof(unsigned) * (size_t)(ncap - g_imemo_cap));
       g_imemo_cap = ncap;
