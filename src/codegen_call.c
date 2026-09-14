@@ -5077,7 +5077,13 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       int is_call = comp_method_in_chain(c, k, name, NULL) >= 0 ||
                     (c->classes[k].is_native_class && comp_native_method_find(c, k, name, 0, 0) >= 0);
       if (is_call || comp_reader_in_chain(c, k, name, NULL)) ncand++;
-      if (is_call) ncall_arm++;
+      /* The root decision counts only the arms the switch below will carry:
+         a class no reachable code constructs gets no arm, so it must not
+         decide the root either. A dead FFI wrapper's Vector2 counted as a
+         calling arm, and every `x` read of a Struct field paid a root push
+         and pop for an arm that could not run (#4460). ncand keeps every
+         candidate, as the choice to emit a dispatch at all always has. */
+      if (is_call && (c->classes[k].instantiated || class_is_prim_reopen(c, k))) ncall_arm++;
     }
     if (ncand > 0 || is_lengthlike || is_pred || is_class_named || is_class_reflect || is_ostruct || is_io_rewind || is_poly_to_a || is_poly_to_h) {
       TyKind ret = comp_ntype(c, id);

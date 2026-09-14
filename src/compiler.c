@@ -270,6 +270,7 @@ ClassInfo *comp_class_new(Compiler *c, const char *name, int def_node) {
   ClassInfo *ci = &c->classes[c->nclasses++];
   c->anon_struct_ids_valid = 0;
   memset(ci, 0, sizeof(*ci));
+  ci->ctor_reachable = 1;   /* conservatively, until compute_instantiated's early pass has looked */
   ci->name = name ? strdup(name) : NULL;
   ci->c_name = sp_class_c_name(name);
   ci->def_node = def_node;

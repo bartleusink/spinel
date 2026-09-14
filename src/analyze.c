@@ -487,9 +487,24 @@ void compute_reachable(Compiler *c) {
    not require the origination site to be reachable), so it only over-marks,
    never under-marks. The poly-dispatch switch reads `instantiated` to skip the
    `case` arm of a class no value can be (codegen_call.c). */
-void compute_instantiated(Compiler *c) {
+/* Twice: `early`, before the type fixpoint, so that the return type a poly
+   receiver's call unifies over its candidates (analyze_infer.c) leaves out a
+   class no reachable code constructs -- a dead FFI wrapper's `Vector2.new`
+   put Vector2's float `x` into every `x` read in the program, and a Struct
+   field read beside it went poly (#4460); and again after it, when a `.new`
+   on a receiver the types can name as a Class value can be told from one
+   that cannot. The early pass has no types, so it takes every `.new` on a
+   non-constant receiver as the dynamic case and keeps every class: it can
+   only over-mark relative to the late pass, and the late pass can only
+   un-mark, so an arm codegen drops was never in the inferred union. */
+void compute_instantiated(Compiler *c, int early) {
   const NodeTable *nt = c->nt;
   int disable = 0;
+  /* The early pass writes ctor_reachable and leaves `instantiated` as the
+     fixpoint has always seen it (unset); the late pass writes both. */
+  int *keep = NULL;
+  if (early) { keep = (int *)malloc(sizeof(int) * (size_t)(c->nclasses ? c->nclasses : 1)); for (int k = 0; k < c->nclasses; k++) keep[k] = c->classes[k].instantiated; }
+  for (int k = 0; k < c->nclasses; k++) c->classes[k].instantiated = 0;
   /* Struct classes: conservatively live (their instances flow as poly). */
   for (int k = 0; k < c->nclasses; k++)
     if (c->classes[k].is_struct) c->classes[k].instantiated = 1;
@@ -512,10 +527,18 @@ void compute_instantiated(Compiler *c) {
       if (rty && (sp_streq(rty, "ConstantReadNode") || sp_streq(rty, "ConstantPathNode"))) {
         const char *cn = nt_str(nt, recv, "name");
         int ci = cn ? comp_class_index(c, cn) : -1;
-        if (ci >= 0) c->classes[ci].instantiated = 1;
+        /* A construction inside a method nothing reaches mints nothing:
+           compute_reachable has run, and its answer is conservative (every
+           method whose name is mentioned anywhere is reachable), so a site
+           it leaves dead is dead. A dead FFI wrapper's `Vector2.new` used to
+           make Vector2 an arm of every `x` / `y` dispatch in the program,
+           and the float it returns widened an unrelated hot loop's Struct
+           field reads to poly (#4460). */
+        Scope *encl = comp_scope_of(c, id);
+        if (ci >= 0 && (!encl || encl->reachable)) c->classes[ci].instantiated = 1;
         /* an unknown constant is a builtin (Array.new, ...) -- not a user arm */
       }
-      else if (comp_ntype(c, recv) == TY_CLASS || comp_ntype(c, recv) == TY_POLY) {
+      else if (early || comp_ntype(c, recv) == TY_CLASS || comp_ntype(c, recv) == TY_POLY) {
         /* `klass.new` on a dynamic Class value -- typed TY_CLASS, or a poly
            value that is a Class at run time (`REG["c"].new`, #2888): the class
            is unresolvable at compile time, so keep every class instantiated
@@ -536,7 +559,7 @@ void compute_instantiated(Compiler *c) {
        scope), so it must not mark the class instantiated. */
     if (recv < 0 && sp_streq(name, "new")) {
       Scope *encl = comp_scope_of(c, id);
-      if (encl && encl->class_id >= 0 && encl->is_cmethod)
+      if (encl && encl->class_id >= 0 && encl->is_cmethod && encl->reachable)
         c->classes[encl->class_id].instantiated = 1;
     }
     /* raise Cls / raise Cls, msg : constructs an instance of Cls */
@@ -555,6 +578,8 @@ void compute_instantiated(Compiler *c) {
   }
   if (disable)
     for (int k = 0; k < c->nclasses; k++) c->classes[k].instantiated = 1;
+  for (int k = 0; k < c->nclasses; k++) c->classes[k].ctor_reachable = c->classes[k].instantiated;
+  if (early) { for (int k = 0; k < c->nclasses; k++) c->classes[k].instantiated = keep[k]; free(keep); }
 }
 
 /* ---- proc capture detection (closures) ----
@@ -13399,6 +13424,13 @@ void analyze_program(Compiler *c) {
      hottest (called per node, every fixpoint iteration). */
   comp_scope_index_set_frozen(1);
 
+  /* The classes that can exist, before any type is derived from them (see
+     compute_instantiated): reachability is a matter of names and a
+     construction site is a call node, so both are known now. Recomputed
+     after the fixpoint, when a dynamic `.new` can be told from a static one. */
+  compute_reachable(c);
+  compute_instantiated(c, 1);
+
   g_fixpoint_rounds = 0;
   /* Two rounds. The proc-form clones are made between them: knowing which
      methods a poly dispatch will name needs settled receiver types, and the
@@ -14214,7 +14246,7 @@ void analyze_program(Compiler *c) {
   /* Which exact cls_ids can appear at runtime -- lets the poly-dispatch switch
      drop `case` arms for classes that are never instantiated (the referenced
      method then DCEs as an unreferenced static). */
-  compute_instantiated(c);
+  compute_instantiated(c, 0);
 
   /* Lower self-recursive yield methods: methods that use `yield` AND call
      themselves recursively. Their implicit block is forwarded as a proc

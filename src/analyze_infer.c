@@ -4564,6 +4564,13 @@ else {
       for (int k = 0; k < c->nclasses; k++) {
         if (an_builtin_only) continue;   /* the builtin answer alone is wanted */
         if (c->classes[k].is_native_class) {
+          /* A native class no reachable code constructs is no candidate: its
+             binding's return type must not widen the union (a dead FFI
+             wrapper's Vector2 put a float `x` beside every int `x`, #4460).
+             Native classes only: a user class left out here would type the
+             call narrower than the emitters, which still count every user
+             candidate, and the two disagreed on three tests. */
+          if (!c->classes[k].ctor_reachable) continue;
           /* The lookup's loose fallback answers a same-name binding of ANY
              arity; one that cannot take this call's arguments is no answer to
              it. StringIO's zero-argument `getbyte` typed `s.getbyte(i)` on a

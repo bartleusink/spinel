@@ -1840,6 +1840,9 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -Eq 'sp_StrStrHash \* *lv_s' "$$tmp/hn.c" || { echo "infer-test: FAIL (a returned Hash.new lost the variant its caller narrowed it to)"; grep -oE 'sp_[A-Za-z]+Hash \* *lv_s' "$$tmp/hn.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_StrIntHash \* *lv_i' "$$tmp/hn.c" || { echo "infer-test: FAIL (a returned Hash.new lost its narrowed value type)"; grep -oE 'sp_[A-Za-z]+Hash \* *lv_i' "$$tmp/hn.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_PolyPolyHash \* *sp_free_hash' "$$tmp/hn.c" || { echo "infer-test: FAIL (a returned Hash.new that nothing narrows lost the widest variant)"; ok=0; }; \
+	$(SPINEL) test/infer/dead_constructor_no_arm.rb -c --no-line-map -o "$$tmp/dc.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile dead_constructor_no_arm)"; exit 1; }; \
+	grep -q 'sp_poly_add' "$$tmp/dc.c" && { echo "infer-test: FAIL (a class constructed only in dead code widened a poly receiver's field read to poly)"; ok=0; }; \
+	grep -Eq 'sp_int_add\(\(\{ sp_RbVal _t[0-9]+ = lv_d; sp_int _t[0-9]+ = 0; switch' "$$tmp/dc.c" || { echo "infer-test: FAIL (the field read of a boxed receiver did not stay an int switch, or its receiver is rooted for an arm that cannot run)"; ok=0; }; \
 	rounds=$$(SP_FIXPOINT_LOG=1 $(SPINEL) test/infer/fixpoint_converges.rb -c --no-line-map -o "$$tmp/fp.c" 2>&1 | sed -n 's/^\[fp\] rounds=\([0-9]*\).*/\1/p' | tail -1); \
 	case "$$rounds" in ''|*[!0-9]*) echo "infer-test: FAIL (no fixpoint round count -- SP_FIXPOINT_LOG gone?)"; ok=0;; \
 	  *) [ "$$rounds" -lt 128 ] || { echo "infer-test: FAIL (the inference fixpoint ran to its $$rounds-round cap: it stopped mid-oscillation, and where it stops decides which typing is emitted)"; ok=0; };; \

@@ -351,6 +351,10 @@ typedef struct {
   int is_value_type;   /* small immutable scalar-ivar class represented by value
                           (sp_X, not sp_X *): no heap alloc / GC. Set by
                           detect_value_types after analysis. */
+  int ctor_reachable;  /* the early census (compute_instantiated before the type
+                          fixpoint): a construction site of this class sits in
+                          reachable code, or nothing can tell. Read only by the
+                          poly-receiver return-type union, for native classes. */
   int instantiated;    /* a value with this exact cls_id can come into existence
                           somewhere: `.new`/`.allocate`/`raise Cls`/Struct, or a
                           Marshal.load that can mint any class. When clear, no

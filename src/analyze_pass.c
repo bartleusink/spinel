@@ -4064,6 +4064,26 @@ int infer_param_types(Compiler *c) {
               else if (a < an) vnode = argv[a];
               if (class_ivar_pinned(cls, cls->ivars[a])) continue;
               TyKind at = vnode >= 0 ? infer_type(c, vnode) : TY_NIL;
+              /* An empty container literal (or `Array.new` / `Hash.new`) has
+                 no type of its own until a use fills it in, and a member
+                 has no write of its own to be filled through: it stayed
+                 UNKNOWN to the backstop and read back boxed. Take the empty
+                 container's kind, the way an `@ivar = []` write does
+                 (#4460). */
+              if (at == TY_UNKNOWN && vnode >= 0) {
+                NodeKind vk = nt_kind(nt, vnode);
+                if (vk == NK_ArrayNode) at = TY_POLY_ARRAY;
+                else if (vk == NK_HashNode) at = TY_POLY_POLY_HASH;
+                else if (vk == NK_CallNode) {
+                  const char *vn = nt_str(nt, vnode, "name"); int vr = nt_ref(nt, vnode, "receiver");
+                  int va = nt_ref(nt, vnode, "arguments"); int van = 0; if (va >= 0) nt_arr(nt, va, "arguments", &van);
+                  const char *vrn = vr >= 0 && nt_kind(nt, vr) == NK_ConstantReadNode ? nt_str(nt, vr, "name") : NULL;
+                  if (vn && vrn && sp_streq(vn, "new") && van == 0 && nt_ref(nt, vnode, "block") < 0) {
+                    if (sp_streq(vrn, "Array")) at = TY_POLY_ARRAY;
+                    else if (sp_streq(vrn, "Hash")) at = TY_POLY_POLY_HASH;
+                  }
+                }
+              }
               TyKind m = ty_unify(cls->ivar_types[a], at);
               if (m != cls->ivar_types[a]) { cls->ivar_types[a] = m; changed = 1; }
             }
