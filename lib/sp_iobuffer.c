@@ -627,7 +627,9 @@ static const char *iob_hexdump(sp_IOBuffer *b, int64_t off, int64_t len, int64_t
   if (off > b->size) off = b->size;
   if (len > b->size - off) len = b->size - off;
   int64_t end = off + len;
-  int64_t nlines = len > 0 ? (len + width - 1) / width : 0;
+  /* ceiling division without the additive form: len + width - 1 itself
+     overflows for a near-INT64_MAX width */
+  int64_t nlines = len / width + (len % width != 0);
   /* per line: the address prefix ("0x" + up to 16 hex digits + two spaces),
      width * 3 hex slots, a separator, width ASCII chars, the newline and
      NUL -- and `width` is caller data, so every derived size is checked
