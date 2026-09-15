@@ -1024,6 +1024,12 @@ thread-puts-test: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	  n=$$(wc -l < "$$tmp/out"); bad=$$(grep -vcE '^[0-7]/[0-9]+$$' "$$tmp/out"); \
 	  [ "$$n" -eq 2400 ] && [ "$$bad" -eq 0 ] || { echo "thread-puts-test: FAIL (run $$r: $$n lines, $$bad malformed)"; grep -vE '^[0-7]/[0-9]+$$' "$$tmp/out" | head -3; ok=0; }; \
 	done; \
+	$(SPINEL) test/threads/ffi_blocking_under_gc.rb -o "$$tmp/f" >/dev/null 2>&1 || \
+	  { echo "thread-puts-test: FAIL (ffi blocking: compile)"; rm -rf "$$tmp"; exit 1; }; \
+	for r in 1 2; do \
+	  SPINEL_GC_STRESS=1 $(TIMEOUT60) "$$tmp/f" > "$$tmp/fout" 2>/dev/null || { echo "thread-puts-test: FAIL (ffi blocking: crashed or timed out under GC stress)"; ok=0; }; \
+	  grep -q '^\[177, 177, 177, 177, 177, 177\]$$' "$$tmp/fout" || { echo "thread-puts-test: FAIL (ffi blocking: a value held across the call was lost)"; head -3 "$$tmp/fout"; ok=0; }; \
+	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "thread-puts-test: pass"; else exit 1; fi
 

@@ -833,6 +833,7 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
    it -- 5.7s of 13.1s of collector time on a server workload, invisible in the
    total. That is what this found, and #4380 then removed; it reads ~0 now. */
 double sp_gc_ph_wait_top = 0;   /* joining the previous sweep at the top of the collection */
+double sp_gc_ph_park_sweeping = 0; unsigned long long sp_gc_ph_park_sweeping_n = 0;   /* the park wait spent while an owner sweep of the previous cycle was still running (sp_sched.c) */
 double sp_gc_ph_mark = 0, sp_gc_ph_oldsweep = 0, sp_gc_ph_slotsweep = 0,
        sp_gc_ph_rembclear = 0, sp_gc_ph_strsweep = 0, sp_gc_ph_trim = 0;
 double sp_gc_ph_slot_max = 0, sp_gc_ph_task_sum = 0, sp_gc_ph_task_obj = 0, sp_gc_ph_task_sold = 0, sp_gc_ph_task_syoung = 0;   /* filled by the threaded sweep driver */

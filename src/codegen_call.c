@@ -26887,6 +26887,13 @@ else {
            no `format` attribute, so gcc does not format-check the call. */
         int is_vararg = call_argc > 0 && sp_streq(c->ffi_funcs[fi].args[call_argc - 1], "varargs");
         int fixed_argc = is_vararg ? call_argc - 1 : call_argc;
+        /* `blocking: true`: the arguments are evaluated into temps first (they
+           may allocate, or run Ruby), then the worker leaves the world for
+           the call itself and comes back for the return. A callback-taking
+           or variadic function keeps the plain call. */
+        int blocking = c->ffi_funcs[fi].blocking && !hdr_call && !is_vararg;
+        Buf pre_buf; memset(&pre_buf, 0, sizeof pre_buf);
+        int tb = blocking ? ++g_tmp : 0;
         /* Build the raw C call */
         Buf call_buf; memset(&call_buf, 0, sizeof call_buf);
         if (is_vararg) {
@@ -26906,6 +26913,7 @@ else {
           TyKind at = comp_ntype(c, argv[ai]);
           int cbidx = ffi_find_callback(c, rcmod, spec);
           if (cbidx >= 0) { emit_ffi_callback_arg(c, cbidx, argv[ai], &call_buf); continue; }
+          size_t arg_at = call_buf.len;   /* the converted argument, for the blocking form's temp */
           /* :ptr already emits a void*; str/int_array/float_array carry a const
              element pointer that must be genericized for the header call. */
           int voidp = hdr_call && (sp_streq(spec, "str") ||
@@ -26980,6 +26988,12 @@ else {
             else { buf_puts(&call_buf, "(("); buf_puts(&call_buf, ffi_c_type(spec)); buf_puts(&call_buf, ")("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))"); }
           }
           if (voidp) buf_puts(&call_buf, ")");
+          if (blocking) {
+            /* move the converted argument out to a temp ahead of the call */
+            buf_printf(&pre_buf, "%s _b%d_%d = %s; ", ffi_c_type(spec), tb, ai, call_buf.p + arg_at);
+            buf_erase(&call_buf, arg_at, call_buf.len - arg_at);
+            buf_printf(&call_buf, "_b%d_%d", tb, ai);
+          }
         }
         /* Extra variadic args: promote by inferred type (int->long long,
            float->double, str->const char*, ptr->void*). A poly-typed vararg
@@ -27008,6 +27022,17 @@ else {
           }
         }
         buf_puts(&call_buf, ")");
+        if (blocking) {
+          /* the worker is out of the world for exactly the call */
+          Buf w; memset(&w, 0, sizeof w);
+          if (is_void_ret)
+            buf_printf(&w, "({ %ssp_native_enter(); %s; sp_native_leave(); })", pre_buf.p ? pre_buf.p : "", call_buf.p);
+          else
+            buf_printf(&w, "({ %s%s _b%d_r; sp_native_enter(); _b%d_r = %s; sp_native_leave(); _b%d_r; })",
+                       pre_buf.p ? pre_buf.p : "", ffi_c_type(ret_spec), tb, tb, call_buf.p, tb);
+          free(call_buf.p); call_buf = w;
+        }
+        free(pre_buf.p);
         if (is_void_ret) {
           buf_puts(b, "("); buf_puts(b, call_buf.p); buf_puts(b, ", (sp_int)0)");
         }

@@ -396,6 +396,10 @@ static void sp_gc_stats_emit(void) {
           sp_gc_ph_task_sum, sp_gc_ph_task_obj, sp_gc_ph_task_sold, sp_gc_ph_task_syoung,
           sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim,
           sp_gc_stat_seconds);
+  { extern double sp_gc_ph_park_sweeping; extern unsigned long long sp_gc_ph_park_sweeping_n;
+    if (sp_gc_ph_park_sweeping_n > 0)
+      fprintf(stderr, "[gcph] park wait: %.3fs of it on %llu barriers raised while an owner sweep of the previous cycle was still running\n",
+              sp_gc_ph_park_sweeping, sp_gc_ph_park_sweeping_n); }
   if (sp_gc_ph_barrier > 0)
     fprintf(stderr, "[gcph] barrier: %.3fs from stop to release, of which %.3fs waiting for the workers to park; parallel mark on %llu drains, %.1f helpers each\n",
             sp_gc_ph_barrier, sp_gc_ph_park, sp_gc_ph_mk_drains,

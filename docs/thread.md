@@ -25,7 +25,12 @@ is a user guarantee.
 - **Green threads over a stop-the-world GC.** A `Thread` is a green thread; the
   workers multiplex many green threads onto few OS threads. A garbage
   collection stops all workers at a safepoint, so allocation stays correct
-  under parallelism without per-object write barriers.
+  under parallelism without per-object write barriers. A worker with nothing
+  to run, waiting in the scheduler, is *out of the world*: its roots are
+  published when it goes idle, a collection counts it as parked without
+  waking it, and it parks for real only if it wakes while one is running.
+  The same is true of a worker inside an `ffi_func` declared `blocking: true`
+  (see [FFI.md](FFI.md)).
 - **Preemption.** A monitor thread timeslices CPU-bound threads (~10 ms
   quantum) so a thread that loops without yielding cannot starve its siblings.
   Preemption is taken at **safepoint polls** (loop back-edges): a thread that

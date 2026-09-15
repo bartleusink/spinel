@@ -439,6 +439,9 @@ typedef struct {
   char *ret;       /* return spec */
   char **args;     /* arg specs array (malloc'd) */
   int nargs;
+  int blocking;    /* `blocking: true`: the call may block for a while and touches
+                      no Ruby object, so the worker leaves the world for it
+                      (sp_native_enter/leave): a collection does not wait for it */
 } FfiFunc;
 
 typedef struct { char *mod; char *name; int val; } FfiConst;     /* ffi_const */

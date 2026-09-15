@@ -2731,6 +2731,19 @@ void register_ffi_decls(Compiler *c) {
           snprintf(emsg, sizeof emsg, "`%s` needs a name, an argument-type array, and a return type", dname);
           ffi_decl_error(c, s, emsg);
         }
+        /* a trailing `blocking: true` (the ffi gem's own keyword): the call
+           leaves the world while it runs, see FfiFunc.blocking */
+        int blocking = 0;
+        if (an >= 1 && nt_type(nt, args[an - 1]) && sp_streq(nt_type(nt, args[an - 1]), "KeywordHashNode")) {
+          int kn = 0; const int *kel = nt_arr(nt, args[an - 1], "elements", &kn);
+          for (int ki = 0; ki < kn; ki++) {
+            int kk = nt_ref(nt, kel[ki], "key"), kv = nt_ref(nt, kel[ki], "value");
+            const char *ks = kk >= 0 ? ffi_arg_str(nt, kk) : NULL;
+            if (ks && sp_streq(ks, "blocking") && kv >= 0 && nt_type(nt, kv) && sp_streq(nt_type(nt, kv), "TrueNode"))
+              blocking = 1;
+          }
+          an--;
+        }
         int a_arr = args[1], a_ret = args[2], a_csym = -1;
         if (sp_streq(dname, "attach_function") && an >= 4) {
           a_csym = args[1]; a_arr = args[2]; a_ret = args[3];
@@ -2780,6 +2793,7 @@ void register_ffi_decls(Compiler *c) {
         c->ffi_funcs[fi].ret   = strdup(ret_spec);
         c->ffi_funcs[fi].args  = arg_specs;
         c->ffi_funcs[fi].nargs = en;
+        c->ffi_funcs[fi].blocking = blocking;
         continue;
       }
 

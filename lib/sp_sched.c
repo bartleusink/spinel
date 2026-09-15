@@ -188,6 +188,7 @@ static SP_TLS unsigned g_mk_seen = 0;
 static int g_cs_help = 0;           /* parked workers may claim the concurrent sweep's tasks */
 static int g_cs_ntasks = 0, g_cs_finished = 0;   /* the concurrent sweep's task list (below) */
 static int g_cs_running = 0;                     /* sweeper threads and barrier helpers inside the task list */
+extern double sp_gc_ph_park_sweeping; extern unsigned long long sp_gc_ph_park_sweeping_n;   /* sp_gc.c */
 static int g_cs_unclaimed = 0;                   /* tasks nobody has taken yet */
 static void sp_cs_help_run(void);
 static void sp_cs_owner_run(int wid);
@@ -345,14 +346,25 @@ static void sched_wake_idle_helper(void) {   /* PRE: sched lock held */
 /* Every waiter re-checks state: helpers on their own condvars, main on its
    pump. Used where the state change is not one thread becoming runnable --
    shutdown, the STW barrier, quiescence. */
-static void sched_wake_all_workers(void) {   /* PRE: sched lock held */
+static unsigned char g_native_out[SP_MAX_WORKERS];    /* out of the world, roots published: SP_OUT_IDLE / SP_OUT_NATIVE, or 0 */
+#define SP_OUT_IDLE   1   /* in the scheduler's idle wait: can be kicked to sweep its own lists */
+#define SP_OUT_NATIVE 2   /* in a blocking native call: a sweeper thread takes its lists */
+/* mode 0: everyone (shutdown). 1: a barrier being raised -- a worker out of
+   the world is counted already and stays asleep. 2: a barrier released --
+   the idle ones are kicked so each sweeps its own young lists now, while
+   its cache is warm, rather than at its next wake or by a sweeper thread. */
+static void sched_wake_all_workers(int mode) {   /* PRE: sched lock held */
   for (int i = 1; i < sp_active_workers; i++) {
+    unsigned char out = __atomic_load_n(&g_native_out[i], __ATOMIC_RELAXED);
+    if (mode == 1 && out) continue;
+    if (mode == 2 && out != SP_OUT_IDLE) continue;
 #ifdef SP_EV_BACKEND
     if (g_wslot[i].evfd > 0) { sched_kick_worker(i); continue; }
 #endif
     if (g_wslot[i].idle) pthread_cond_signal(&g_wslot[i].cv);
   }
-  sched_wake_main();
+  { unsigned char out0 = __atomic_load_n(&g_native_out[0], __ATOMIC_RELAXED);
+    if (!((mode == 1 && out0) || (mode == 2 && out0 != SP_OUT_IDLE))) sched_wake_main(); }
 }
 /* Wake the one worker that can run a thread pinned to `wid` (see home_wid).
    Main's worker (0) waits in its pump on the shared condvar, and a signal
@@ -362,24 +374,107 @@ static void sched_wake_home(int wid) {   /* PRE: sched lock held */
   sched_wake_idle_helper();   /* unpinned: any worker will do */
 }
 #define SCHED_WAKE()    sched_wake_idle_helper()
-#define SCHED_WAKE_ALL() sched_wake_all_workers()
+#define SCHED_WAKE_ALL() sched_wake_all_workers(0)
 #define SCHED_WAKE_MAIN() sched_wake_main()   /* main's pump alone */
 
 /* Park the calling worker at the barrier until the collection finishes,
    publishing its running green thread's roots first. PRE: g_sched_lock held. */
-static void sp_stw_park_locked(void) {
-  /* Publish the shadow-stack roots plus this worker's live match registers (TLS,
-     so the collector's globals hook does not reach them) into the green thread's
-     saved snapshot, then restore our own root depth -- the snapshot keeps them. */
+/* A worker inside a blocking native call (an ffi_func declared `blocking:
+   true`) has left the world: it runs no Ruby, touches no Ruby object, and
+   its roots were published on the way in, so a collection raised while it
+   is out counts it as parked and marks the fibers it recorded, and the
+   barrier does not wait for the call to return. On the way back, a
+   collection in progress is waited out. The count of such workers joins
+   g_nparked in the collector's wait; a worker that returns while the
+   barrier is up moves itself from one count to the other before waiting,
+   so the collector's condition never goes backwards. */
+static int       g_nnative = 0;                        /* workers out in a blocking native call */
+static SP_TLS int g_native_depth = 0;                  /* this worker: nested enter/leave */
+static sp_Fiber *g_native_fiber[SP_MAX_WORKERS][2];    /* per worker: the fibers to mark while out */
+static int       g_native_nfiber[SP_MAX_WORKERS];
+static void sp_stw_publish_locked(void);
+static void sp_stw_park_locked(void);
+static SP_TLS int g_native_noop = 0;                   /* entered before the pool existed: nothing to undo */
+/* Leave the world (PRE: sched lock held, no collection active): publish, record
+   the fibers to mark, and count this worker as out. Shared by a blocking
+   native call and by the idle wait in the scheduler loop -- an idle worker
+   has nothing running either, and waking thirty of them so each could park
+   was most of what the barrier waited for. */
+static void sp_out_enter_locked(int wid, int how) {
+  sp_stw_publish_locked();
+  if (wid >= 0 && wid < SP_MAX_WORKERS) {
+    sp_Fiber *root = sp_fiber_worker_root();
+    g_native_nfiber[wid] = 0;
+    if (sp_fiber_current) g_native_fiber[wid][g_native_nfiber[wid]++] = sp_fiber_current;
+    if (root && root != sp_fiber_current) g_native_fiber[wid][g_native_nfiber[wid]++] = root;
+    __atomic_store_n(&g_native_out[wid], (unsigned char)how, __ATOMIC_RELEASE);
+  }
+  g_nnative++;
+}
+/* Back in the world (PRE: sched lock held). A collection in progress counted
+   this worker as out; it becomes a parker of this epoch and waits for the
+   release like one (the fibers it recorded stay valid until then: nothing
+   has run on it). */
+static void sp_out_leave_locked(int wid) {
+  if (g_stw_active) {
+    g_nnative--;
+    unsigned my_epoch = g_stw_epoch;
+    g_nparked++;
+    if (g_nparked + g_nnative >= sp_active_workers - 1) pthread_cond_signal(&g_stw_request);
+    while (g_stw_active && g_stw_epoch == my_epoch) {
+      if (g_cs_help && __atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) {
+        SCHED_UNLOCK(); sp_cs_help_run(); SCHED_LOCK(); continue;
+      }
+      pthread_cond_wait(&g_stw_release, &g_sched_lock);
+    }
+    if (g_stw_epoch == my_epoch) g_nparked--;
+  }
+  else g_nnative--;
+  if (wid >= 0 && wid < SP_MAX_WORKERS) { __atomic_store_n(&g_native_out[wid], 0, __ATOMIC_RELEASE); g_native_nfiber[wid] = 0; }
+  /* the collection that ran while this worker was out left it its own young
+     lists to sweep, and after a full cycle its slab chunks to release */
+  if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0 || (g_cs_full && sp_slab_on > 0)) {
+    SCHED_UNLOCK();
+    if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sp_cs_owner_run(sp_worker_id);
+    if (g_cs_full && sp_slab_on > 0) sp_slab_release_worker(sp_worker_id);
+    SCHED_LOCK();
+  }
+}
+void sp_native_enter(void) {
+  if (g_native_depth++ > 0) return;
+  if (!g_workers_started) { g_native_noop = 1; return; }   /* one worker, no collector to leave the world for */
+  SCHED_LOCK();
+  /* a collection already running: park through it first, as a poll would */
+  if (g_stw_active) sp_stw_park_locked();
+  sp_out_enter_locked(sp_worker_id, SP_OUT_NATIVE);
+  SCHED_UNLOCK();
+}
+void sp_native_leave(void) {
+  if (--g_native_depth > 0) return;
+  if (g_native_noop) { g_native_noop = 0; return; }
+  SCHED_LOCK();
+  sp_out_leave_locked(sp_worker_id);
+  SCHED_UNLOCK();
+}
+/* What a parking worker publishes for the collector: the shadow-stack roots
+   plus this worker's live match registers (TLS, so the collector's globals
+   hook does not reach them) into the green thread's saved snapshot, then
+   the worker's own root depth is restored -- the snapshot keeps them. The
+   pointer-keyed string length cache goes too: the collection about to run
+   may recycle a string's address. */
+static void sp_stw_publish_locked(void) {
   int saved_nroots = sp_gc_nroots;
   sp_re_push_match_roots();
   if (sp_safepoint_publish_hook) sp_safepoint_publish_hook();   /* TU in-flight exc / proc homes */
   sp_fiber_publish_current_roots();
   sp_gc_nroots = saved_nroots;
-  /* The collection about to run may recycle a string's address; drop this
-     worker's pointer-keyed length cache so it cannot return a stale length for a
-     reused address after the sweep (the collector clears its own via the sweep). */
   sp_str_lcache_clear();
+}
+static void sp_stw_park_locked(void) {
+  /* Publish the shadow-stack roots plus this worker's live match registers (TLS,
+     so the collector's globals hook does not reach them) into the green thread's
+     saved snapshot, then restore our own root depth -- the snapshot keeps them. */
+  sp_stw_publish_locked();
   /* Record the fibers the collector must mark for this worker: the green thread
      it is running (sp_fiber_current) AND its root fiber. The root fiber holds the
      worker's own suspended context -- for the main thread that is the top-level
@@ -398,7 +493,7 @@ static void sp_stw_park_locked(void) {
      set (then sweeping a still-live root). */
   unsigned my_epoch = g_stw_epoch;
   g_nparked++;
-  if (g_nparked >= sp_active_workers - 1) pthread_cond_signal(&g_stw_request);
+  if (g_nparked + g_nnative >= sp_active_workers - 1) pthread_cond_signal(&g_stw_request);
   while (g_stw_active && g_stw_epoch == my_epoch) {
     /* Sweep our own slot if the collector has asked for it. Dropping the
        scheduler lock is safe and necessary: nothing else touches this slot
@@ -516,11 +611,25 @@ static void sp_stw_collect_impl(int force) {
   g_nparked = 0;     /* this collection's park count starts fresh */
   SP_SAFEPOINT_SET(1);
   double bt0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
+  /* SPINEL_GC_PHASES: how many of the workers this barrier waits for are in
+     their own sweep of the previous cycle's lists (a sweep does not look at
+     the safepoint), against how many are running the program */
+  int ph_sweeping = sp_gc_ph_on ? __atomic_load_n(&g_cs_running, __ATOMIC_RELAXED) : 0;
   /* wake idle workers (and main waiting in its pump) so they park at the barrier
      rather than sit through the collection without publishing their roots. */
-  sched_wake_all_workers();   /* reaches an ev_waiting main and workers too */
-  while (g_nparked < sp_active_workers - 1) pthread_cond_wait(&g_stw_request, &g_sched_lock);
-  if (sp_gc_ph_on) sp_gc_ph_park += sp_monotonic_now() - bt0;
+  sched_wake_all_workers(1);   /* reaches an ev_waiting main and workers too, except those out */
+  while (g_nparked + g_nnative < sp_active_workers - 1) pthread_cond_wait(&g_stw_request, &g_sched_lock);
+  /* the workers out in a blocking native call: their roots were published
+     on the way out, and the fibers they recorded are marked like a parked
+     worker's (a worker that came back meanwhile is a parker of this epoch,
+     still with its slot recorded, since nothing has run on it) */
+  for (int w = 0; w < SP_MAX_WORKERS && w < sp_active_workers; w++) {
+    if (!g_native_out[w]) continue;
+    for (int f = 0; f < g_native_nfiber[w] && g_n_parked_fiber < 2 * SP_MAX_WORKERS; f++)
+      g_parked_fiber[g_n_parked_fiber++] = g_native_fiber[w][f];
+  }
+  if (sp_gc_ph_on) { double pw = sp_monotonic_now() - bt0; sp_gc_ph_park += pw;
+                     if (ph_sweeping > 0) { sp_gc_ph_park_sweeping += pw; sp_gc_ph_park_sweeping_n++; } }
   /* Our own root fiber holds this worker's suspended context (the main thread's
      top-level locals if it triggered the collection while pumping a green
      thread). We do not park, so record it here for the mark like a parked worker
@@ -543,6 +652,7 @@ static void sp_stw_collect_impl(int force) {
   g_stw_active = 0;
   sp_recompute_safepoint_flag();   /* keep the flag set if a preempt is still pending */
   pthread_cond_broadcast(&g_stw_release);
+  if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sched_wake_all_workers(2);   /* the idle owners sweep their own lists */
   if (sp_gc_ph_on) sp_gc_ph_barrier += sp_monotonic_now() - bt0;
   SCHED_UNLOCK();
   /* the collector's own young lists, like every released worker's */
@@ -842,9 +952,15 @@ static int sp_ev_worker_wait(int wid, int tmo_ms) {
   sp_ev_arm_kick(wid);
   g_wslot[wid].ev_waiting = 1;
   int set = g_wslot[wid].evfd;
+  /* the idle wait (not the per-turn zero-timeout drain) leaves the world: a
+     collection raised meanwhile marks this worker's recorded fibers and does
+     not wake it to park */
+  int out = tmo_ms != 0 && !g_stw_active;
+  if (out) sp_out_enter_locked(wid, SP_OUT_IDLE);
   SCHED_UNLOCK();
   int en = sp_ev_backend_wait(set, evs, 64, tmo_ms);
   SCHED_LOCK();
+  if (out) sp_out_leave_locked(wid);
   g_wslot[wid].ev_waiting = 0;
   if (en == 0) g_ev_backstop++;
   g_mon_polls++; g_mon_pollfds += (unsigned long long)(en > 0 ? en : 0);
@@ -1237,8 +1353,14 @@ static void sp_cs_run_task(const sp_sw_task *t) {
    that allocates from them; the old lists and the sweepers' own slot are
    the sweeper threads'; under the barrier anyone takes what is left. */
 static unsigned char g_cs_claimed[CS_TASK_MAX];
+/* A young list is its owner's to sweep (warm in its cache, and it is the
+   next to allocate from those slots). An idle owner is kicked at the release
+   to do exactly that; one out in a blocking native call cannot be, so a
+   sweeper thread takes its lists, or the next barrier would be spent
+   finishing them. */
 static int sp_cs_task_is_owned(const sp_sw_task *t) {
-  return (t->kind == CS_OBJ || t->kind == CS_STR_YOUNG) && t->wid != CS_SWEEPER_WID;
+  return (t->kind == CS_OBJ || t->kind == CS_STR_YOUNG) && t->wid != CS_SWEEPER_WID &&
+         !(t->wid >= 0 && t->wid < SP_MAX_WORKERS && __atomic_load_n(&g_native_out[t->wid], __ATOMIC_RELAXED) == SP_OUT_NATIVE);
 }
 #define CS_RUN_SWEEPER 0
 #define CS_RUN_OWNER   1
@@ -1565,7 +1687,7 @@ static void *sp_trim_thread_main(void *arg) {
   for (;;) {
     struct timespec ts = { 1, 0 };
     nanosleep(&ts, NULL);
-    if (g_shutdown) break;
+    if (__atomic_load_n(&g_shutdown, __ATOMIC_RELAXED)) break;   /* set under the sched lock at drain; read here without it */
     if (__atomic_exchange_n(&sp_gc_trim_wanted, 0, __ATOMIC_ACQ_REL)) malloc_trim(0);
   }
   return NULL;
@@ -1859,7 +1981,9 @@ static void sp_sched_pump(sp_thread *target, int may_wait) {
          main made runnable -- checked on a bound. */
       if (g_wslot[0].evfd > 0) { sp_ev_worker_wait(0, SP_EV_BACKSTOP_MS); continue; }
 #endif
+      sp_out_enter_locked(0, SP_OUT_IDLE);
       pthread_cond_wait(&g_sched_work, &g_sched_lock);
+      sp_out_leave_locked(0);
       continue;
     }
 #else
@@ -2497,7 +2621,9 @@ static void *sp_worker_main(void *arg) {
     /* `idle` is set under the lock the enqueue also holds, so a wake issued
        between our sched_pick and this wait cannot be lost. */
     g_wslot[wid].idle = 1;
+    sp_out_enter_locked(wid, SP_OUT_IDLE);
     pthread_cond_wait(&g_wslot[wid].cv, &g_sched_lock);   /* woken for work meant for us, or shutdown */
+    sp_out_leave_locked(wid);
     g_wslot[wid].idle = 0;
   }
   SCHED_UNLOCK();
@@ -2642,7 +2768,7 @@ void sp_sched_drain(void) {
   sp_sched_pump(NULL, 2);   /* exit drain: runnable work only, not sleepers */
 #ifdef SP_THREADS
   g_shutdown = 1;
-  sched_wake_all_workers();
+  sched_wake_all_workers(0);
   sp_sysmon_wake();   /* wake the monitor (idle or in poll) so it sees shutdown */
   int sysmon_running = g_sysmon_started;
   SCHED_UNLOCK();

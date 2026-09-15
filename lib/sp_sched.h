@@ -158,6 +158,18 @@ extern volatile int sp_safepoint_flag;
 #define SP_SAFEPOINT_SET(v) (sp_safepoint_flag = (v))
 #endif
 void sp_safepoint(void);
+/* A blocking native call (an ffi_func declared `blocking: true`) is bracketed
+   by these: the worker leaves the world, so a collection raised while the
+   call runs does not wait for it, and a collection in progress is waited out
+   on the way back. The call must touch no Ruby object. No-ops without the
+   threaded runtime or before the worker pool exists. */
+#ifdef SP_THREADS
+void sp_native_enter(void);
+void sp_native_leave(void);
+#else
+static inline void sp_native_enter(void) {}
+static inline void sp_native_leave(void) {}
+#endif
 
 /* Optional hook the generated TU installs so a worker parking at a safepoint
    also publishes its per-worker in-flight GC roots that live in the TU (pending

@@ -129,6 +129,23 @@ spec — pass it as a separate `:size_t` arg, same way as `:str` +
 underlying Array after the call returns, so the C side must not
 stash the pointer (copy if it needs to).
 
+A trailing `blocking: true` (the ffi gem's keyword) marks a call that may
+take a while and touches no Ruby object -- a database step, a blocking
+read, a sleep:
+
+```ruby
+ffi_func :sqlite3_step, [:ptr], :int, blocking: true
+```
+
+In a threaded program the worker leaves the world for such a call: its
+roots are published on the way out, so a garbage collection raised while
+the call runs does not wait for it to return (otherwise every other worker
+waits at the barrier until it does), and a collection in progress is
+waited out on the way back. The arguments are evaluated before the call
+leaves. The bracket costs a scheduler lock round trip, so it is for calls
+that block, not for every call; a callback-taking or variadic function
+keeps the plain call. The single-threaded runtime ignores the keyword.
+
 ### `ffi_const :NAME, <int>`
 
 Declares an integer constant accessible as `Module::NAME`. Pure
