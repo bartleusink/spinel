@@ -832,6 +832,7 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
    heap on every non-full cycle, O(live) per collection, and nothing attributed
    it -- 5.7s of 13.1s of collector time on a server workload, invisible in the
    total. That is what this found, and #4380 then removed; it reads ~0 now. */
+double sp_gc_ph_wait_top = 0;   /* joining the previous sweep at the top of the collection */
 double sp_gc_ph_mark = 0, sp_gc_ph_oldsweep = 0, sp_gc_ph_slotsweep = 0,
        sp_gc_ph_rembclear = 0, sp_gc_ph_strsweep = 0, sp_gc_ph_trim = 0;
 double sp_gc_ph_slot_max = 0, sp_gc_ph_task_sum = 0, sp_gc_ph_task_obj = 0, sp_gc_ph_task_sold = 0, sp_gc_ph_task_syoung = 0;   /* filled by the threaded sweep driver */
@@ -885,10 +886,12 @@ static void sp_gc_trim_request(void){
 void sp_gc_collect(void){
   /* The previous cycle's sweep may still be running beside the mutators:
      finish it before anything here walks a list or reads a live total. */
+  double ph_top0 = sp_gc_ph_on ? sp_gc_stat_now() : 0;
   if(sp_gc_conc_wait_hook) sp_gc_conc_wait_hook();
   size_t ob_before = sp_gc_bytes;
   double stat_t0 = sp_gc_stat_now();
   double ph_t = stat_t0;
+  if (sp_gc_ph_on) sp_gc_ph_wait_top += stat_t0 - ph_top0;
   int full=(sp_gc_cycle%sp_gc_full_interval==0);sp_gc_cycle++;
   /* Forced by growth rather than by the schedule: the old generation has
      outgrown what the last full found live in it. */
@@ -1101,8 +1104,10 @@ void sp_gc_collect(void){
       for(int i=0;i<n;i++)sp_gc_wslot[i].flush_delta=0; }
     SP_GC_PH(sp_gc_ph_slotsweep);
     sp_slab_free_flush();
+    SP_GC_PH(sp_gc_ph_strsweep);
     sp_gc_str_minor_only = 0;
     if(full) sp_gc_trim_request();   /* the slab's own release waits for the sweep (the driver runs it) */
+    SP_GC_PH(sp_gc_ph_trim);
     sp_gc_stat_collections++;
     if(full)sp_gc_stat_fulls++;
     sp_gc_stat_seconds+=sp_gc_stat_now()-stat_t0;

@@ -39,6 +39,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <time.h>
 #include "sp_gc.h"
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
@@ -368,8 +369,11 @@ static int sp_slab_chunk_cmp(const void *a, const void *b) {
   uintptr_t x = (uintptr_t)*(sp_slab_chunk *const *)a, y = (uintptr_t)*(sp_slab_chunk *const *)b;
   return x < y ? -1 : x > y;
 }
-static sp_slab_chunk **sp_slab_sortbuf = NULL;
-static size_t sp_slab_sortcap = 0;
+/* The sort buffer is per thread: the owners release their own lists beside
+   the program, at the same time, and a shared buffer would need a lock every
+   one of them queued on. */
+static SP_TLS sp_slab_chunk **sp_slab_sortbuf = NULL;
+static SP_TLS size_t sp_slab_sortcap = 0;
 static sp_slab_chunk *sp_slab_sort_avail(sp_slab_chunk *head) {
   size_t n = 0;
   for (sp_slab_chunk *ch = head; ch; ch = ch->next_avail) {
@@ -388,9 +392,114 @@ static sp_slab_chunk *sp_slab_sort_avail(sp_slab_chunk *head) {
   return sp_slab_sortbuf[0];
 }
 
+/* SPINEL_GC_PHASES: what a release spends its time on -- chunks walked,
+   chunks handed back (each one an madvise), and the madvise time itself. */
+unsigned long long sp_slab_rel_calls = 0, sp_slab_rel_walked = 0, sp_slab_rel_madv = 0;
+double sp_slab_rel_madv_t = 0, sp_slab_rel_sort_t = 0;
+static double sp_slab_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
+/* One worker's lists, released beside the running program by their OWNER,
+   right after its own young sweep: the walk, the sort and the madvise calls
+   that the collector used to do for every worker in turn under the barrier
+   (0.85 ms per full cycle on campfire's glibc lane, every worker stalled for
+   it) are spread over the workers instead, each on its own lists, while the
+   others run. Only the owner pops its available lists, so detaching a list
+   whole (an exchange with NULL) makes it private for the walk; a sweeper
+   thread pushing a chunk meanwhile lands it on the fresh head, and the kept
+   chunks are merged back under it with the same compare-and-swap the
+   sweepers push with. A fully free chunk is stable once seen: every slot is
+   on its free list, so nothing can free into it, and only its owner could
+   allocate from it. The empty pool is shared, so it takes the slab lock. */
+void sp_slab_release_worker(int wid) {
+  sp_slab_free_flush();
+  if (sp_slab_on <= 0 || wid < 0 || wid >= SP_SLAB_NWK) return;
+#ifdef SP_THREADS
+  sp_slab_worker *wk = &sp_slab_wk[wid];
+  long reserve = wk->taken;
+  if (reserve < SP_SLAB_RESERVE) reserve = SP_SLAB_RESERVE;
+  wk->taken = 0;
+  if (sp_gc_ph_on) sp_slab_rel_calls++;
+  for (int cls = 0; cls < SP_SLAB_NCLS; cls++) {
+    sp_slab_chunk *ch = __atomic_exchange_n(&wk->avail[cls], NULL, __ATOMIC_ACQ_REL);
+    if (!ch) continue;
+    sp_slab_chunk *keep = NULL, *give = NULL;
+    while (ch) {
+      sp_slab_chunk *nx = ch->next_avail;
+      if (sp_gc_ph_on) sp_slab_rel_walked++;
+      if (__atomic_load_n(&ch->nfree, __ATOMIC_ACQUIRE) == ch->nslots && reserve <= 0) {
+        ch->next_avail = give; give = ch;   /* handed back below, in address order */
+      }
+      else {
+        if (__atomic_load_n(&ch->nfree, __ATOMIC_RELAXED) == ch->nslots) reserve--;
+        ch->next_avail = keep; keep = ch;
+      }
+      ch = nx;
+    }
+    if (give) {
+      /* the chunks handed back, in address order, so neighbours go to the
+         kernel as one madvise: a call per 16 KB chunk was most of the
+         release's time, and half of them sit next to each other */
+      give = sp_slab_sort_avail(give);
+      sp_slab_chunk *gt = give;
+      while (gt) {
+        char *lo = sp_slab_chunk_base(gt), *hi = lo + SP_SLAB_CHUNK;
+        int touched = gt->touched;
+        sp_slab_chunk *run_end = gt;
+        while (run_end->next_avail && sp_slab_chunk_base(run_end->next_avail) == hi &&
+               run_end->next_avail->touched == touched) {
+          run_end = run_end->next_avail; hi += SP_SLAB_CHUNK;
+        }
+        if (touched) {
+          double mt0 = sp_gc_ph_on ? sp_slab_now() : 0;
+          madvise(lo, (size_t)(hi - lo), MADV_DONTNEED);
+          if (sp_gc_ph_on) { sp_slab_rel_madv++; sp_slab_rel_madv_t += sp_slab_now() - mt0; }
+        }
+        sp_slab_chunk *nx = run_end->next_avail;
+        for (sp_slab_chunk *c2 = gt;; c2 = c2->next_avail) {
+          c2->in_use = 0; c2->on_avail = 0; c2->touched = 0;
+          c2->free = NULL; c2->bump = c2->end = NULL; c2->nfree = c2->nslots = 0;
+          if (c2 == run_end) break;
+        }
+        gt = nx;
+      }
+      gt = give; while (gt->next_avail) gt = gt->next_avail;
+      SP_SLAB_LOCK();
+      gt->next_avail = sp_slab_empty; sp_slab_empty = give;
+      SP_SLAB_UNLOCK();
+    }
+    if (keep) {
+      double st0 = sp_gc_ph_on ? sp_slab_now() : 0;
+      keep = sp_slab_sort_avail(keep);
+      if (sp_gc_ph_on) sp_slab_rel_sort_t += sp_slab_now() - st0;
+      sp_slab_chunk *kt = keep; while (kt->next_avail) kt = kt->next_avail;
+      sp_slab_chunk *oh;
+      do { oh = __atomic_load_n(&wk->avail[cls], __ATOMIC_ACQUIRE); kt->next_avail = oh;
+      } while (!__atomic_compare_exchange_n(&wk->avail[cls], &oh, keep, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    }
+  }
+#else
+  (void)wid;
+  sp_slab_release();
+#endif
+}
+/* The collector's part once the owners release their own: the slots no
+   active worker owns (a worker that has exited, the sweeper slot), which
+   nobody else will walk. Under the barrier. */
+void sp_slab_release_from(int first) {
+  sp_slab_free_flush();
+  if (sp_slab_on <= 0) return;
+  for (int w = first; w < SP_SLAB_NWK; w++) {
+    sp_slab_worker *wk = &sp_slab_wk[w];
+    for (int cls = 0; cls < SP_SLAB_NCLS; cls++) {
+      if (!wk->avail[cls]) continue;
+      sp_slab_release_worker(w);
+      break;
+    }
+  }
+}
 void sp_slab_release(void) {
   sp_slab_free_flush();
   if (sp_slab_on <= 0) return;
+  if (sp_gc_ph_on) sp_slab_rel_calls++;
   /* SPINEL_GC_PHASES: the slab's footprint every 64th release -- chunks in
      use, of which fully free (the reserve), and the bytes their live slots
      hold -- so the resident set can be read against what is live. */
@@ -422,9 +531,14 @@ void sp_slab_release(void) {
       sp_slab_chunk *keep = NULL, *ch = wk->avail[cls];
       while (ch) {
         sp_slab_chunk *nx = ch->next_avail;
+        if (sp_gc_ph_on) sp_slab_rel_walked++;
         if (__atomic_load_n(&ch->nfree, __ATOMIC_RELAXED) == ch->nslots && reserve <= 0) {
           char *base = sp_slab_chunk_base(ch);
-          if (ch->touched) madvise(base, SP_SLAB_CHUNK, MADV_DONTNEED);
+          if (ch->touched) {
+            double mt0 = sp_gc_ph_on ? sp_slab_now() : 0;
+            madvise(base, SP_SLAB_CHUNK, MADV_DONTNEED);
+            if (sp_gc_ph_on) { sp_slab_rel_madv++; sp_slab_rel_madv_t += sp_slab_now() - mt0; }
+          }
           ch->in_use = 0; ch->on_avail = 0; ch->touched = 0;
           ch->free = NULL; ch->bump = ch->end = NULL; ch->nfree = ch->nslots = 0;
           ch->next_avail = sp_slab_empty;
@@ -437,7 +551,9 @@ void sp_slab_release(void) {
         }
         ch = nx;
       }
-      wk->avail[cls] = sp_slab_sort_avail(keep);
+      { double st0 = sp_gc_ph_on ? sp_slab_now() : 0;
+        wk->avail[cls] = sp_slab_sort_avail(keep);
+        if (sp_gc_ph_on) sp_slab_rel_sort_t += sp_slab_now() - st0; }
     }
   }
 }

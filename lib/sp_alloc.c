@@ -409,12 +409,17 @@ static void sp_gc_stats_emit(void) {
     fprintf(stderr, "[gcph] concurrent sweep: %.3fs wall beside the program (longest task %.3fs); %llu collections waited %.3fs for the previous sweep (not in the total above)\n",
             sp_gc_ph_conc_wall, sp_gc_ph_slot_max, sp_gc_ph_conc_waits, sp_gc_ph_conc_wait);
   if (sp_gc_ph_conc_wall > 0)
-    fprintf(stderr, "[gcph] concurrent sweep, applied under the barrier: objects %.3fs  strings %.3fs  slab release %.3fs\n",
-            sp_gc_ph_apply_obj, sp_gc_ph_apply_str, sp_gc_ph_apply_release);
+    { extern double sp_gc_ph_wait_top;
+      fprintf(stderr, "[gcph] concurrent sweep, applied under the barrier: objects %.3fs  strings %.3fs  slab release %.3fs  (the join at the top of the collection: %.3fs)\n",
+              sp_gc_ph_apply_obj, sp_gc_ph_apply_str, sp_gc_ph_apply_release, sp_gc_ph_wait_top); }
   { extern unsigned long long sp_gc_ph_trim_req, sp_gc_ph_trim_inline; extern double sp_gc_ph_trim_inline_t;
     if (sp_gc_ph_trim_req > 0)
       fprintf(stderr, "[gcph] trim: %llu requests, %llu run inline (%.3fs), trimmer thread %s\n",
               sp_gc_ph_trim_req, sp_gc_ph_trim_inline, sp_gc_ph_trim_inline_t, sp_gc_trimmer_on ? "on" : "off"); }
+  { extern unsigned long long sp_slab_rel_calls, sp_slab_rel_walked, sp_slab_rel_madv; extern double sp_slab_rel_madv_t, sp_slab_rel_sort_t;
+    if (sp_slab_rel_calls > 0)
+      fprintf(stderr, "[gcph] slab release: %llu releases walked %llu chunks, handed back %llu (madvise %.3fs, sort %.3fs)\n",
+              sp_slab_rel_calls, sp_slab_rel_walked, sp_slab_rel_madv, sp_slab_rel_madv_t, sp_slab_rel_sort_t); }
   /* The mark, one level down, because "mark grew" has two causes that want
      different answers: more ROOTS to scan and more GRAPH to trace. `fibers` is
      every live fiber's saved roots, walked serially, and it grows with the

@@ -347,6 +347,8 @@ void *sp_slab_alloc_raw(size_t need);
 void  sp_slab_free(void *p);
 void  sp_slab_free_flush(void);   /* end of a sweep task: publish this thread's batched frees */
 void  sp_slab_release(void);
+void  sp_slab_release_worker(int wid);   /* one worker's lists, by their owner, beside the program */
+void  sp_slab_release_from(int first);   /* the slots from `first` on, under the barrier */
 extern int sp_slab_on;
 
 /* ---- Collector entry points (defined in lib/sp_gc.c) ---- */

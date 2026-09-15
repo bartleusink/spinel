@@ -191,6 +191,7 @@ static int g_cs_running = 0;                     /* sweeper threads and barrier 
 static int g_cs_unclaimed = 0;                   /* tasks nobody has taken yet */
 static void sp_cs_help_run(void);
 static void sp_cs_owner_run(int wid);
+static int g_cs_full;   /* the running concurrent sweep is a full cycle's (defined with its siblings below) */
 static int g_cs_owner_env = -1;                  /* SPINEL_GC_OWNER=0: the sweeper threads take every list */
 /* Claim and run tasks until the list is exhausted. Off the scheduler lock. */
 static int sp_sweep_run_tasks(void) {
@@ -442,9 +443,12 @@ static void sp_stw_park_locked(void) {
      slots it frees are the ones it allocates from next, still in its own
      cache from the walk; swept by another core they came back cold, and the
      mutators measured slower than under the stop-the-world sweep. */
-  if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) {
+  if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0 || (g_cs_full && sp_slab_on > 0)) {
     SCHED_UNLOCK();
-    sp_cs_owner_run(sp_worker_id);
+    if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sp_cs_owner_run(sp_worker_id);
+    /* and, after a full cycle, its own slab chunks: the release that used
+       to run for every worker under the next barrier */
+    if (g_cs_full && sp_slab_on > 0) sp_slab_release_worker(sp_worker_id);
     SCHED_LOCK();
   }
 }
@@ -543,6 +547,7 @@ static void sp_stw_collect_impl(int force) {
   SCHED_UNLOCK();
   /* the collector's own young lists, like every released worker's */
   if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sp_cs_owner_run(sp_worker_id);
+  if (g_cs_full && sp_slab_on > 0) sp_slab_release_worker(sp_worker_id);
 #else
   (void)force;
   sp_gc_collect_retune();
@@ -1184,7 +1189,7 @@ static pthread_cond_t  g_cs_done = PTHREAD_COND_INITIALIZER;
 static int      g_cs_nsweepers = 0;
 static unsigned g_cs_gen = 0;        /* bumped per sweep started; sweepers wait for a new one */
 static int      g_cs_pending = 0;    /* a sweep is in flight */
-static int      g_cs_full = 0, g_cs_str_sweep = 0, g_cs_str_major = 0;
+static int      g_cs_str_sweep = 0, g_cs_str_major = 0;
 static sp_sw_task g_cs_tasks[CS_TASK_MAX];
 /* the detached lists (inputs) and the per-slot results */
 static sp_gc_hdr  *g_cs_obj[SP_MAX_WORKERS];
@@ -1420,7 +1425,9 @@ static void sp_sched_conc_wait(void) {
     sp_str_sweep_end_excluding(g_cs_str_major, promoted, young_now);
   }
   if (sp_gc_ph_on) { double t = sp_monotonic_now(); sp_gc_ph_apply_str += t - at0; at0 = t; }
-  if (g_cs_full) sp_slab_release();
+  /* the owners released their own chunks beside the program (sp_stw_park_locked's
+     exit); what is left for the barrier is the slots no active worker owns */
+  if (g_cs_full) sp_slab_release_from(sp_active_workers);
   if (sp_gc_ph_on) sp_gc_ph_apply_release += sp_monotonic_now() - at0;
   g_cs_pending = 0;
 }
