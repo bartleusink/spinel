@@ -7363,10 +7363,18 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
        that consume one -- `min`, `join`, interpolation -- still want the boxed
        element, so the C stopped compiling. The rows here are already unboxed
        pointers read out of a narrowed table, which is what makes this shape
-       the one that pays. */
+       the one that pays.
+
+       The receiver must be an ARRAY. `h.map { |k, v| cols[v] }` answers the
+       same rows, but its emitter has no pointer-array container to collect
+       them into: the hash-collect path bails on the kind and the fallback it
+       drops through does not reach Hash#map at all, so the program stopped
+       running. Narrowing a slot whose builder cannot build it at that kind is
+       worse than leaving it boxed. */
     else if (cn && (sp_streq(cn, "map") || sp_streq(cn, "collect")) && can == 0 &&
              nt_ref(nt, v, "block") >= 0 && nt_type(nt, nt_ref(nt, v, "block")) &&
-             sp_streq(nt_type(nt, nt_ref(nt, v, "block")), "BlockNode")) {
+             sp_streq(nt_type(nt, nt_ref(nt, v, "block")), "BlockNode") &&
+             crecv >= 0 && ty_is_array(infer_type(c, crecv))) {
       int mb = nt_ref(nt, v, "block");
       int mbody = nt_ref(nt, mb, "body");
       int mn = 0;

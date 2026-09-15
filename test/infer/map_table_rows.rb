@@ -70,3 +70,18 @@ def self.shared
   picked[0].length
 end
 p shared
+
+# A HASH receiver answers the same rows, but its emitter has no pointer-array
+# container to collect them into -- the hash-collect path bails on the kind and
+# the fallback it drops through does not reach Hash#map at all. Narrowing this
+# one stopped the program running, so the table stays boxed and this pins that.
+def self.from_hash
+  cols = Array.new(3) { Array.new(0, 0.0) }
+  cols[0] << 1.5
+  cols[1] << 2.5
+  cols[2] << 3.5
+  h = { 0 => 2, 1 => 0 }
+  rows = h.map { |_k, vv| cols[vv] }
+  [rows.length, rows[0][0], rows[1][0]]
+end
+p from_hash
