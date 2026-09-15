@@ -13312,14 +13312,22 @@ void analyze_program(Compiler *c) {
      scan (which made the escape analysis O(methods * reads * nodes)). */
   char *blk_call_recv = (char *)calloc((size_t)c->nt->count, 1);
   char *blk_arg_expr = (char *)calloc((size_t)c->nt->count, 1);
-  /* blk_cond_pred[id] -- id is the `predicate` of an if/unless/while/until.
+  /* blk_cond_pred[id] -- id is the condition of an if/unless/while/until.
      A bare `blk` there asks only "was a block given?", which emit_cond answers
      at the inline site without naming the slot. It is not an approved use (the
      method still cannot be spliced through it) but it is not a VALUE use
      either, so it must not drag the method into the lowered form -- that turns
-     the folded `yield if block` into a real proc call. */
+     the folded `yield if block` into a real proc call.
+     The four are named rather than taking every `predicate` ref: CaseNode and
+     CaseMatchNode spell their SUBJECT `predicate` too, and `case blk` wants the
+     block's value like any other read. Naming the boolean contexts also makes
+     the failure direction the safe one -- a node type left out is read as a
+     value use, which lowers a method that need not have been. */
   char *blk_cond_pred = (char *)calloc((size_t)c->nt->count, 1);
   for (int p = 0; blk_cond_pred && p < c->nt->count; p++) {
+    const char *cty = nt_type(c->nt, p);
+    if (!cty || !(sp_streq(cty, "IfNode") || sp_streq(cty, "UnlessNode") ||
+                  sp_streq(cty, "WhileNode") || sp_streq(cty, "UntilNode"))) continue;
     int pr = nt_ref(c->nt, p, "predicate");
     if (pr >= 0 && pr < c->nt->count) blk_cond_pred[pr] = 1;
   }

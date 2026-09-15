@@ -86,6 +86,40 @@ par = 0
 each_index(6, 3) { |i, _w| par += i }
 p [seq, par]
 
+# `case blk` is a VALUE use: CaseNode spells its subject `predicate`, the same
+# field name an if/unless/while/until gives its condition, so exempting every
+# `predicate` from the value-use test put this shape straight back to naming an
+# undeclared lv_blk. Pattern matching (`case/in`) spells it that way too.
+def yields_and_cases(&blk)
+  yield(1)
+  case blk
+  when Proc then blk.call(2)
+  else 0
+  end
+end
+p yields_and_cases { |i| i * 10 }
+
+def yields_and_case_ins(&blk)
+  yield(1)
+  case blk
+  in Proc => p1 then p1.call(3)
+  end
+end
+p yields_and_case_ins { |i| i * 5 }
+
+# A condition and a value use of the same block in one method: the condition is
+# still folded at the site that has one, the value use still needs the proc.
+def yields_cases_and_assigns(&blk)
+  yield(1) if blk
+  r = case blk
+      when Proc then 1
+      else 0
+      end
+  q = blk
+  [r, q.call(4)]
+end
+p yields_cases_and_assigns { |i| i }
+
 # Pinned: the shapes that always compiled must keep doing so. A `yield` beside
 # a plain `blk.call` is still spliced, and `yield` alone is untouched.
 def yields_and_calls(&blk)
