@@ -7410,6 +7410,20 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
   sl[S].alive = 0;
 }
 
+/* A want narrow_object_arrays cleared at the top of a round and did NOT
+   re-stamp is a decision that went away. Reporting it re-runs write inference
+   without it; see the call at the end of the pass for why that matters. Only a
+   genuinely dropped one: the ordinary round clears and re-stamps, and a node
+   still carrying a stamp is not a drop. */
+static int oa_want_dropped(Compiler *c, const int *cleared, int n_cleared) {
+  if (!c->arr_want) return 0;
+  for (int e = 0; e < n_cleared; e++) {
+    int cid = cleared[e];
+    if (cid >= 0 && cid < c->node_cap && c->arr_want[cid] == TY_UNKNOWN) return 1;
+  }
+  return 0;
+}
+
 static int narrow_object_arrays(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -7460,7 +7474,7 @@ static int narrow_object_arrays(Compiler *c) {
       if (n_cleared == cap_cleared) {
         cap_cleared = cap_cleared ? cap_cleared * 2 : 16;
         int *nc = (int *)realloc(cleared, sizeof(int) * (size_t)cap_cleared);
-        if (!nc) { free(cleared); cleared = NULL; cap_cleared = 0; break; }
+        if (!nc) { free(cleared); cleared = NULL; n_cleared = 0; cap_cleared = 0; break; }
         cleared = nc;
       }
       cleared[n_cleared++] = id;
@@ -7551,7 +7565,9 @@ static int narrow_object_arrays(Compiler *c) {
       sl[n].old_pin = cl->ivar_oa_type[iv]; cl->ivar_oa_type[iv] = TY_UNKNOWN; n++;
     }
   }
-  if (n == 0) { free(sl); return 0; }
+  /* the drop still has to be reported (and `cleared` freed) on the way out:
+     a round with no candidate slot at all still cleared this pass's wants. */
+  if (n == 0) { int dropped = oa_want_dropped(c, cleared, n_cleared); free(cleared); free(sl); return dropped; }
   /* (class, ivar) -> slot + 1, so a read costs one ivar-name lookup in its
      own class rather than a scan of every slot: the scan was O(nodes x
      slots) per round and took a 100k-line program from seconds to minutes. */
@@ -8105,10 +8121,7 @@ static int narrow_object_arrays(Compiler *c) {
      the slot's pin is simply restored. Report it, and the write types are
      re-derived without the want. Only a genuinely dropped one: the normal
      round clears and re-stamps, and reporting that would never converge. */
-  for (int e = 0; e < n_cleared; e++) {
-    int cid = cleared[e];
-    if (c->arr_want && cid >= 0 && cid < c->node_cap && c->arr_want[cid] == TY_UNKNOWN) { changed = 1; break; }
-  }
+  if (oa_want_dropped(c, cleared, n_cleared)) changed = 1;
   free(cleared);
   for (int k = 0; k < c->nclasses; k++) free(ivslot[k]);
   free(ivslot);
