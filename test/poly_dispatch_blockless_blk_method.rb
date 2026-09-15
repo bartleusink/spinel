@@ -51,3 +51,21 @@ rescue LocalJumpError => e
 end
 h = Http.new("x")
 puts h.request(req)
+
+# A yielding method with an optional Hash parameter shares its name with
+# Hash#fetch. The proc form is the arm the dispatch calls, so the arm reads
+# the arguments and the defaults against the proc form's own parameter
+# types: a Hash's `fetch("k", "")` through the same poly slot drops the
+# Cache arm (a String cannot be its opts), and a call with a block spells
+# the `{}` default as the Hash the proc form takes.
+class Cache
+  def fetch(key, opts = {})
+    "#{key}:#{opts.size}:#{yield}"
+  end
+end
+cache = Cache.new
+slots2 = { "c" => cache, "h" => { "a" => "1" } }
+p slots2["h"].fetch("a", "")
+p slots2["h"].fetch("zz", "dflt")
+p slots2["c"].fetch("k") { "x" }
+p slots2["c"].fetch("k", expires_in: 60) { "y" }

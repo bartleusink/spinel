@@ -5518,8 +5518,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             char selfpbuf[320];  /* stack-local: nested inlines each need their own receiver buffer */
             snprintf(selfpbuf, sizeof selfpbuf, "%s", _dself);
             g_self = selfpbuf;
-            for (int a = 0; a < c->scopes[mi].nparams; a++) {
-              buf_puts(&cb, ", "); emit_arg_or_default(c, &c->scopes[mi], a, -1, &cb);
+            /* the defaults are spelled for the proc form's own parameter
+               types when that is the symbol called (#4492) */
+            Scope *ds = &c->scopes[pfi9 >= 0 ? pfi9 : mi];
+            for (int a = 0; a < ds->nparams; a++) {
+              buf_puts(&cb, ", "); emit_arg_or_default(c, ds, a, -1, &cb);
             }
             g_self = saved_self;
           }
@@ -6211,6 +6214,19 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             buf_printf(b, " _t%d = ", kwtmp[e]); emit_expr(c, val, b); buf_puts(b, "; ");
           }
         }
+        /* The builtin arms read the keyword hash as the last positional
+           argument (`h.fetch(k, a: 1)` takes it as the default), through the
+           temp atmp[argc - 1] that the positional loop above stopped short
+           of: it read a temp nothing declared and the C did not build. Hold
+           the hash there, built once from the per-key temps, for the one
+           builtin that reads it. */
+        if (sp_streq(name, "fetch") && argc == 2) {
+          atmp[pos_argc] = ++g_tmp;
+          atmp_ty[pos_argc] = TY_SYM_POLY_HASH;
+          buf_printf(b, "sp_SymPolyHash *_t%d = ", atmp[pos_argc]);
+          emit_kwh_sym_hash(c, kwn, kwels, kwtmp, kwty, NULL, b);
+          buf_printf(b, "; SP_GC_ROOT(_t%d); ", atmp[pos_argc]);
+        }
       }
       /* Seed the result temp (a setter dispatch yields the argument's temp
          instead and declares none). For `fetch(key, default)` the seed IS the
@@ -6487,11 +6503,19 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            a C pointer/integer type error (const char * into an sp_sym slot), so
            skip the arm. Mirrors the key-type-mismatch handling for typed hashes. */
         int arm_key_incompat = 0;
-        for (int a = 0; a < c->scopes[mi].nparams && a < pos_argc; a++) {
+        /* The arm calls the proc form when the method has one, and the proc
+           form is a separately inferred clone: its parameters carry the
+           types the C signature was emitted with, where the inlined original's
+           may have stayed unknown. `fetch(key, opts = {})` inlined at its
+           block sites had an untyped `opts`, so a Hash's `fetch("k", "")`
+           through a poly slot took the Cache arm and handed a String to its
+           sp_SymPolyHash * (#4492). */
+        Scope *ks = &c->scopes[scope_proc_form_of(c, mi) >= 0 ? scope_proc_form_of(c, mi) : mi];
+        for (int a = 0; a < ks->nparams && a < pos_argc; a++) {
           /* a declared keyword param is bound by name from the split-off kwh,
              never by this positional slot -- exclude it from the check */
-          if (kwh >= 0 && c->scopes[mi].pnames && c->scopes[mi].pnames[a] &&
-              callee_param_is_declared_kwarg(c, &c->scopes[mi], c->scopes[mi].pnames[a]))
+          if (kwh >= 0 && ks->pnames && ks->pnames[a] &&
+              callee_param_is_declared_kwarg(c, ks, ks->pnames[a]))
             continue;
           /* A `*rest` parameter packs any argument type into a PolyArray, so a
              param-vs-arg type mismatch there is not a real incompatibility --
@@ -6500,9 +6524,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
              through a poly receiver became an empty switch (call dropped) (#3218).
              Positional args at/after the rest map to the rest/tail, not to param
              slot `a`, so skip from the rest index on. */
-          if (c->scopes[mi].rest_idx >= 0 && a >= c->scopes[mi].rest_idx) break;
-          LocalVar *pv0 = (c->scopes[mi].pnames && c->scopes[mi].pnames[a])
-                            ? scope_local(&c->scopes[mi], c->scopes[mi].pnames[a]) : NULL;
+          if (ks->rest_idx >= 0 && a >= ks->rest_idx) break;
+          LocalVar *pv0 = (ks->pnames && ks->pnames[a])
+                            ? scope_local(ks, ks->pnames[a]) : NULL;
           TyKind pt0 = pv0 ? pv0->type : TY_UNKNOWN;
           TyKind at0 = atmp_ty[a];
           int pc = pt0 != TY_POLY && pt0 != TY_UNKNOWN && pt0 != TY_NIL && pt0 != TY_VOID;
@@ -6547,9 +6571,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            different hash kind cannot be this call's target -- passing the
            pointer raw is a hard C error, not a coercion that works, and the
            un-seeded build drops the arm for the same reason (#4033). */
-        { int kslot = kwh_positional_slot(c, &c->scopes[mi], kwh, pos_argc);
-          if (kslot >= 0 && c->scopes[mi].pnames && c->scopes[mi].pnames[kslot]) {
-            LocalVar *kpv9 = scope_local(&c->scopes[mi], c->scopes[mi].pnames[kslot]);
+        { int kslot = kwh_positional_slot(c, ks, kwh, pos_argc);
+          if (kslot >= 0 && ks->pnames && ks->pnames[kslot]) {
+            LocalVar *kpv9 = scope_local(ks, ks->pnames[kslot]);
             TyKind kpt9 = kpv9 ? kpv9->type : TY_UNKNOWN;
             if (ty_is_hash(kpt9) && kpt9 != TY_SYM_POLY_HASH) arm_key_incompat = 1;
           } }
@@ -6558,6 +6582,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         int mnp = c->scopes[mi].nparams;
         Buf cb; memset(&cb, 0, sizeof cb);
         int pfi8 = scope_proc_form_of(c, mi);   /* yielding: call the clone (#3399) */
+        /* the proc form is a separately inferred clone whose parameter types
+           are the ones its C signature carries: read the arguments against
+           it, or a default `{}` for its sp_SymPolyHash * arrived boxed as a
+           PolyPolyHash (#4492) */
+        Scope *ms = &c->scopes[pfi8 >= 0 ? pfi8 : mi];
         /* a by-value (value-type) class takes self BY VALUE: dereference the
            boxed pointer rather than passing it, as the sibling arm at the
            default-dispatch above already does (#2441). Passing the pointer
@@ -6591,8 +6620,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                    mc(pfi8 >= 0 ? c->scopes[pfi8].name : c->scopes[mi].name),
                    c->classes[defcls].is_value_type ? "*" : "", selfpbuf2);
         const char *saved_self = g_self;
-        int r_idx = c->scopes[mi].rest_idx;
-        int npost = c->scopes[mi].npost_rest;
+        int r_idx = ms->rest_idx;
+        int npost = ms->npost_rest;
         int rest_end = pos_argc - npost;   /* where the *rest collection stops */
         /* A default reading an earlier parameter (`def g(u, v = u.upcase)`)
            is evaluated in the callee, where that parameter is bound. This arm
@@ -6601,28 +6630,28 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            same name (#4431). When such a default exists the arm binds each
            argument to a named local inside a statement expression first, the
            way emit_args_filled does, and renames the parameter to it. */
-        int pd_arm = r_idx < 0 && c->scopes[mi].kwrest_idx < 0 &&
-                     default_refs_earlier_param(c, &c->scopes[mi]);
+        int pd_arm = r_idx < 0 && ms->kwrest_idx < 0 &&
+                     default_refs_earlier_param(c, ms);
         int pd_uid = pd_arm ? ++g_tmp : 0, pd_ren_base = g_nren;
         Buf pdpre; memset(&pdpre, 0, sizeof pdpre);
         for (int a = 0; a < mnp; a++) {
           buf_puts(&cb, ", ");
           Buf pa; memset(&pa, 0, sizeof pa);
-          const char *pnm = c->scopes[mi].pnames ? c->scopes[mi].pnames[a] : NULL;
+          const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
           do {
 
 
           /* a **kwrest param collects the keywords no declared keyword param
              consumed (#3268) */
-          if (kwh >= 0 && a == c->scopes[mi].kwrest_idx) {
-            LocalVar *krp = pnm ? scope_local(&c->scopes[mi], pnm) : NULL;
+          if (kwh >= 0 && a == ms->kwrest_idx) {
+            LocalVar *krp = pnm ? scope_local(ms, pnm) : NULL;
             int kh2 = ++g_tmp;
             if (krp && krp->type == TY_POLY) buf_puts(&pa, "sp_box_obj(");
             buf_printf(&pa, "({ sp_SymPolyHash *_t%d = sp_SymPolyHash_new(); SP_GC_ROOT(_t%d);", kh2, kh2);
             for (int e = 0; e < kwn; e++) {
               int key = nt_ref(nt, kwels[e], "key");
               const char *kn = key >= 0 ? nt_str(nt, key, "value") : NULL;
-              if (!kn || callee_param_is_declared_kwarg(c, &c->scopes[mi], kn)) continue;
+              if (!kn || callee_param_is_declared_kwarg(c, ms, kn)) continue;
               char tn[32]; snprintf(tn, sizeof tn, "_t%d", kwtmp[e]);
               Buf eb; memset(&eb, 0, sizeof eb);
               if (kwty[e] == TY_POLY) buf_puts(&eb, tn);
@@ -6637,7 +6666,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           }
           /* a declared keyword param binds by NAME from the split-off keyword
              hash; unmatched keywords fall back to the param default (#3268) */
-          if (kwh >= 0 && pnm && callee_param_is_declared_kwarg(c, &c->scopes[mi], pnm)) {
+          if (kwh >= 0 && pnm && callee_param_is_declared_kwarg(c, ms, pnm)) {
             int e_found = -1;
             for (int e = 0; e < kwn; e++) {
               int key = nt_ref(nt, kwels[e], "key");
@@ -6646,7 +6675,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             }
             if (e_found >= 0) {
               TyKind kpt = TY_UNKNOWN;
-              LocalVar *kpv = scope_local(&c->scopes[mi], pnm);
+              LocalVar *kpv = scope_local(ms, pnm);
               if (kpv) kpt = kpv->type;
               TyKind at = kwty[e_found];
               char tn[32]; snprintf(tn, sizeof tn, "_t%d", kwtmp[e_found]);
@@ -6656,7 +6685,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             }
             else {
               g_self = selfpbuf2;
-              emit_arg_or_default(c, &c->scopes[mi], a, -1, &pa);
+              emit_arg_or_default(c, ms, a, -1, &pa);
               g_self = saved_self;
             }
             continue;
@@ -6683,7 +6712,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                arguments at all, silently (#3528, the #3503 shape one path
                out). Consumed means some declared keyword param took a key
                from it. */
-            if (rest_kwh_tail(c, &c->scopes[mi], kwh, pos_argc) >= 0) {
+            if (rest_kwh_tail(c, ms, kwh, pos_argc) >= 0) {
               {
                 int kh3 = ++g_tmp;
                 buf_printf(&pa, " sp_PolyArray_push(_t%d, ({ sp_SymPolyHash *_t%d = sp_SymPolyHash_new();"
@@ -6713,8 +6742,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
              TypeError, no ArgumentError, no diagnostic (#4030). The rest-tail
              collapse above is the same rule for a callee that has only a
              rest; a callee with both funds the positional first. */
-          if (kwh_positional_slot(c, &c->scopes[mi], kwh, pos_argc) == a) {
-            LocalVar *cp = pnm ? scope_local(&c->scopes[mi], pnm) : NULL;
+          if (kwh_positional_slot(c, ms, kwh, pos_argc) == a) {
+            LocalVar *cp = pnm ? scope_local(ms, pnm) : NULL;
             if (cp && cp->type == TY_POLY) buf_puts(&pa, "sp_box_obj(");
             emit_kwh_sym_hash(c, kwn, kwels, kwtmp, kwty, NULL, &pa);
             if (cp && cp->type == TY_POLY) buf_puts(&pa, ", SP_BUILTIN_SYM_POLY_HASH)");
@@ -6723,7 +6752,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           /* box the call-site arg if this candidate's parameter is poly;
              emit default for args beyond the call-site count (padding) */
           TyKind pt = TY_UNKNOWN;
-          LocalVar *pv = scope_local(&c->scopes[mi], c->scopes[mi].pnames[a]);
+          LocalVar *pv = scope_local(ms, ms->pnames[a]);
           if (pv) pt = pv->type;
           /* post-*rest required params take from the tail of the call args */
           int src = (r_idx >= 0 && npost > 0 && a > r_idx) ? rest_end + (a - r_idx - 1) : a;
@@ -6739,11 +6768,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           }
 else {
             g_self = selfpbuf2;
-            emit_arg_or_default(c, &c->scopes[mi], a, -1, &pa);
+            emit_arg_or_default(c, ms, a, -1, &pa);
             g_self = saved_self;
           }
           } while (0);
-          LocalVar *pv9 = pnm ? scope_local(&c->scopes[mi], pnm) : NULL;
+          LocalVar *pv9 = pnm ? scope_local(ms, pnm) : NULL;
           if (pd_arm && pnm && g_nren < MAX_RENAME) {
             TyKind pt9 = pv9 ? pv9->type : TY_POLY;
             if (pt9 == TY_UNKNOWN) pt9 = TY_POLY;
