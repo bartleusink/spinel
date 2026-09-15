@@ -137,18 +137,21 @@ argument lists still decline with `NoMethodError` where CRuby answers:
   slots, so both raise `NoMethodError` rather than reading past the argument
   array.
 - A typed-array adapter value the typed array cannot hold (`arr.method(:push)`
-  given a String, `arr.method(:[]=)` given a String value) declines with
-  `NoMethodError`, matching the poly-slot route. CRuby's Array is
-  heterogeneous and would accept it; the typed array is what cannot. An
+  given a String, `arr.method(:[]=)` given a String value) raises the same
+  `TypeError` every typed-array store raises for such a value (see "A typed
+  array holds one kind of element" below). CRuby's Array is heterogeneous and
+  would accept it; the typed array is what cannot. Through a poly slot
+  (`[arr.method(:push)][0].call("z")`) the call is an ABI mismatch and
+  declines with `NoMethodError` before any value is examined. An
   out-of-kind INDEX still raises CRuby's `TypeError`, and a zero-argument
   `arr.method(:[]).call()` raises `ArgumentError` rather than reading index 0.
   A zero-argument `arr.method(:[]).to_proc.call()` raises the same
   `ArgumentError` through the proc trampoline; the unmodeled two-argument
   slice form (`arr.method(:[]).to_proc.call(0, 2)`) still answers `arr[0]`
   where CRuby answers `[arr[0], arr[1]]`.
-  The value declines can mutate before they raise: `arr.method(:push).call(3,
-  "z")` appends `3` and then declines on `"z"`, so a rescued
-  `NoMethodError` leaves the array partially pushed (CRuby's untyped Array
+  The value refusals can mutate before they raise: `arr.method(:push).call(3,
+  "z")` appends `3` and then refuses `"z"`, so a rescued
+  `TypeError` leaves the array partially pushed (CRuby's untyped Array
   would have appended both).
 - A statically known `Method#call` whose target has a rest parameter accepts it
   only when nothing follows the rest. A post-rest positional, a declared
@@ -568,6 +571,41 @@ r = (begin; x.nope; rescue NoMethodError; "runtime"; end)   # => "runtime"
 A name CRuby *does* define on that class, which Spinel has not implemented, is
 a different thing entirely: that is a gap in Spinel, and it reports itself as
 an `unsupported call` naming the node, not as a `NoMethodError`.
+
+#### A typed array holds one kind of element
+
+An Array whose every visible element is an Integer, a Float or a String is
+compiled as a typed array (`sp_IntArray`, `sp_FloatArray`, `sp_StrArray`),
+which is what makes numeric code fast. A store the compiler can see both
+sides of widens the array instead (`a = Array.new(0, 0); a << "x"` makes `a` a
+general Array), so the typed representation is only kept where every store
+agrees. A value whose kind is decided at run time -- an element read out of a
+general Array, a boxed parameter, a poly-typed call -- that does not match
+the array's kind cannot be stored, and raises `TypeError` at the store:
+
+```ruby
+def collect(out, src)
+  i = 0
+  while i < src.length
+    out << src[i]      # src[i] is decided at run time
+    i += 1
+  end
+end
+a = Array.new(0, 0)
+collect(a, [1, "z"])   # TypeError: cannot store String into an Array[Integer]: a typed array holds one kind of element
+```
+
+CRuby's Array would hold the String. Spinel used to coerce instead (`"z".to_i`
+into an Integer array stored `0`, an Integer into a String array stored `""`),
+which was a wrong value said nothing about; refusing is the one answer that
+never lies about what the array holds. `nil` is the kind's own nil and is
+stored; an Integer stored into a Float array is promoted, as CRuby's
+arithmetic would promote it. Every store route answers the same way: `<<`,
+`push`, `unshift`, `insert`, `concat`, `fill`, `[]=`, the runtime dispatch on
+a boxed array, and a typed-array `Method` adapter. A nested store through a
+general container (`grid[r][c] = v` where the row is typed) is the one route
+that widens the row to a general Array instead, since the container is what
+holds it.
 
 #### A `Float::INFINITY` bound reports the other bound as a `Float`
 

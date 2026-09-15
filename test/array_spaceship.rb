@@ -30,8 +30,9 @@ p(polys([1, 2]) <=> polys([1, 2, 3]))
 p(ints([1, 2]) <=> strs(["a"]))
 
 # an array compared to itself is 0; a self-referential array still terminates
+# (a general Array: a typed one cannot hold an Array element, #4481)
 a = ints([1, 2, 3])
 p(a <=> a)
-r = polys([1, 2])
+r = polys([1, "two"])
 r.push(r)
 p(r <=> r)

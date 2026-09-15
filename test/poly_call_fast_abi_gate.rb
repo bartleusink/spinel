@@ -27,6 +27,10 @@ def expect_nome(label)
   puts "#{label}: no raise"
 rescue NoMethodError
   puts "#{label}: NoMethodError"
+rescue TypeError
+  # a value the typed array cannot hold is the TypeError every typed-array
+  # store raises (#4481), the adapter route included
+  puts "#{label}: TypeError"
 end
 
 # The count guards raise CRuby's ArgumentError (both engines); record the

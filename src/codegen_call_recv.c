@@ -1963,7 +1963,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       int fill_conflict = 0;
       {
         TyKind fe = ty_array_elem(rt), fv = comp_ntype(c, argv[0]);
-        fill_conflict = rt != TY_POLY_ARRAY && fe != TY_POLY && fv != TY_UNKNOWN &&
+        fill_conflict = rt != TY_POLY_ARRAY && fe != TY_POLY && fv != TY_UNKNOWN && fv != TY_POLY &&
                         fv != fe && !(ty_is_numeric(fv) && ty_is_numeric(fe));
       }
       const char *fk = (rt == TY_POLY_ARRAY || fill_conflict) ? "Poly" : k;
@@ -1979,7 +1979,8 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         else emit_expr(c, recv, b);
         buf_puts(b, "; ");
         emit_ctype(c, ty_array_elem(fill_rt), b); buf_printf(b, " _t%d = ", tv);
-        if (fill_rt == TY_POLY_ARRAY) emit_boxed(c, argv[0], b); else emit_expr(c, argv[0], b);
+        if (fill_rt == TY_POLY_ARRAY) emit_boxed(c, argv[0], b);
+        else emit_typed_elem_value(c, argv[0], ty_array_elem(fill_rt), b);
         buf_printf(b, "; sp_int _t%d = sp_%sArray_length(_t%d);", tn, fk, t);
         if (argc >= 2 && comp_ntype(c, argv[1]) == TY_RANGE) {
           /* fill(val, range): use range as index span */
@@ -2936,13 +2937,13 @@ else {
         if (rt == TY_INT_ARRAY) {
           buf_printf(b, "({ sp_IntArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, ";");
           for (int a = argc - 1; a >= 0; a--) {
-            buf_printf(b, " sp_IntArray_unshift(_t%d, ", t); emit_int_expr(c, argv[a], b); buf_puts(b, ");");
+            buf_printf(b, " sp_IntArray_unshift(_t%d, ", t); emit_typed_elem_value(c, argv[a], TY_INT, b); buf_puts(b, ");");
           }
         }
         else if (rt == TY_STR_ARRAY) {
           buf_printf(b, "({ sp_StrArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, ";");
           for (int a = 0; a < argc; a++) {
-            buf_printf(b, " sp_StrArray_insert(_t%d, %d, ", t, a); emit_expr(c, argv[a], b); buf_puts(b, ");");
+            buf_printf(b, " sp_StrArray_insert(_t%d, %d, ", t, a); emit_typed_elem_value(c, argv[a], TY_STRING, b); buf_puts(b, ");");
           }
         }
         else {
@@ -2952,7 +2953,7 @@ else {
              then prepend them in reverse so a multi-arg unshift keeps order. */
           buf_printf(b, "({ sp_FloatArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, ";");
           for (int a = 0; a < argc; a++) {
-            buf_printf(b, " sp_float _u%d_%d = ", t, a); emit_float_expr(c, argv[a], b); buf_puts(b, ";");
+            buf_printf(b, " sp_float _u%d_%d = ", t, a); emit_typed_elem_value(c, argv[a], TY_FLOAT, b); buf_puts(b, ";");
           }
           for (int a = argc - 1; a >= 0; a--) {
             buf_printf(b, " sp_FloatArray_unshift(_t%d, _u%d_%d);", t, t, a);
@@ -3307,6 +3308,26 @@ else {
         buf_printf(b, "); _t%d; })", t);
         return 1;
       }
+      /* concat in VALUE position with a source of another kind (a general
+         Array read at run time, another typed kind): the statement emitter
+         owns the per-kind element loop, so run it inside a compound whose
+         value is the receiver. A same-kind source keeps its own arm below.
+         Reached since a typed parameter no longer widens under such a
+         concat (#4481); before, the receiver was a general Array here. */
+      if (sp_streq(name, "concat") && argc >= 1 &&
+          nt_kind(nt, recv) == NK_LocalVariableReadNode) {
+        int other = 0;
+        for (int ai = 0; ai < argc; ai++) {
+          TyKind at = comp_ntype(c, argv[ai]);
+          if (at == TY_POLY_ARRAY || at == TY_POLY || (ty_is_array(at) && at != rt)) other = 1;
+        }
+        if (other) {
+          buf_puts(b, "({ ");
+          emit_array_mutate_stmt(c, id, b, 0);
+          buf_puts(b, " "); emit_expr(c, recv, b); buf_puts(b, "; })");
+          return 1;
+        }
+      }
       /* insert(i) with no values leaves the array as it is and answers it;
          only the value-carrying form had an emitter (#3855) */
       if (sp_streq(name, "insert") && argc == 1) {
@@ -3332,7 +3353,7 @@ else {
                    to2, ti2, ti2, ti2, t, t, ti2, to2, t, t);
         for (int a2 = 1; a2 < argc; a2++) {
           buf_printf(b, " sp_%sArray_insert(_t%d, _t%d + %d, ", k, t, ti2, a2 - 1);
-          emit_expr(c, argv[a2], b); buf_puts(b, ");");
+          emit_typed_elem_value(c, argv[a2], ty_array_elem(rt), b); buf_puts(b, ");");
         }
         buf_printf(b, " _t%d; })", t);
         return 1;

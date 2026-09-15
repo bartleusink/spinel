@@ -3740,6 +3740,36 @@ static sp_RbVal sp_PolyArray_delete(sp_PolyArray *a, sp_RbVal v) {sp_gc_wb((void
    caps[2i] (begin) and caps[2i+1] (end); -1 marks a non-participating
    group. Issue #974. */
 
+/* An element a TYPED array is asked to hold, arriving boxed (a value whose
+   kind is decided at run time). The typed array holds one kind: a value of
+   that kind is stored, nil is the kind's own nil, an Integer is accepted by a
+   Float array as CRuby's arithmetic would, and anything else is refused.
+   These used to coerce (`"z".to_i` into an int array, an Integer into ""
+   for a string array), which stored a wrong value and said nothing (#4481).
+   CRuby's Array would hold the value; the typed array cannot, and refusing
+   is the one answer that never lies about what is in it. */
+SP_NORETURN SP_COLD static void sp_raise_typed_elem(sp_RbVal v, const char *kind) {
+  sp_exc_stage_recv(v);
+  sp_raise_cls("TypeError", sp_sprintf("cannot store %s into an Array[%s]: a typed array holds one kind of element",
+                                       sp_poly_class_name(v), kind));
+}
+static sp_int sp_poly_elem_i(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT) return v.v.i;
+  if (v.tag == SP_TAG_NIL) return SP_INT_NIL;
+  sp_raise_typed_elem(v, "Integer");
+}
+static sp_float sp_poly_elem_f(sp_RbVal v) {
+  if (v.tag == SP_TAG_FLT) return v.v.f;
+  if (v.tag == SP_TAG_INT) return (sp_float)v.v.i;
+  if (v.tag == SP_TAG_NIL) return sp_float_nil();
+  sp_raise_typed_elem(v, "Float");
+}
+static const char *sp_poly_elem_s(sp_RbVal v) {
+  if (v.tag == SP_TAG_STR) return v.v.s;
+  if (sp_poly_is_strbuf(v)) return sp_poly_strbuf_deref(v).v.s;
+  if (v.tag == SP_TAG_NIL) return NULL;
+  sp_raise_typed_elem(v, "String");
+}
 static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
   /* Proc#<< composes the other way round: `f << g` calls g then f (#2880) */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_PROC &&
@@ -3754,7 +3784,7 @@ static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
      a non-array. Returns the recv (matching `<<`s chainability). */
   if (a.tag == SP_TAG_OBJ) {
     if (a.cls_id == SP_BUILTIN_INT_ARRAY) {
-      sp_IntArray_push((sp_IntArray *)a.v.p, b.tag == SP_TAG_INT ? b.v.i : sp_poly_to_i(b));
+      sp_IntArray_push((sp_IntArray *)a.v.p, sp_poly_elem_i(b));
       return a;
     }
     if (a.cls_id == SP_BUILTIN_POLY_ARRAY) {
@@ -3766,7 +3796,7 @@ static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
       return a;
     }
     if (a.cls_id == SP_BUILTIN_FLT_ARRAY) {
-      sp_FloatArray_push((sp_FloatArray *)a.v.p, b.tag == SP_TAG_FLT ? b.v.f : (sp_float)sp_poly_to_i(b));
+      sp_FloatArray_push((sp_FloatArray *)a.v.p, sp_poly_elem_f(b));
       return a;
     }
     if (a.cls_id == SP_BUILTIN_STR_ARRAY) {
@@ -3776,7 +3806,7 @@ static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
       const char *_es = b.tag == SP_TAG_STR ? (const char *)b.v.p
                       : (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_STRBUF && b.v.p)
                           ? sp_String_cstr((sp_String *)b.v.p)
-                          : sp_str_empty;
+                          : sp_poly_elem_s(b);   /* nil, or the refusal (#4481) */
       sp_StrArray_push((sp_StrArray *)a.v.p, _es);
       return a;
     }
@@ -6536,7 +6566,7 @@ static sp_RbVal sp_poly_insert(sp_RbVal v, sp_int i, sp_RbVal x) {
   if (v.tag == SP_TAG_OBJ && v.v.p) {
     switch (v.cls_id) {
       case SP_BUILTIN_INT_ARRAY:
-        sp_IntArray_insert((sp_IntArray *)v.v.p, i, sp_poly_to_i(x));
+        sp_IntArray_insert((sp_IntArray *)v.v.p, i, sp_poly_elem_i(x));
         return v;
       case SP_BUILTIN_FLT_ARRAY: {
         sp_FloatArray *a = (sp_FloatArray *)v.v.p;
@@ -6545,11 +6575,11 @@ static sp_RbVal sp_poly_insert(sp_RbVal v, sp_int i, sp_RbVal x) {
           sp_raise_cls("IndexError", sp_sprintf("index %lld too small for array; minimum: %lld",
                                                 (long long)orig, (long long)(-(a->len + 1))));
         while (i2 > a->len) sp_FloatArray_push(a, (sp_float)0);
-        { sp_float fv = sp_poly_to_f(x); sp_FloatArray_splice(a, i2, 0, &fv, 1); }
+        { sp_float fv = sp_poly_elem_f(x); sp_FloatArray_splice(a, i2, 0, &fv, 1); }
         return v;
       }
       case SP_BUILTIN_STR_ARRAY:
-        sp_StrArray_insert((sp_StrArray *)v.v.p, i, sp_poly_to_s(x));
+        sp_StrArray_insert((sp_StrArray *)v.v.p, i, sp_poly_elem_s(x));
         return v;
       case SP_BUILTIN_POLY_ARRAY:
         sp_PolyArray_insert((sp_PolyArray *)v.v.p, i, x);
@@ -7631,11 +7661,11 @@ static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
   if (v.tag != SP_TAG_OBJ) return val;
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  sp_IntArray_set((sp_IntArray*)v.v.p, idx,
-                                                val.tag == SP_TAG_INT ? val.v.i : (sp_int)val.v.f); break;
+                                                sp_poly_elem_i(val)); break;
     case SP_BUILTIN_FLT_ARRAY:  sp_FloatArray_set((sp_FloatArray*)v.v.p, idx,
-                                                   val.tag == SP_TAG_FLT ? val.v.f : (sp_float)val.v.i); break;
+                                                   sp_poly_elem_f(val)); break;
     case SP_BUILTIN_STR_ARRAY:  sp_StrArray_set((sp_StrArray*)v.v.p, idx,
-                                                 val.tag == SP_TAG_STR ? val.v.s : NULL); break;
+                                                 sp_poly_elem_s(val)); break;
     case SP_BUILTIN_POLY_ARRAY: {
       sp_PolyArray *_pa = (sp_PolyArray*)v.v.p;
       if (_pa && !_pa->frozen) {
@@ -7732,11 +7762,11 @@ static sp_RbVal sp_poly_arr_set(sp_RbVal v, sp_int idx, sp_RbVal val) {
   if (v.tag != SP_TAG_OBJ) return val;
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  sp_IntArray_set((sp_IntArray*)v.v.p, idx,
-                                                val.tag == SP_TAG_INT ? val.v.i : (sp_int)val.v.f); break;
+                                                sp_poly_elem_i(val)); break;
     case SP_BUILTIN_FLT_ARRAY:  sp_FloatArray_set((sp_FloatArray*)v.v.p, idx,
-                                                   val.tag == SP_TAG_FLT ? val.v.f : (sp_float)val.v.i); break;
+                                                   sp_poly_elem_f(val)); break;
     case SP_BUILTIN_STR_ARRAY:  sp_StrArray_set((sp_StrArray*)v.v.p, idx,
-                                                 val.tag == SP_TAG_STR ? val.v.s : NULL); break;
+                                                 sp_poly_elem_s(val)); break;
     case SP_BUILTIN_POLY_ARRAY: sp_PolyArray_set((sp_PolyArray*)v.v.p, idx, val); break;
     default: break;
   }
@@ -7833,7 +7863,7 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
       break;
     case SP_BUILTIN_INT_ARRAY:
       if (key.tag == SP_TAG_INT) sp_IntArray_set((sp_IntArray*)v.v.p, key.v.i,
-                                                  val.tag == SP_TAG_INT ? val.v.i : (sp_int)val.v.f);
+                                                  sp_poly_elem_i(val));
       break;
     case SP_BUILTIN_POLY_ARRAY:
       if (key.tag == SP_TAG_INT) sp_PolyArray_set((sp_PolyArray*)v.v.p, key.v.i, val);
@@ -7843,11 +7873,11 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
        dropped the assignment. */
     case SP_BUILTIN_STR_ARRAY:
       if (key.tag == SP_TAG_INT) sp_StrArray_set((sp_StrArray*)v.v.p, key.v.i,
-                                                  val.tag == SP_TAG_STR ? val.v.s : NULL);
+                                                  sp_poly_elem_s(val));
       break;
     case SP_BUILTIN_FLT_ARRAY:
       if (key.tag == SP_TAG_INT) sp_FloatArray_set((sp_FloatArray*)v.v.p, key.v.i,
-                                                    val.tag == SP_TAG_FLT ? val.v.f : (sp_float)val.v.i);
+                                                    sp_poly_elem_f(val));
       break;
     case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_set((sp_PolyPolyHash*)v.v.p, key, val); break;
     default: break;

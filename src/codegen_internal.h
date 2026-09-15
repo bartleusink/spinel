@@ -541,6 +541,7 @@ void nameset_add(NameSet *s, const char *nm);
    enclosing scope -> `(*_cell_x)`; otherwise the plain `lv_x`. Reads and
    writes share this (a cell deref is a valid lvalue). */
 void emit_local_ref(Compiler *c, int scope_node, const char *name, Buf *b);
+void emit_typed_elem_value(Compiler *c, int node, TyKind et, Buf *b);
 void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent);
 const char *resolve_class_alias(Compiler *c, const char *cname);
 /* Emit `sp_Proc *` reference to the synthetic __yblk__ param of a lowered
@@ -816,7 +817,6 @@ int user_defines_or_reads(Compiler *c, const char *name);
 const char *array_index_bad_class(Compiler *c, int id);
 extern int g_poly_builtin_arm;  /* emitting a poly dispatch's builtin arm */
 void emit_complex_coerce(Compiler *c, int node, Buf *b);
-int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent);
 void emit_brk_wrapped_call(Compiler *c, int id, Buf *b);
 void emit_array_splice(Compiler *c, int id, int recv, TyKind rt, int start_node, int len_node, int range_node, int rhs_node, Buf *b);
 int splice_to_ary_mi(Compiler *c, TyKind rhs_ty);

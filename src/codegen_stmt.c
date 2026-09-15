@@ -11409,9 +11409,9 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
     /* coerce a poly RHS to the typed array's element representation */
     TyKind et = ty_array_elem(rt);
     TyKind vt = comp_ntype(c, argv[1]);
-    if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
-    else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
-    else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+    if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_elem_i("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+    else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_elem_s("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+    else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_elem_f("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
     else emit_expr(c, argv[1], b);
     buf_puts(b, ");\n");
     return 1;
@@ -11448,9 +11448,9 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
           char getx[128]; snprintf(getx, sizeof getx, "sp_%sArray_get(_t%d, _t%d)", ak, tsrc, ti);
           TyKind selem = ty_array_elem(at);
           if (et == TY_POLY && !sp_streq(ak, "Poly")) { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, selem, getx, &bx); buf_puts(b, bx.p ? bx.p : getx); free(bx.p); }
-          else if (sp_streq(ak, "Poly") && et == TY_STRING) buf_printf(b, "sp_poly_to_s(%s)", getx);
-          else if (sp_streq(ak, "Poly") && et == TY_INT) buf_printf(b, "sp_poly_to_i(%s)", getx);
-          else if (sp_streq(ak, "Poly") && et == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", getx);
+          else if (sp_streq(ak, "Poly") && et == TY_STRING) buf_printf(b, "sp_poly_elem_s(%s)", getx);
+          else if (sp_streq(ak, "Poly") && et == TY_INT) buf_printf(b, "sp_poly_elem_i(%s)", getx);
+          else if (sp_streq(ak, "Poly") && et == TY_FLOAT) buf_printf(b, "sp_poly_elem_f(%s)", getx);
           else buf_puts(b, getx);
           buf_puts(b, "); }\n");
         }
@@ -11461,9 +11461,9 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
           buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) sp_%sArray_push(_t%d, ", ti, ti, tn, ti, k, tr);
           char getx[64]; snprintf(getx, sizeof getx, "sp_PolyArray_get(_t%d, _t%d)", tsrc, ti);
           if (et == TY_POLY) buf_puts(b, getx);
-          else if (et == TY_STRING) buf_printf(b, "sp_poly_to_s(%s)", getx);
-          else if (et == TY_INT) buf_printf(b, "sp_poly_to_i(%s)", getx);
-          else if (et == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", getx);
+          else if (et == TY_STRING) buf_printf(b, "sp_poly_elem_s(%s)", getx);
+          else if (et == TY_INT) buf_printf(b, "sp_poly_elem_i(%s)", getx);
+          else if (et == TY_FLOAT) buf_printf(b, "sp_poly_elem_f(%s)", getx);
           else buf_puts(b, getx);
           buf_puts(b, "); }\n");
         }
@@ -11479,9 +11479,9 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       /* a poly-array element must be boxed; emit_boxed also fixes a yield whose
          node type widened to poly but whose per-site value is concrete (#2454). */
       if (et == TY_POLY) emit_boxed(c, argv[a], b);
-      else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
-      else if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
-      else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
+      else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_elem_s("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
+      else if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_elem_i("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
+      else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_elem_f("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
       /* A shared-mutable string (#3227) reads as its sp_String* handle. A
          typed array's element slot is a plain const char*, so the handle has
          to be spent here -- pushed raw it went in as a struct pointer that the
@@ -11557,9 +11557,9 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       }
       else if (!sp_streq(k, "Poly") && sp_streq(ak, "Poly")) {
         /* unbox the source poly element into the receiver's scalar */
-        if (et == TY_INT) buf_printf(b, "sp_poly_to_i(%s)", getexpr);
-        else if (et == TY_STRING) buf_printf(b, "sp_poly_to_s(%s)", getexpr);
-        else if (et == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", getexpr);
+        if (et == TY_INT) buf_printf(b, "sp_poly_elem_i(%s)", getexpr);
+        else if (et == TY_STRING) buf_printf(b, "sp_poly_elem_s(%s)", getexpr);
+        else if (et == TY_FLOAT) buf_printf(b, "sp_poly_elem_f(%s)", getexpr);
         else buf_puts(b, getexpr);
       }
       else buf_puts(b, getexpr);

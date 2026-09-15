@@ -576,6 +576,23 @@ int g_has_user_to_io = 0;
 int g_gen_obj_hashkey = 0;
 int g_gen_obj_valeq = 0;
 int g_re_init_needed = 0;
+/* A value written into a TYPED array's element slot. A value decided at
+   run time (poly) goes through the element check, which stores its own kind
+   and refuses a foreign one with TypeError rather than coercing it (#4481);
+   a statically typed value is emitted as it is (the emitter's own
+   int/float/string forms already convert between the numeric kinds). */
+void emit_typed_elem_value(Compiler *c, int node, TyKind et, Buf *b) {
+  TyKind vt = comp_ntype(c, node);
+  if (vt == TY_POLY && (et == TY_INT || et == TY_FLOAT || et == TY_STRING)) {
+    buf_printf(b, "sp_poly_elem_%s(", et == TY_INT ? "i" : et == TY_FLOAT ? "f" : "s");
+    emit_expr(c, node, b);
+    buf_puts(b, ")");
+    return;
+  }
+  if (et == TY_INT) emit_int_expr(c, node, b);
+  else if (et == TY_FLOAT) emit_float_expr(c, node, b);
+  else emit_expr(c, node, b);
+}
 void emit_local_ref(Compiler *c, int scope_node, const char *name, Buf *b) {
   if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, name)) {
     /* A TY_PROC capture is stored as (sp_int)(uintptr_t)sp_Proc* in the cell.

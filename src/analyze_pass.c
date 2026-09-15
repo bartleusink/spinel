@@ -2411,7 +2411,13 @@ int infer_write_types(Compiler *c) {
           continue;
         }
         if (!ty_is_array(lv->type) || lv->type == TY_POLY_ARRAY) continue;
-        if (vt == TY_UNKNOWN || vt == ty_array_elem(lv->type)) continue;
+        /* A POLY value is exempt, as it is for `[]=` below: it is decided at
+           run time and usually the element kind, and the typed push refuses
+           a foreign one with TypeError (#4481). Widening the parameter to the
+           general Array instead made every typed caller copy its array into
+           the call, which is the copy #4480 refuses. */
+        if (vt == TY_UNKNOWN || vt == TY_POLY || vt == TY_POLY_ARRAY ||
+            vt == ty_array_elem(lv->type)) continue;
         lv->type = TY_POLY_ARRAY; lv->push_widened = 1; changed = 1;
         continue;
       }

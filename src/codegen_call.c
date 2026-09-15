@@ -15605,14 +15605,15 @@ static char adapter_arg_kind(TyKind arr, int is_push, int is_set, int pos) {
   return 'i';      /* IntArray [] index: converts, or CRuby's TypeError */
 }
 
-/* The decline the poly-slot route raises when a typed-array adapter cannot
-   take a value (a String pushed into an IntArray, an Integer into a
-   StrArray). A `call` no typed-array-adapter Method can take is CRuby's
-   NoMethodError shape here, not a TypeError: CRuby's Array would have
-   accepted the value, the typed array is what cannot. */
-static void emit_adapter_decline(Buf *out) {
-  buf_puts(out, "({ sp_raise_cls(\"NoMethodError\", "
-                "\"undefined method 'call' for an instance of Method\"); (sp_int)0; })");
+/* The refusal a typed-array adapter raises when the typed array cannot hold
+   the value (a String pushed into an IntArray, an Integer into a StrArray):
+   the TypeError every store route raises for that now (#4481), worded by
+   sp_raise_typed_elem from the boxed value. CRuby's Array would have
+   accepted the value; the typed array is what cannot. */
+static void emit_adapter_decline(Compiler *c, int node, char kind, Buf *out) {
+  buf_puts(out, "({ sp_raise_typed_elem(");
+  emit_boxed(c, node, out);
+  buf_printf(out, ", \"%s\"); (sp_int)0; })", kind == 's' ? "String" : "Integer");
 }
 
 /* Emit `node` as one typed-array adapter argument of the expected kind. A
@@ -15629,13 +15630,13 @@ static void emit_adapter_arg_static(Compiler *c, int node, char kind, Buf *out) 
       emit_expr(c, node, out);
       buf_puts(out, ")");
     }
-    else emit_adapter_decline(out);
+    else emit_adapter_decline(c, node, kind, out);
   }
   else if (at == TY_INT) {
     emit_expr(c, node, out);
   }
   else if (kind == 'v') {
-    emit_adapter_decline(out);
+    emit_adapter_decline(c, node, kind, out);
   }
   else {
     buf_puts(out, "sp_poly_arg_int_chk(");
@@ -15648,13 +15649,11 @@ static void emit_adapter_arg_static(Compiler *c, int node, char kind, Buf *out) 
 static void emit_adapter_arg_boxed(const char *v, char kind, Buf *out) {
   if (kind == 's') {
     buf_printf(out, "({ sp_RbVal _ade = %s; if (_ade.tag != SP_TAG_STR)"
-                    " sp_raise_cls(\"NoMethodError\", \"undefined method 'call'"
-                    " for an instance of Method\"); (sp_int)(uintptr_t)_ade.v.s; })", v);
+                    " sp_raise_typed_elem(_ade, \"String\"); (sp_int)(uintptr_t)_ade.v.s; })", v);
   }
   else if (kind == 'v') {
     buf_printf(out, "({ sp_RbVal _ade = %s; if (_ade.tag != SP_TAG_INT)"
-                    " sp_raise_cls(\"NoMethodError\", \"undefined method 'call'"
-                    " for an instance of Method\"); (sp_int)_ade.v.i; })", v);
+                    " sp_raise_typed_elem(_ade, \"Integer\"); (sp_int)_ade.v.i; })", v);
   }
   else {
     buf_printf(out, "sp_poly_arg_int_chk(%s)", v);
@@ -18071,7 +18070,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
             /* promote: bound methods are invoked through the poly ABI, so the
                adapter takes/returns sp_RbVal (boxing the int/string element). */
             const char *boxret = (ki == 0) ? "sp_box_int_or_nil" : "sp_box_str";
-            const char *unbox  = (ki == 0) ? "sp_poly_to_i" : "sp_poly_to_s";
+            /* the element the typed array is asked to hold: its own kind
+               or the refusal, never a coercion (#4481) */
+            const char *unbox  = (ki == 0) ? "sp_poly_elem_i" : "sp_poly_elem_s";
             const char *boxarr = (ki == 0) ? "sp_box_int_array" : "sp_box_str_array";
             if (oi == 0) {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_get(void *a, sp_RbVal i);\n", bk);
@@ -30521,9 +30522,9 @@ else {
         TyKind et = ty_array_elem(rt);
         TyKind vt = comp_ntype(c, argv[1]);
         emit_ctype(c, et, b); buf_printf(b, " _t%d = ", tv);
-        if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
-        else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
-        else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_elem_i("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_elem_s("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_elem_f("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
         else emit_expr(c, argv[1], b);
       }
       buf_printf(b, "; sp_%sArray_set(_t%d, _t%d, _t%d); _t%d; })", k, t, ti, tv, tv);

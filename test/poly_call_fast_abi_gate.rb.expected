@@ -51,12 +51,12 @@ adapter_set_empty: ArgumentError
 sadapter_set_short: ArgumentError
 rest_opt_short: NoMethodError
 10
-iarr_push_str: NoMethodError
-iarr_push_float: NoMethodError
-iarr_set_str: NoMethodError
+iarr_push_str: TypeError
+iarr_push_float: TypeError
+iarr_set_str: TypeError
 iarr_poly_push: NoMethodError
 iarr_poly_set: NoMethodError
-iarr_set_splat_after_idx: NoMethodError
+iarr_set_splat_after_idx: TypeError
 7
 [7, 2]
 iarr_get_str: TypeError

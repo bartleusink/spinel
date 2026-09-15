@@ -1296,7 +1296,7 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
                                         makes the result a poly array (see below) */
                                      ({ TyKind _fv = infer_type(c, argv[0]);
                                         TyKind _fe = ty_array_elem(rt);
-                                        _fe == TY_POLY || _fv == TY_UNKNOWN || _fv == _fe ||
+                                        _fe == TY_POLY || _fv == TY_UNKNOWN || _fv == TY_POLY || _fv == _fe ||
                                         (ty_is_numeric(_fv) && ty_is_numeric(_fe)); })) ||
                                     (block >= 0 && argc <= 2))) ||
         sp_streq(name, "replace") ||
