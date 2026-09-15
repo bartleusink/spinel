@@ -6771,7 +6771,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       int yargs = nt_ref(nt, id, "arguments");
       int yargc = 0; const int *yargv = yargs >= 0 ? nt_arr(nt, yargs, "arguments", &yargc) : NULL;
       emit_indent(b, indent);
-      buf_puts(b, "sp_proc_call(");
+      buf_puts(b, "sp_proc_yield(");
       emit_yblk_ref(b);
       buf_puts(b, ", ");
       /* force_poly=1: a rest/post-taking block recovers arguments from the boxed

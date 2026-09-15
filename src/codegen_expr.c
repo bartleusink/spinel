@@ -1729,7 +1729,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
          raw carrier bits from the slot (v.i aliases the pointer/int value),
          matching this lowered method's sp_int raw-carrier ABI -- the call site
          casts back to the yield's inferred type, exactly as before. */
-      buf_puts(b, "((void)sp_proc_call(");
+      buf_puts(b, "((void)sp_proc_yield(");
       emit_yblk_ref(b);
       buf_puts(b, ", ");
       /* force_poly=1: a rest/post-taking block recovers arguments from the boxed

@@ -808,13 +808,13 @@ void emit_yield_proc_call(Compiler *c, int args_node, TyKind result_ty, Buf *b, 
   const int *yargv = args_node >= 0 ? nt_arr(nt, args_node, "arguments", &yargc) : NULL;
   if (!as_expr) {
     emit_indent(b, indent);
-    buf_printf(b, "sp_proc_call(%s, ", g_yield_proc_ref);
+    buf_printf(b, "sp_proc_yield(%s, ", g_yield_proc_ref);
     emit_proc_call_args(c, yargc, yargv, b, 1);
     buf_puts(b, ";\n");
     return;
   }
   Buf cb; memset(&cb, 0, sizeof cb);
-  buf_printf(&cb, "((void)sp_proc_call(%s, ", g_yield_proc_ref);
+  buf_printf(&cb, "((void)sp_proc_yield(%s, ", g_yield_proc_ref);
   emit_proc_call_args(c, yargc, yargv, &cb, 1);
   buf_puts(&cb, ", _sp_proc_poly_ret)");
   /* The result rides a single global, so two yields in one expression race:
@@ -1660,7 +1660,10 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(&sw, indent);
     buf_printf(&sw, "case %d: {\n", k);
     char castbuf[96];
-    snprintf(castbuf, sizeof castbuf, "(sp_%s *)_t%d.v.p", c->classes[k].c_name, trecv);
+    /* a by-value (value-type) class is stored inline: the inline entry binds
+       self as `sp_X _tN = <expr>`, so hand it the struct, not the pointer */
+    snprintf(castbuf, sizeof castbuf, "%s(sp_%s *)_t%d.v.p",
+             c->classes[k].is_value_type ? "*" : "", c->classes[k].c_name, trecv);
     g_inline_recv_expr = castbuf;
     g_inline_recv_class = k;
     c->ntype[recv] = ty_object(k);  /* so the inline entry classifies the receiver */

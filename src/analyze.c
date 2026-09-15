@@ -11366,12 +11366,18 @@ static int scope_yields_inside_lifted_body(Compiler *c, int mi) {
   return 0;
 }
 
-/* Does any call with a block have a poly receiver and this method's name? */
+/* Does any call have a poly receiver and this method's name? With a block,
+   or without one: a poly receiver dispatches by class to a callable symbol,
+   and an inlined method has none, so a blockless `slots["h"].request(req)`
+   to a `request(req, &blk)` that inlines at its (all blockless) call sites
+   found no arm and raised NoMethodError (#4492, the edge the #4477 approval
+   of `blk.nil?` walked over). The proc form is that arm: its block is the
+   real proc, NULL here, which is what `blk.nil?` and a bare `yield` (a
+   LocalJumpError) already answer for. */
 static int pf_wanted(Compiler *c, const char *name) {
   const NodeTable *nt = c->nt;
   for (int id = 0; id < nt->count; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
-    if (nt_ref(nt, id, "block") < 0) continue;
     const char *nm = nt_str(nt, id, "name");
     if (!nm || !sp_streq(nm, name)) continue;
     int recv = nt_ref(nt, id, "receiver");

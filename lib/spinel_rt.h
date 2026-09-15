@@ -11212,6 +11212,16 @@ sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args);
 #else
 sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args) { if (!p || !p->fn) return 0; if (!args) { sp_int noargs[16] = {0}; return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, 0, noargs); } return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, argc, args); }
 #endif
+/* `yield` through a block that arrived as a proc parameter (a proc form, a
+   lowered yielder, a forwarded &blk): no block is LocalJumpError, as the
+   static yield-without-block emitter already raises, not a silent nil. */
+static inline sp_int sp_proc_yield(sp_Proc *p, sp_int argc, sp_int *args) {
+  if (!p) {
+    sp_exc_stage_key(sp_box_str((&("\xff" "noreason")[1])));
+    sp_raise_cls("LocalJumpError", "no block given (yield)");
+  }
+  return sp_proc_call(p, argc, args);
+}
 
 /* Run the at_exit hooks, most recently registered first, and answer the status
    the process should end with. `status` in is what the terminating path would
