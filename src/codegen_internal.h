@@ -614,6 +614,7 @@ void emit_ctype(Compiler *c, TyKind t, Buf *b);
 /* Emit the boxing prefix/suffix to convert a typed value to sp_RbVal.
    Call as: emit_box_open(t, b); emit_expr(c, node, b); emit_box_close(t, b). */
 void emit_box_open(Compiler *c, TyKind t, Buf *b);
+const char *ptr_array_stamp(Compiler *c, TyKind t);   /* "SP_PTR_ELEM_x, cls" for sp_box_ptr_array_k (#4486) */
 void emit_box_close(Compiler *c, TyKind t, Buf *b);
 /* "Int" / "Str" / "Float" for the sp_<K>Array_* runtime family. */
 const char *array_kind(TyKind t);

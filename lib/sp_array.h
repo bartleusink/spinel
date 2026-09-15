@@ -178,10 +178,99 @@ static inline void sp_PtrArray_push(sp_PtrArray*a,void*v){sp_gc_wb((void*)a); if
 /* Array#pop on a `<X>_ptr_array`. Returns NULL when empty (matches CRuby's
    nil for typed-element arrays since the slot can't carry nil). #520. */
 static inline void *sp_PtrArray_pop(sp_PtrArray*a){sp_gc_wb((void*)a); if(!a||a->len==0)return NULL;return a->data[--a->len];}
+/* A pointer array boxed by reference (#4486): its elements are what the stamp
+   says (sp_box_ptr_array_k), so an element read boxes a row as the typed
+   array it is and an object as its own class, and a store takes exactly that
+   kind or raises the TypeError the flat typed arrays raise. An array that was
+   never stamped (no emitter boxes one without stamping) reads as opaque
+   objects, which is what the erased id always meant. Shared by the runtime
+   archive and the generated TU, so only sp_alloc.h/sp_gc.h names appear. */
+static inline const char *sp_PtrArray_kind_name(sp_PtrArray *a) {
+  switch (a->elem_kind) {
+    case SP_PTR_ELEM_INT_ROWS: return "Array[Integer]";
+    case SP_PTR_ELEM_FLT_ROWS: return "Array[Float]";
+    case SP_PTR_ELEM_OBJ: return (a->elem_cls >= 0 && sp_obj_cls_name_fn) ? sp_obj_cls_name_fn(a->elem_cls) : "Object";
+    default: return "Object";
+  }
+}
+static inline sp_RbVal sp_PtrArray_elem_box(sp_PtrArray *a, void *e) {
+  if (!e) return sp_box_nil();
+  switch (a->elem_kind) {
+    case SP_PTR_ELEM_INT_ROWS: return sp_box_obj(e, SP_BUILTIN_INT_ARRAY);
+    case SP_PTR_ELEM_FLT_ROWS: return sp_box_obj(e, SP_BUILTIN_FLT_ARRAY);
+    case SP_PTR_ELEM_OBJ: return sp_box_nullable_obj_dyn(e, 0);   /* the object's own class id, a subclass included */
+    default: return sp_box_obj(e, SP_BUILTIN_OBJECT);
+  }
+}
+static inline sp_RbVal sp_PtrArray_get_box(sp_PtrArray *a, sp_int i) {
+  if (!a) return sp_box_nil();
+  if (i < 0) i += a->len;
+  if (i < 0 || i >= a->len) return sp_box_nil();
+  return sp_PtrArray_elem_box(a, a->data[i]);
+}
+/* the class a boxed value would name in a TypeError, from what this header can see */
+static inline const char *sp_PtrArray_val_class(sp_RbVal v) {
+  switch (v.tag) {
+    case SP_TAG_INT: return "Integer"; case SP_TAG_FLT: return "Float"; case SP_TAG_STR: return "String";
+    case SP_TAG_NIL: return "NilClass"; case SP_TAG_SYM: return "Symbol";
+    case SP_TAG_BOOL: return v.v.b ? "TrueClass" : "FalseClass";
+    case SP_TAG_OBJ:
+      if (v.cls_id >= 0) return sp_obj_cls_name_fn ? sp_obj_cls_name_fn(v.cls_id) : "Object";
+      switch (v.cls_id) {
+        case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_STR_ARRAY:
+        case SP_BUILTIN_SYM_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: return "Array";
+        default: return "Object";
+      }
+    default: return "Object";
+  }
+}
+/* can the array hold v? 1 with the pointer in *out (NULL for nil), else 0 */
+static inline int sp_PtrArray_elem_ok(sp_PtrArray *a, sp_RbVal v, void **out) {
+  *out = NULL;
+  if (v.tag == SP_TAG_NIL) return 1;
+  if (v.tag != SP_TAG_OBJ) return 0;
+  switch (a->elem_kind) {
+    case SP_PTR_ELEM_INT_ROWS: if (v.cls_id != SP_BUILTIN_INT_ARRAY) return 0; break;
+    case SP_PTR_ELEM_FLT_ROWS: if (v.cls_id != SP_BUILTIN_FLT_ARRAY) return 0; break;
+    case SP_PTR_ELEM_OBJ:
+      if (!(a->elem_cls < 0 || v.cls_id == a->elem_cls ||
+            (v.cls_id >= 0 && sp_class_le_id_fn && sp_class_le_id_fn(v.cls_id, a->elem_cls)))) return 0;
+      break;
+    default: break;
+  }
+  *out = v.v.p;
+  return 1;
+}
+static inline void *sp_PtrArray_elem_unbox(sp_PtrArray *a, sp_RbVal v) {
+  void *e;
+  if (sp_PtrArray_elem_ok(a, v, &e)) return e;
+  sp_exc_stage_recv(v);
+  sp_raise_cls("TypeError", sp_sprintf("cannot store %s into an Array[%s]: a typed array holds one kind of element",
+                                       sp_PtrArray_val_class(v), sp_PtrArray_kind_name(a)));
+  return NULL;
+}
+/* the boxed elements of a pointer array, for the paths that work on a poly array */
+static inline sp_PolyArray *sp_PtrArray_to_poly(sp_PtrArray *a) {
+  SP_GC_ROOT(a);
+  sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r);
+  if (a) for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(r, sp_PtrArray_elem_box(a, a->data[i]));
+  return r;
+}
 static inline void*sp_PtrArray_get(sp_PtrArray*a,sp_int i){if(!a)return NULL;if(i<0)i+=a->len;if(i<0||i>=a->len)return NULL;return a->data[i];}
 /* Issue #770: bounds-check the final index; no-op out-of-range rather
    than writing into adjacent memory (typed slots have a fixed shape). */
 static inline void sp_PtrArray_set(sp_PtrArray*a,sp_int i,void*v){sp_gc_wb((void*)a); if(!a)return;if(i<0)i+=a->len;if(i<0||i>=a->len)return;a->data[i]=v;}
+/* `a[i] = v` through a boxed pointer array: Ruby's index rules (a negative
+   index from the end, IndexError below -len, nil-fill past the end), where
+   the typed setter above answers a fixed shape (#4486) */
+static inline void sp_PtrArray_set_grow(sp_PtrArray*a,sp_int i,void*v){
+  if(!a)return;
+  if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_PTR_ARRAY);return;}
+  sp_int orig=i; if(i<0)i+=a->len;
+  if(i<0)sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)-a->len));
+  while(a->len<=i)sp_PtrArray_push(a,NULL);
+  sp_gc_wb((void*)a); a->data[i]=v;
+}
 static inline sp_int sp_PtrArray_length(sp_PtrArray*a){if(!a)return 0;return a->len;}
 static inline sp_bool sp_PtrArray_empty(sp_PtrArray*a){sp_gc_wb((void*)a); if(!a)return TRUE;return a->len==0;}
 

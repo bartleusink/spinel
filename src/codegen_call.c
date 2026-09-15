@@ -5599,6 +5599,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %ssp_StrArray_length((sp_StrArray *)_t%d.v.p)%s; break;", tr, bopen, tv, bclose);
         buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = %ssp_FloatArray_length((sp_FloatArray *)_t%d.v.p)%s; break;", tr, bopen, tv, bclose);
         buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: _t%d = %ssp_PolyArray_length((sp_PolyArray *)_t%d.v.p)%s; break;", tr, bopen, tv, bclose);
+        buf_printf(b, " case SP_BUILTIN_PTR_ARRAY: _t%d = %ssp_PtrArray_length((sp_PtrArray *)_t%d.v.p)%s; break;", tr, bopen, tv, bclose);
         buf_printf(b, " case SP_BUILTIN_POLY_POLY_HASH: _t%d = %s((sp_PolyPolyHash *)_t%d.v.p)->len%s; break;", tr, bopen, tv, bclose);
         buf_printf(b, " case SP_BUILTIN_SYM_POLY_HASH: _t%d = %s((sp_SymPolyHash *)_t%d.v.p)->len%s; break;", tr, bopen, tv, bclose);
         buf_printf(b, " case SP_BUILTIN_STR_POLY_HASH: _t%d = %s((sp_StrPolyHash *)_t%d.v.p)->len%s; break;", tr, bopen, tv, bclose);
@@ -5618,7 +5619,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       if (sp_streq(name, "clear") && argc == 0) {
         buf_printf(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY:"
                       " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
-                      " case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_STRBUF:"
+                      " case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: case SP_BUILTIN_STRBUF:"
                       " case SP_BUILTIN_STR_INT_HASH: case SP_BUILTIN_STR_STR_HASH:"
                       " case SP_BUILTIN_INT_STR_HASH: case SP_BUILTIN_INT_INT_HASH:"
                       " case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_SYM_POLY_HASH:"
@@ -5634,6 +5635,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %ssp_StrArray_length((sp_StrArray *)_t%d.v.p) == 0%s; break;", tr, ebopen, tv, ebclose);
         buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = %ssp_FloatArray_length((sp_FloatArray *)_t%d.v.p) == 0%s; break;", tr, ebopen, tv, ebclose);
         buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: _t%d = %ssp_PolyArray_length((sp_PolyArray *)_t%d.v.p) == 0%s; break;", tr, ebopen, tv, ebclose);
+        buf_printf(b, " case SP_BUILTIN_PTR_ARRAY: _t%d = %ssp_PtrArray_length((sp_PtrArray *)_t%d.v.p) == 0%s; break;", tr, ebopen, tv, ebclose);
         buf_printf(b, " case SP_BUILTIN_POLY_POLY_HASH: _t%d = %s((sp_PolyPolyHash *)_t%d.v.p)->len == 0%s; break;", tr, ebopen, tv, ebclose);
         buf_printf(b, " case SP_BUILTIN_SYM_POLY_HASH: _t%d = %s((sp_SymPolyHash *)_t%d.v.p)->len == 0%s; break;", tr, ebopen, tv, ebclose);
         buf_printf(b, " case SP_BUILTIN_STR_POLY_HASH: _t%d = %s((sp_StrPolyHash *)_t%d.v.p)->len == 0%s; break;", tr, ebopen, tv, ebclose);
@@ -5692,7 +5694,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         if (ib9.p && strncmp(ib9.p, "sp_raise_nomethod(", 18) != 0) {
           buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY:"
                       " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
-                      " case SP_BUILTIN_POLY_ARRAY:"
+                      " case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY:"
                       " case SP_BUILTIN_STR_INT_HASH: case SP_BUILTIN_STR_STR_HASH:"
                       " case SP_BUILTIN_INT_STR_HASH: case SP_BUILTIN_INT_INT_HASH:"
                       " case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_SYM_POLY_HASH:"
@@ -5860,7 +5862,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         snprintf(ev, sizeof ev, "%s(_t%d%s)",
                  ewi ? "sp_Enumerator_new_ewi" : "sp_Enumerator_new_indices", tv, ewi ? ", 0" : "");
         buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
-                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: ");
+                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: ");
         buf_printf(b, "_t%d = ", tr);
         if (ret == TY_POLY) emit_boxed_text(c, TY_ENUMERATOR, ev, b);
         else buf_puts(b, ev);
@@ -5875,7 +5877,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         char jv[80];
         snprintf(jv, sizeof jv, "sp_poly_join(_t%d, sp_str_empty)", tv);
         buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
-                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: ");
+                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: ");
         buf_printf(b, "_t%d = ", tr);
         if (ret == TY_POLY) emit_boxed_text(c, TY_STRING, jv, b);
         else buf_puts(b, jv);
@@ -5931,7 +5933,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         char av[80];
         snprintf(av, sizeof av, "sp_poly_to_a_arr(_t%d)", tv);
         buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
-                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: ");
+                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: ");
         buf_printf(b, "_t%d = ", tr);
         if (ret == TY_POLY) emit_boxed_text(c, TY_POLY_ARRAY, av, b);
         else buf_puts(b, av);
@@ -6836,6 +6838,7 @@ else {
           buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = sp_box_str(sp_StrArray_get((sp_StrArray *)_t%d.v.p, %s)); break;", tr, tv, idxref);
           buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = sp_box_float(sp_FloatArray_get((sp_FloatArray *)_t%d.v.p, %s)); break;", tr, tv, idxref);
           buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: _t%d = sp_PolyArray_get((sp_PolyArray *)_t%d.v.p, %s); break;", tr, tv, idxref);
+          buf_printf(b, " case SP_BUILTIN_PTR_ARRAY: _t%d = sp_PtrArray_get_box((sp_PtrArray *)_t%d.v.p, %s); break;", tr, tv, idxref);
         }
         else {
           buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_IntArray_get((sp_IntArray *)_t%d.v.p, %s); break;", tr, tv, idxref);
@@ -6982,7 +6985,7 @@ else {
         /* sp_poly_insert is the kind dispatch for a positional splice, so
            `unshift(a, b)` is a insert at 0 and b insert at 1 -- CRuby's order.
            Answers the receiver, like push. */
-        buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY:");
+        buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY:");
         for (int a = 0; a < argc; a++) {
           char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
           Buf ab; memset(&ab, 0, sizeof ab);
@@ -6998,7 +7001,7 @@ else {
         /* The value is a builtin array: append each (boxed) arg via sp_poly_shl,
            which dispatches on the array kind. `push`/`<<`/`append` return the
            receiver, so yield it when the result is used (chained). */
-        buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY:");
+        buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY:");
         for (int a = 0; a < argc; a++) {
           char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
           Buf ab; memset(&ab, 0, sizeof ab);
@@ -7050,7 +7053,7 @@ else {
         /* every array kind joins through the same runtime helper; the separator
            is the call's own argument (absent means "") */
         buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
-                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: ");
+                    " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: ");
         Buf jb; memset(&jb, 0, sizeof jb);
         buf_printf(&jb, "sp_poly_join(_t%d, ", tv);
         /* a BOXED separator has to be read as a String here: the temp is an
@@ -7124,10 +7127,11 @@ else {
         /* PolyArray: box the arg for runtime comparison */
         {
           int tbox = ++g_tmp;
-          buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: { sp_RbVal _t%d = ", tbox);
+          buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: { sp_RbVal _t%d = ", tbox);
           char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[0]);
           emit_boxed_text(c, at, tn, b);
-          buf_printf(b, "; _t%d = %ssp_PolyArray_include((sp_PolyArray *)_t%d.v.p, _t%d)%s; break; }", tr, ibo, tv, tbox, ibc);
+          /* a pointer array compares through its boxed elements (#4486) */
+          buf_printf(b, "; _t%d = %ssp_PolyArray_include(sp_poly_to_poly_array(_t%d), _t%d)%s; break; }", tr, ibo, tv, tbox, ibc);
         }
         /* PolyPolyHash: keys are boxed sp_RbVal */
         {
@@ -7146,7 +7150,7 @@ else {
           else emit_boxed_text(c, atmp_ty[0], tn4, &ab4); }
         buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
                     " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_SYM_ARRAY:"
-                    " case SP_BUILTIN_POLY_ARRAY: {");
+                    " case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: {");
         buf_printf(b, " sp_int _t%d = sp_poly_arr_index_val(_t%d, %s, %d); _t%d = ",
                    tix, tv, ab4.p ? ab4.p : "sp_box_nil()",
                    sp_streq(name, "rindex") ? 1 : 0, tr);
@@ -7168,7 +7172,7 @@ else {
         }
         buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
                     " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_SYM_ARRAY:"
-                    " case SP_BUILTIN_POLY_ARRAY: ");
+                    " case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: "); 
         buf_printf(b, "_t%d = ", tr);
         if (ret == TY_POLY) buf_puts(b, "sp_box_bool(");
         buf_printf(b, "sp_PolyArray_intersect_p(sp_poly_to_poly_array(_t%d), sp_poly_to_poly_array(%s))", tv, abox);

@@ -533,6 +533,10 @@ extern int (*sp_obj_conv_fn)(int cls_id, void *p, int which, sp_RbVal *out);
 /* Ruby class name for a user cls_id (the generated id->name table), so a
    runtime TU can word a TypeError the way CRuby does. */
 extern const char *(*sp_obj_cls_name_fn)(int cls_id);
+/* Is user class `sub` the class `super` or a descendant of it? The generated
+   class bank installs it; NULL means only an exact id can be trusted. A
+   pointer array of one class checks a stored object against it (#4486). */
+extern int (*sp_class_le_id_fn)(int sub, int super);
 
 /* ---- Hot inline mark helpers (inlined into both sides) ----
  * String tag bytes: 0xfe heap-unmarked -> 0xfc marked; others skipped. */

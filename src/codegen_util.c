@@ -1421,6 +1421,17 @@ void emit_ctype(Compiler *c, TyKind t, Buf *b) {
     buf_puts(b, n ? n : "void");
   }
 }
+/* The element stamp a pointer array is boxed with (#4486): the runtime's one
+   cls_id for pointer arrays is type-erased, so the box carries what the
+   elements are for the poly paths to read them back. */
+const char *ptr_array_stamp(Compiler *c, TyKind t) {
+  static char buf[64];
+  (void)c;
+  if (t == TY_INT_ARRAY_ARRAY)   return "SP_PTR_ELEM_INT_ROWS, -1";
+  if (t == TY_FLOAT_ARRAY_ARRAY) return "SP_PTR_ELEM_FLT_ROWS, -1";
+  snprintf(buf, sizeof buf, "SP_PTR_ELEM_OBJ, %d", ty_obj_array_class(t));
+  return buf;
+}
 void emit_box_open(Compiler *c, TyKind t, Buf *b) {
   if (t == TY_INT)          buf_puts(b, "sp_box_int(");
   else if (t == TY_STRING)  buf_puts(b, "sp_box_str(");
@@ -1436,6 +1447,7 @@ void emit_box_open(Compiler *c, TyKind t, Buf *b) {
   else if (t == TY_FLOAT_ARRAY) buf_puts(b, "sp_box_nullable_obj((void *)(");
   else if (t == TY_STR_ARRAY)   buf_puts(b, "sp_box_nullable_obj((void *)(");
   else if (t == TY_POLY_ARRAY)  buf_puts(b, "sp_box_nullable_obj((void *)(");
+  else if (ty_is_ptr_array(t))  buf_puts(b, "sp_box_ptr_array_k((void *)(");   /* by reference, stamped (#4486) */
   else if (t == TY_CLASS) buf_puts(b, "sp_box_class(");
   else if (t == TY_COMPLEX)  buf_puts(b, "sp_box_complex(");
   else if (t == TY_RATIONAL) buf_puts(b, "sp_box_rational(");
@@ -1460,6 +1472,7 @@ void emit_box_close(Compiler *c, TyKind t, Buf *b) {
   if (t == TY_FLOAT_ARRAY) { buf_puts(b, "), SP_BUILTIN_FLT_ARRAY)"); return; }
   if (t == TY_STR_ARRAY)   { buf_puts(b, "), SP_BUILTIN_STR_ARRAY)"); return; }
   if (t == TY_POLY_ARRAY)  { buf_puts(b, "), SP_BUILTIN_POLY_ARRAY)"); return; }
+  if (ty_is_ptr_array(t))  { buf_printf(b, "), %s)", ptr_array_stamp(c, t)); return; }
   buf_puts(b, ")");
 }
 /* comp_ntype through fold_seed_kind, which owns the rule (see types.c). */

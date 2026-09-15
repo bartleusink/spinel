@@ -128,6 +128,10 @@ void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
     case TY_STR_ARRAY:   buf_printf(b, "sp_box_nullable_obj((void *)(%s), SP_BUILTIN_STR_ARRAY)", expr); return;
     case TY_POLY_ARRAY:  buf_printf(b, "sp_box_nullable_obj((void *)(%s), SP_BUILTIN_POLY_ARRAY)", expr); return;
     case TY_OPENSTRUCT:  buf_printf(b, "sp_box_nullable_obj((void *)(%s), SP_BUILTIN_OPENSTRUCT)", expr); return;
+    /* a nested table or an object array boxes by reference, stamped with what
+       its elements are (#4486) */
+    case TY_INT_ARRAY_ARRAY: case TY_FLOAT_ARRAY_ARRAY:
+      buf_printf(b, "sp_box_ptr_array_k((void *)(%s), %s)", expr, ptr_array_stamp(c, t)); return;
     case TY_NIL:
       /* a nil-typed expression can still have side effects (puts/print as a
          block tail): evaluate it for effect, then yield nil */
@@ -139,14 +143,7 @@ void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
     /* Never silently int-box an unexpected type (the root of the poly-box bug
        family): fail loudly so a missing case is caught at compile time rather
        than emitting wrong C. The known poly-context types are handled above. */
-    if (ty_is_ptr_array(t)) {
-      fprintf(stderr, "spinel: a%s reaches a slot that holds any kind of value: it has no boxed form yet "
-                      "and the value would be dropped. Give every path the same kind, or build it as a "
-                      "general Array.\n",
-              t == TY_INT_ARRAY_ARRAY ? "n Array[Array[Integer]]"
-              : t == TY_FLOAT_ARRAY_ARRAY ? "n Array[Array[Float]]" : "n Array of objects");
-      exit(1);
-    }
+    if (ty_is_obj_array(t)) { buf_printf(b, "sp_box_ptr_array_k((void *)(%s), %s)", expr, ptr_array_stamp(c, t)); return; }
     fprintf(stderr, "spinel: emit_boxed_text: cannot box type %d into a poly value\n", (int)t);
     exit(1);
   }
@@ -188,6 +185,9 @@ void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   if (t == TY_INT_ARRAY)   { buf_printf(b, "sp_poly_as_int_array(%s)", expr); return; }
   if (t == TY_FLOAT_ARRAY) { buf_printf(b, "sp_poly_as_float_array(%s)", expr); return; }
   if (t == TY_STR_ARRAY)   { buf_printf(b, "sp_poly_as_str_array(%s)", expr); return; }
+  /* a pointer array of this kind is handed back itself; any other array is
+     copied element by element, each checked against the kind (#4486) */
+  if (ty_is_ptr_array(t))  { buf_printf(b, "sp_poly_as_ptr_array(%s, %s)", expr, ptr_array_stamp(c, t)); return; }
   if (t == TY_STR_POLY_HASH)  { buf_printf(b, "sp_poly_as_str_poly_hash(%s)", expr); return; }
   if (t == TY_SYM_POLY_HASH)  { buf_printf(b, "sp_poly_as_sym_poly_hash(%s)", expr); return; }
   if (t == TY_POLY_POLY_HASH) { buf_printf(b, "sp_poly_as_poly_poly_hash(%s)", expr); return; }
@@ -1345,16 +1345,12 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
        The untyped fallback below evaluates the value and yields nil, which
        is exactly what a method answering the table on one path and nil on
        another used to return (#4486). Refuse the shape instead. */
+    /* a nested table or an object array boxes by reference, stamped with what
+       its elements are, where it used to be refused (#4486) */
     if (ty_is_ptr_array(t)) {
-      char msg[512];
-      snprintf(msg, sizeof msg,
-               "a%s reaches a slot that holds any kind of value (a method whose value is it on one "
-               "path and something else on another, an element of a general Array, a Hash value, a "
-               "boxed parameter): it has no boxed form yet and the value would be dropped. Give every "
-               "path the same kind, or build it as a general Array.",
-               t == TY_INT_ARRAY_ARRAY ? "n Array[Array[Integer]]"
-               : t == TY_FLOAT_ARRAY_ARRAY ? "n Array[Array[Float]]" : "n Array of objects");
-      unsupported_feature(c, node, msg);
+      buf_puts(b, "sp_box_ptr_array_k((void *)("); emit_expr(c, node, b);
+      buf_printf(b, "), %s)", ptr_array_stamp(c, t));
+      return;
     }
     /* TY_UNKNOWN (e.g. unrecognized stdlib class .new): evaluate for side-effects, yield nil */
     buf_puts(b, "("); emit_expr(c, node, b); buf_puts(b, ", sp_box_nil())"); return;
@@ -8108,7 +8104,8 @@ void emit_regex_section(Compiler *c, Buf *b) {
   if (g_needs_class_machinery)
     buf_puts(b, "  sp_user_exc_parent_fn = sp_user_exc_parent;\n"
                 "  sp_user_exc_modules_fn = sp_user_exc_modules;\n"
-                "  sp_poly_is_a_hook = sp_poly_is_a;\n");
+                "  sp_poly_is_a_hook = sp_poly_is_a;\n"
+                "  sp_class_le_id_fn = sp_class_le_ids;\n");
   /* Replace the runtime's hook with the superset that also marks this
      program's heap-typed globals/constants/class-ivars (it chains to
      sp_re_mark_globals itself). Skipped when there are none -- the marker would
@@ -9857,6 +9854,8 @@ char *codegen_program(const NodeTable *nt) {
 
   buf_puts(&b, "static int sp_class_lt(sp_Class a,sp_Class b){return a.cls_id!=b.cls_id&&sp_class_is_ancestor(b,a);}\n");
   buf_puts(&b, "static int sp_class_le(sp_Class a,sp_Class b){return sp_class_is_ancestor(b,a);}\n");
+  /* the runtime archive's view of the same question, by id (sp_class_le_id_fn) */
+  buf_puts(&b, "static int sp_class_le_ids(int a,int b){return sp_class_is_ancestor((sp_Class){b},(sp_Class){a});}\n");
   buf_puts(&b, "static int sp_class_gt(sp_Class a,sp_Class b){return sp_class_lt(b,a);}\n");
   buf_puts(&b, "static int sp_class_ge(sp_Class a,sp_Class b){return sp_class_le(b,a);}\n");
   /* The checked unbox emit_unbox_text uses for class-typed slots (#4437). */

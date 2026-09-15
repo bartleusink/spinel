@@ -1043,6 +1043,16 @@ sp_RbVal sp_poly_replace(sp_RbVal recv, sp_RbVal src) {SP_GC_ROOT_RBVAL(recv);SP
     sp_FloatArray_replace((sp_FloatArray *)recv.v.p, (sp_FloatArray *)src.v.p);
   else if (recv.cls_id == SP_BUILTIN_STR_ARRAY && src.cls_id == SP_BUILTIN_STR_ARRAY)
     sp_StrArray_replace((sp_StrArray *)recv.v.p, (sp_StrArray *)src.v.p);
+  else if (recv.cls_id == SP_BUILTIN_PTR_ARRAY && src.cls_id == SP_BUILTIN_PTR_ARRAY) {
+    /* a pointer array takes another's elements when they are of its kind (#4486) */
+    sp_PtrArray *d = (sp_PtrArray *)recv.v.p, *sa = (sp_PtrArray *)src.v.p;
+    if (d == sa) return recv;
+    if (d->frozen) { sp_raise_frozen_array_at(d, SP_BUILTIN_PTR_ARRAY); return recv; }
+    for (sp_int i = 0; i < sa->len; i++) (void)sp_PtrArray_elem_unbox(d, sp_PtrArray_elem_box(sa, sa->data[i]));
+    sp_gc_wb((void *)d);
+    d->len = 0;
+    for (sp_int i = 0; i < sa->len; i++) sp_PtrArray_push(d, sa->data[i]);
+  }
   else if (recv.cls_id == SP_BUILTIN_POLY_ARRAY) {
     sp_PolyArray *d = (sp_PolyArray *)recv.v.p;
     d->len = 0;
@@ -1051,6 +1061,7 @@ sp_RbVal sp_poly_replace(sp_RbVal recv, sp_RbVal src) {SP_GC_ROOT_RBVAL(recv);SP
       case SP_BUILTIN_FLT_ARRAY: { sp_FloatArray *s = (sp_FloatArray *)src.v.p; for (sp_int i = 0; i < s->len; i++) sp_PolyArray_push(d, sp_box_float(s->data[i])); break; }
       case SP_BUILTIN_STR_ARRAY: { sp_StrArray *s = (sp_StrArray *)src.v.p; for (sp_int i = 0; i < s->len; i++) sp_PolyArray_push(d, sp_box_str(s->data[i])); break; }
       case SP_BUILTIN_POLY_ARRAY: { sp_PolyArray *s = (sp_PolyArray *)src.v.p; for (sp_int i = 0; i < s->len; i++) sp_PolyArray_push(d, s->data[i]); break; }
+      case SP_BUILTIN_PTR_ARRAY: { sp_PtrArray *s = (sp_PtrArray *)src.v.p; for (sp_int i = 0; i < s->len; i++) sp_PolyArray_push(d, sp_PtrArray_elem_box(s, s->data[i])); break; }
       default: break;
     }
   }
@@ -1121,7 +1132,7 @@ int sp_json_kind(sp_RbVal v) {
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_FLT_ARRAY:
     case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_SYM_ARRAY:
-    case SP_BUILTIN_POLY_ARRAY: return 1;
+    case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY: return 1;
     case SP_BUILTIN_STR_INT_HASH: case SP_BUILTIN_STR_STR_HASH:
     case SP_BUILTIN_INT_STR_HASH: case SP_BUILTIN_STR_POLY_HASH:
     case SP_BUILTIN_SYM_POLY_HASH: case SP_BUILTIN_POLY_POLY_HASH:
@@ -1267,7 +1278,7 @@ static int sp_transpose_row_p(sp_RbVal rv) {
   return rv.tag == SP_TAG_OBJ &&
          (rv.cls_id == SP_BUILTIN_INT_ARRAY || rv.cls_id == SP_BUILTIN_FLT_ARRAY ||
           rv.cls_id == SP_BUILTIN_STR_ARRAY || rv.cls_id == SP_BUILTIN_SYM_ARRAY ||
-          rv.cls_id == SP_BUILTIN_POLY_ARRAY);
+          rv.cls_id == SP_BUILTIN_POLY_ARRAY || rv.cls_id == SP_BUILTIN_PTR_ARRAY);
 }
 static const char *sp_transpose_row_class(sp_RbVal rv) {
   switch (rv.tag) {
@@ -1298,6 +1309,7 @@ sp_PolyArray *sp_poly_array_transpose(sp_PolyArray *rows) {
     else if (rv.cls_id == SP_BUILTIN_FLT_ARRAY) { rlen = ((sp_FloatArray *)rv.v.p)->len; if(!kind) kind = SP_BUILTIN_FLT_ARRAY; }
     else if (rv.cls_id == SP_BUILTIN_STR_ARRAY) { rlen = ((sp_StrArray *)rv.v.p)->len; if(!kind) kind = SP_BUILTIN_STR_ARRAY; }
     else if (rv.cls_id == SP_BUILTIN_POLY_ARRAY) { rlen = ((sp_PolyArray *)rv.v.p)->len; if(!kind) kind = SP_BUILTIN_POLY_ARRAY; }
+    else if (rv.cls_id == SP_BUILTIN_PTR_ARRAY) { rlen = ((sp_PtrArray *)rv.v.p)->len; if(!kind) kind = SP_BUILTIN_POLY_ARRAY; }   /* a row of rows or objects reads generically (#4486) */
     if (ncols < 0) ncols = rlen;
     else if (rlen != ncols)
       sp_raise_cls("IndexError", sp_sprintf("element size differs (%lld should be %lld)",
@@ -1362,6 +1374,8 @@ else if (kind == SP_BUILTIN_STR_ARRAY) {
           sp_PolyArray *row = (sp_PolyArray *)rv.v.p;
           if (c < row->len) val = row->data[c];
         }
+        else if (rv.tag == SP_TAG_OBJ && rv.cls_id == SP_BUILTIN_PTR_ARRAY)
+          val = sp_PtrArray_get_box((sp_PtrArray *)rv.v.p, c);
         sp_PolyArray_push(col, val);
       }
       cv.tag = SP_TAG_OBJ; cv.cls_id = SP_BUILTIN_POLY_ARRAY; cv.v.p = col;
@@ -3297,6 +3311,7 @@ int sp_typed_arr_frozen(sp_RbVal v) {
     case SP_BUILTIN_FLT_ARRAY: return ((sp_FloatArray *)v.v.p)->frozen;
     case SP_BUILTIN_STR_ARRAY: return ((sp_StrArray *)v.v.p)->frozen;
     case SP_BUILTIN_POLY_ARRAY: return ((sp_PolyArray *)v.v.p)->frozen;
+    case SP_BUILTIN_PTR_ARRAY: return (int)((sp_PtrArray *)v.v.p)->frozen;
     default: return 0;
   }
 }
@@ -3891,6 +3906,7 @@ sp_int sp_array_kind_len(sp_RbVal el) {
     case SP_BUILTIN_FLT_ARRAY:  return ((sp_FloatArray *)el.v.p)->len;
     case SP_BUILTIN_STR_ARRAY:  return ((sp_StrArray *)el.v.p)->len;
     case SP_BUILTIN_POLY_ARRAY: return ((sp_PolyArray *)el.v.p)->len;
+    case SP_BUILTIN_PTR_ARRAY:  return ((sp_PtrArray *)el.v.p)->len;
     default: return -1;
   }
 }

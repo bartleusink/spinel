@@ -903,6 +903,14 @@ sp_RbVal sp_box_foreign_ptr(void *p);
 sp_RbVal sp_box_regexp(void *p);
 sp_RbVal sp_box_sym_array(void *p);
 sp_RbVal sp_box_ptr_array(void *p);
+/* Box a pointer array by reference, stamping what its elements are so the poly
+   paths can read, render and refuse stores faithfully (#4486). */
+static inline sp_RbVal sp_box_ptr_array_k(void *p, int kind, int cls) {
+  if (!p) return sp_box_nil();
+  sp_PtrArray *a = (sp_PtrArray *)p;
+  if (a->elem_kind == SP_PTR_ELEM_UNKNOWN) { a->elem_kind = kind; a->elem_cls = cls; }
+  return sp_box_obj(p, SP_BUILTIN_PTR_ARRAY);
+}
 sp_RbVal sp_box_method(void *p);
 sp_RbVal sp_box_complex(sp_Complex v);
 sp_RbVal sp_box_rational(sp_Rational v);

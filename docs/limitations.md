@@ -626,26 +626,28 @@ collect(o, ctx.tbl)
 Give the parameter the argument's kind (an rbs seed, or call sites that all
 pass the same kind) or build the argument as a general Array.
 
-#### A nested numeric table or an object array has no boxed form
+#### A nested numeric table or an object array is boxed by reference
 
 `Array[Array[Integer]]`, `Array[Array[Float]]` and an Array of one class's
 objects are compiled to an unboxed pointer array when every use supports it
-(see docs/rbs-extract.md). That representation has no boxed form, so it
-cannot reach a slot that holds any kind of value: a method whose value is
-the table on one path and `nil` or something else on another, an element of
-a general Array, a Hash value, a boxed parameter. Such a program is refused
-at compile time rather than compiled with the value dropped:
+(see docs/rbs-extract.md). Reaching a slot that holds any kind of value -- a
+method whose value is the table on one path and `nil` on another, an element
+of a general Array, a Hash value, a boxed parameter -- boxes the array by
+reference, stamped with what its elements are, so the boxed value is the same
+array (a mutation through either side is seen by both) and reads, `inspect`,
+`==`, iteration and the rest answer as they would for a general Array:
 
 ```ruby
 def run(flag)
   run_bcf if flag      # the table on one path, nil on the other
 end
-# spinel: t.rb:2: an Array[Array[Float]] reaches a slot that holds any kind of value ...
+p run(true)            # [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 ```
 
-Give every path the same kind (an explicit empty table on the other path,
-or a `nil` check at the call site instead of inside the method), or build
-the table as a general Array.
+The typed-array rule above applies through the box: a store of another kind
+(`t << "x"`, `t.push(1)`, `t.insert(0, :s)`, `t.concat(["q"])`) raises
+`TypeError`, where CRuby's Array would take the element. An object array of
+one class takes that class and its subclasses.
 
 #### A `Float::INFINITY` bound reports the other bound as a `Float`
 

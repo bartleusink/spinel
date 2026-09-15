@@ -848,11 +848,6 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (#4480: a typed array copied into a mutated general-Array parameter compiled)"; ok=0; \
 	else grep -q "which the method mutates" "$$tmp/tp.out" || \
 	  { echo "reject-test: FAIL (#4480: rejected without saying why)"; sed -n 1,5p "$$tmp/tp.out"; ok=0; }; fi; \
-	t=test/reject/nested_table_into_poly_slot.rb; \
-	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/nt.c" >"$$tmp/nt.out" 2>&1; then \
-	  echo "reject-test: FAIL (#4486: a nested table boxed into a general slot compiled)"; ok=0; \
-	else grep -q "has no boxed form yet" "$$tmp/nt.out" || \
-	  { echo "reject-test: FAIL (#4486: rejected without saying why)"; sed -n 1,5p "$$tmp/nt.out"; ok=0; }; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 

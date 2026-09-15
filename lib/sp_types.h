@@ -241,7 +241,14 @@ typedef struct sp_str_hdr { struct sp_str_hdr *next; uint32_t size; uint32_t len
 #define SP_STRARR_INLINE 4
 typedef struct{sp_int*data;sp_int start;sp_int len;sp_int cap;sp_int frozen;}sp_IntArray;
 typedef struct{sp_float*data;sp_int len;sp_int cap;sp_int frozen;}sp_FloatArray;
-typedef struct{void**data;sp_int len;sp_int cap;void(*scan_elem)(void*);sp_int frozen;}sp_PtrArray;
+/* elem_kind/elem_cls: what the pointers are, stamped when the array is boxed by
+   reference (the one cls_id for pointer arrays is type-erased, #4486). 0 until
+   then; a stamp never changes since a typed array holds one kind. */
+typedef struct{void**data;sp_int len;sp_int cap;void(*scan_elem)(void*);sp_int frozen;int elem_kind;int elem_cls;}sp_PtrArray;
+#define SP_PTR_ELEM_UNKNOWN  0
+#define SP_PTR_ELEM_OBJ      1   /* user objects, elem_cls = the static class (-1: read each object's own) */
+#define SP_PTR_ELEM_INT_ROWS 2   /* sp_IntArray rows (Array[Array[Integer]]) */
+#define SP_PTR_ELEM_FLT_ROWS 3   /* sp_FloatArray rows (Array[Array[Float]]) */
 typedef struct{const char**data;sp_int len;sp_int cap;sp_int frozen;const char*inline_data[SP_STRARR_INLINE];}sp_StrArray;
 
 /* ---- Non-poly typed hashes ---- */

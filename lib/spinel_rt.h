@@ -1676,6 +1676,11 @@ static inline void sp_poly_puts(sp_RbVal v) {
         case SP_BUILTIN_RATIONAL: puts(sp_rational_to_s(*(sp_Rational *)v.v.p)); break;
         case SP_BUILTIN_BIG_RATIONAL: puts(sp_brat_to_s((sp_BigRational *)v.v.p)); break;
         case SP_BUILTIN_REGEX: puts(sp_re_to_s_str(v.v.p)); break;
+        case SP_BUILTIN_PTR_ARRAY: {   /* rows or objects, one per line like any array (#4486) */
+          sp_PtrArray *_pa = (sp_PtrArray *)v.v.p;
+          if (_pa) for (sp_int _i = 0; _i < _pa->len; _i++) sp_poly_puts(sp_PtrArray_elem_box(_pa, _pa->data[_i]));
+          break;
+        }
         case SP_BUILTIN_POLY_ARRAY: {
           /* puts flattens arrays recursively, one element per line -- and one
              that holds itself gets CRuby's single `[...]` line instead of an
@@ -1811,6 +1816,7 @@ static sp_float sp_poly_Float_ex(sp_RbVal v, int raise);
 static inline int sp_poly_is_hash_kind(int cls_id);
 static inline const char *sp_poly_inspect(sp_RbVal v);
 static const char *sp_PolyArray_inspect(sp_PolyArray *a);  /* fwd: Array#to_s == inspect */
+static const char *sp_PtrArray_inspect_k(sp_PtrArray *a);   /* fwd: a pointer array by what it holds (#4486) */
 static inline const char *sp_poly_to_s(sp_RbVal v) {
   switch (v.tag) {
     /* int-typed nil (SP_INT_NIL) is Ruby nil; nil.to_s is "" -- match it. */
@@ -1829,7 +1835,7 @@ static inline const char *sp_poly_to_s(sp_RbVal v) {
         case SP_BUILTIN_FLT_ARRAY: return sp_FloatArray_inspect((sp_FloatArray *)v.v.p);
         case SP_BUILTIN_STR_ARRAY: return sp_StrArray_inspect((sp_StrArray *)v.v.p);
         case SP_BUILTIN_SYM_ARRAY: return sp_SymArray_inspect((sp_IntArray *)v.v.p);
-        case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_inspect((sp_PtrArray *)v.v.p);
+        case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_inspect_k((sp_PtrArray *)v.v.p);
         /* Array#to_s is Array#inspect; a boxed PolyArray element had no arm
            and fell through to "" (#3007) */
         case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_inspect((sp_PolyArray *)v.v.p);
@@ -3063,7 +3069,7 @@ static sp_bool sp_PolyPolyHash_eq(sp_PolyPolyHash *a, sp_PolyPolyHash *b);
 static inline int sp_poly_is_array_kind(int cls_id) {
   return cls_id == SP_BUILTIN_INT_ARRAY || cls_id == SP_BUILTIN_STR_ARRAY ||
          cls_id == SP_BUILTIN_FLT_ARRAY || cls_id == SP_BUILTIN_SYM_ARRAY ||
-         cls_id == SP_BUILTIN_POLY_ARRAY;
+         cls_id == SP_BUILTIN_POLY_ARRAY || cls_id == SP_BUILTIN_PTR_ARRAY;
 }
 static inline int sp_poly_is_hash_kind(int cls_id) {
   return cls_id == SP_BUILTIN_STR_INT_HASH || cls_id == SP_BUILTIN_STR_STR_HASH ||
@@ -3770,6 +3776,11 @@ static const char *sp_poly_elem_s(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL) return NULL;
   sp_raise_typed_elem(v, "String");
 }
+static const char *sp_PtrArray_inspect_k(sp_PtrArray *a) {
+  if (!a) return SPL("nil");
+  if (a->elem_kind == SP_PTR_ELEM_UNKNOWN) return sp_PtrArray_inspect(a);   /* opaque, as the erased id always was */
+  return sp_PolyArray_inspect(sp_PtrArray_to_poly(a));
+}
 static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
   /* Proc#<< composes the other way round: `f << g` calls g then f (#2880) */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_PROC &&
@@ -3792,7 +3803,8 @@ static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
       return a;
     }
     if (a.cls_id == SP_BUILTIN_PTR_ARRAY) {
-      sp_PtrArray_push((sp_PtrArray *)a.v.p, b.v.p);
+      sp_PtrArray *pa = (sp_PtrArray *)a.v.p;
+      sp_PtrArray_push(pa, sp_PtrArray_elem_unbox(pa, b));   /* its own kind, or TypeError (#4486) */
       return a;
     }
     if (a.cls_id == SP_BUILTIN_FLT_ARRAY) {
@@ -3951,6 +3963,7 @@ static sp_int sp_poly_arr_len(sp_RbVal a) {
     case SP_BUILTIN_FLT_ARRAY: return ((sp_FloatArray *)a.v.p)->len;
     case SP_BUILTIN_STR_ARRAY: return ((sp_StrArray *)a.v.p)->len;
     case SP_BUILTIN_POLY_ARRAY: return ((sp_PolyArray *)a.v.p)->len;
+    case SP_BUILTIN_PTR_ARRAY: return a.v.p ? ((sp_PtrArray *)a.v.p)->len : 0;
     case SP_BUILTIN_STR_INT_HASH: return ((sp_StrIntHash *)a.v.p)->len;
     case SP_BUILTIN_STR_STR_HASH: return ((sp_StrStrHash *)a.v.p)->len;
     case SP_BUILTIN_INT_STR_HASH: return ((sp_IntStrHash *)a.v.p)->len;
@@ -4040,6 +4053,7 @@ static sp_RbVal sp_poly_arr_get(sp_RbVal a, sp_int i) {
     case SP_BUILTIN_FLT_ARRAY: { sp_FloatArray *ar=(sp_FloatArray*)a.v.p; if(!ar) return sp_box_nil(); if(i<0)i+=ar->len; if(i<0||i>=ar->len) return sp_box_nil(); return sp_float_is_nil(ar->data[i]) ? sp_box_nil() : sp_box_float(ar->data[i]); }  /* a gap filled by `a[n] = v` past the end is nil (#3836) */
     case SP_BUILTIN_STR_ARRAY: { sp_StrArray *ar=(sp_StrArray*)a.v.p; if(!ar) return sp_box_nil(); if(i<0)i+=ar->len; if(i<0||i>=ar->len) return sp_box_nil(); return sp_box_str(ar->data[i]); }
     case SP_BUILTIN_POLY_ARRAY: { sp_PolyArray *ar=(sp_PolyArray*)a.v.p; if(!ar) return sp_box_nil(); if(i<0)i+=ar->len; if(i<0||i>=ar->len) return sp_box_nil(); return ar->data[i]; }
+    case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_get_box((sp_PtrArray *)a.v.p, i);
     default: return sp_box_nil();
   }
 }
@@ -4142,6 +4156,16 @@ static void sp_poly_arr_writeback(sp_RbVal orig, sp_PolyArray *work) {
       for (sp_int i = 0; i < work->len; i++) sp_StrArray_push(a, sp_poly_to_s(work->data[i]));
       return;
     }
+    case SP_BUILTIN_PTR_ARRAY: {
+      /* a pointer array takes back its own kind of element, checked one by
+         one before anything is stored (#4486) */
+      sp_PtrArray *a = (sp_PtrArray *)orig.v.p;
+      for (sp_int i = 0; i < work->len; i++) (void)sp_PtrArray_elem_unbox(a, work->data[i]);
+      sp_gc_wb((void *)a);
+      a->len = 0;
+      for (sp_int i = 0; i < work->len; i++) sp_PtrArray_push(a, sp_PtrArray_elem_unbox(a, work->data[i]));
+      return;
+    }
     default: return;   /* POLY_ARRAY: same storage; others: nothing to do */
   }
 }
@@ -4171,6 +4195,7 @@ static sp_bool sp_poly_array_frozen(sp_RbVal v) {
     case SP_BUILTIN_FLT_ARRAY:  return ((sp_FloatArray *)v.v.p)->frozen != 0;
     case SP_BUILTIN_STR_ARRAY:  return ((sp_StrArray *)v.v.p)->frozen != 0;
     case SP_BUILTIN_POLY_ARRAY: return ((sp_PolyArray *)v.v.p)->frozen != 0;
+    case SP_BUILTIN_PTR_ARRAY:  return ((sp_PtrArray *)v.v.p)->frozen != 0;
   }
   return FALSE;
 }
@@ -4265,7 +4290,7 @@ static sp_PolyArray *sp_kernel_array(sp_RbVal x) {
        result is a poly array), so its elements are copied. */
     if (x.cls_id == SP_BUILTIN_POLY_ARRAY) return (sp_PolyArray *)x.v.p;
     if (x.cls_id == SP_BUILTIN_INT_ARRAY || x.cls_id == SP_BUILTIN_STR_ARRAY ||
-        x.cls_id == SP_BUILTIN_FLT_ARRAY) {
+        x.cls_id == SP_BUILTIN_FLT_ARRAY || x.cls_id == SP_BUILTIN_PTR_ARRAY) {
       sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r);
       sp_int n = sp_poly_arr_len(x);
       for (sp_int i = 0; i < n; i++) sp_PolyArray_push(r, sp_poly_arr_get(x, i));
@@ -4357,6 +4382,9 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
     case SP_BUILTIN_FLT_ARRAY:  return sp_box_float_array(sp_FloatArray_slice((sp_FloatArray*)a.v.p, start, len));
     case SP_BUILTIN_STR_ARRAY:  return sp_box_str_array(sp_StrArray_slice((sp_StrArray*)a.v.p, start, len));
     case SP_BUILTIN_POLY_ARRAY: return sp_box_poly_array(sp_PolyArray_slice((sp_PolyArray*)a.v.p, start, len));
+    /* a slice of a pointer array is a fresh general Array of the same rows or
+       objects, by reference (#4486) */
+    case SP_BUILTIN_PTR_ARRAY:  return sp_box_poly_array(sp_PolyArray_slice(sp_PtrArray_to_poly((sp_PtrArray*)a.v.p), start, len));
     default: return sp_box_nil();
   }
 }
@@ -4364,7 +4392,8 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
 static int sp_rbval_is_array(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ &&
     (v.cls_id == SP_BUILTIN_INT_ARRAY || v.cls_id == SP_BUILTIN_FLT_ARRAY ||
-     v.cls_id == SP_BUILTIN_STR_ARRAY || v.cls_id == SP_BUILTIN_POLY_ARRAY);
+     v.cls_id == SP_BUILTIN_STR_ARRAY || v.cls_id == SP_BUILTIN_POLY_ARRAY ||
+     v.cls_id == SP_BUILTIN_PTR_ARRAY);
 }
 /* 3-arg []= on a poly receiver whose runtime object is a builtin array. Matches
    CRuby: a POLY_ARRAY splices directly (sp_PolyArray_splice already inserts a
@@ -4441,6 +4470,16 @@ static sp_RbVal sp_poly_splice(sp_RbVal recv, sp_int start, sp_int len, sp_RbVal
       }
       if (nofill && src.tag == SP_TAG_STR) { const char *v = src.v.s; sp_StrArray_splice(a, start, len, &v, 1); return recv; }
       break;
+    }
+    case SP_BUILTIN_PTR_ARRAY: {
+      /* splice through the boxed elements and write them back: the array
+         keeps its identity, and an element of another kind is refused before
+         anything is stored (#4486) */
+      SP_GC_ROOT_RBVAL(src); SP_GC_ROOT_RBVAL(recv);
+      sp_PolyArray *p = sp_PtrArray_to_poly((sp_PtrArray *)recv.v.p); SP_GC_ROOT(p);
+      sp_PolyArray_splice(p, start, len, src);
+      sp_poly_arr_writeback(recv, p);
+      return recv;
     }
     default: return recv;
   }
@@ -4657,6 +4696,7 @@ static void sp_PolyArray_flatten_into(sp_PolyArray *dst, sp_RbVal v) {
   if (v.cls_id == SP_BUILTIN_STR_ARRAY) { sp_StrArray *sa = (sp_StrArray *)v.v.p; for (sp_int i = 0; i < sa->len; i++) sp_PolyArray_push(dst, sp_box_str(sa->data[i])); return; }
   if (v.cls_id == SP_BUILTIN_SYM_ARRAY) { sp_IntArray *ya = (sp_IntArray *)v.v.p; for (sp_int i = 0; i < ya->len; i++) sp_PolyArray_push(dst, sp_box_sym((sp_sym)ya->data[ya->start + i])); return; }
   if (v.cls_id == SP_BUILTIN_FLT_ARRAY) { sp_FloatArray *fa = (sp_FloatArray *)v.v.p; for (sp_int i = 0; i < fa->len; i++) sp_PolyArray_push(dst, sp_box_float(fa->data[i])); return; }
+  if (v.cls_id == SP_BUILTIN_PTR_ARRAY) { sp_PolyArray_flatten_into(dst, sp_box_poly_array(sp_PtrArray_to_poly((sp_PtrArray *)v.v.p))); return; }   /* rows or objects (#4486) */
   if (v.cls_id == SP_BUILTIN_POLY_ARRAY) {
     sp_PolyArray *pa = (sp_PolyArray *)v.v.p;
     if (sp_poly_recur_seen(SP_POLY_RECUR_FLATTEN, pa, NULL))
@@ -5107,6 +5147,7 @@ static void sp_PolyArray_flatten_into_n(sp_PolyArray *dst, sp_RbVal v, sp_int de
   if (v.cls_id == SP_BUILTIN_STR_ARRAY) { sp_StrArray *sa = (sp_StrArray *)v.v.p; for (sp_int i = 0; i < sa->len; i++) sp_PolyArray_push(dst, sp_box_str(sa->data[i])); return; }
   if (v.cls_id == SP_BUILTIN_SYM_ARRAY) { sp_IntArray *ya = (sp_IntArray *)v.v.p; for (sp_int i = 0; i < ya->len; i++) sp_PolyArray_push(dst, sp_box_sym((sp_sym)ya->data[ya->start + i])); return; }
   if (v.cls_id == SP_BUILTIN_FLT_ARRAY) { sp_FloatArray *fa = (sp_FloatArray *)v.v.p; for (sp_int i = 0; i < fa->len; i++) sp_PolyArray_push(dst, sp_box_float(fa->data[i])); return; }
+  if (v.cls_id == SP_BUILTIN_PTR_ARRAY) { sp_PolyArray_flatten_into_n(dst, sp_box_poly_array(sp_PtrArray_to_poly((sp_PtrArray *)v.v.p)), depth); return; }
   if (v.cls_id == SP_BUILTIN_POLY_ARRAY) {
     sp_PolyArray *pa = (sp_PolyArray *)v.v.p;
     /* A negative depth is the "no limit" form, and the only one a cycle can
@@ -5539,7 +5580,7 @@ static inline const char *sp_poly_inspect(sp_RbVal v) {
         case SP_BUILTIN_FLT_ARRAY: return sp_FloatArray_inspect((sp_FloatArray *)v.v.p);
         case SP_BUILTIN_STR_ARRAY: return sp_StrArray_inspect((sp_StrArray *)v.v.p);
         case SP_BUILTIN_SYM_ARRAY: return sp_SymArray_inspect((sp_IntArray *)v.v.p);
-        case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_inspect((sp_PtrArray *)v.v.p);
+        case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_inspect_k((sp_PtrArray *)v.v.p);
         case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_inspect((sp_PolyArray *)v.v.p);
         case SP_BUILTIN_RANGE:     return sp_Range_inspect((sp_Range *)v.v.p);
         case SP_BUILTIN_FLOAT_RANGE: return sp_frange_inspect(*(sp_FloatRange *)v.v.p);
@@ -5660,6 +5701,7 @@ static const char *sp_poly_join(sp_RbVal a, const char *sep) {
   switch (a.cls_id) {
     case SP_BUILTIN_STR_ARRAY: return sp_StrArray_join((sp_StrArray *)a.v.p, sep);
     case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_join((sp_PolyArray *)a.v.p, sep);
+    case SP_BUILTIN_PTR_ARRAY: return sp_PolyArray_join(sp_PtrArray_to_poly((sp_PtrArray *)a.v.p), sep);
     case SP_BUILTIN_INT_ARRAY: {
       sp_IntArray *ar = (sp_IntArray *)a.v.p;
       if (!ar || ar->len == 0) return sp_str_empty;
@@ -5670,6 +5712,10 @@ static const char *sp_poly_join(sp_RbVal a, const char *sep) {
       }
       return sp_str_from_bytes(s->data, (size_t)s->len);  /* standalone copy (#3151) */
     }
+    /* a Float or Symbol array had no arm and joined as its inspect text: a
+       row of a nested Float table is boxed as one (#4486) */
+    case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_SYM_ARRAY:
+      return sp_PolyArray_join(sp_poly_to_poly_array(a), sep);
     default: return sp_poly_to_s(a);
   }
 }
@@ -6477,6 +6523,7 @@ static sp_RbVal sp_poly_clear(sp_RbVal v) {
     case SP_BUILTIN_FLT_ARRAY:      ((sp_FloatArray *)v.v.p)->len = 0; break;
     case SP_BUILTIN_STR_ARRAY:      ((sp_StrArray *)v.v.p)->len = 0; break;
     case SP_BUILTIN_POLY_ARRAY:     ((sp_PolyArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_PTR_ARRAY:      ((sp_PtrArray *)v.v.p)->len = 0; break;
     case SP_BUILTIN_STRBUF: {
       sp_String *_m = (sp_String *)v.v.p;
       if (sp_String_is_frozen(_m)) { sp_raise_frozen_str(_m->data); break; }
@@ -6533,6 +6580,11 @@ static sp_RbVal sp_poly_pop(sp_RbVal v) {
         return sp_box_str(sp_StrArray_pop(a));
       }
       case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_pop((sp_PolyArray *)v.v.p);
+      case SP_BUILTIN_PTR_ARRAY: {
+        sp_PtrArray *a = (sp_PtrArray *)v.v.p;
+        if (a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_PTR_ARRAY); return sp_box_nil(); }
+        return a->len > 0 ? sp_PtrArray_elem_box(a, sp_PtrArray_pop(a)) : sp_box_nil();
+      }
       default: break;
     }
   }
@@ -6601,6 +6653,15 @@ static sp_RbVal sp_poly_insert(sp_RbVal v, sp_int i, sp_RbVal x) {
       case SP_BUILTIN_POLY_ARRAY:
         sp_PolyArray_insert((sp_PolyArray *)v.v.p, i, x);
         return v;
+      case SP_BUILTIN_PTR_ARRAY: {
+        /* the pointer-array mutators work through the boxed elements and
+           write back: identity kept, a foreign element refused (#4486) */
+        SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(x);
+        sp_PolyArray *p = sp_PtrArray_to_poly((sp_PtrArray *)v.v.p); SP_GC_ROOT(p);
+        sp_PolyArray_insert(p, i, x);
+        sp_poly_arr_writeback(v, p);
+        return v;
+      }
       default: break;
     }
   }
@@ -6638,6 +6699,17 @@ static sp_RbVal sp_poly_delete_at(sp_RbVal v, sp_int i) {
         a->len--;
         return r;
       }
+      case SP_BUILTIN_PTR_ARRAY: {
+        sp_PtrArray *a = (sp_PtrArray *)v.v.p;
+        sp_int i2 = i < 0 ? i + a->len : i;
+        if (i2 < 0 || i2 >= a->len) return sp_box_nil();
+        if (a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_PTR_ARRAY); return sp_box_nil(); }
+        sp_RbVal r = sp_PtrArray_elem_box(a, a->data[i2]);
+        sp_gc_wb((void *)a);
+        memmove(a->data + i2, a->data + i2 + 1, (size_t)(a->len - i2 - 1) * sizeof(void *));
+        a->len--;
+        return r;
+      }
       default: break;
     }
   }
@@ -6663,6 +6735,7 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
         return sp_box_str(sp_StrArray_shift(a));
       }
       case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_shift((sp_PolyArray *)v.v.p);
+      case SP_BUILTIN_PTR_ARRAY: return sp_poly_delete_at(v, 0);
       default: break;
     }
   }
@@ -6744,7 +6817,7 @@ static sp_RbVal sp_poly_each_elem(sp_RbVal a, sp_int i) {
   if (a.tag != SP_TAG_OBJ) return sp_box_nil();
   switch (a.cls_id) {
     case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_FLT_ARRAY:
-    case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_POLY_ARRAY:
+    case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY:
       return sp_poly_arr_get(a, i);
     case SP_BUILTIN_RANGE: { sp_Range *r = (sp_Range *)a.v.p; return sp_box_int(r->first + i); }
     case SP_BUILTIN_STR_INT_HASH: {
@@ -6994,6 +7067,29 @@ static sp_FloatArray *sp_poly_as_float_array(sp_RbVal v) {
   }
   return a;
 }
+/* A boxed value read as a pointer array of the given kind (#4486): a pointer
+   array already of that kind is itself (by reference, as the box was); any
+   other array is copied element by element, each checked against the kind
+   the way a store would be; nil is NULL and anything else is TypeError. */
+static sp_PtrArray *sp_poly_as_ptr_array(sp_RbVal v, int kind, int cls) {
+  if (v.tag == SP_TAG_NIL) return (sp_PtrArray *)0;
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_PTR_ARRAY) {
+    sp_PtrArray *a = (sp_PtrArray *)v.v.p;
+    if (!a) return a;
+    if (a->elem_kind == SP_PTR_ELEM_UNKNOWN) { a->elem_kind = kind; a->elem_cls = cls; }
+    if (a->elem_kind == kind && (kind != SP_PTR_ELEM_OBJ || a->elem_cls == cls ||
+                                 (sp_class_le_id_fn && a->elem_cls >= 0 && sp_class_le_id_fn(a->elem_cls, cls))))
+      return a;
+  }
+  if (v.tag != SP_TAG_OBJ || !sp_poly_is_array_kind(v.cls_id))
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Array", sp_poly_class_name(v)));
+  SP_GC_ROOT_RBVAL(v);
+  sp_PtrArray *a = sp_PtrArray_new(); SP_GC_ROOT(a);
+  a->elem_kind = kind; a->elem_cls = cls;
+  sp_int n = sp_poly_length(v);
+  for (sp_int i = 0; i < n; i++) sp_PtrArray_push(a, sp_PtrArray_elem_unbox(a, sp_poly_arr_get(v, i)));
+  return a;
+}
 static sp_StrArray *sp_poly_as_str_array(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_ARRAY) return (sp_StrArray *)v.v.p;
   if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_StrArray *)0;
@@ -7016,7 +7112,7 @@ static sp_StrArray *sp_poly_as_str_array(sp_RbVal v) {
 static sp_RbVal sp_poly_massign_get(sp_RbVal v, sp_int i) {
   if (v.tag == SP_TAG_OBJ) switch (v.cls_id) {
     case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY:
-    case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY:
+    case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_PTR_ARRAY:
       return sp_poly_arr_get(v, i);
     default: break;
   }
@@ -7341,6 +7437,18 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
                                           key.tag == SP_TAG_FLT ? key.v.f : (sp_float)key.v.i);
         return sp_float_is_nil(r) ? sp_box_nil() : sp_box_float(r);  /* the element, not the key: -0.0 differs */
       }
+      case SP_BUILTIN_PTR_ARRAY: {
+        SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT_RBVAL(key);
+        sp_PolyArray *a = sp_PtrArray_to_poly((sp_PtrArray *)recv.v.p); SP_GC_ROOT(a);
+        sp_int w = 0, found = 0;
+        for (sp_int i = 0; i < a->len; i++) {
+          if (sp_poly_eq(a->data[i], key)) { found = 1; continue; }
+          a->data[w++] = a->data[i];
+        }
+        a->len = w;
+        if (found) sp_poly_arr_writeback(recv, a);
+        return found ? key : sp_box_nil();
+      }
       default: break;
     }
   }
@@ -7472,6 +7580,15 @@ static sp_RbVal sp_poly_dup(sp_RbVal v, int keep_frozen) {
         if (keep_frozen && a->frozen) r->frozen = 1;
         v.v.p = r; break;
       }
+      case SP_BUILTIN_PTR_ARRAY: {
+        /* a shallow copy of the same kind, its stamp carried over (#4486) */
+        sp_PtrArray *a = (sp_PtrArray *)v.v.p; SP_GC_ROOT(a);
+        sp_PtrArray *r = sp_PtrArray_new_scan(a->scan_elem);
+        r->elem_kind = a->elem_kind; r->elem_cls = a->elem_cls;
+        for (sp_int i = 0; i < a->len; i++) sp_PtrArray_push(r, a->data[i]);
+        if (keep_frozen && a->frozen) r->frozen = 1;
+        v.v.p = r; break;
+      }
     }
     return v;
   }
@@ -7510,13 +7627,25 @@ static inline sp_RbVal sp_poly_clone_freeze(sp_RbVal v, int fz) {
    (sp_gc_is_frozen reports it back), heap strings flip the string marker,
    every immutable tag (int/float/sym/nil/bool/...) is already frozen. */
 static inline sp_RbVal sp_poly_freeze(sp_RbVal v) {
-  if (v.tag == SP_TAG_OBJ) sp_gc_freeze(v.v.p);
+  if (v.tag == SP_TAG_OBJ) {
+    sp_gc_freeze(v.v.p);
+    /* the array mutators test the array's own field, not the header bit, so
+       a boxed array frozen here went on taking pushes (found under #4486) */
+    if (v.v.p) switch (v.cls_id) {
+      case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY: ((sp_IntArray *)v.v.p)->frozen = 1; break;
+      case SP_BUILTIN_FLT_ARRAY:  ((sp_FloatArray *)v.v.p)->frozen = 1; break;
+      case SP_BUILTIN_STR_ARRAY:  ((sp_StrArray *)v.v.p)->frozen = 1; break;
+      case SP_BUILTIN_POLY_ARRAY: ((sp_PolyArray *)v.v.p)->frozen = 1; break;
+      case SP_BUILTIN_PTR_ARRAY:  ((sp_PtrArray *)v.v.p)->frozen = 1; break;
+      default: break;
+    }
+  }
   else if (v.tag == SP_TAG_STR && v.v.s) sp_str_freeze_val(v.v.s);
   return v;
 }
 static inline sp_bool sp_poly_frozen(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_is_frozen_val(v.v.s) : TRUE;
-  if (v.tag == SP_TAG_OBJ) return sp_gc_is_frozen(v.v.p);
+  if (v.tag == SP_TAG_OBJ) return sp_gc_is_frozen(v.v.p) || (v.v.p && sp_poly_array_frozen(v));
   return TRUE;
 }
 /* eql? for a poly value: like == but without cross-kind numeric coercion, so
@@ -7693,6 +7822,7 @@ static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
       break;
     }
     case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_set((sp_PolyPolyHash*)v.v.p, sp_box_int(idx), val); break;
+    case SP_BUILTIN_PTR_ARRAY: { sp_PtrArray *_pa = (sp_PtrArray*)v.v.p; sp_PtrArray_set_grow(_pa, idx, sp_PtrArray_elem_unbox(_pa, val)); break; }
     default: break;
   }
   return val;
@@ -7785,6 +7915,7 @@ static sp_RbVal sp_poly_arr_set(sp_RbVal v, sp_int idx, sp_RbVal val) {
     case SP_BUILTIN_STR_ARRAY:  sp_StrArray_set((sp_StrArray*)v.v.p, idx,
                                                  sp_poly_elem_s(val)); break;
     case SP_BUILTIN_POLY_ARRAY: sp_PolyArray_set((sp_PolyArray*)v.v.p, idx, val); break;
+    case SP_BUILTIN_PTR_ARRAY: { sp_PtrArray *_pa = (sp_PtrArray*)v.v.p; sp_PtrArray_set_grow(_pa, idx, sp_PtrArray_elem_unbox(_pa, val)); break; }
     default: break;
   }
   return val;
@@ -7795,10 +7926,12 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val);   /* f
    so the value is stored exactly as CRuby does (e.g. a Float into a former int
    array). Returns the (possibly new) boxed array so the caller updates the slot. */
 static sp_RbVal sp_poly_arr_widen_and_set(sp_RbVal v, sp_int idx, sp_RbVal val) {
+  void *_pe;
   if (v.tag == SP_TAG_OBJ &&
       ((v.cls_id == SP_BUILTIN_INT_ARRAY && val.tag != SP_TAG_INT) ||
        (v.cls_id == SP_BUILTIN_FLT_ARRAY && val.tag != SP_TAG_FLT) ||
-       (v.cls_id == SP_BUILTIN_STR_ARRAY && val.tag != SP_TAG_STR))) {
+       (v.cls_id == SP_BUILTIN_STR_ARRAY && val.tag != SP_TAG_STR) ||
+       (v.cls_id == SP_BUILTIN_PTR_ARRAY && !sp_PtrArray_elem_ok((sp_PtrArray *)v.v.p, val, &_pe)))) {
     if (sp_typed_arr_frozen(v)) sp_raise_frozen_array_v(v);
     SP_GC_ROOT_RBVAL(val);
     sp_PolyArray *pa = sp_poly_to_poly_array(v);
@@ -7895,6 +8028,9 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
     case SP_BUILTIN_FLT_ARRAY:
       if (key.tag == SP_TAG_INT) sp_FloatArray_set((sp_FloatArray*)v.v.p, key.v.i,
                                                     sp_poly_elem_f(val));
+      break;
+    case SP_BUILTIN_PTR_ARRAY:
+      if (key.tag == SP_TAG_INT) { sp_PtrArray *_pa = (sp_PtrArray*)v.v.p; sp_PtrArray_set_grow(_pa, key.v.i, sp_PtrArray_elem_unbox(_pa, val)); }
       break;
     case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_set((sp_PolyPolyHash*)v.v.p, key, val); break;
     default: break;
@@ -8059,7 +8195,7 @@ static sp_int sp_poly_count_val(sp_RbVal v, sp_RbVal x) {
   for (sp_int i = 0; i < n; i++) if (sp_poly_eq(sp_poly_arr_get(v, i), x)) cnt++;
   return cnt;
 }
-static sp_int sp_poly_length(sp_RbVal v){if(v.tag==SP_TAG_STR)return v.v.s?(sp_int)sp_str_byte_len(v.v.s):0;   /* the header length, so an embedded NUL counts (#3540) */if(v.tag==SP_TAG_SYM)return sp_sym_name_fn?(sp_int)strlen(sp_sym_name_fn((sp_sym)v.v.i)):0;if(v.tag!=SP_TAG_OBJ)return 0;switch(v.cls_id){case SP_BUILTIN_INT_ARRAY:return sp_IntArray_length((sp_IntArray*)v.v.p);case SP_BUILTIN_FLT_ARRAY:return sp_FloatArray_length((sp_FloatArray*)v.v.p);case SP_BUILTIN_STR_ARRAY:return sp_StrArray_length((sp_StrArray*)v.v.p);case SP_BUILTIN_SYM_ARRAY:return sp_IntArray_length((sp_IntArray*)v.v.p);case SP_BUILTIN_POLY_ARRAY:return sp_PolyArray_length((sp_PolyArray*)v.v.p);case SP_BUILTIN_STR_INT_HASH:return sp_StrIntHash_length((sp_StrIntHash*)v.v.p);case SP_BUILTIN_STR_STR_HASH:return sp_StrStrHash_length((sp_StrStrHash*)v.v.p);case SP_BUILTIN_INT_STR_HASH:return sp_IntStrHash_length((sp_IntStrHash*)v.v.p);case SP_BUILTIN_INT_INT_HASH:return sp_IntIntHash_length((sp_IntIntHash*)v.v.p);case SP_BUILTIN_STR_POLY_HASH:return sp_StrPolyHash_length((sp_StrPolyHash*)v.v.p);case SP_BUILTIN_SYM_POLY_HASH:return sp_SymPolyHash_length((sp_SymPolyHash*)v.v.p);case SP_BUILTIN_POLY_POLY_HASH:return sp_PolyPolyHash_length((sp_PolyPolyHash*)v.v.p);
+static sp_int sp_poly_length(sp_RbVal v){if(v.tag==SP_TAG_STR)return v.v.s?(sp_int)sp_str_byte_len(v.v.s):0;   /* the header length, so an embedded NUL counts (#3540) */if(v.tag==SP_TAG_SYM)return sp_sym_name_fn?(sp_int)strlen(sp_sym_name_fn((sp_sym)v.v.i)):0;if(v.tag!=SP_TAG_OBJ)return 0;switch(v.cls_id){case SP_BUILTIN_INT_ARRAY:return sp_IntArray_length((sp_IntArray*)v.v.p);case SP_BUILTIN_FLT_ARRAY:return sp_FloatArray_length((sp_FloatArray*)v.v.p);case SP_BUILTIN_STR_ARRAY:return sp_StrArray_length((sp_StrArray*)v.v.p);case SP_BUILTIN_SYM_ARRAY:return sp_IntArray_length((sp_IntArray*)v.v.p);case SP_BUILTIN_POLY_ARRAY:return sp_PolyArray_length((sp_PolyArray*)v.v.p);case SP_BUILTIN_PTR_ARRAY:return v.v.p?((sp_PtrArray*)v.v.p)->len:0;case SP_BUILTIN_STR_INT_HASH:return sp_StrIntHash_length((sp_StrIntHash*)v.v.p);case SP_BUILTIN_STR_STR_HASH:return sp_StrStrHash_length((sp_StrStrHash*)v.v.p);case SP_BUILTIN_INT_STR_HASH:return sp_IntStrHash_length((sp_IntStrHash*)v.v.p);case SP_BUILTIN_INT_INT_HASH:return sp_IntIntHash_length((sp_IntIntHash*)v.v.p);case SP_BUILTIN_STR_POLY_HASH:return sp_StrPolyHash_length((sp_StrPolyHash*)v.v.p);case SP_BUILTIN_SYM_POLY_HASH:return sp_SymPolyHash_length((sp_SymPolyHash*)v.v.p);case SP_BUILTIN_POLY_POLY_HASH:return sp_PolyPolyHash_length((sp_PolyPolyHash*)v.v.p);
 /* File#size / File::Stat#size on a boxed handle: the file's byte size via its
    path (a poly-held stat handle's .size read this as container length 0) (#3041) */
 case SP_BUILTIN_IO:{sp_int sp_file_size(const char*);sp_File*_f=(sp_File*)v.v.p;if(_f&&sp_File_path(_f)[0]&&sp_File_path(_f)[0]!='<')return sp_file_size(sp_File_path(_f));return 0;}
@@ -8208,6 +8344,7 @@ static sp_RbVal sp_poly_sum(sp_RbVal v) {
     /* Accumulate a poly array through sp_poly_add, not sum_int: a container-read
        row of Rationals/Floats/Bignums summed as ints returned 0 (#3159). */
     case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_sum_poly((sp_PolyArray *)v.v.p);
+    case SP_BUILTIN_PTR_ARRAY:  return sp_PolyArray_sum_poly(sp_PtrArray_to_poly((sp_PtrArray *)v.v.p));
     /* a container-read int Range sums like the typed path (#3234) */
     case SP_BUILTIN_RANGE: {
       sp_IntArray *ia = sp_range_to_ia(*(sp_Range *)v.v.p);
@@ -8415,7 +8552,7 @@ static sp_RbVal sp_poly_min(sp_RbVal v) {
     case SP_BUILTIN_FLT_ARRAY:  { sp_FloatArray *a = (sp_FloatArray *)v.v.p; return (a && a->len) ? sp_box_float(sp_FloatArray_min(a)) : sp_box_nil(); }
     /* a String array reached here through the default and answered nil (#3464) */
     case SP_BUILTIN_STR_ARRAY:  { const char *m = sp_StrArray_min((sp_StrArray *)v.v.p); return m ? sp_box_str(m) : sp_box_nil(); }
-    case SP_BUILTIN_SYM_ARRAY:  return sp_PolyArray_min(sp_poly_to_poly_array(v));
+    case SP_BUILTIN_SYM_ARRAY: case SP_BUILTIN_PTR_ARRAY: return sp_PolyArray_min(sp_poly_to_poly_array(v));
     case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_min((sp_PolyArray *)v.v.p);
     /* Time#min is the MINUTE, not an enumerable minimum. A boxed Time has no
        user elements, so it fell to the default and answered nil -- silently,
@@ -8438,7 +8575,7 @@ static sp_RbVal sp_poly_max(sp_RbVal v) {
     case SP_BUILTIN_INT_ARRAY:  { sp_IntArray *a = (sp_IntArray *)v.v.p; return (a && a->len) ? sp_box_int(sp_IntArray_max(a)) : sp_box_nil(); }
     case SP_BUILTIN_FLT_ARRAY:  { sp_FloatArray *a = (sp_FloatArray *)v.v.p; return (a && a->len) ? sp_box_float(sp_FloatArray_max(a)) : sp_box_nil(); }
     case SP_BUILTIN_STR_ARRAY:  { const char *m = sp_StrArray_max((sp_StrArray *)v.v.p); return m ? sp_box_str(m) : sp_box_nil(); }
-    case SP_BUILTIN_SYM_ARRAY:  return sp_PolyArray_max(sp_poly_to_poly_array(v));
+    case SP_BUILTIN_SYM_ARRAY: case SP_BUILTIN_PTR_ARRAY: return sp_PolyArray_max(sp_poly_to_poly_array(v));
     case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_max((sp_PolyArray *)v.v.p);
     case SP_BUILTIN_RANGE: { sp_IntArray *ia = sp_range_to_ia(*(sp_Range *)v.v.p);
                              SP_GC_ROOT(ia);
@@ -10312,6 +10449,7 @@ static sp_PolyArray *sp_enum_items_from(sp_RbVal v) {
     switch (v.cls_id) {
       case SP_BUILTIN_INT_ARRAY:  return sp_IntArray_to_poly((sp_IntArray *)p);
       case SP_BUILTIN_STR_ARRAY:  return sp_StrArray_to_poly_fmt((sp_StrArray *)p);
+      case SP_BUILTIN_PTR_ARRAY:  return sp_PtrArray_to_poly((sp_PtrArray *)p);
       case SP_BUILTIN_POLY_ARRAY: { sp_PolyArray *a = (sp_PolyArray *)p; sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(r, a->data[i]); return r; }
       case SP_BUILTIN_FLT_ARRAY:  { sp_FloatArray *a = (sp_FloatArray *)p; sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(r, sp_box_float(a->data[i])); return r; }
       case SP_BUILTIN_SYM_ARRAY:  { sp_IntArray *a = (sp_IntArray *)p; sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(r, sp_box_sym((sp_sym)a->data[a->start + i])); return r; }
