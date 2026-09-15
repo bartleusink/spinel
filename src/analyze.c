@@ -7474,7 +7474,7 @@ static int narrow_object_arrays(Compiler *c) {
       if (n_cleared == cap_cleared) {
         cap_cleared = cap_cleared ? cap_cleared * 2 : 16;
         int *nc = (int *)realloc(cleared, sizeof(int) * (size_t)cap_cleared);
-        if (!nc) { free(cleared); cleared = NULL; n_cleared = 0; cap_cleared = 0; break; }
+        if (!nc) { free(cleared); fprintf(stderr, "oom\n"); exit(1); }
         cleared = nc;
       }
       cleared[n_cleared++] = id;
