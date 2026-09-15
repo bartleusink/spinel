@@ -1233,7 +1233,24 @@ int reconcile_locals_reading_ivars(Compiler *c) {
 }
 
 /* Element type contributed by a pushed value (see yield_aware_elem_ty). */
-static TyKind push_elem_ty(Compiler *c, int node) { return yield_aware_elem_ty(c, node); }
+/* An empty `[]` / `{}` pushed as an element infers UNKNOWN (its own kind
+   comes from its uses, and it has none), which the slot rule reads as "no
+   evidence": `@c = []; @c << []` left the ivar at the int array the empty
+   literal defaults to, and the push handed it a PolyArray pointer, a C
+   error. The literal is a container whatever its kind, so the element is
+   poly and the slot the poly array; a later pass may still narrow a table
+   of such rows once something decides their kind (#4484). */
+static TyKind push_elem_ty(Compiler *c, int node) {
+  TyKind t = yield_aware_elem_ty(c, node);
+  if (t == TY_UNKNOWN && node >= 0) {
+    NodeKind k = nt_kind(c->nt, node);
+    if (k == NK_ArrayNode || k == NK_HashNode || k == NK_KeywordHashNode) {
+      int en = 0; nt_arr(c->nt, node, "elements", &en);
+      if (en == 0) return TY_POLY;
+    }
+  }
+  return t;
+}
 
 /* ---- "this poly slot can hold a builtin container" ----
    TY_POLY is a top type with no member list, so a call on a poly receiver
@@ -8158,8 +8175,26 @@ int infer_block_params(Compiler *c) {
        site in the same iteration, before infer_block_params runs), widening
        it to the element scalar type collapses the outer array type to TY_POLY.
        Codegen emits a scoped shadow for the block param instead. */
-    if (ty_is_array(lv->type) && !ty_is_array(pt))
+    if (ty_is_array(lv->type) && !ty_is_array(pt)) {
+      /* ...unless the variable is a PURE block parameter, one no write site
+         in the scope assigns: its array type can only have come from the
+         usage pass reading a push inside the block (`@rows.each { |r| r <<
+         1.5 }`) ahead of this binding, in the round before the receiver had
+         a type. The push says what the element holds, not what the element
+         is; the receiver does, and it says poly. Keeping the array type
+         assigned the loop's sp_RbVal element to an sp_FloatArray * and the
+         program did not compile. */
+      if (pt != TY_POLY) continue;
+      int has_write = 0;
+      for (int w = 0; w < nt->count && !has_write; w++) {
+        if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
+        const char *wn = nt_str(nt, w, "name");
+        if (wn && sp_streq(wn, p0) && comp_scope_of(c, w) == s) has_write = 1;
+      }
+      if (has_write) continue;
+      lv->type = TY_POLY; changed = 1;
       continue;
+    }
     TyKind merged = ty_unify(lv->type, pt);
     if (merged != lv->type) { lv->type = merged; changed = 1; }
   }
