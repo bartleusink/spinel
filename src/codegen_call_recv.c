@@ -12290,24 +12290,26 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   /* The one/two-String-argument transforms on a boxed receiver: a String
      arriving through a poly slot (a Fiber#resume value, a container read) had
      no arm for these and raised NoMethodError naming String, which is what it
-     was. A regexp pattern keeps the dedicated regexp emitters. */
+     was. A regexp pattern keeps the dedicated regexp emitters. The receiver
+     is unboxed as a String, not converted to one: `42.tr("4", "x")` is
+     NoMethodError, not "x2" (#4493). */
   if (recv >= 0 && rt == TY_POLY && nt_ref(nt, id, "block") < 0 &&
       !user_defines_or_reads(c, name)) {
     if (sp_streq(name, "squeeze") && argc == 1) {
-      buf_puts(b, "sp_str_squeeze_chars(sp_poly_to_s("); emit_expr(c, recv, b);
-      buf_puts(b, "), "); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
+      buf_puts(b, "sp_str_squeeze_chars(sp_poly_recv_s("); emit_expr(c, recv, b);
+      buf_puts(b, ", \"squeeze\"), "); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
       return 1;
     }
     if (sp_streq(name, "tr") && argc == 2) {
-      buf_puts(b, "sp_str_tr(sp_poly_to_s("); emit_expr(c, recv, b);
-      buf_puts(b, "), "); emit_str_expr(c, argv[0], b);
+      buf_puts(b, "sp_str_tr(sp_poly_recv_s("); emit_expr(c, recv, b);
+      buf_puts(b, ", \"tr\"), "); emit_str_expr(c, argv[0], b);
       buf_puts(b, ", "); emit_str_expr(c, argv[1], b); buf_puts(b, ")");
       return 1;
     }
     if ((sp_streq(name, "sub") || sp_streq(name, "gsub")) && argc == 2 &&
         comp_ntype(c, argv[0]) == TY_STRING && comp_ntype(c, argv[1]) == TY_STRING) {
-      buf_printf(b, "sp_str_%s(sp_poly_to_s(", name); emit_expr(c, recv, b);
-      buf_puts(b, "), "); emit_str_expr(c, argv[0], b);
+      buf_printf(b, "sp_str_%s(sp_poly_recv_s(", name); emit_expr(c, recv, b);
+      buf_printf(b, ", \"%s\"), ", name); emit_str_expr(c, argv[0], b);
       buf_puts(b, ", "); emit_str_expr(c, argv[1], b); buf_puts(b, ")");
       return 1;
     }
@@ -13206,8 +13208,10 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     if (!has_user) {
       const char *fn = sp_streq(name, "ljust") ? "sp_str_ljust"
                      : sp_streq(name, "rjust") ? "sp_str_rjust" : "sp_str_center";
-      buf_printf(b, "sp_box_str(%s%s(sp_poly_to_s(", fn, argc == 2 ? "2" : "");
-      emit_expr(c, recv, b); buf_puts(b, "), ");
+      /* unboxed as a String: an Integer or nil in the slot is NoMethodError,
+         not its to_s padded (#4493) */
+      buf_printf(b, "sp_box_str(%s%s(sp_poly_recv_s(", fn, argc == 2 ? "2" : "");
+      emit_expr(c, recv, b); buf_printf(b, ", \"%s\"), ", name);
       emit_int_expr(c, argv[0], b);
       if (argc == 2) { buf_puts(b, ", "); emit_expr(c, argv[1], b); }
       buf_puts(b, "))");
