@@ -116,17 +116,20 @@ These are deliberate consequences of real parallelism, listed in
     outcomes are silently dropped elements, a heap-corruption abort, and
     SIGSEGV. A shared container needs a `Mutex`, or a `Queue`, which is
     itself thread-safe.
-- **A green thread's C stack is fixed and small.** Every thread, Fiber and
-  generator Enumerator body runs on its own 64 KB C stack (`SP_FIBER_STACK_SIZE`
-  in lib/sp_fiber.h, a build-time constant of the runtime); the process stack
-  is only the main thread's. A call chain that fits at `-O2` can run past it
-  in an unoptimised build, whose frames are many times larger, and so can a
-  large local. Below the stack sits a 256 KB guard (`SP_FIBER_GUARD_SIZE`,
-  virtual space that is never touched), so a frame that steps past the end
-  faults in the guard instead of writing into whatever mapping is below, and
-  the fault is reported as `spinel: fiber stack overflow: ...` before the
-  process dies by the signal. A program that needs deeper stacks rebuilds the
-  runtime with `-DSP_FIBER_STACK_SIZE=<bytes>` (#4496).
+- **A green thread's C stack is fixed.** Every thread, Fiber and generator
+  Enumerator body runs on its own C stack, 256 KB by default (half of
+  CRuby's machine stack for a fiber); the process stack is only the main
+  thread's. The mapping is address space until a page is touched, so a fiber
+  costs the depth it actually reaches, not the size. `SPINEL_FIBER_STACK=<bytes>`
+  (`K`/`M` suffixes) in the environment sets the size for every fiber a run
+  creates, and a program built at `-O 0` or `-O 1` (or `--debug`) asks for
+  1 MB by itself, since an unoptimised build's frames are many times
+  `-O2`'s; the build-time default is `SP_FIBER_STACK_SIZE` in lib/sp_fiber.h.
+  Below the stack sits a 256 KB guard (`SP_FIBER_GUARD_SIZE`, never
+  touched), so a frame that steps past the end faults in the guard instead
+  of writing into whatever mapping is below, and the fault is reported as
+  `spinel: fiber stack overflow: ...` naming the size and the knob before
+  the process dies by the signal (#4496).
 - **Interleaving is nondeterministic.** The ordering of `Thread.pass`,
   `Thread.list` membership, and the exact moment a `Thread#raise` / `#kill` is
   delivered are nondeterministic, where the single-worker model was

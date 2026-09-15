@@ -8,5 +8,5 @@ def deep(n)
   return a.sum if n == 0
   deep(n - 1) + a[1]
 end
-t = Thread.new { deep(100000) }
+t = Thread.new { deep(10_000_000) }
 p t.value

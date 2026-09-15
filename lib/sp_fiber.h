@@ -12,12 +12,21 @@
 #include "sp_fiber_ctx.h"
 
 
-/* A green thread's whole C stack. Overridable at build time (-DSP_FIBER_STACK_SIZE=...)
-   for a program whose request path collapses into one deep frame; the default
-   stays small because every fiber pays it. */
+/* A green thread's whole C stack: the build-time default, 256 KB (half of
+   CRuby's machine stack for a fiber). The mapping is virtual space until a
+   page is touched, so what a fiber costs is the depth it actually reaches,
+   not this number; what it bounds is how deep a call chain, or how large a
+   frame, a fiber can run (#4496). The size a program runs with is
+   sp_fiber_stack_size, settable at run time: SPINEL_FIBER_STACK=<bytes>
+   (K/M suffixes) in the environment wins, else the hint the generated
+   program gives (an unoptimised build asks for more, its frames being many
+   times -O2's), else this default. */
 #ifndef SP_FIBER_STACK_SIZE
-#define SP_FIBER_STACK_SIZE (64*1024)
+#define SP_FIBER_STACK_SIZE (256*1024)
 #endif
+extern size_t sp_fiber_stack_size;
+/* the generated program's request, honoured unless the environment says otherwise */
+void sp_fiber_stack_hint(size_t bytes);
 /* The PROT_NONE guard below it. One page catches a frame that grows past the
    stack a page at a time, and nothing else: a C compiler that emits no stack
    probes (gcc on Linux, by default) lets a 51 KB frame step straight over a
@@ -43,7 +52,7 @@
 #define SP_TSAN 1
 #endif
 
-typedef struct sp_Fiber{sp_fiber_ctx ctx;sp_fiber_ctx caller_ctx;char*stack;int state;int transferred;sp_RbVal yielded_value;sp_RbVal resumed_value;void(*body)(struct sp_Fiber*);void*user_data;int saved_exc_top;int saved_catch_top;void*exc_ctx;int raised;const char*raised_cls;const char*raised_msg;void*raised_obj;int inject;const char*inj_cls;const char*inj_msg;void*inj_obj;void*storage;void***saved_roots;int saved_nroots;int saved_roots_cap;struct sp_Fiber*fiber_next;struct sp_Fiber*fiber_prev;
+typedef struct sp_Fiber{sp_fiber_ctx ctx;sp_fiber_ctx caller_ctx;char*stack;size_t stack_size;int state;int transferred;sp_RbVal yielded_value;sp_RbVal resumed_value;void(*body)(struct sp_Fiber*);void*user_data;int saved_exc_top;int saved_catch_top;void*exc_ctx;int raised;const char*raised_cls;const char*raised_msg;void*raised_obj;int inject;const char*inj_cls;const char*inj_msg;void*inj_obj;void*storage;void***saved_roots;int saved_nroots;int saved_roots_cap;struct sp_Fiber*fiber_next;struct sp_Fiber*fiber_prev;
 #ifdef SP_TSAN
   void *tsan_fiber;                 /* __tsan fiber handle for this coroutine */
   struct sp_Fiber *caller_fiber;    /* who switched into us (the swap-out target) */

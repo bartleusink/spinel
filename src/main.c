@@ -33,6 +33,7 @@
 #include <sys/wait.h>
 
 extern int g_no_root_elision;
+extern int g_opt_level;
 extern int g_require_gate_cli;
 extern int g_inline_hot;
 extern int g_no_write_barrier;
@@ -479,6 +480,10 @@ int main(int argc, char **argv) {
   free(eval_src.p);
 
   if (!source) { usage(); return 1; }
+  /* -O0 / -O1 (and --debug) build the TU unoptimised: the generated program
+     asks for larger fiber stacks (#4496). -Os / -Og and anything else keep
+     the -O2 assumption. */
+  g_opt_level = (opt_level[0] == '0' || opt_level[0] == '1') ? opt_level[0] - '0' : 2;
   if (!file_exists(source)) { fprintf(stderr, "spinel: %s: No such file\n", source); return 1; }
 
   /* Mode-conflict checks mirror the old driver. */

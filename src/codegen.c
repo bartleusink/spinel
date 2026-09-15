@@ -2244,7 +2244,10 @@ static void fi_build(Compiler *c) {
      once a caller's absorbed total passes the budget. */
   {
     const char *fe = getenv("SPINEL_INLINE_FORCE_FRAME");
-    long fbudget = (fe && *fe) ? atol(fe) : 64 * 1024;   /* SP_FIBER_STACK_SIZE */
+    /* 64 KB, the fiber stack's size when this budget was set; the stack is
+       256 KB now (#4496) and the budget stays, since what it bounds is how
+       much the forcing may add to a frame, not the frame itself */
+    long fbudget = (fe && *fe) ? atol(fe) : 64 * 1024;
     int report = getenv("SPINEL_INLINE_FORCE_REPORT") != NULL;
     /* The budget exists for SP_FIBER_STACK_SIZE. A program that runs no user
        code on a fiber stack has the process stack (megabytes) to spend, and
@@ -2557,6 +2560,12 @@ static void gc_save_take_back(Buf *b, size_t off, size_t save_len) {
    miscompile can be bisected against the same binary. */
 int g_no_root_elision = 0;
 int g_inline_hot = 1;   /* --no-inline-hot turns off forcing small leaf methods inline */
+/* The C optimisation level the TU is built at (-O), for the one decision the
+   generated program makes from it: an unoptimised build's frames are many
+   times -O2's (a 24-column constructor over a poly Hash reserved 51 KB at -O0
+   against 592 bytes at -O2), so such a build asks the runtime for larger
+   fiber stacks (#4496). */
+int g_opt_level = 2;
 /* Escape hatch: `--no-write-barrier` emits the stores bare, so a suspected
    miscompile can be bisected against the same binary. */
 int g_no_write_barrier = 0;
@@ -8106,6 +8115,10 @@ void emit_regex_section(Compiler *c, Buf *b) {
                 "  sp_user_exc_modules_fn = sp_user_exc_modules;\n"
                 "  sp_poly_is_a_hook = sp_poly_is_a;\n"
                 "  sp_class_le_id_fn = sp_class_le_ids;\n");
+  /* an unoptimised build runs its fibers on 1 MB stacks (see g_opt_level);
+     SPINEL_FIBER_STACK in the environment still wins */
+  if (g_opt_level < 2)
+    buf_puts(b, "  sp_fiber_stack_hint((size_t)1 << 20);\n");
   /* Replace the runtime's hook with the superset that also marks this
      program's heap-typed globals/constants/class-ivars (it chains to
      sp_re_mark_globals itself). Skipped when there are none -- the marker would
