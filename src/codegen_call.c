@@ -14428,6 +14428,39 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
           snprintf(raise, sizeof raise,
                    "sp_raise_nomethod(sp_nomethod_msg_args(\"%s\", _t%d, 0, (sp_RbVal[]){sp_box_nil()}))",
                    nm, tv);
+          /* Each arm below renders the call's arguments for ITS callee, and
+             so does the not-a-Class fallback after them: an argument that is
+             an expression was evaluated once per candidate class -- a
+             `build(sql)` argument to `@model.hydrate(build(sql))` ran three
+             times for three models, its side effects with it, and every run
+             but the taken arm's was garbage. Ruby evaluates an argument once.
+             Bind each non-trivial argument to one rooted boxed temp here and
+             let every arm unbox that; a plain read or literal is left in
+             place, where re-rendering costs nothing. Splats and keyword
+             hashes keep their own paths. */
+          int hoisted_n = 0, hoisted_sv[64]; TyKind hoisted_ty[64];
+          { int hargc = 0;
+            const int *hav = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &hargc) : NULL;
+            for (int a = 0; hav && a < hargc && hoisted_n < 64; a++) {
+              const char *aty = nt_type(nt, hav[a]);
+              if (!aty || sp_streq(aty, "SplatNode") || sp_streq(aty, "KeywordHashNode") ||
+                  sp_streq(aty, "BlockArgumentNode") || sp_streq(aty, "ForwardingArgumentsNode") ||
+                  sp_streq(aty, "LocalVariableReadNode") || sp_streq(aty, "InstanceVariableReadNode") ||
+                  sp_streq(aty, "SelfNode") || sp_streq(aty, "IntegerNode") ||
+                  sp_streq(aty, "FloatNode") || sp_streq(aty, "StringNode") ||
+                  sp_streq(aty, "SymbolNode") || sp_streq(aty, "NilNode") ||
+                  sp_streq(aty, "TrueNode") || sp_streq(aty, "FalseNode"))
+                continue;
+              if (g_n_argov >= MAX_ARG_OVERRIDE) break;
+              int ht = hoist_boxed_rooted(c, hav[a]);
+              hoisted_sv[hoisted_n] = g_n_argov;
+              hoisted_ty[hoisted_n] = c->ntype[hav[a]];
+              g_argov_node[g_n_argov] = hav[a];
+              snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ht);
+              g_n_argov++;
+              c->ntype[hav[a]] = TY_POLY;
+              hoisted_n++;
+            } }
           buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, recv, b);
           buf_printf(b, "; (_t%d.tag == SP_TAG_CLASS) ? (", tv);
           for (int k = 0; k < nc; k++) {
@@ -14463,6 +14496,11 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "%s) : %s; })", raise,
                      (eb2.p && eb2.p[0]) ? eb2.p : raise);
           free(eb2.p);
+          /* Undo the argument overrides in reverse: the slots are a stack. */
+          for (int h = hoisted_n - 1; h >= 0; h--) {
+            c->ntype[g_argov_node[hoisted_sv[h]]] = hoisted_ty[h];
+            g_n_argov = hoisted_sv[h];
+          }
           return 1;
         }
       }
