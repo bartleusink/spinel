@@ -458,7 +458,18 @@ void sp_slab_release_worker(int wid) {
     while (ch) {
       sp_slab_chunk *nx = ch->next_avail;
       if (sp_gc_ph_on) sp_slab_rel_walked++;
-      if (__atomic_load_n(&ch->nfree, __ATOMIC_ACQUIRE) == ch->nslots && reserve <= 0) {
+      /* Never the chunk this class is allocating from. The sweeper's push
+         reads `cur` racily, so the chunk a refill is installing can be on
+         the list as well (sp_slab_free_flush); with every slot the owner took
+         from it dead by the next full cycle, it reads as fully free, and
+         handing it back left `cur` naming a chunk another worker then carved
+         for another class: the owner's next pop took that class's free slot
+         and its bump ran on that class's bump pointer, two sizes sharing one
+         chunk until a free-list link was overwritten. Only the owner reads
+         `cur`, and this runs on the owner (or, for a slot no worker runs,
+         under the barrier), so the read is stable here. */
+      if (__atomic_load_n(&ch->nfree, __ATOMIC_ACQUIRE) == ch->nslots && reserve <= 0 &&
+          ch != __atomic_load_n(&wk->cur[cls], __ATOMIC_RELAXED)) {
         ch->next_avail = give; give = ch;   /* handed back below, in address order */
       }
       else {
@@ -487,8 +498,14 @@ void sp_slab_release_worker(int wid) {
           if (sp_gc_ph_on) { sp_slab_rel_madv++; sp_slab_rel_madv_t += sp_slab_now() - mt0; }
         }
         sp_slab_chunk *nx = run_end->next_avail;
+        /* on_avail stays SET on a chunk handed back: a sweeper whose
+           free-list push landed before the walk read the chunk as fully
+           free can still be short of its own "put it on the list" step, and
+           that step's exchange must find the chunk spoken for, or the owner
+           would pop a chunk the pool has since carved for someone else. The
+           carve (sp_slab_refill) is what clears it. */
         for (sp_slab_chunk *c2 = gt;; c2 = c2->next_avail) {
-          c2->in_use = 0; c2->on_avail = 0; c2->touched = 0;
+          c2->in_use = 0; c2->on_avail = 1; c2->touched = 0;
           c2->free = NULL; c2->bump = c2->end = NULL; c2->nfree = c2->nslots = 0;
           if (c2 == run_end) break;
         }
@@ -565,14 +582,15 @@ void sp_slab_release(void) {
       while (ch) {
         sp_slab_chunk *nx = ch->next_avail;
         if (sp_gc_ph_on) sp_slab_rel_walked++;
-        if (__atomic_load_n(&ch->nfree, __ATOMIC_RELAXED) == ch->nslots && reserve <= 0) {
+        if (__atomic_load_n(&ch->nfree, __ATOMIC_RELAXED) == ch->nslots && reserve <= 0 &&
+            ch != wk->cur[cls]) {   /* the chunk in hand stays: see sp_slab_release_worker */
           char *base = sp_slab_chunk_base(ch);
           if (ch->touched) {
             double mt0 = sp_gc_ph_on ? sp_slab_now() : 0;
             madvise(base, SP_SLAB_CHUNK, MADV_DONTNEED);
             if (sp_gc_ph_on) { sp_slab_rel_madv++; sp_slab_rel_madv_t += sp_slab_now() - mt0; }
           }
-          ch->in_use = 0; ch->on_avail = 0; ch->touched = 0;
+          ch->in_use = 0; ch->on_avail = 1; ch->touched = 0;   /* spoken for until carved: see sp_slab_release_worker */
           ch->free = NULL; ch->bump = ch->end = NULL; ch->nfree = ch->nslots = 0;
           ch->next_avail = sp_slab_empty;
           sp_slab_empty = ch;
