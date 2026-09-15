@@ -1265,6 +1265,20 @@ rbs-seed-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	      { echo "rbs-seed-test: FAIL (nested array seed output mismatch)"; diff -u test/rbs-seed/nested_array_ivar.expected "$$tmp/nai.out" || true; ok=0; }; \
 	  else echo "rbs-seed-test: FAIL (nested array seed binary exited non-zero)"; ok=0; fi; \
 	else echo "rbs-seed-test: FAIL (nested array seed binary did not build)"; ok=0; fi; \
+	$(SPINEL) test/rbs-seed/nested_array_empty_rows.rb --rbs test/rbs-seed/sig \
+	  -c --no-line-map -o "$$tmp/ner.c" 2>"$$tmp/ner.err"; \
+	for iv in iv_a iv_b iv_c iv_d; do grep -Eq "sp_PtrArray[[:space:]]+\*[[:space:]]*$$iv" "$$tmp/ner.c" || { echo "rbs-seed-test: FAIL (#4484: nested seed did not supply the row kind for $$iv)"; ok=0; }; done; \
+	if grep -q 'warning: --rbs' "$$tmp/ner.err"; then echo "rbs-seed-test: FAIL (#4484: empty-row table still warned)"; sed -n 1,2p "$$tmp/ner.err"; ok=0; fi; \
+	if $(SPINEL) test/rbs-seed/nested_array_empty_rows.rb --rbs test/rbs-seed/sig -o "$$tmp/ner" 2>/dev/null; then \
+	  if "$$tmp/ner" > "$$tmp/ner.out" 2>/dev/null; then \
+	    cmp -s "$$tmp/ner.out" test/rbs-seed/nested_array_empty_rows.expected || \
+	      { echo "rbs-seed-test: FAIL (#4484: empty-row table output mismatch)"; diff -u test/rbs-seed/nested_array_empty_rows.expected "$$tmp/ner.out" || true; ok=0; }; \
+	  else echo "rbs-seed-test: FAIL (#4484: empty-row table binary exited non-zero)"; ok=0; fi; \
+	else echo "rbs-seed-test: FAIL (#4484: empty-row table binary did not build)"; ok=0; fi; \
+	if $(SPINEL) test/rbs-seed/nested_array_seed_conflict.rb --rbs test/rbs-seed/sig -o "$$tmp/nsc" >"$$tmp/nsc.err" 2>&1; then \
+	  echo "rbs-seed-test: FAIL (#4484: a nested seed against rows of the other kind was not refused)"; ok=0; \
+	elif ! grep -q 'seed contradicted' "$$tmp/nsc.err"; then \
+	  echo "rbs-seed-test: FAIL (#4484: nested seed conflict refused for another reason)"; sed -n 1,2p "$$tmp/nsc.err"; ok=0; fi; \
 	$(SPINEL) test/rbs-seed/boundary.rb --rbs test/rbs-seed/sig \
 	  -c --no-line-map -o "$$tmp/b.c" 2>/dev/null; \
 	if $(CC) -O0 -Ilib $(RBS_SEED_STRICT) "$$tmp/b.c" $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/b" 2>"$$tmp/b.err"; then \

@@ -278,16 +278,23 @@ typedef struct {
                                    pointer arrays: 1 + the class index for
                                    `Array[Class]`, or SEED_OA_INT_TABLE /
                                    SEED_OA_FLT_TABLE for `Array[Array[Integer]]`
-                                   / `Array[Array[Float]]`. It is not a pin: the
-                                   narrowing pass decides from the uses, and a
-                                   request it could not honour is reported after
-                                   the fixpoint (#4444). Pinning a nested array
-                                   instead would be worse than saying nothing --
-                                   the seed's own type would stop the pass that
-                                   produces it, so the accurate declaration made
-                                   the code slower. */
+                                   / `Array[Array[Float]]`. It is not a type pin:
+                                   the narrowing pass decides from the uses, and
+                                   a request it could not honour is reported
+                                   after the fixpoint (#4444). Pinning a nested
+                                   array's type instead would be worse than
+                                   saying nothing -- the seed's own type would
+                                   stop the pass that produces it. A nested seed
+                                   is instead ELEMENT EVIDENCE inside that pass,
+                                   so it supplies the row kind when the rows are
+                                   empty literals, and a row of the other kind
+                                   is a contradiction (#4484). */
 #define SEED_OA_INT_TABLE (-1)
 #define SEED_OA_FLT_TABLE (-2)
+  unsigned char *ivar_oa_conflict;  /* a nested-array seed met a row of another
+                                       kind in narrow_object_arrays: the
+                                       signature and the program disagree,
+                                       reported after the fixpoint (#4484) */
   unsigned char *ivar_int_table;  /* the slot is a table of int arrays, narrowed
                                      to TY_INT_ARRAY_ARRAY while the fixpoint
                                      runs so a parameter bound from `@t[k][j]`

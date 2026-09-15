@@ -204,19 +204,39 @@ the field layouts coincide by construction.
 ### `Array[Array[Integer]]` and `Array[Array[Float]]` on an instance variable
 
 These are the two nested element types with an unboxed table form (`sp_PtrArray`
-of `sp_IntArray*` / `sp_FloatArray*`). Like `obj_Foo_ptr_array` they are a
-**request, not a pin**, and here the distinction is load-bearing rather than a
-nicety: neither tag maps to a scalar kind, so pinning would have to pin the ivar
-to a boxed poly array — and a pinned ivar is skipped by the very pass that
-produces the table. Writing the accurate signature therefore used to make the
-program *slower*, with nothing said about it.
+of `sp_IntArray*` / `sp_FloatArray*`). The seed **supplies the row kind**, the
+way `Array[Float]` supplies the element kind of a flat array: both are
+performance declarations, and a table whose rows are all empty literals
+has no element kind of its own to be read from the code.
 
-The narrowing runs with or without the seed. What the seed adds is a warning
-when the request cannot be honoured, which matters because the narrowing is
-otherwise invisible: a table that quietly falls back to the boxed array is
-byte-identical in behaviour and several times slower. The warning distinguishes
-the two ways it can fail — a use the unboxed form has no emitter for, and a
-signature whose element type disagrees with the one the code gives the table.
+```ruby
+class Model
+  def initialize(n)
+    @feat_thr = Array.new(n) { [] }    # rows have no kind yet
+  end
+end
+```
+
+```rbs
+class Model
+  @feat_thr: Array[Array[Float]]
+end
+```
+
+With the seed, `@feat_thr` is the float table and every empty row, wherever
+it enters (`Array.new(n) { [] }`, `[[], []]`, `@t << []`, `@t[i] = []`,
+`@t = []` grown later), is built as an `sp_FloatArray`. Without it the
+program would have to write `Array.new(n) { Array.new(0, 0.0) }` to say the
+same thing.
+
+The seed is evidence for the narrowing pass, not a type pin: the pass still
+has to be able to honour it. A use the unboxed table has no emitter for
+(`each`, `map`, a read from outside the class's own instance methods) keeps
+the table boxed and warns, naming the ivar, as an `Array[Foo]` request does.
+A row of the **other** kind (an `Array.new(0, 0)` row under an
+`Array[Array[Float]]` seed) is a contradiction, and is refused at compile
+time the way a contradicted flat seed is: a seed is trusted, so the emitted
+table would otherwise hand a row of one layout to a reader of the other.
 
 Every other nesting stays `poly_array`: there is no table of string arrays,
 symbol arrays, object arrays, or of tables.

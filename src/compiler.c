@@ -338,6 +338,7 @@ int comp_ivar_intern(ClassInfo *ci, const char *name) {
     ci->ivar_int_table = realloc(ci->ivar_int_table, (size_t)ci->civars);
     ci->ivar_oa_type = realloc(ci->ivar_oa_type, sizeof(TyKind) * (size_t)ci->civars);
     ci->ivar_oa_seed = realloc(ci->ivar_oa_seed, sizeof(int) * (size_t)ci->civars);
+    ci->ivar_oa_conflict = realloc(ci->ivar_oa_conflict, (size_t)ci->civars);
     ci->ivar_nullable_int = realloc(ci->ivar_nullable_int, (size_t)ci->civars);
     ci->ivar_nullable_int_elem = realloc(ci->ivar_nullable_int_elem, (size_t)ci->civars);
     ci->ivar_arr_elem_arr_or_nil = realloc(ci->ivar_arr_elem_arr_or_nil, (size_t)ci->civars);
@@ -348,6 +349,7 @@ int comp_ivar_intern(ClassInfo *ci, const char *name) {
   ci->ivar_int_table[ci->nivars] = 0;
   ci->ivar_oa_type[ci->nivars] = TY_UNKNOWN;
   ci->ivar_oa_seed[ci->nivars] = 0;
+  ci->ivar_oa_conflict[ci->nivars] = 0;
   ci->ivar_nullable_int[ci->nivars] = 0;
   ci->ivar_nullable_int_elem[ci->nivars] = 0;
   ci->ivar_arr_elem_arr_or_nil[ci->nivars] = 0;

@@ -1,10 +1,11 @@
 # `Array[Array[Integer]]` / `Array[Array[Float]]` as ivar seeds.
 #
-# They are REQUESTS the post-fixpoint narrowing pass answers, not pins. Pinning
-# would be worse than saying nothing: the tags map to no scalar kind, so the
-# seed would pin the ivar to a boxed poly array, and a pinned ivar is skipped by
-# the very pass that produces the unboxed table -- the accurate signature made
-# the program slower, silently.
+# They are element EVIDENCE for the post-fixpoint narrowing pass, not type
+# pins. Pinning the type would be worse than saying nothing: the tags map to no
+# scalar kind, so the seed would pin the ivar to a boxed poly array, and a
+# pinned ivar is skipped by the very pass that produces the unboxed table -- the
+# accurate signature made the program slower, silently. (The rows here carry
+# their own kind; nested_array_empty_rows.rb is the case the seed decides.)
 #
 # With the seed applied both tables must still narrow (sp_PtrArray of
 # sp_IntArray* / sp_FloatArray*) and the program must answer what CRuby answers.

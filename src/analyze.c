@@ -2856,6 +2856,7 @@ static void seed_method(Compiler *c, Scope *s, const char *ret_tok, char *ptypes
   }
 }
 
+static int is_empty_array_literal(const NodeTable *nt, int id, int cap);
 static void apply_rbs_seeds(Compiler *c, const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return;
@@ -2890,6 +2891,21 @@ static void apply_rbs_seeds(Compiler *c, const char *path) {
         snprintf(ivn, sizeof ivn, "%s%s", a1[0] == '@' ? "" : "@", a1);
         int idx = comp_ivar_intern(&c->classes[cur_ci], ivn);
         c->classes[cur_ci].ivar_oa_seed[idx] = nreq ? nreq : oac + 1;
+        /* `@t = []` under a nested seed: the empty literal's default kind is
+           the int array, which would type the ivar as one and keep it out of
+           the narrowing pass altogether. The seed says the literal is the
+           table, so it starts as the poly array the pass narrows (#4484). */
+        if (nreq && c->arr_want) {
+          const NodeTable *nt = c->nt;
+          NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, wid) {
+            const char *wn = nt_str(nt, wid, "name");
+            int wv = nt_ref(nt, wid, "value");
+            if (!wn || !sp_streq(wn, ivn) || !is_empty_array_literal(nt, wv, c->node_cap)) continue;
+            Scope *wsc = comp_scope_of(c, wid);
+            if (!wsc || wsc->class_id != cur_ci) continue;
+            if (c->arr_want[wv] == TY_UNKNOWN) c->arr_want[wv] = TY_POLY_ARRAY;
+          }
+        }
       }
       else if (t != TY_UNKNOWN) {
         ClassInfo *ci = &c->classes[cur_ci];
@@ -6808,6 +6824,33 @@ static int oa_cls_join(int a, int b) {
   if (a == b) return a;
   return -2;   /* two classes, or a foreign element (-2) from either side */
 }
+/* The empty `[]` literals that flowed into a slot as ELEMENTS this round: a
+   row of `Array.new(n) { [] }`, an element of `[[], []]`, the value of a
+   push or a `[]=`. An empty literal is no evidence about the element kind
+   (it infers UNKNOWN until a use fixes it) and is neutral in the join; when
+   the component does narrow to a table, from another row or from an
+   `Array[Array[Float]]` seed, the literal has to be BUILT as a row of that
+   kind, or the table would hold a poly array where its reader casts an
+   sp_FloatArray *. arr_want is the durable pin an empty literal takes its
+   kind from (mark_empty_array_operands uses the same one), so a stamp here
+   is seen by the next round's inference and by codegen (#4484). */
+static int *g_oa_empt_slot, *g_oa_empt_node, g_oa_empt_n, g_oa_empt_cap;
+static void oa_note_empty(Compiler *c, int S, int node) {
+  if (!is_empty_array_literal(c->nt, node, c->node_cap)) return;
+  if (g_oa_empt_n >= g_oa_empt_cap) {
+    g_oa_empt_cap = g_oa_empt_cap ? g_oa_empt_cap * 2 : 64;
+    g_oa_empt_slot = (int *)realloc(g_oa_empt_slot, sizeof(int) * (size_t)g_oa_empt_cap);
+    g_oa_empt_node = (int *)realloc(g_oa_empt_node, sizeof(int) * (size_t)g_oa_empt_cap);
+    if (!g_oa_empt_slot || !g_oa_empt_node) { fprintf(stderr, "oom\n"); exit(1); }
+  }
+  g_oa_empt_slot[g_oa_empt_n] = S; g_oa_empt_node[g_oa_empt_n] = node; g_oa_empt_n++;
+}
+/* element evidence from one value flowing into slot S, noting an empty
+   literal for the stamp above */
+static int oa_elem_evidence(Compiler *c, int S, int node) {
+  oa_note_empty(c, S, node);
+  return oa_obj_class_of(c, node);
+}
 static int oa_recv_op_ok(const char *nm, int argc, int has_block) {
   if (!nm || has_block) return 0;
   if ((sp_streq(nm, "[]") || sp_streq(nm, "at")) && argc == 1) return 1;
@@ -7052,6 +7095,11 @@ static int narrow_int_table_ivars(Compiler *c) {
       const char *ivn = cl->ivars[iv];
       if (!ivn || !ivn[0]) continue;
       if (class_ivar_pinned(cl, ivn)) continue;         /* an --rbs seed owns it */
+      /* this pass makes int tables only; a slot declared `Array[Array[Float]]`
+         is narrow_object_arrays' to decide, where the seed is evidence and
+         an int row against it is the contradiction reported after the
+         fixpoint rather than a table of the other kind (#4484) */
+      if (cl->ivar_oa_seed[iv] == SEED_OA_FLT_TABLE) continue;
       const char *bare = ivn[0] == '@' ? ivn + 1 : ivn;
       if (comp_is_reader(cl, bare) || comp_is_writer(cl, bare)) continue;
       if (comp_is_sg_reader(cl, bare) || comp_is_sg_writer(cl, bare)) continue;
@@ -7221,11 +7269,14 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
     int en = 0; const int *el = nt_arr(nt, v, "elements", &en);
     for (int e = 0; e < en; e++) {
       const char *ety = nt_type(nt, el[e]);
-      int ec = (ety && sp_streq(ety, "SplatNode")) ? -2 : oa_obj_class_of(c, el[e]);
+      int ec = (ety && sp_streq(ety, "SplatNode")) ? -2 : oa_elem_evidence(c, S, el[e]);
       /* OA_CLS_IA / OA_CLS_FA (a nested scalar array) are negative SENTINELS,
          not an "invalid" -1/-2: they are real evidence, so they must not kill
          the slot (an `[[a,b],[c,d]]` array-of-int-array literal narrows like a
-         pushed one already does -- the push arm never had this < 0 guard). */
+         pushed one already does -- the push arm never had this < 0 guard).
+         An empty `[]` element is a row with no kind of its own yet: neutral,
+         and built at the component's kind if it narrows (oa_note_empty). */
+      if (is_empty_array_literal(nt, el[e], c->node_cap) && !OA_CLS_IS_NESTED(ec)) continue;
       if (ec < 0 && !OA_CLS_IS_NESTED(ec)) { sl[S].alive = 0; break; }
       sl[S].cls = oa_cls_join(sl[S].cls, ec);
     }
@@ -7256,7 +7307,7 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
     else if (cn && (sp_streq(cn, "<<") || sp_streq(cn, "push") || sp_streq(cn, "append")) &&
              can >= 1 && nt_ref(nt, v, "block") < 0 && crecv >= 0 && read_slot[crecv] >= 0) {
       int cargv_n = 0; const int *cargv = nt_arr(nt, cargs, "arguments", &cargv_n);
-      for (int a = 0; a < cargv_n; a++) sl[S].cls = oa_cls_join(sl[S].cls, oa_obj_class_of(c, cargv[a]));
+      for (int a = 0; a < cargv_n; a++) sl[S].cls = oa_cls_join(sl[S].cls, oa_elem_evidence(c, S, cargv[a]));
       claimed[crecv] = 1;
       oa_uf_union(sl, S, read_slot[crecv]);
     }
@@ -7273,8 +7324,14 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
       int gbody = gb >= 0 ? nt_ref(nt, gb, "body") : -1;
       int gn = 0;
       const int *gs = gbody >= 0 ? nt_arr(nt, gbody, "body", &gn) : NULL;
-      int ec = (gs && gn > 0) ? oa_obj_class_of(c, gs[gn - 1]) : -1;
-      if (ec < 0 && !OA_CLS_IS_NESTED(ec)) sl[S].alive = 0;
+      int ec = (gs && gn > 0) ? oa_elem_evidence(c, S, gs[gn - 1]) : -1;
+      /* `Array.new(n) { [] }`: the row is an empty literal, neutral here and
+         built at the table's kind once something else (a pushed row, an
+         `Array[Array[Float]]` seed) decides it (#4484) */
+      if (gs && gn > 0 && is_empty_array_literal(nt, gs[gn - 1], c->node_cap) &&
+          !ty_is_ptr_array(infer_type(c, gs[gn - 1])) &&
+          infer_type(c, gs[gn - 1]) != TY_INT_ARRAY && infer_type(c, gs[gn - 1]) != TY_FLOAT_ARRAY) { }
+      else if (ec < 0 && !OA_CLS_IS_NESTED(ec)) sl[S].alive = 0;
       else sl[S].cls = oa_cls_join(sl[S].cls, ec);
     }
     /* a call whose own value is a tracked slot: join the two. */
@@ -7312,6 +7369,7 @@ static int narrow_object_arrays(Compiler *c) {
   /* 1. candidate slots: POLY_ARRAY locals/params (skip block params + rbs). */
   int cap = 16, n = 0;
   OAS *sl = (OAS *)malloc(sizeof(OAS) * cap);
+  g_oa_empt_n = 0;
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
     for (int li = 0; li < sc->nlocals; li++) {
@@ -7386,6 +7444,14 @@ static int narrow_object_arrays(Compiler *c) {
       if (inherited) continue;
       if (n >= cap) { cap *= 2; sl = (OAS *)realloc(sl, sizeof(OAS) * cap); if (!sl) { fprintf(stderr, "oom\n"); exit(1); } }
       sl[n].sidx = -1; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0; sl[n].ici = ci; sl[n].iiv = iv;
+      /* An `Array[Array[Integer]]` / `Array[Array[Float]]` seed is element
+         evidence, the same evidence a pushed row gives: it decides the kind
+         when the program's own rows are silent (`Array.new(n) { [] }`), and
+         a row of the other kind joins against it into a conflict the report
+         after the fixpoint names (#4484). The seed is evidence and not a
+         type pin because a pinned ivar is skipped by this very pass. */
+      if (cl->ivar_oa_seed[iv] == SEED_OA_INT_TABLE) sl[n].cls = OA_CLS_IA;
+      else if (cl->ivar_oa_seed[iv] == SEED_OA_FLT_TABLE) sl[n].cls = OA_CLS_FA;
       sl[n].old_pin = cl->ivar_oa_type[iv]; cl->ivar_oa_type[iv] = TY_UNKNOWN; n++;
     }
   }
@@ -7569,12 +7635,12 @@ static int narrow_object_arrays(Compiler *c) {
       if (oa_recv_op_ok(name, argc, has_block)) {
         claimed[recv] = 1;
         if (name && (sp_streq(name, "push") || sp_streq(name, "<<") || sp_streq(name, "append")))
-          for (int a = 0; a < argc; a++) sl[S].cls = oa_cls_join(sl[S].cls, oa_obj_class_of(c, argv[a]));
+          for (int a = 0; a < argc; a++) sl[S].cls = oa_cls_join(sl[S].cls, oa_elem_evidence(c, S, argv[a]));
         else if (name && sp_streq(name, "[]=") && argc == 2) {
           /* a range-keyed []= is a splice, which the obj-array representation
              has no emitter for: keep the slot on the poly path */
           if (infer_type(c, argv[0]) == TY_RANGE) sl[S].alive = 0;
-          else sl[S].cls = oa_cls_join(sl[S].cls, oa_obj_class_of(c, argv[1]));
+          else sl[S].cls = oa_cls_join(sl[S].cls, oa_elem_evidence(c, S, argv[1]));
         }
         else if (name && (sp_streq(name, "min") || sp_streq(name, "max") ||
                           sp_streq(name, "sort") || sp_streq(name, "sort!"))) {
@@ -7800,6 +7866,8 @@ static int narrow_object_arrays(Compiler *c) {
        is also written by the element-narrowing below it. Put a pin back when
        this pass reaches no decision, or the two passes alternate forever and
        the fixpoint burns its whole round budget (#3781). */
+    if (sl[i].ici >= 0 && c->classes[sl[i].ici].ivar_oa_seed[sl[i].iiv] < 0)
+      c->classes[sl[i].ici].ivar_oa_conflict[sl[i].iiv] = (unsigned char)(sl[r].cls == -2);
     if (!sl[r].alive || sl[r].cls == -1 || sl[r].cls == -2) {
       if (sl[i].ici >= 0) continue;   /* an ivar with no decision stays the poly array it was reset to */
       if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
@@ -7818,6 +7886,14 @@ static int narrow_object_arrays(Compiler *c) {
         continue;
       }
       nty = sl[r].cls == OA_CLS_IA ? TY_INT_ARRAY_ARRAY : TY_FLOAT_ARRAY_ARRAY;
+      /* every empty `[]` that flowed into this component is a row: build it
+         at the row kind (see oa_note_empty) */
+      for (int e = 0; e < g_oa_empt_n; e++) {
+        if (oa_uf_find(sl, g_oa_empt_slot[e]) != r) continue;
+        int lit = g_oa_empt_node[e];
+        if (c->arr_want && lit < c->node_cap && c->arr_want[lit] == TY_UNKNOWN)
+          c->arr_want[lit] = sl[r].cls == OA_CLS_IA ? TY_INT_ARRAY : TY_FLOAT_ARRAY;
+      }
     }
     else {
       /* a component using no-block sort/min/max narrows only when the element
@@ -14835,18 +14911,24 @@ void analyze_program(Compiler *c) {
         int want = req - 1;
         asked = want >= 0 && want < c->nclasses ? c->classes[want].name : "?";
       }
-      /* A nested request can fail two ways, and they want different advice. The
-         slot may have stayed boxed -- a use the unboxed form has no emitter for
-         -- or it may have narrowed to the OTHER table kind, which is not a
-         missing emitter at all but the signature and the code disagreeing about
-         the element type. Saying "stays a boxed array" for the second is simply
-         untrue, and would send the reader looking for a use to remove. */
-      if (req < 0 && ty_is_ptr_array(got)) {
-        fprintf(stderr, "warning: --rbs: %s %s: Array[%s] asked for, but the element type the code "
-                        "gives it is %s -- the signature and the program disagree\n",
-                cl->name, cl->ivars[iv], asked,
-                got == TY_INT_ARRAY_ARRAY ? "Array[Integer]"
-                                          : got == TY_FLOAT_ARRAY_ARRAY ? "Array[Float]" : "another array");
+      /* A nested request can fail two ways, and they want different advice.
+         The slot may have stayed boxed because a use has no emitter in the
+         unboxed form, or because a row of the OTHER kind met the seed in the
+         element join. The second is not a missing emitter at all but the
+         signature and the code disagreeing about the element type, and it is
+         the same contradiction a flat seed reports (a seed is trusted, so the
+         emitted table would hand a row of one layout to a reader of the
+         other): refused like one, not warned about (#4484). */
+      if (req < 0 && (cl->ivar_oa_conflict[iv] || ty_is_ptr_array(got))) {
+        fprintf(stderr,
+                "spinel: --rbs seed contradicted: %s %s is declared Array[%s] but the program "
+                "gives it rows of another kind\n"
+                "  A seed is trusted, so the emitted table would hand a row of one layout to "
+                "a reader of the other.\n"
+                "  Fix the signature or the rows.\n",
+                cl->name, cl->ivars[iv], asked);
+        if (!collect_mode()) exit(1);
+        g_seed_bad = 1;
         continue;
       }
       fprintf(stderr, "warning: --rbs: %s %s: Array[%s] stays a boxed array; every use of it must be "

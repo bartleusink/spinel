@@ -6650,6 +6650,13 @@ TyKind infer_uncached(Compiler *c, int id) {
          writes to infer from, so mark_empty_array_operands types it as a poly
          array. An argument may instead take a specific layout through arr_want.
          Elsewhere it stays UNKNOWN so `x = []; x << 1` can back-fill its kind. */
+      /* A SPECIFIC kind fixed by the use context outranks the generic poly
+         layout: the row of an `Array.new(n) { [] }` table is a block tail
+         (marked as a receiver-style empty) and is built as an sp_FloatArray
+         once narrow_object_arrays has decided the table's kind (#4484). */
+      if (c->arr_want && id < c->node_cap && ty_is_array(c->arr_want[id]) &&
+          c->arr_want[id] != TY_POLY_ARRAY)
+        return c->arr_want[id];
       if (c->empty_arr_recv && id < c->node_cap && c->empty_arr_recv[id])
         return TY_POLY_ARRAY;
       /* kind fixed by the use context (mark_empty_array_operands) */
