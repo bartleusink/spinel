@@ -6271,6 +6271,51 @@ int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc) {
   return at >= pre ? at : -1;
 }
 
+/* Does scope mi's body mutate the array held by its local `name` in place: a
+   receiver-mutating Array method on a plain read of it, or the name passed
+   on, positionally, into a method whose parameter is mutated the same way
+   (depth-limited)? Asked about a poly-array parameter a caller wants to
+   pass a TYPED array to. */
+static int array_mutator_name(const char *nm) {
+  size_t l = nm ? strlen(nm) : 0;
+  if (!l) return 0;
+  static const char *const M[] = {
+    "<<", "push", "append", "unshift", "prepend", "insert", "concat", "fill",
+    "clear", "delete", "delete_at", "pop", "shift", "replace", "[]=", "keep_if",
+    "delete_if", "slice!", NULL };
+  for (int i = 0; M[i]; i++) if (sp_streq(nm, M[i])) return 1;
+  return nm[l - 1] == '!';
+}
+static int scope_mutates_array_local(Compiler *c, int mi, const char *name, int depth) {
+  const NodeTable *nt = c->nt;
+  if (depth > 3 || mi < 0) return 0;
+  for (int q = 0; q < nt->count; q++) {
+    if (c->nscope[q] != mi || nt_kind(nt, q) != NK_CallNode) continue;
+    int r = nt_ref(nt, q, "receiver");
+    if (r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode) {
+      const char *rn = nt_str(nt, r, "name");
+      if (rn && sp_streq(rn, name) && array_mutator_name(nt_str(nt, q, "name"))) return 1;
+    }
+    /* passed on: only a receiverless (or self) call to a user method resolves
+       statically enough to follow */
+    const char *cnm = nt_str(nt, q, "name");
+    if (!cnm || (r >= 0 && nt_kind(nt, r) != NK_SelfNode)) continue;
+    int aa = nt_ref(nt, q, "arguments"); int an = 0;
+    const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &an) : NULL;
+    for (int k = 0; k < an; k++) {
+      if (nt_kind(nt, av[k]) != NK_LocalVariableReadNode) continue;
+      const char *vn = nt_str(nt, av[k], "name");
+      if (!vn || !sp_streq(vn, name)) continue;
+      Scope *cs = &c->scopes[mi];
+      int tmi = cs->class_id >= 0 ? comp_method_in_chain(c, cs->class_id, cnm, NULL) : -1;
+      if (tmi < 0) tmi = comp_method_index(c, cnm);
+      if (tmi < 0 || k >= c->scopes[tmi].nparams || !c->scopes[tmi].pnames[k]) continue;
+      if (scope_mutates_array_local(c, tmi, c->scopes[tmi].pnames[k], depth + 1)) return 1;
+    }
+  }
+  return 0;
+}
+
 void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_INT;
@@ -6512,6 +6557,25 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
            the boxing converter, mirroring the local-assignment coercion. */
         if (pt == TY_POLY_ARRAY &&
             (at == TY_INT_ARRAY || at == TY_STR_ARRAY || at == TY_FLOAT_ARRAY)) {
+          /* The rebuild is a COPY, which is right for a value and wrong for
+             storage the caller still holds: a callee that appends to the
+             parameter appended to the copy and the caller's array never
+             changed, silently (#4480). Until the parameter can take the
+             typed array by reference, refuse the shape rather than
+             miscompile it. */
+          if (m && idx >= 0 && idx < m->nparams && m->pnames[idx] &&
+              scope_mutates_array_local(c, (int)(m - c->scopes), m->pnames[idx], 0)) {
+            char msg[512];
+            snprintf(msg, sizeof msg,
+                     "an Array[%s] is passed to `%s`'s parameter `%s`, which the method mutates: the "
+                     "parameter is a general Array and the argument would be copied into it, so the "
+                     "mutation would not reach the caller's array. Give the parameter the argument's kind "
+                     "(an rbs seed, or callers that all pass Array[%s]), or build the argument as a general Array.",
+                     at == TY_INT_ARRAY ? "Integer" : at == TY_STR_ARRAY ? "String" : "Float",
+                     m->name ? m->name : "?", m->pnames[idx],
+                     at == TY_INT_ARRAY ? "Integer" : at == TY_STR_ARRAY ? "String" : "Float");
+            unsupported_feature(c, provided, msg);
+          }
           const char *cv = at == TY_INT_ARRAY ? "sp_PolyArray_from_int_array"
                          : at == TY_STR_ARRAY ? "sp_PolyArray_from_str_array"
                          : "sp_PolyArray_from_float_array";

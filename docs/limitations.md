@@ -607,6 +607,46 @@ general container (`grid[r][c] = v` where the row is typed) is the one route
 that widens the row to a general Array instead, since the container is what
 holds it.
 
+#### A typed array is not copied into a general-Array parameter the method mutates
+
+A parameter every call site passes a general Array to is compiled as one; a
+call site passing a typed array (`Array[Integer]`) to it has to convert,
+since the two store their elements differently, and the conversion is a copy.
+For a parameter the method only reads the copy is invisible. For one the
+method mutates it is not: the appends land in the copy and the caller's array
+never changes, which CRuby never does. Such a call is refused at compile time:
+
+```ruby
+def collect(out, tbl) ... out << row[ti] ... end   # out settled as a general Array
+o = Array.new(0, 0)
+collect(o, ctx.tbl)
+# spinel: t.rb:22: an Array[Integer] is passed to `collect`'s parameter `out`, which the method mutates: ...
+```
+
+Give the parameter the argument's kind (an rbs seed, or call sites that all
+pass the same kind) or build the argument as a general Array.
+
+#### A nested numeric table or an object array has no boxed form
+
+`Array[Array[Integer]]`, `Array[Array[Float]]` and an Array of one class's
+objects are compiled to an unboxed pointer array when every use supports it
+(see docs/rbs-extract.md). That representation has no boxed form, so it
+cannot reach a slot that holds any kind of value: a method whose value is
+the table on one path and `nil` or something else on another, an element of
+a general Array, a Hash value, a boxed parameter. Such a program is refused
+at compile time rather than compiled with the value dropped:
+
+```ruby
+def run(flag)
+  run_bcf if flag      # the table on one path, nil on the other
+end
+# spinel: t.rb:2: an Array[Array[Float]] reaches a slot that holds any kind of value ...
+```
+
+Give every path the same kind (an explicit empty table on the other path,
+or a `nil` check at the call site instead of inside the method), or build
+the table as a general Array.
+
 #### A `Float::INFINITY` bound reports the other bound as a `Float`
 
 An integer `Range` is a value with `sp_int` bounds, which have no

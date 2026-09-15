@@ -139,6 +139,14 @@ void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
     /* Never silently int-box an unexpected type (the root of the poly-box bug
        family): fail loudly so a missing case is caught at compile time rather
        than emitting wrong C. The known poly-context types are handled above. */
+    if (ty_is_ptr_array(t)) {
+      fprintf(stderr, "spinel: a%s reaches a slot that holds any kind of value: it has no boxed form yet "
+                      "and the value would be dropped. Give every path the same kind, or build it as a "
+                      "general Array.\n",
+              t == TY_INT_ARRAY_ARRAY ? "n Array[Array[Integer]]"
+              : t == TY_FLOAT_ARRAY_ARRAY ? "n Array[Array[Float]]" : "n Array of objects");
+      exit(1);
+    }
     fprintf(stderr, "spinel: emit_boxed_text: cannot box type %d into a poly value\n", (int)t);
     exit(1);
   }
@@ -1317,6 +1325,23 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
     default: break;
   }
   if (!fn) {
+    /* A kind narrow_object_arrays produces (an object array, a table of int
+       or float rows) has no boxed form: the one cls_id for them is type-
+       erased, so a reference box would read every element as #<Object>.
+       The untyped fallback below evaluates the value and yields nil, which
+       is exactly what a method answering the table on one path and nil on
+       another used to return (#4486). Refuse the shape instead. */
+    if (ty_is_ptr_array(t)) {
+      char msg[512];
+      snprintf(msg, sizeof msg,
+               "a%s reaches a slot that holds any kind of value (a method whose value is it on one "
+               "path and something else on another, an element of a general Array, a Hash value, a "
+               "boxed parameter): it has no boxed form yet and the value would be dropped. Give every "
+               "path the same kind, or build it as a general Array.",
+               t == TY_INT_ARRAY_ARRAY ? "n Array[Array[Integer]]"
+               : t == TY_FLOAT_ARRAY_ARRAY ? "n Array[Array[Float]]" : "n Array of objects");
+      unsupported_feature(c, node, msg);
+    }
     /* TY_UNKNOWN (e.g. unrecognized stdlib class .new): evaluate for side-effects, yield nil */
     buf_puts(b, "("); emit_expr(c, node, b); buf_puts(b, ", sp_box_nil())"); return;
   }
