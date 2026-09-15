@@ -203,21 +203,22 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   int cm_class = -1;
   int implicit_self = 0;
   if (recv < 0) {
-    mi = comp_method_index(c, name);     /* free function */
-    if (mi < 0) {                        /* implicit-self instance method */
-      Scope *encl = comp_scope_of(c, id);
-      if (encl->class_id >= 0) {
+    /* A bare call resolves to self first, as Ruby does and as the analyzer
+       does (comp_self_call_mi): a top-level `def request` beside a class's
+       own `request` took the free function here, the inline declined on its
+       arity, and the fallback called a symbol the self method never had
+       because every other site inlined it (#4500). */
+    Scope *encl = comp_scope_of(c, id);
+    mi = -1;
+    if (encl && encl->class_id >= 0) {
+      if (encl->is_cmethod) mi = comp_cmethod_in_chain(c, encl->class_id, name, NULL);
+      if (mi < 0) {
         mi = comp_method_in_chain(c, encl->class_id, name, NULL);
-        implicit_self = 1;
-        /* inside a class method, a bare call also reaches sibling class
-           methods (self is the class there, no instance to bind) */
-        if (mi < 0 && encl->is_cmethod) {
-          mi = comp_cmethod_in_chain(c, encl->class_id, name, NULL);
-          implicit_self = 0;
-        }
+        if (mi >= 0) implicit_self = 1;
       }
-      else return 0;
     }
+    if (mi < 0) mi = comp_method_index(c, name);   /* free function */
+    if (mi < 0) return 0;
   }
   else {
     TyKind rt = comp_ntype(c, recv);
