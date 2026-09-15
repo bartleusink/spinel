@@ -154,7 +154,7 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_SWEEPERS` | how many sweeper threads sweep the old lists (default the worker count, at most 8). `SPINEL_GC_OWNER=0` hands them the young lists too, instead of each worker sweeping its own |
 | `SPINEL_GC_TRIM_SEC` | how often the container buffers glibc still holds are given back to the OS with `malloc_trim` (default 1, `0` never). A trim walks every arena, tens of milliseconds on a many-core box; it runs on its own thread beside the program, but a worker that allocates from the arena being walked waits for it, so a longer interval buys latency for memory: on a 32-core server `10` took the room page's p99 from 122 to 102 ms and its RSS from 950 MB to 1.4 GB |
 | `SPINEL_GC_STR_MAJOR_KB` | the string OLD generation's own gate: how much old string it takes to make the next string sweep a MAJOR (default 1024). Only a major reclaims an old string |
-| `SPINEL_GC_STR_MAJOR` | the major's policy. By default it runs on a SCHEDULE (a major every N string sweeps, N adapted from the survival ratio) with the size test demoted to a backstop, which is how the object heap has always run its full collection. `size` restores the gate that shipped before it -- a size test re-aimed to twice what the last major left. `fixed` pins both the cadence and the backstop where the floor put them |
+| `SPINEL_GC_STR_MAJOR` | the major's policy. By default it runs on a SCHEDULE (a major every N string sweeps, N adapted from the survival ratio) with the size test demoted to a backstop, which is how the object heap has always run its full collection. `size` restores the gate that shipped before it -- the size test on its own, re-aimed to twice what the last major KEPT (what it left minus what the same sweep promoted, which is no survivor of anything yet). `fixed` pins both the cadence and the backstop where the floor put them |
 
 The schedule became the default on the measurements below, and `size` exists
 because a default change should carry its own way back.
@@ -170,11 +170,21 @@ The last row is the cost: five percent of one benchmark's median memory, with
 no time, against halving a real application's. A program that wants the old
 behaviour has `SPINEL_GC_STR_MAJOR=size`.
 
-The reason the size gate ratchets at all is that it is aimed at a number it
+The reason the size gate ratcheted at all is that it was aimed at a number it
 produces. A small budget promotes early, promotion is one-way until a major,
-and "twice what the last major left" then sets the next gate from what that
+and "twice what the last major left" then set the next gate from what that
 early promotion inflated. A cadence cannot do that, and a survival RATIO is
-scale-free, so neither can the adaptation.
+scale-free, so neither can the adaptation. The backstop is now aimed at what
+the major KEPT rather than at what it left: on a server, what a sweep promotes
+is mostly the strings the requests in flight held at that moment, dead a few
+milliseconds later, and a gate of twice kept-plus-promoted held three sweeps of
+them (an old generation of 290 MB against 20 MB kept on Campfire, and the
+young trigger, which retunes on the whole string heap, following it up).
+Aimed at kept, the next sweep whose promotion outgrows the live set is a
+major, and the old generation stays within one sweep's promotion of what is
+live: peak RSS 1,024 -> 711 MB and PSS 707 -> 629 MB on the room page. What
+that costs is the collections the inflated trigger had been skipping, about
+3% of throughput at 64 connections on 32 cores.
 
 The three `_KB` variables set where a budget STARTS; the collector re-aims it
 from what the collection found. That is right for running a program and wrong

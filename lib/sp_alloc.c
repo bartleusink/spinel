@@ -955,12 +955,23 @@ void sp_str_sweep_end(int major, size_t promoted) {
        the floor put them, which is what makes a policy measurable against
        itself. SPINEL_GC_STR_MAJOR=size turns the schedule off entirely and
        leaves the size test as the whole policy, which is what shipped before. */
+    /* The old set this major walked is what it KEPT: sp_str_old_total() after
+       the sweep also carries what the same sweep promoted out of young, and
+       that is not a survivor of anything yet. Both re-aims below are taken
+       over kept, for the reason the ratio's note gives. */
+    size_t kept = old_after > promoted ? old_after - promoted : 0;
     if (!sp_gc_str_major_fixed) {
-      /* Re-baseline the backstop: twice what this major left. That formula is
-         a ratchet when it is the ONLY gate and harmless behind a schedule,
-         which is the same bound sp_gc_collect keeps for the object old
-         generation. */
-      sp_str_old_threshold = sp_gc_sat_mul(old_after, 2);
+      /* Re-baseline the backstop: twice what this major KEPT, the bound
+         sp_gc_collect keeps for the object old generation. Aiming it at
+         old_after instead let the strings a request had in flight at the sweep
+         set the gate: on Campfire every sweep promotes 50-70 MB of them, they
+         die milliseconds later, and a gate of twice kept-plus-promoted held
+         three sweeps of that garbage (old 290 MB against 20 MB kept) -- and the
+         young trigger, which retunes on the whole string heap, followed it up
+         to 12 MB a worker. Aimed at kept, the next sweep whose promotion
+         outgrows the live set is a major, and the old generation stays within
+         one sweep's promotion of what is live. */
+      sp_str_old_threshold = sp_gc_sat_mul(kept, 2);
       if (sp_str_old_threshold < sp_str_old_threshold_init)
         sp_str_old_threshold = sp_str_old_threshold_init;
       /* Adapt the CADENCE from the survival RATIO. A ratio is scale-free, so
@@ -984,7 +995,6 @@ void sp_str_sweep_end(int major, size_t promoted) {
            at a 4 MB floor it walked the interval up to 32 and left 61 MB of old
            against a 12 MB live set. */
         size_t before = sp_str_gate_old;
-        size_t kept = old_after > promoted ? old_after - promoted : 0;
         if (kept > before - (before >> 2)) {                /* >75% survived */
           if (sp_str_major_interval < SP_STR_MAJOR_INTERVAL_MAX) sp_str_major_interval *= 2;
         }
