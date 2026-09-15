@@ -371,6 +371,36 @@ const char *sp_str_append_grow(const char *s, const char *t) {SP_GC_ROOT_STR(s);
   if (sp_str_is_binary(s)) sp_str_mark_binary(r);
   return r;
 }
+/* The same append for the first `lb` bytes of `t`, for the append form of an
+   interpolation (emit_interp_append): the length was taken when the part was
+   evaluated, so a part that is `s` itself contributes what it held then even
+   if an earlier part's append grew `s` in place. */
+const char *sp_str_append_grow_n(const char *s, const char *t, size_t lb) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(t);
+  if (!s) return t ? sp_str_from_bytes(t, lb) : sp_str_empty;
+  if (!t || lb == 0) return s;
+  size_t la = sp_str_byte_len(s);
+  unsigned char m = ((const unsigned char *)s)[-1];
+  if (m == 0xfe || m == 0xfc) {
+    sp_str_hdr *h = ((sp_str_hdr *)(s - 1)) - 1;
+    size_t total = (size_t)(h->size & SP_STR_SIZE_MASK);
+    size_t cap = total > sizeof(sp_str_hdr) + 2 ? total - sizeof(sp_str_hdr) - 2 : 0;
+    if (la + lb <= cap) {
+      memmove((char *)s + la, t, lb);   /* t may point into s (a self-append) */
+      ((char *)s)[la + lb] = 0;
+      sp_str_lcache_drop(s);
+      sp_str_set_len((char *)s, la + lb);
+      return s;
+    }
+  }
+  size_t want = (la + lb) * 2 + 16;
+  char *r = sp_str_alloc(want);
+  memcpy(r, s, la);
+  memcpy(r + la, t, lb);
+  r[la + lb] = 0;
+  sp_str_set_len(r, la + lb);
+  if (sp_str_is_binary(s)) sp_str_mark_binary(r);
+  return r;
+}
 const char*sp_str_substr(const char*s,sp_int start,sp_int len){SP_GC_ROOT_STR(s);if(!s)sp_nil_recv("[]");if(len<=0){char*r=sp_str_alloc_raw(1);r[0]=0;sp_str_set_len(r,0);return sp_str_bin_from(r,s);}if(start<0)start=0;char*r=sp_str_alloc_raw(len+1);memcpy(r,s+start,len);r[len]=0;sp_str_set_len(r,(size_t)len);return sp_str_bin_from(r,s);}
 const char*sp_str_delete_suffix(const char*s,const char*p){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(p);if(!s)sp_nil_recv("delete_suffix");if(!p)return s;size_t sl=strlen(s),pl=strlen(p);if(pl<=sl&&memcmp(s+sl-pl,p,pl)==0){char*r=sp_str_alloc_raw(sl-pl+1);memcpy(r,s,sl-pl);r[sl-pl]=0;sp_str_set_len(r,sl-pl);return r;}char*r=sp_str_alloc_raw(sl+1);memcpy(r,s,sl+1);sp_str_set_len(r,sl);return r;}
 /* strip / lstrip / rstrip. CRuby strips the set "\0\t\n\v\f\r " from the

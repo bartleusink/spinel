@@ -10795,6 +10795,14 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       for (int j = nchain - 1; j >= 0; j--) {
         int arg = chain[j];
         TyKind at = comp_ntype(c, arg);
+        /* an interpolation appends its parts straight into the buffer, no
+           intermediate string (emit_interp_append) */
+        if (nt_kind(nt, arg) == NK_InterpolatedStringNode) {
+          char o1[1100], o2[1100];
+          snprintf(o1, sizeof o1, "sp_String_append_bin(%s, ", srefC);
+          snprintf(o2, sizeof o2, "sp_String_append_n(%s, ", srefC);
+          if (emit_interp_append(c, arg, o1, o2, b, indent)) continue;
+        }
         emit_indent(b, indent);
         buf_printf(b, "sp_String_append_bin(%s, ", srefC);
         (void)at;
@@ -10851,6 +10859,32 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
         TyKind at = comp_ntype(c, arg);
         emit_indent(b, indent);
         buf_puts(b, "sp_str_check_mutable("); emit_expr(c, cur, b); buf_puts(b, ");\n");
+        /* an interpolation appends its parts straight into the string, no
+           intermediate (emit_interp_append); each part is its own statement
+           so the write-barrier pass sees each store */
+        if (nt_kind(nt, arg) == NK_InterpolatedStringNode) {
+          Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, cur, &rb);
+          const char *rs = rb.p ? rb.p : "";
+          char o1[2200], o2[2200];
+          snprintf(o1, sizeof o1, "%s = sp_str_append_grow(%s, ", rs, rs);
+          snprintf(o2, sizeof o2, "%s = sp_str_append_grow_n(%s, ", rs, rs);
+          free(rb.p);
+          if (emit_interp_append(c, arg, o1, o2, b, indent)) continue;
+        }
+        /* a shared-mutable String appends its live bytes by length: the
+           String-position snapshot (sp_str_concat of the contents and "")
+           copied them once before the append copied them again */
+        { char sbuf[1024];
+          if (at != TY_INT && strbuf_slot_ref(c, arg, sbuf, sizeof sbuf)) {
+            int ts = ++g_tmp;
+            emit_indent(b, indent);
+            buf_printf(b, "{ sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", ts, sbuf, ts);
+            emit_indent(b, indent + 1);
+            emit_expr(c, cur, b); buf_puts(b, " = sp_str_append_grow_n(");
+            emit_expr(c, cur, b); buf_printf(b, ", _t%d ? sp_String_cstr(_t%d) : sp_str_empty, _t%d ? (size_t)_t%d->len : 0);\n", ts, ts, ts, ts);
+            emit_indent(b, indent); buf_puts(b, "}\n");
+            continue;
+          } }
         emit_indent(b, indent);
         emit_expr(c, cur, b); buf_puts(b, " = sp_str_append_grow(");
         emit_expr(c, cur, b); buf_puts(b, ", ");

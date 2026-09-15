@@ -511,6 +511,7 @@ int re_lit_flags(Compiler *c, int nid) {
   return nid < 0 ? -1 : (int)nt_int(c->nt, nid, "flags", 0);
 }
 void emit_interp(Compiler *c, int id, Buf *b);  /* forward */
+int emit_interp_append(Compiler *c, int id, const char *open, const char *open_n, Buf *b, int indent);
 
 /* Emit a regex pattern expression to `b`, handling both static literals and
    interpolated patterns. For interpolated patterns, setup is emitted to

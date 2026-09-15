@@ -58,26 +58,37 @@ static void interp_flatten(const NodeTable *nt, int id, int **out, int *n, int *
   }
 }
 
-void emit_interp(Compiler *c, int id, Buf *b) {
+/* Single-buffer construction: every part is either an escaped literal
+   (compile-time length), a bounded-width scalar (int <= 21 digits, bool
+   <= 5), or a dynamic part pre-evaluated -- in part order, preserving
+   side-effect order -- into a rooted `const char *` temp whose byte length
+   feeds the capacity sum. One sp_str_alloc_raw then serves the whole
+   string; sp_w_* writers append each part. (The previous lowering built
+   one heap string per part and ran an sp_sprintf pass over them.)
+   The plan is shared with the append form (`s << "..#{x}.."`), which
+   writes the same parts into the receiver instead of a fresh string. */
+enum { WK_LIT, WK_INT, WK_BOOL, WK_NIL, WK_DYN };
+typedef struct { int kind; int tmp; int lit_off; int lit_esc_len; long lit_len; } WPart;
+typedef struct {
+  WPart *wp; int nwp; int ndyn_or_scalar;
+  Buf lits;      /* escaped literal texts, concatenated */
+  Buf decls;     /* the pre-evaluated temps, as statements */
+  long fixed_cap;
+  int *flat;
+} InterpPlan;
+static void interp_plan_free(InterpPlan *pl) {
+  free(pl->lits.p); free(pl->decls.p); free(pl->wp); free(pl->flat);
+}
+static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
   const NodeTable *nt = c->nt;
   int n = 0;
   int *flat = NULL, fcap = 0;
   interp_flatten(nt, id, &flat, &n, &fcap);
   const int *parts = flat;
-
-  /* Single-buffer construction: every part is either an escaped literal
-     (compile-time length), a bounded-width scalar (int <= 21 digits, bool
-     <= 5), or a dynamic part pre-evaluated -- in part order, preserving
-     side-effect order -- into a rooted `const char *` temp whose byte length
-     feeds the capacity sum. One sp_str_alloc_raw then serves the whole
-     string; sp_w_* writers append each part. (The previous lowering built
-     one heap string per part and ran an sp_sprintf pass over them.) */
-  enum { WK_LIT, WK_INT, WK_BOOL, WK_NIL, WK_DYN };
-  typedef struct { int kind; int tmp; int lit_off; int lit_esc_len; long lit_len; } WPart;
   WPart *wp = malloc(sizeof(WPart) * (size_t)(n > 0 ? n : 1));
   if (!wp) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   int nwp = 0, ndyn_or_scalar = 0;
-  Buf lits; memset(&lits, 0, sizeof lits);   /* escaped literal texts, concatenated */
+  Buf lits; memset(&lits, 0, sizeof lits);
   Buf decls; memset(&decls, 0, sizeof decls);
   long fixed_cap = 0;
 
@@ -335,6 +346,15 @@ void emit_interp(Compiler *c, int id, Buf *b) {
       unsupported(c, pid, "interpolation part");
     }
   }
+  pl->wp = wp; pl->nwp = nwp; pl->ndyn_or_scalar = ndyn_or_scalar;
+  pl->lits = lits; pl->decls = decls; pl->fixed_cap = fixed_cap; pl->flat = flat;
+}
+
+void emit_interp(Compiler *c, int id, Buf *b) {
+  InterpPlan pl; memset(&pl, 0, sizeof pl);
+  interp_plan(c, id, &pl);
+  WPart *wp = pl.wp; int nwp = pl.nwp, ndyn_or_scalar = pl.ndyn_or_scalar;
+  Buf lits = pl.lits, decls = pl.decls; long fixed_cap = pl.fixed_cap; int *flat = pl.flat;
 
   if (ndyn_or_scalar == 0) {
     /* adjacent literals ("a" "b") fold to one literal: frozen per the
@@ -392,6 +412,52 @@ void emit_interp(Compiler *c, int id, Buf *b) {
   buf_printf(b, "*_t%d = 0; sp_str_set_len(_t%d, (size_t)(_t%d - _t%d)); (const char *)_t%d; })",
              wpid, rid, wpid, rid, rid);
   free(lits.p); free(decls.p); free(wp); free(flat);
+}
+
+/* `s << "lit #{x} lit"`: the interpolation's parts appended to `s` one by
+   one, with no intermediate string. The value form above builds the whole
+   string in a fresh buffer and the append then copies it again into `s`; a
+   template that appends a page-sized interpolation copied the page once per
+   nesting level (campfire's room page moved seven times its size through
+   memmove per request). The parts are pre-evaluated into rooted temps first,
+   in order, exactly as the value form does, so every side effect and every
+   raise happens before the first byte lands in `s`; a part that aliases `s`
+   itself (`s << "#{s}"`) is appended by the length taken at evaluation, so an
+   earlier append growing `s` in place cannot change what it contributes.
+   `open`/`close` bracket each part's append statement: open(receiver text)
+   ... part ... close; a NULL length-taking variant is spelled by the caller
+   through `open_n`/`close_n` when it has one. Answers 0 when the plan has no
+   dynamic part (a literal fold, left to the plain path). */
+int emit_interp_append(Compiler *c, int id, const char *open, const char *open_n, Buf *b, int indent) {
+  InterpPlan pl; memset(&pl, 0, sizeof pl);
+  interp_plan(c, id, &pl);
+  if (pl.ndyn_or_scalar == 0) { interp_plan_free(&pl); return 0; }
+  emit_indent(b, indent);
+  buf_printf(b, "{ %s\n", pl.decls.p ? pl.decls.p : "");
+  for (int k = 0; k < pl.nwp; k++) {
+    WPart *w = &pl.wp[k];
+    if (w->kind == WK_NIL) continue;
+    if (w->kind == WK_LIT && w->lit_len == 0) continue;
+    emit_indent(b, indent + 1);
+    switch (w->kind) {
+      case WK_LIT:
+        buf_printf(b, "%s(&(\"\\xff\" \"%.*s\")[1]), %ldUL);\n", open_n,
+                   w->lit_esc_len, (pl.lits.p ? pl.lits.p : "") + w->lit_off, w->lit_len);
+        break;
+      case WK_INT:
+        buf_printf(b, "%s_t%d == SP_INT_NIL ? sp_str_empty : sp_int_to_s(_t%d));\n", open, w->tmp, w->tmp);
+        break;
+      case WK_BOOL:
+        buf_printf(b, "%s_t%d ? SPL(\"true\") : SPL(\"false\"));\n", open, w->tmp);
+        break;
+      default:
+        buf_printf(b, "%s_t%d, _l%d);\n", open_n, w->tmp, w->tmp);
+        break;
+    }
+  }
+  emit_indent(b, indent); buf_puts(b, "}\n");
+  interp_plan_free(&pl);
+  return 1;
 }
 
 /* ---- expression ---- */

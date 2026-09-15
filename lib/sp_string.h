@@ -92,6 +92,8 @@ static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;i
 /* Replace the buffer contents in place (the handle stays stable, so every
    alias and container holding it observes the new value; #3227). */
 static inline void sp_String_set_bin(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}s->len=0;sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
+/* the first tl bytes of t: the append form of an interpolation (emit_interp_append) */
+static inline void sp_String_append_n(sp_String*s,const char*t,size_t tl){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)tl);}
 static inline void sp_String_append_bin(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
 /* Handle wrap for CODEGEN-emitted sources only: every spinel-emitted string
    carries a marker byte at s[-1], so the frozen state (0xf1: an explicit
