@@ -14423,7 +14423,10 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
           ccls[nc] = k; cmi[nc] = mi; cdef[nc] = dc; nc++;
         }
         if (nc > 0) {
-          int tv = ++g_tmp, argsN = nt_ref(nt, id, "arguments");
+          /* The receiver first, into a rooted temp of its own: Ruby evaluates
+             it before the arguments, and the arguments hoisted below may
+             allocate while it is held by nothing else. */
+          int tv = hoist_boxed_rooted(c, recv), argsN = nt_ref(nt, id, "arguments");
           char raise[256];
           snprintf(raise, sizeof raise,
                    "sp_raise_nomethod(sp_nomethod_msg_args(\"%s\", _t%d, 0, (sp_RbVal[]){sp_box_nil()}))",
@@ -14461,8 +14464,7 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               c->ntype[hav[a]] = TY_POLY;
               hoisted_n++;
             } }
-          buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, recv, b);
-          buf_printf(b, "; (_t%d.tag == SP_TAG_CLASS) ? (", tv);
+          buf_printf(b, "({ (_t%d.tag == SP_TAG_CLASS) ? (", tv);
           for (int k = 0; k < nc; k++) {
             buf_printf(b, "_t%d.cls_id == %d ? ", tv, ccls[k]);
             Buf cb; memset(&cb, 0, sizeof cb);
