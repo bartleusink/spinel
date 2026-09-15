@@ -6835,6 +6835,22 @@ static int oa_cls_join(int a, int b) {
    kind from (mark_empty_array_operands uses the same one), so a stamp here
    is seen by the next round's inference and by codegen (#4484). */
 static int *g_oa_empt_slot, *g_oa_empt_node, g_oa_empt_n, g_oa_empt_cap;
+/* Nodes whose own emitted type has to follow the slot they feed: a
+   `idx.map { |k| cols[k] }` builds the table in place, so narrowing the slot
+   without retyping the map leaves the emitter building a poly array and
+   assigning it to a narrowed one -- which does not compile. The empty-literal
+   list beside this one does the same job for `[]`. */
+static int *g_oa_src_slot, *g_oa_src_node, g_oa_src_n, g_oa_src_cap;
+static void oa_note_src(int S, int node) {
+  if (node < 0) return;
+  if (g_oa_src_n >= g_oa_src_cap) {
+    g_oa_src_cap = g_oa_src_cap ? g_oa_src_cap * 2 : 64;
+    g_oa_src_slot = (int *)realloc(g_oa_src_slot, sizeof(int) * (size_t)g_oa_src_cap);
+    g_oa_src_node = (int *)realloc(g_oa_src_node, sizeof(int) * (size_t)g_oa_src_cap);
+    if (!g_oa_src_slot || !g_oa_src_node) { fprintf(stderr, "oom\n"); exit(1); }
+  }
+  g_oa_src_slot[g_oa_src_n] = S; g_oa_src_node[g_oa_src_n] = node; g_oa_src_n++;
+}
 static void oa_note_empty(Compiler *c, int S, int node) {
   if (!is_empty_array_literal(c->nt, node, c->node_cap)) return;
   if (g_oa_empt_n >= g_oa_empt_cap) {
@@ -7334,6 +7350,48 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
       else if (ec < 0 && !OA_CLS_IS_NESTED(ec)) sl[S].alive = 0;
       else sl[S].cls = oa_cls_join(sl[S].cls, ec);
     }
+    /* `raw = idx.map { |k| cols[k] }`: the mapped table's rows ARE the other
+       table's rows -- the same objects, not copies -- so the two must agree on
+       a row kind. That is an EDGE, not element evidence: the source table's
+       kind is still being derived this round (every slot is reset at the top
+       of the pass), so reading it as evidence answers "no kind yet" and the
+       slot dies. The while-loop spelling never needed this because its rows
+       come from its own `Array.new(0, 0.0)` generator.
+
+       Deliberately only this shape. Keeping every map source alive also
+       narrows `[...].map { Obj.new(s) }` to an object table, and the places
+       that consume one -- `min`, `join`, interpolation -- still want the boxed
+       element, so the C stopped compiling. The rows here are already unboxed
+       pointers read out of a narrowed table, which is what makes this shape
+       the one that pays. */
+    else if (cn && (sp_streq(cn, "map") || sp_streq(cn, "collect")) && can == 0 &&
+             nt_ref(nt, v, "block") >= 0 && nt_type(nt, nt_ref(nt, v, "block")) &&
+             sp_streq(nt_type(nt, nt_ref(nt, v, "block")), "BlockNode")) {
+      int mb = nt_ref(nt, v, "block");
+      int mbody = nt_ref(nt, mb, "body");
+      int mn = 0;
+      const int *ms = mbody >= 0 ? nt_arr(nt, mbody, "body", &mn) : NULL;
+      int mtail = (ms && mn > 0) ? ms[mn - 1] : -1;
+      int joined = 0;
+      if (mtail >= 0 && nt_kind(nt, mtail) == NK_CallNode) {
+        const char *mtn = nt_str(nt, mtail, "name");
+        int mtr = nt_ref(nt, mtail, "receiver");
+        int mta = nt_ref(nt, mtail, "arguments"); int mtan = 0;
+        if (mta >= 0) nt_arr(nt, mta, "arguments", &mtan);
+        if (mtn && (sp_streq(mtn, "[]") || sp_streq(mtn, "at")) && mtan == 1 &&
+            mtr >= 0 && read_slot[mtr] >= 0) {
+          claimed[mtr] = 1;
+          oa_uf_union(sl, S, read_slot[mtr]);
+          /* the map BUILDS the table in place, so the emitter has to build it
+             at the kind this component settles on -- recorded as a want, which
+             later inference passes re-read (a c->ntype stamp would be
+             recomputed away before emission) */
+          oa_note_src(S, v);
+          joined = 1;
+        }
+      }
+      if (!joined) sl[S].alive = 0;   /* every other map source, as before */
+    }
     /* a call whose own value is a tracked slot: join the two. */
     else if (call_ret[v] >= 0) {
       claimed[v] = 1; oa_uf_union(sl, S, call_ret[v]);
@@ -7370,6 +7428,7 @@ static int narrow_object_arrays(Compiler *c) {
   int cap = 16, n = 0;
   OAS *sl = (OAS *)malloc(sizeof(OAS) * cap);
   g_oa_empt_n = 0;
+  g_oa_src_n = 0;
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
     for (int li = 0; li < sc->nlocals; li++) {
@@ -7952,6 +8011,19 @@ static int narrow_object_arrays(Compiler *c) {
       sl[i].lv->type = nty; sl[i].lv->oa_pin = nty;
     }
     else { c->scopes[sl[i].sidx].ret = nty; c->scopes[sl[i].sidx].ret_oa_pin = nty; }
+    /* and the sources that BUILD the table in place, so the emitter builds it
+       at the narrowed kind rather than building a poly array and assigning it
+       into a narrowed slot */
+    for (int e = 0; e < g_oa_src_n; e++) {
+      if (oa_uf_find(sl, g_oa_src_slot[e]) != oa_uf_find(sl, i)) continue;
+      int src = g_oa_src_node[e];
+      /* a WANT, not c->ntype: the type cache is recomputed by every later
+         inference pass, so a stamp there is gone by emission. infer_type
+         re-reads arr_want on each pass, which is exactly how the empty-row
+         literal of an `Array.new(n) { [] }` table keeps the kind this pass
+         gives it (#4484). */
+      if (c->arr_want && src >= 0 && src < c->node_cap) c->arr_want[src] = nty;
+    }
   }
   /* the round changed something exactly when some slot's decision differs from
      the one it carried in -- the fixpoint's convergence test depends on this

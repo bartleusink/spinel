@@ -612,6 +612,15 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         /* a value-carrying next widens the element type past the tail */
         TyKind bnt = ie_block_break_next_ty(c, body);
         if (bnt != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? bnt : ty_unify(bt, bnt);
+        /* A table of rows: ty_array_of has no kind for "array of int/float
+           array" -- those exist only once narrow_object_arrays has decided a
+           slot carries one -- so that pass records its decision here and this
+           reads it back, the way the empty row literal of an
+           `Array.new(n) { [] }` table already does (#4484). Without it a
+           mapped table was built as a poly array, boxing every row on the way
+           in only to unbox it again on each read. */
+        if (c->arr_want && id < c->node_cap && ty_is_ptr_array(c->arr_want[id]))
+          { *out = c->arr_want[id]; return 1; }
         { *out = ty_array_of(bt); return 1; }
       }
       if (block >= 0 &&
@@ -809,6 +818,15 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
            collected value is boxed rather than assigned to a typed temp. */
         TyKind bnt = ie_block_break_next_ty(c, body);
         if (bnt != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? bnt : ty_unify(bt, bnt);
+        /* A table of rows: ty_array_of has no kind for "array of int/float
+           array" -- those exist only once narrow_object_arrays has decided a
+           slot carries one -- so that pass records its decision here and this
+           reads it back, the way the empty row literal of an
+           `Array.new(n) { [] }` table already does (#4484). Without it a
+           mapped table was built as a poly array, boxing every row on the way
+           in only to unbox it again on each read. */
+        if (c->arr_want && id < c->node_cap && ty_is_ptr_array(c->arr_want[id]))
+          { *out = c->arr_want[id]; return 1; }
         { *out = ty_array_of(bt); return 1; }
       }
       if (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat")) {
