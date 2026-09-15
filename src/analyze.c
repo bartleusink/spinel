@@ -7965,6 +7965,27 @@ static int narrow_object_arrays(Compiler *c) {
   }
   for (int i = 0; i < n; i++) {
     int r = oa_uf_find(sl, i);
+    /* A component that reaches no decision this round drops any stamp an
+       earlier round left on its builder nodes. The pass is written to
+       un-narrow a slot that stops qualifying (a new escape appearing as the
+       fixpoint desugars), and the slot then goes back to the poly array while
+       a stale want would still have the emitter build an sp_PtrArray into it.
+       Not observed to fire -- across the suite, the packages and a large
+       application the drop site is reached constantly but the want is always
+       already UNKNOWN -- so this states the invariant rather than fixing a
+       reproduced failure.
+       Only THIS pass's own source nodes, which are `map` calls. The empty-row
+       literal of #4484 is stamped here too and has the same exposure, but its
+       node is an empty `[]`, and two other producers stamp those as well
+       (mark_empty_array_operands and the ivar-write scan); clearing one here
+       could drop a want this pass never set. */
+    #define OA_DROP_SRC_STAMP() do { \
+      for (int _e = 0; _e < g_oa_src_n; _e++) { \
+        if (oa_uf_find(sl, g_oa_src_slot[_e]) != oa_uf_find(sl, i)) continue; \
+        int _sn = g_oa_src_node[_e]; \
+        if (c->arr_want && _sn >= 0 && _sn < c->node_cap) c->arr_want[_sn] = TY_UNKNOWN; \
+      } \
+    } while (0)
     /* This pass cleared every candidate's pin on the way in, but the pin field
        is also written by the element-narrowing below it. Put a pin back when
        this pass reaches no decision, or the two passes alternate forever and
@@ -7972,6 +7993,7 @@ static int narrow_object_arrays(Compiler *c) {
     if (sl[i].ici >= 0 && c->classes[sl[i].ici].ivar_oa_seed[sl[i].iiv] < 0)
       c->classes[sl[i].ici].ivar_oa_conflict[sl[i].iiv] = (unsigned char)(sl[r].cls == -2);
     if (!sl[r].alive || sl[r].cls == -1 || sl[r].cls == -2) {
+      OA_DROP_SRC_STAMP();
       if (sl[i].ici >= 0) continue;   /* an ivar with no decision stays the poly array it was reset to */
       if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
       else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
@@ -7983,6 +8005,7 @@ static int narrow_object_arrays(Compiler *c) {
          first/last but not the boxed sort/min/max comparators yet, so a
          component that used those (needs_cmp) stays on the poly path for now. */
       if (sl[r].needs_cmp) {
+        OA_DROP_SRC_STAMP();
         if (sl[i].ici >= 0) continue;
         if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
         else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;

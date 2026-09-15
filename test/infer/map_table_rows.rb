@@ -85,3 +85,37 @@ def self.from_hash
   [rows.length, rows[0][0], rows[1][0]]
 end
 p from_hash
+
+# The un-narrow path, with a mapped table in the component: the table escapes
+# somewhere the pass does not model, so the slot stays boxed. This is the path
+# a stale want would be read on -- the emitter must build what the slot is.
+$sink = nil
+def self.escapes
+  cols = Array.new(3) { |c| [c, c + 1] }
+  leaked = [0, 1].map { |k| cols[k] }
+  $sink = leaked
+  leaked[1][0]
+end
+p escapes
+p $sink.length
+
+# Same, through a receiver the pass cannot resolve to one class.
+class TakeA
+  def take(t) = t[0][0]
+end
+class TakeB
+  def take(t) = t[1][1]
+end
+def self.dispatched
+  cols = Array.new(3) { |c| [c, c + 1] }
+  tbl = [0, 1].map { |k| cols[k] }
+  objs = [TakeA.new, TakeB.new]
+  acc = 0
+  i = 0
+  while i < 2
+    acc += objs[i].take(tbl)
+    i += 1
+  end
+  acc
+end
+p dispatched
