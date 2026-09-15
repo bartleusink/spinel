@@ -7671,12 +7671,34 @@ static int narrow_object_arrays(Compiler *c) {
        sp_PtrArray parameter, and the C build stopped (#4130). */
     int oa_tmi = -1;
     if (name) {
-      if (recv < 0) oa_tmi = comp_self_call_mi(c, id, name);
+      if (recv < 0) {
+        oa_tmi = comp_self_call_mi(c, id, name);
+        /* Inside a class method, a bare `new(...)` constructs this class -- the
+           `def self.load; ...; new(labels, columns, ...); end` factory shape,
+           which is how the form below is actually written. There is no class
+           method named `new` for the lookup to find, so the arguments' route
+           into initialize's parameters was invisible here too. */
+        if (oa_tmi < 0 && sp_streq(name, "new")) {
+          Scope *ncs = comp_scope_of(c, id);
+          if (ncs && ncs->is_cmethod && ncs->class_id >= 0)
+            oa_tmi = comp_method_in_chain(c, ncs->class_id, "initialize", NULL);
+        }
+      }
       else if (nt_type(nt, recv) &&
                (sp_streq(nt_type(nt, recv), "ConstantReadNode") ||
                 sp_streq(nt_type(nt, recv), "ConstantPathNode"))) {
         int rci = comp_class_index(c, nt_str(nt, recv, "name"));
         oa_tmi = rci >= 0 ? comp_cmethod_in_chain(c, rci, name, NULL) : -1;
+        /* `T.new(cols)` names no class method -- `new` is implicit -- so the
+           lookup above answered -1 and the argument loop below read that as
+           "callee unattributable" and killed the caller's slot. The arguments
+           really do reach T#initialize's parameters, and a table built as a
+           local in a `self.load` factory and handed to the constructor is
+           ordinary Ruby: it stayed boxed while the identical table assigned to
+           the ivar inside `initialize` narrowed. A class that defines its own
+           `self.new` is found above and keeps it. */
+        if (oa_tmi < 0 && rci >= 0 && sp_streq(name, "new"))
+          oa_tmi = comp_method_in_chain(c, rci, "initialize", NULL);
       }
       else {
         TyKind ort = infer_type(c, recv);
