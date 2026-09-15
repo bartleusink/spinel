@@ -7970,6 +7970,8 @@ static int narrow_object_arrays(Compiler *c) {
        un-narrow a slot that stops qualifying (a new escape appearing as the
        fixpoint desugars), and the slot then goes back to the poly array while
        a stale want would still have the emitter build an sp_PtrArray into it.
+       Used at each of the three bails that do so: no decision, and the two
+       comparator fallbacks (the nested one and the object-array one).
        Not observed to fire -- across the suite, the packages and a large
        application the drop site is reached constantly but the want is always
        already UNKNOWN -- so this states the invariant rather than fixing a
@@ -8026,6 +8028,7 @@ static int narrow_object_arrays(Compiler *c) {
          class can actually compare (has `<=>` in its chain); otherwise it stays
          poly, where the boxed comparator raises the CRuby ArgumentError. */
       if (sl[r].needs_cmp && comp_method_in_chain(c, sl[r].cls, "<=>", NULL) < 0) {
+        OA_DROP_SRC_STAMP();
         if (sl[i].ici >= 0) continue;
         if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
         else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
