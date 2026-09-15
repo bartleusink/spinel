@@ -7448,12 +7448,22 @@ static int narrow_object_arrays(Compiler *c) {
      A map/collect CallNode is the exact discriminator: this pass is the only
      producer that stamps one. The other producers stamp empty `[]` literals,
      which are ArrayNodes, so their wants are untouched. */
+  int n_cleared = 0, cap_cleared = 0;
+  int *cleared = NULL;
   if (c->arr_want) {
     for (int id = 0; id < c->nt->count && id < c->node_cap; id++) {
       if (!ty_is_ptr_array(c->arr_want[id])) continue;
       if (nt_kind(nt, id) != NK_CallNode) continue;
       const char *rn = nt_str(nt, id, "name");
-      if (rn && (sp_streq(rn, "map") || sp_streq(rn, "collect"))) c->arr_want[id] = TY_UNKNOWN;
+      if (!rn || !(sp_streq(rn, "map") || sp_streq(rn, "collect"))) continue;
+      c->arr_want[id] = TY_UNKNOWN;
+      if (n_cleared == cap_cleared) {
+        cap_cleared = cap_cleared ? cap_cleared * 2 : 16;
+        int *nc = (int *)realloc(cleared, sizeof(int) * (size_t)cap_cleared);
+        if (!nc) { free(cleared); cleared = NULL; cap_cleared = 0; break; }
+        cleared = nc;
+      }
+      cleared[n_cleared++] = id;
     }
   }
   for (int s = 0; s < c->nscopes; s++) {
@@ -8087,6 +8097,19 @@ static int narrow_object_arrays(Compiler *c) {
     if (now != sl[i].old_pin) { changed = 1; break; }
   }
 
+  /* A want that was cleared above and NOT re-stamped is a decision that went
+     away this round. infer_write_types runs before this pass in the fixpoint
+     body, so it had already read that want into a destination local, and the
+     `ch |= infer_write_types(c)` after this pass only runs when this pass
+     reports a change -- which the pin comparison below does not notice, since
+     the slot's pin is simply restored. Report it, and the write types are
+     re-derived without the want. Only a genuinely dropped one: the normal
+     round clears and re-stamps, and reporting that would never converge. */
+  for (int e = 0; e < n_cleared; e++) {
+    int cid = cleared[e];
+    if (c->arr_want && cid >= 0 && cid < c->node_cap && c->arr_want[cid] == TY_UNKNOWN) { changed = 1; break; }
+  }
+  free(cleared);
   for (int k = 0; k < c->nclasses; k++) free(ivslot[k]);
   free(ivslot);
   #undef OA_IVSLOT
