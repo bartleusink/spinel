@@ -1446,21 +1446,21 @@ TyKind method_call_ret(Compiler *c, int mi, int call_id) {
   /* Lowered because a yield sits in a lifted Thread/Fiber body: the method's
      value is its own tail (`t.value`), not the block's (#3355). */
   if (c->scopes[mi].lowered_lifted_yield) return c->scopes[mi].ret;
-  /* Lowered, but the method's value is its OWN tail rather than the block's --
-     `walk` ends in `nil`, not in a yield. Reading the block's type here made
-     the caller discard a real answer as nil (#4145). */
-  if (c->scopes[mi].is_lowered_yield && !c->scopes[mi].lowered_carries_block_value)
-    return c->scopes[mi].ret;
-  /* A lowered method that carries the block's value is ONE function serving
-     every call site, and its signature is poly (see the lowering in
-     analyze.c). Answering the per-call-site block type here made the call site
-     read a differently-typed slot than the function returns -- which held only
-     while the raw carrier happened to fit, i.e. for scalars. */
-  if (c->scopes[mi].is_lowered_yield && c->scopes[mi].lowered_carries_block_value)
-    return c->scopes[mi].ret;
-  /* Lowered yield methods (self-recursive + yield) carry the block's return value:
-     return the per-call-site block body type so puts/assign use the right type. */
-  if (c->scopes[mi].is_lowered_yield || is_yield || is_blk_param_call(c, last, mi)) {
+  /* Every remaining lowered method answers its own declared return, for one of
+     two reasons that used to be separate arms:
+       - its value is its OWN tail rather than the block's (`walk` ends in
+         `nil`, not in a yield). Reading the block's type here made the caller
+         discard a real answer as nil (#4145);
+       - its value IS the block's, and one function serves every call site, so
+         the signature is poly and the call site must read what the function
+         returns rather than the per-site block type -- which held only while
+         the raw carrier happened to fit, i.e. for scalars.
+     The two conditions are exhaustive over is_lowered_yield, which is why the
+     per-call-site arm below no longer names it. */
+  if (c->scopes[mi].is_lowered_yield) return c->scopes[mi].ret;
+  /* A yield-tailed inlined method, or a tail that calls the &block param:
+     the block is spliced per call site, so use that site's block body type. */
+  if (is_yield || is_blk_param_call(c, last, mi)) {
     int blk = nt_ref(c->nt, call_id, "block");
     const char *bty = blk >= 0 ? nt_type(c->nt, blk) : NULL;
     /* `callee(&b)` / `callee(...)` forwards the block active in the enclosing
