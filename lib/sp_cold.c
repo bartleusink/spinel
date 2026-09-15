@@ -3747,8 +3747,12 @@ void sp_marv_raise(const char *cls, const char *msg) {SP_GC_ROOT_STR(msg); sp_ra
 const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *str, sp_StrStrHash *h) {SP_GC_ROOT_STR(str);SP_GC_ROOT(h);
   int64_t slen = (int64_t)strlen(str);
  /* malloc scratch (realloc-safe); exact-sized string emitted below. */
-  size_t cap = (slen * 2) + 64; char *out = (char *)malloc(cap); size_t olen = 0;
+  /* a short subject (an attribute being escaped, the common call) builds on
+     the stack: the malloc was one of the two a page render made per escape */
+  char out_sb[512];
+  size_t cap = (slen * 2) + 64; char *out = cap <= sizeof out_sb ? out_sb : (char *)malloc(cap); size_t olen = 0;
   int64_t pos = 0; int caps[64];
+  #define GSH_GROW(need) do { size_t _nc = (need); if (out == out_sb) { char *_o = (char *)malloc(_nc); memcpy(_o, out, olen); out = _o; } else out = (char *)realloc(out, _nc); cap = _nc; } while (0)
   while (pos <= slen) {
     int n = re_exec(pat, str, slen, pos, caps, 64, 0);
     if (n <= 0 || caps[0] < 0) break;
@@ -3769,7 +3773,7 @@ const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *str, sp
     const char *rep = sp_StrStrHash_get(h, key);
     if (!rep) rep = "";
     size_t rlen = strlen(rep);
-    if (olen + before + rlen >= cap) { cap = ((olen + before + rlen) * 2) + 64; out = (char *)realloc(out, cap); }
+    if (olen + before + rlen >= cap) GSH_GROW(((olen + before + rlen) * 2) + 64);
     memcpy(out + olen, str + pos, before); olen += before;
     memcpy(out + olen, rep, rlen); olen += rlen;
     if (kbuf != keybuf) free(kbuf);
@@ -3777,7 +3781,7 @@ const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *str, sp
  /* Zero-width match: keep the source char at this position and step
     past it (see sp_re_gsub for the rationale). */
       if (caps[1] < slen) {
-        if (olen + 1 >= cap) { cap = (olen * 2) + 64; out = (char *)realloc(out, cap); }
+        if (olen + 1 >= cap) GSH_GROW((olen * 2) + 64);
         out[olen++] = str[caps[1]];
       }
       pos = caps[1] + 1;
@@ -3788,12 +3792,13 @@ else {
   }
   if (pos < slen) {
     size_t rest = slen - pos;
-    if (olen + rest >= cap) { cap = olen + rest + 1; out = (char *)realloc(out, cap); }
+    if (olen + rest >= cap) GSH_GROW(olen + rest + 1);
     memcpy(out + olen, str + pos, rest); olen += rest;
   }
+  #undef GSH_GROW
   char *res = sp_str_alloc(olen);
   memcpy(res, out, olen);
-  free(out);
+  if (out != out_sb) free(out);
   return res;
 }
 /* Issue #910: sub(regex, hash) — same lookup semantics as

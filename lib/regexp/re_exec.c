@@ -94,6 +94,7 @@ typedef struct {
   const mrb_regexp_pattern *pat;
   int ncap;               /* actual capture count (num_captures * 2) */
   int *cap_pool;          /* flat: cap_pool[slot * ncap .. (slot+1) * ncap) */
+  int cap_pool_fixed;     /* the pool is the caller's stack block: grow by copying, never realloc */
   int pool_next;          /* next free slot */
   int pool_capa;          /* total slots allocated */
   uint32_t *visited;      /* generation-based */
@@ -125,7 +126,13 @@ pool_alloc(pike_state *s, int *out)
 {
   if (s->pool_next >= s->pool_capa) {
     int new_capa = s->pool_capa * 2;
-    int *grown = (int*)realloc(s->cap_pool, sizeof(int) * new_capa * s->ncap);
+    int *grown;
+    if (s->cap_pool_fixed) {   /* the stack block: the grown pool starts on the heap */
+      grown = (int*)malloc(sizeof(int) * new_capa * s->ncap);
+      if (grown) memcpy(grown, s->cap_pool, sizeof(int) * s->pool_capa * s->ncap);
+      s->cap_pool_fixed = 0;
+    }
+    else grown = (int*)realloc(s->cap_pool, sizeof(int) * new_capa * s->ncap);
     if (!grown) { s->oom = TRUE; return FALSE; }
     s->cap_pool = grown;
     s->pool_capa = new_capa;
@@ -388,19 +395,27 @@ pike_vm(const mrb_regexp_pattern *pat,
   s.pass_span = RE_PASS_SPAN(pat->loop_depth);
   s.gen = s.pass_span;
   s.key_max = s.gen + s.pass_span - 1;
+  /* The capture pool and the result slots are two mallocs per match, and a
+     page render matches a few hundred times; a small one lives on the stack
+     instead (the pool may still grow off it, see pool_alloc). */
+  int cap_pool_sb[128], result_caps_sb[64];
+  int cap_pool_on_stack = 0;
   if (match_only) {
     s.pool_capa = 1;
     s.pool_next = 0;
-    s.cap_pool = (int*)malloc(sizeof(int) * ncap);
+    if ((size_t)ncap <= sizeof cap_pool_sb / sizeof cap_pool_sb[0]) { s.cap_pool = cap_pool_sb; cap_pool_on_stack = 1; }
+    else s.cap_pool = (int*)malloc(sizeof(int) * ncap);
     s.result_caps = NULL;
   }
   else {
     s.pool_capa = list_capa * 2;
     s.pool_next = 0;
-    s.cap_pool = (int*)malloc(sizeof(int) * s.pool_capa * ncap);
-    s.result_caps = (int*)malloc(sizeof(int) * ncap);
+    if ((size_t)s.pool_capa * ncap <= sizeof cap_pool_sb / sizeof cap_pool_sb[0]) { s.cap_pool = cap_pool_sb; cap_pool_on_stack = 1; }
+    else s.cap_pool = (int*)malloc(sizeof(int) * s.pool_capa * ncap);
+    s.result_caps = (size_t)ncap <= sizeof result_caps_sb / sizeof result_caps_sb[0] ? result_caps_sb : (int*)malloc(sizeof(int) * ncap);
     memset(s.result_caps, -1, sizeof(int) * ncap);
   }
+  s.cap_pool_fixed = cap_pool_on_stack;
 
   re_threadlist curr, next;
   if (use_cache) {
@@ -601,8 +616,8 @@ pike_vm(const mrb_regexp_pattern *pat,
     free(next.threads);
     free(s.visited);
   }
-  free(s.cap_pool);
-  if (s.result_caps) free(s.result_caps);
+  if (s.cap_pool != cap_pool_sb) free(s.cap_pool);
+  if (s.result_caps && s.result_caps != result_caps_sb) free(s.result_caps);
 
   return ret;
 }
@@ -1184,7 +1199,9 @@ backtrack_exec(const mrb_regexp_pattern *pat,
   /* One block for the capture slots and the per-pc iteration records, so a
      search asks the allocator once for the state whose size the pattern
      fixes; the two stacks, whose size the subject fixes, grow on their own. */
-  int *caps = (int*)malloc(sizeof(int) * (ncap + (int)pat->code_len));
+  int caps_sb[256];
+  int *caps = (size_t)(ncap + (int)pat->code_len) <= sizeof caps_sb / sizeof caps_sb[0]
+              ? caps_sb : (int*)malloc(sizeof(int) * (ncap + (int)pat->code_len));
   if (!caps) return 0;
 
   bt_state m;
@@ -1243,7 +1260,7 @@ backtrack_exec(const mrb_regexp_pattern *pat,
        finds there: that would be a different match reported as this one. */
     if (r == BT_LIMIT) break;
   }
-  free(caps);
+  if (caps != caps_sb) free(caps);
   free(m.cp);
   free(m.undo);
   return ret;
