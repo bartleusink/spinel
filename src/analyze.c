@@ -7482,6 +7482,20 @@ static int narrow_object_arrays(Compiler *c) {
     int bn = 0; const int *bl = nt_arr(nt, id, "body", &bn);
     for (int i = 0; i < bn; i++) if (bl[i] >= 0 && bl[i] < nc) value_ok[bl[i]] = 1;
   }
+  /* The tail of a method body is the method's value, not a discarded
+     statement. When the method has a return slot, step 5b classifies the
+     tail; when it has none (its return was still unknown this round because
+     the callee is defined further down the file, or is not an array at all)
+     the value leaves through a return this pass does not model, so the
+     callee's slot must die here rather than narrow under a caller whose own
+     uses were never vetted (#4490). */
+  for (int s = 0; s < c->nscopes; s++) {
+    Scope *sc = &c->scopes[s];
+    if (sc->def_node < 0 || !sc->name || sc->body < 0) continue;
+    if (oa_find(sl, n, s, NULL) >= 0) continue;
+    int bn = 0; const int *bl = nt_arr(nt, sc->body, "body", &bn);
+    if (bn > 0 && bl[bn - 1] >= 0 && bl[bn - 1] < nc) value_ok[bl[bn - 1]] = 0;
+  }
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "LocalVariableWriteNode")) continue;
