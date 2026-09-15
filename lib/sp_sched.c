@@ -1566,9 +1566,17 @@ static void *sp_trim_thread_main(void *arg) {
 static void sp_trim_thread_start(void) {
   pthread_t t;
   pthread_attr_t at; pthread_attr_init(&at);
-  pthread_attr_setstacksize(&at, 256 * 1024);
+  /* 1 MB, like the sweepers: a thread's stack also carries the runtime's
+     static TLS, and the mark stack there alone is half a megabyte, so the
+     256 KB this asked for was refused by pthread_create (EINVAL). The
+     trimmer then never started, and every full cycle's malloc_trim ran
+     inline under the barrier -- 40 ms each, the whole reason the thread
+     exists -- with nothing saying so. */
+  pthread_attr_setstacksize(&at, 1024 * 1024);
   pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-  if (pthread_create(&t, &at, sp_trim_thread_main, NULL) == 0) sp_gc_trimmer_on = 1;
+  int rc = pthread_create(&t, &at, sp_trim_thread_main, NULL);
+  if (rc == 0) sp_gc_trimmer_on = 1;
+  else if (sp_gc_ph_on) fprintf(stderr, "[gcph] trimmer thread did not start: %s\n", strerror(rc));
   pthread_attr_destroy(&at);
 }
 #else

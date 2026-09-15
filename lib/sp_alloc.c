@@ -411,6 +411,10 @@ static void sp_gc_stats_emit(void) {
   if (sp_gc_ph_conc_wall > 0)
     fprintf(stderr, "[gcph] concurrent sweep, applied under the barrier: objects %.3fs  strings %.3fs  slab release %.3fs\n",
             sp_gc_ph_apply_obj, sp_gc_ph_apply_str, sp_gc_ph_apply_release);
+  { extern unsigned long long sp_gc_ph_trim_req, sp_gc_ph_trim_inline; extern double sp_gc_ph_trim_inline_t;
+    if (sp_gc_ph_trim_req > 0)
+      fprintf(stderr, "[gcph] trim: %llu requests, %llu run inline (%.3fs), trimmer thread %s\n",
+              sp_gc_ph_trim_req, sp_gc_ph_trim_inline, sp_gc_ph_trim_inline_t, sp_gc_trimmer_on ? "on" : "off"); }
   /* The mark, one level down, because "mark grew" has two causes that want
      different answers: more ROOTS to scan and more GRAPH to trace. `fibers` is
      every live fiber's saved roots, walked serially, and it grows with the

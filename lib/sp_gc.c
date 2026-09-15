@@ -861,12 +861,14 @@ static double sp_gc_stat_now(void){
 /* What malloc still holds is container buffers; the objects and strings
    are the slab's. A trim is still a 60 ms walk of every arena on a
    32-worker box, so once a second is the cadence (SPINEL_GC_TRIM_SEC). */
+unsigned long long sp_gc_ph_trim_req = 0, sp_gc_ph_trim_inline = 0; double sp_gc_ph_trim_inline_t = 0;
 static void sp_gc_trim_request(void){
   static double last_trim=0, trim_every=-1;
   if(trim_every<0){ const char*e=getenv("SPINEL_GC_TRIM_SEC"); trim_every=(e&&*e)?atof(e):1.0; }
   double now=sp_gc_stat_now();
   if(trim_every>0&&now-last_trim>=trim_every){
     last_trim=now;
+    if (sp_gc_ph_on) sp_gc_ph_trim_req++;
 #ifdef SP_THREADS
     /* Not here: a trim walks every arena, 60 ms on a 32-worker box, and
        under stop-the-world that was the longest pause the server had (p99
@@ -874,7 +876,7 @@ static void sp_gc_trim_request(void){
        it beside the running program, where a mutator that lands on the
        arena being walked waits a few milliseconds for that arena alone. */
     if (sp_gc_trimmer_on) __atomic_store_n(&sp_gc_trim_wanted, 1, __ATOMIC_RELEASE);
-    else malloc_trim(0);   /* no worker pool yet, so no trimmer: a single-threaded program on the mt archive */
+    else { double t0 = sp_gc_ph_on ? sp_gc_stat_now() : 0; malloc_trim(0); if (sp_gc_ph_on) { sp_gc_ph_trim_inline++; sp_gc_ph_trim_inline_t += sp_gc_stat_now() - t0; } }   /* no worker pool yet, so no trimmer: a single-threaded program on the mt archive */
 #else
     malloc_trim(0);
 #endif
