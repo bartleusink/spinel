@@ -6756,6 +6756,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           TyKind pt = TY_UNKNOWN;
           LocalVar *pv = scope_local(ms, ms->pnames[a]);
           if (pv) pt = pv->type;
+          /* a parameter inference left unknown is spelled sp_RbVal in the
+             signature (emit_method's rule), so the argument has to arrive
+             boxed: the proc form of Net::HTTP#request, whose `req` is a Post
+             at one site and a Get at another, took a raw sp_Post * (#4499) */
+          if (pt == TY_UNKNOWN) pt = TY_POLY;
           /* post-*rest required params take from the tail of the call args */
           int src = (r_idx >= 0 && npost > 0 && a > r_idx) ? rest_end + (a - r_idx - 1) : a;
           if (src < pos_argc) {
