@@ -4746,6 +4746,25 @@ static sp_RbVal sp_fmt_named_ref(sp_PolyArray *a, const char *nm, char nclose, c
    expand each element of the (any-kind) array as its own argument. puts
    recurses into array elements, as CRuby does. */
 /* puts over an argument list: arrays flatten, an empty one writes nothing */
+/* One `puts` line as ONE locked stdio sequence. The emitters used to write
+   the text and the newline as two calls (fputs, then putchar), and between
+   the two another worker's puts could land: threads logging concurrently
+   produced lines glued together ("1/10/0", then an empty line). The stream
+   lock makes the pair atomic; the argument is already evaluated by the time
+   it is called, so nothing that could park a green thread runs under it. */
+static void sp_puts_line(const char *s) {
+  flockfile(stdout);
+  if (s) fputs(s, stdout);
+  putc_unlocked('\n', stdout);
+  funlockfile(stdout);
+}
+/* Kernel#puts on a String: a trailing newline is not doubled. */
+static void sp_puts_str_line(const char *s) {
+  flockfile(stdout);
+  if (s) fputs(s, stdout);
+  if (!s || !*s || s[strlen(s) - 1] != '\n') putc_unlocked('\n', stdout);
+  funlockfile(stdout);
+}
 static void sp_puts_elems(sp_RbVal a) {
   sp_int n = sp_poly_arr_len(a);
   if (sp_poly_recur_seen(SP_POLY_RECUR_PUTS, a.v.p, NULL)) { puts("[...]"); return; }
@@ -4753,9 +4772,7 @@ static void sp_puts_elems(sp_RbVal a) {
   for (sp_int i = 0; i < n; i++) {
     sp_RbVal e = sp_poly_arr_get(a, i);
     if (e.tag == SP_TAG_OBJ && sp_poly_is_array_kind(e.cls_id)) { sp_puts_elems(e); continue; }
-    const char *s = sp_poly_to_s(e);
-    if (s) fputs(s, stdout);
-    if (!s || !*s || s[strlen(s) - 1] != 10) putchar(10);
+    sp_puts_str_line(sp_poly_to_s(e));
   }
   sp_poly_recur_pop(pmark);
 }

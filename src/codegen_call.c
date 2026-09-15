@@ -22046,7 +22046,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       buf_puts(b, "); ");
     }
     buf_printf(b, "for (sp_int _i%d = 0; _i%d < _t%d->len; _i%d++) { "
-                  "fputs(sp_poly_inspect(_t%d->data[_i%d]), stdout); putchar('\\n'); } _t%d; })",
+                  "sp_puts_line(sp_poly_inspect(_t%d->data[_i%d])); } _t%d; })",
                t, t, t, t, t, t, t);
     return;
   }
@@ -22055,7 +22055,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     int t = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", t);
     emit_boxed(c, argv[0], b);
-    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); fputs(sp_poly_inspect(_t%d), stdout); putchar('\\n'); ", t, t);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_puts_line(sp_poly_inspect(_t%d)); ", t, t);
     char tv[16]; snprintf(tv, sizeof tv, "_t%d", t);
     emit_unbox_text(c, at, tv, b);
     buf_puts(b, "; })");

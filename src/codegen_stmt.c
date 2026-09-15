@@ -33,7 +33,7 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   else if (t == TY_BIGINT) {
     buf_puts(b, "{ const char *_bs = sp_bigint_to_s("); emit_expr(c, arg, b);
-    buf_puts(b, "); if (_bs) fputs(_bs, stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); if (_bs) sp_puts_line(_bs); }\n");
   }
   else if (t == TY_MATCHDATA) {
     /* puts uses to_s: the full matched substring; nil (NULL) prints blank */
@@ -42,12 +42,12 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "; puts(_t%d ? sp_MatchData_to_s(_t%d) : \"\"); }\n", tmd, tmd);
   }
   else if (t == TY_RATIONAL) {
-    buf_puts(b, "fputs(sp_rational_to_s("); emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line(sp_rational_to_s("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
   }
   else if (t == TY_COMPLEX) {
-    buf_puts(b, "fputs(sp_complex_to_s("); emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line(sp_complex_to_s("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
   }
   else if (t == TY_CURRY) {
     /* a fully-applied curry realizes to its (int) result */
@@ -56,11 +56,11 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   else if (t == TY_FLOAT) {
     buf_puts(b, "{ const char *_fs = sp_float_opt_to_s("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(_fs, stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_line(_fs); }\n");
   }
   else if (t == TY_STRING) {
     buf_puts(b, "{ const char *_ps = (const char *)("); emit_expr(c, arg, b);
-    buf_puts(b, "); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_str_line(_ps); }\n");
   }
   else if (t == TY_BOOL) {
     buf_puts(b, "puts(("); emit_expr(c, arg, b); buf_puts(b, ") ? \"true\" : \"false\");\n");
@@ -80,14 +80,14 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     if (t == TY_INT_ARRAY)
       buf_printf(b, "printf(\"%%lld\\n\", (long long)sp_IntArray_get(%s, _t%d));\n", a, ti);
     else if (t == TY_FLOAT_ARRAY)
-      buf_printf(b, "{ const char *_fs = sp_float_to_s(sp_FloatArray_get(%s, _t%d)); fputs(_fs, stdout); putchar('\\n'); }\n", a, ti);
+      buf_printf(b, "{ const char *_fs = sp_float_to_s(sp_FloatArray_get(%s, _t%d)); sp_puts_line(_fs); }\n", a, ti);
     else /* str */
-      buf_printf(b, "{ const char *_ps = sp_StrArray_get(%s, _t%d); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n", a, ti);
+      buf_printf(b, "{ const char *_ps = sp_StrArray_get(%s, _t%d); sp_puts_str_line(_ps); }\n", a, ti);
     free(ab.p);
   }
   else if (t == TY_EXCEPTION) {
     buf_puts(b, "{ const char *_ps = sp_exc_message("); emit_expr(c, arg, b);
-    buf_puts(b, "); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_str_line(_ps); }\n");
   }
   else if (t == TY_REGEX) {
     buf_puts(b, "puts(sp_re_to_s_str((void *)("); emit_expr(c, arg, b); buf_puts(b, ")));\n");
@@ -96,23 +96,23 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
   else if (t == TY_TIME) {
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_Time _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; const char *_ts = sp_time_to_s_v(_t%d); fputs(_ts, stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; const char *_ts = sp_time_to_s_v(_t%d); sp_puts_line(_ts); }\n", tv);
   }
   else if (t == TY_RANGE) {
     /* puts of a Range renders its to_s ("first..last"), then a newline. */
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_Range _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_Range_inspect(&_t%d), stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; sp_puts_line(sp_Range_inspect(&_t%d)); }\n", tv);
   }
   else if (t == TY_FLOAT_RANGE) {
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_FloatRange _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_frange_inspect(_t%d), stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; sp_puts_line(sp_frange_inspect(_t%d)); }\n", tv);
   }
   else if (t == TY_STR_RANGE) {
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_StrRange _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_srange_inspect(_t%d), stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; sp_puts_line(sp_srange_inspect(_t%d)); }\n", tv);
   }
   else if (t == TY_CLASS) {
     int _tc = ++g_tmp;
@@ -137,7 +137,7 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     int nts = comp_native_method_find(c, ty_object_class(t), "to_s", 0, 0);
     buf_printf(b, "{ const char *_ps = %s(", c->native_methods[nts].csym);
     emit_expr(c, arg, b);
-    buf_puts(b, "); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_str_line(_ps); }\n");
   }
   else if (ty_is_object(t) && obj_str_cname(c, ty_object_class(t), 0)) {
     /* an object with #to_s (user-defined or a generated struct/data one) */
@@ -163,7 +163,7 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
       buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
       buf_printf(b, "_t%d", tt);
     }
-    buf_puts(b, ")); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
+    buf_puts(b, ")); sp_puts_str_line(_ps); }\n");
   }
   else if (t == TY_IO || t == TY_DIR) {
     /* a handle renders as Object's to_s does for it (the protocol arm's render) */
@@ -175,7 +175,7 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     int cid = ty_object_class(t);
     const char *rn = class_ruby_name(c, cid) ? class_ruby_name(c, cid) : c->classes[cid].name;
     buf_printf(b, "{ void *_po = (void *)("); emit_expr(c, arg, b);
-    buf_printf(b, "); fputs(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"\", stdout); putchar('\\n'); }\n", rn);
+    buf_printf(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"\"); }\n", rn);
   }
   else if (nt_type(c->nt, arg) && sp_streq(nt_type(c->nt, arg), "ArrayNode") &&
            ({ int _n = 0; nt_arr(c->nt, arg, "elements", &_n); _n == 0; })) {
@@ -351,7 +351,7 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     emit_boxed(c, arg, &hb);
     if (hb.p && strstr(hb.p, "sp_PolyPolyHash_new")) {
       emit_indent(b, indent);
-      buf_printf(b, "fputs(sp_poly_inspect(%s), stdout); putchar('\\n');\n", hb.p);
+      buf_printf(b, "sp_puts_line(sp_poly_inspect(%s));\n", hb.p);
       free(hb.p);
       return;
     }
@@ -382,7 +382,7 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
           ty_is_object(_prt) && ty_object_class(_prt) >= 0 &&
           comp_reader_in_chain(c, ty_object_class(_prt), "class", NULL); })) {
     emit_indent(b, indent);
-    buf_puts(b, "fputs("); emit_expr(c, arg, b); buf_puts(b, ", stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line("); emit_expr(c, arg, b); buf_puts(b, ");\n");
     return;
   }
   emit_indent(b, indent);
@@ -394,46 +394,46 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   else if (t == TY_FLOAT) {
     buf_puts(b, "{ const char *_fs = sp_float_opt_inspect("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(_fs, stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_line(_fs); }\n");
   }
   else if (t == TY_STRING) {
     /* a nullable string (NULL) prints "nil" */
     int tv = ++g_tmp;
     buf_printf(b, "{ const char *_t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(_t%d ? sp_str_inspect(_t%d) : \"nil\", stdout); putchar('\\n'); }\n", tv, tv);
+    buf_printf(b, "; sp_puts_line(_t%d ? sp_str_inspect(_t%d) : \"nil\"); }\n", tv, tv);
   }
   else if (t == TY_BOOL) {
     buf_puts(b, "puts(("); emit_expr(c, arg, b); buf_puts(b, ") ? \"true\" : \"false\");\n");
   }
   else if (t == TY_SYMBOL) {
-    buf_puts(b, "fputs(sp_sym_inspect(");
+    buf_puts(b, "sp_puts_line(sp_sym_inspect(");
     emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "));\n");
   }
   else if (t == TY_EXCEPTION) {
     /* p of an exception inspects as #<ClassName: message>; a NULL receiver
        (nil $! outside a rescue) prints "nil". */
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_Exception *_t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(_t%d ? sp_sprintf(\"#<%%s: %%s>\", sp_exc_class_name(_t%d), sp_exc_message(_t%d)) : \"nil\", stdout); putchar('\\n'); }\n", tv, tv, tv);
+    buf_printf(b, "; sp_puts_line(_t%d ? sp_sprintf(\"#<%%s: %%s>\", sp_exc_class_name(_t%d), sp_exc_message(_t%d)) : \"nil\"); }\n", tv, tv, tv);
   }
   else if (ty_is_array(t) && array_kind(t)) {
-    buf_printf(b, "fputs(sp_%sArray_inspect(", array_kind(t));
+    buf_printf(b, "sp_puts_line(sp_%sArray_inspect(", array_kind(t));
     emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "));\n");
   }
   else if (ty_is_hash(t) && ty_hash_cname(t)) {
-    buf_printf(b, "fputs(sp_%sHash_inspect(", ty_hash_cname(t));
+    buf_printf(b, "sp_puts_line(sp_%sHash_inspect(", ty_hash_cname(t));
     emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "));\n");
   }
   else if (t == TY_POLY_ARRAY) {
-    buf_puts(b, "fputs(sp_PolyArray_inspect("); emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line(sp_PolyArray_inspect("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
   }
   else if (t == TY_POLY) {
-    buf_puts(b, "fputs(sp_poly_inspect("); emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line(sp_poly_inspect("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
   }
   else if (t == TY_UNKNOWN) {
     /* An unresolved call (`OpenStruct.new(..)` without `require "ostruct"`, or
@@ -442,16 +442,16 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
        compile in argument position, not just as a statement. Box it (emit_boxed
        evaluates the raise, then yields nil) and inspect; the print never runs
        because the raise unwinds first (#3135 without require). */
-    buf_puts(b, "fputs(sp_poly_inspect("); emit_boxed(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line(sp_poly_inspect("); emit_boxed(c, arg, b);
+    buf_puts(b, "));\n");
   }
   else if (t == TY_COMPLEX) {
-    buf_puts(b, "fputs(sp_complex_inspect("); emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line(sp_complex_inspect("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
   }
   else if (t == TY_RATIONAL) {
-    buf_puts(b, "fputs(sp_rational_inspect("); emit_expr(c, arg, b);
-    buf_puts(b, "), stdout); putchar('\\n');\n");
+    buf_puts(b, "sp_puts_line(sp_rational_inspect("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
   }
   else if (t == TY_REGEX) {
     buf_puts(b, "puts(sp_re_inspect_str((void *)("); emit_expr(c, arg, b); buf_puts(b, ")));\n");
@@ -467,7 +467,7 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
   else if (t == TY_TIME) {
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_Time _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_time_inspect_v(_t%d), stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; sp_puts_line(sp_time_inspect_v(_t%d)); }\n", tv);
   }
   else if (t == TY_RANGE) {   /* a Range inspects as "first..last" / "first...last" */
     /* A string-endpoint range has no int sp_Range value; inspect its literal
@@ -477,39 +477,39 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
       int lo = nt_ref(c->nt, rn, "left"), hi = nt_ref(c->nt, rn, "right");
       if (lo >= 0 && hi >= 0 && comp_ntype(c, lo) == TY_STRING && comp_ntype(c, hi) == TY_STRING) {
         int excl = (int)(nt_int(c->nt, rn, "flags", 0) & 4) ? 1 : 0;
-        buf_puts(b, "fputs(sp_sprintf(\"%s");
+        buf_puts(b, "sp_puts_line(sp_sprintf(\"%s");
         buf_puts(b, excl ? "..." : "..");
         buf_puts(b, "%s\", sp_str_inspect("); emit_expr(c, lo, b);
         buf_puts(b, "), sp_str_inspect("); emit_expr(c, hi, b);
-        buf_puts(b, ")), stdout); putchar('\\n');\n");
+        buf_puts(b, ")));\n");
         return;
       }
     }
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_Range _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_Range_inspect(&_t%d), stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; sp_puts_line(sp_Range_inspect(&_t%d)); }\n", tv);
   }
   else if (t == TY_FLOAT_RANGE) {   /* a Float range inspects as "1.0..3.0" */
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_FloatRange _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_frange_inspect(_t%d), stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; sp_puts_line(sp_frange_inspect(_t%d)); }\n", tv);
   }
   else if (t == TY_STR_RANGE) {   /* a String range inspects as "\"a\"..\"e\"" */
     int tv = ++g_tmp;
     buf_printf(b, "{ sp_StrRange _t%d = ", tv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_srange_inspect(_t%d), stdout); putchar('\\n'); }\n", tv);
+    buf_printf(b, "; sp_puts_line(sp_srange_inspect(_t%d)); }\n", tv);
   }
   else if (t == TY_CLASS) {   /* a Class/Module inspects as its name, except a
                                  keyword-init Struct class, which carries the
                                  `(keyword_init: true)` suffix (#3947) */
     int cv = ++g_tmp;
     buf_printf(b, "{ sp_Class _t%d = ", cv); emit_expr(c, arg, b);
-    buf_printf(b, "; fputs(sp_class_inspect_name(_t%d), stdout); putchar('\\n'); }\n", cv);
+    buf_printf(b, "; sp_puts_line(sp_class_inspect_name(_t%d)); }\n", cv);
   }
   else if (t == TY_BIGINT) {
     /* Integer#inspect == #to_s, so a bignum prints the same as puts/print. */
     buf_puts(b, "{ const char *_bs = sp_bigint_to_s("); emit_expr(c, arg, b);
-    buf_puts(b, "); if (_bs) fputs(_bs, stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); if (_bs) sp_puts_line(_bs); }\n");
   }
   else if (t == TY_NIL || t == TY_VOID) {
     buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, "); fputs(\"nil\\n\", stdout);\n");
@@ -524,37 +524,37 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     const char *cn = obj_str_cname(c, ty_object_class(t), 1);
     int pv = ++g_tmp;
     buf_printf(b, "{ sp_%s *_t%d = (sp_%s *)(", cn, pv, cn); emit_expr(c, arg, b);
-    buf_printf(b, "); fputs(_t%d ? sp_%s_inspect(_t%d) : \"nil\", stdout); putchar('\\n'); }\n", pv, cn, pv);
+    buf_printf(b, "); sp_puts_line(_t%d ? sp_%s_inspect(_t%d) : \"nil\"); }\n", pv, cn, pv);
   }
   else if (t == TY_PROC) {
     buf_puts(b, "{ sp_Proc *_pp = ("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(sp_proc_inspect(_pp), stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_line(sp_proc_inspect(_pp)); }\n");
   }
   else if (t == TY_CURRY) {
     /* a curried proc reports as a Proc, lambda-ness from its source */
     buf_puts(b, "{ sp_Curry *_pc = ("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(_pc ? sp_sprintf(_pc->target && _pc->target->lambda_p ?"
+    buf_puts(b, "); sp_puts_line(_pc ? sp_sprintf(_pc->target && _pc->target->lambda_p ?"
               " \"#<Proc:0x%016llx (lambda)>\" : \"#<Proc:0x%016llx>\","
-              " (unsigned long long)(uintptr_t)_pc) : \"nil\", stdout); putchar('\\n'); }\n");
+              " (unsigned long long)(uintptr_t)_pc) : \"nil\"); }\n");
   }
   else if (t == TY_METHOD) {
     /* the stamped #<Method: ...> rendering; a NULL (nil super_method) prints nil */
     buf_puts(b, "{ sp_BoundMethod *_pm = ("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(_pm ? sp_method_desc_cstr(_pm) : \"nil\", stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_line(_pm ? sp_method_desc_cstr(_pm) : \"nil\"); }\n");
   }
   else if (t == TY_ENUMERATOR) {
     buf_puts(b, "{ sp_Enumerator *_pe = ("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(sp_enum_inspect(_pe), stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_line(sp_enum_inspect(_pe)); }\n");
   }
   else if (t == TY_IO) {
     /* a nullable handle: the readiness family answers nil on timeout */
     int iv = ++g_tmp;
     buf_printf(b, "{ sp_File *_t%d = (", iv); emit_expr(c, arg, b);
-    buf_printf(b, "); fputs(_t%d ? sp_File_inspect(_t%d) : \"nil\", stdout); putchar('\\n'); }\n", iv, iv);
+    buf_printf(b, "); sp_puts_line(_t%d ? sp_File_inspect(_t%d) : \"nil\"); }\n", iv, iv);
   }
   else if (t == TY_RANDOM) {
     buf_puts(b, "{ sp_Random *_pr = ("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(sp_Random_inspect(_pr), stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_line(sp_Random_inspect(_pr)); }\n");
   }
   else if (t == TY_DIR) {
     /* #<Dir:PATH>, the same rendering Dir#inspect emits (#3395: reachable now
@@ -567,20 +567,20 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   else if (t == TY_OPENSTRUCT) {
     buf_puts(b, "{ sp_OpenStruct *_po = ("); emit_expr(c, arg, b);
-    buf_puts(b, "); fputs(_po ? sp_OpenStruct_inspect(_po) : \"nil\", stdout); putchar('\\n'); }\n");
+    buf_puts(b, "); sp_puts_line(_po ? sp_OpenStruct_inspect(_po) : \"nil\"); }\n");
   }
   else if (t == TY_EXCEPTION) {
     /* boxed-path inspect: NULL prints nil, else #<Class: message> */
     int ev = ++g_tmp;
     buf_printf(b, "{ sp_Exception *_t%d = (sp_Exception *)(", ev); emit_expr(c, arg, b);
-    buf_printf(b, "); fputs(_t%d ? sp_sprintf(\"#<%%s: %%s>\", sp_exc_class_name(_t%d), sp_exc_message(_t%d)) : \"nil\", stdout); putchar('\\n'); }\n", ev, ev, ev);
+    buf_printf(b, "); sp_puts_line(_t%d ? sp_sprintf(\"#<%%s: %%s>\", sp_exc_class_name(_t%d), sp_exc_message(_t%d)) : \"nil\"); }\n", ev, ev, ev);
   }
   else if (t == TY_MUTEX || t == TY_QUEUE || t == TY_CONDVAR) {
     /* the concurrency handles render as Object's default does (#4421) */
     const char *hn = t == TY_MUTEX ? "Thread::Mutex"
                    : t == TY_QUEUE ? "Thread::Queue" : "Thread::ConditionVariable";
     buf_puts(b, "{ void *_po = (void *)("); emit_expr(c, arg, b);
-    buf_printf(b, "); fputs(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"nil\", stdout); putchar('\\n'); }\n", hn);
+    buf_printf(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"nil\"); }\n", hn);
   }
   else if (ty_is_object(t)) {
     /* p obj: a user #inspect wins; otherwise the generated per-class ivar
@@ -590,11 +590,11 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     if (icn) {
       buf_printf(b, "{ const char *_pi = sp_%s_inspect((sp_%s *)(", icn, icn);
       emit_expr(c, arg, b);
-      buf_puts(b, ")); fputs(_pi ? _pi : \"nil\", stdout); putchar('\\n'); }\n");
+      buf_puts(b, ")); sp_puts_line(_pi ? _pi : \"nil\"); }\n");
     }
     else {
       buf_printf(b, "{ void *_po = (void *)("); emit_expr(c, arg, b);
-      buf_printf(b, "); fputs(_po ? sp_obj_inspect_sw(%d, _po) : \"nil\", stdout); putchar('\\n'); }\n", cid);
+      buf_printf(b, "); sp_puts_line(_po ? sp_obj_inspect_sw(%d, _po) : \"nil\"); }\n", cid);
     }
   }
   else {
@@ -645,7 +645,7 @@ int emit_output_spilled(Compiler *c, const char *name, int argc, const int *argv
   if (sp_streq(name, "puts"))       buf_printf(b, "sp_puts_elems(sp_box_poly_array(_t%d));\n", t);
   else if (sp_streq(name, "print")) buf_printf(b, "sp_splat_print(sp_box_poly_array(_t%d));\n", t);
   else buf_printf(b, "for (sp_int _i%d = 0; _i%d < _t%d->len; _i%d++) { "
-                     "fputs(sp_poly_inspect(_t%d->data[_i%d]), stdout); putchar('\\n'); }\n", t, t, t, t, t, t);
+                     "sp_puts_line(sp_poly_inspect(_t%d->data[_i%d])); }\n", t, t, t, t, t, t);
   emit_indent(b, indent); buf_puts(b, "}\n");
   return 1;
 }

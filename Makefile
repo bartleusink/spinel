@@ -42,7 +42,7 @@ RBS_SRC      = $(wildcard $(RBS_DIR)/src/*.c) $(wildcard $(RBS_DIR)/src/util/*.c
 RBS_OBJ      = $(patsubst $(RBS_DIR)/src/%.c,build/rbs/%.o,$(RBS_SRC))
 RBS_LIB      = build/librbs.a
 
-.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
+.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test gc-str-major-test threaded-render-test gc-locality-test \
         gate-optcarrot clean install uninstall deps tools
@@ -743,7 +743,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test thread-puts-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -1011,6 +1011,22 @@ gc-obj-budget-test: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 # it read a header off the stack (#4391). Run under GC stress because the fault
 # needs a collection while the proc is live -- with stress that is every
 # allocation, which makes it deterministic; without it the program is quiet.
+# ---- puts from several threads lands whole lines ----
+# The text and the newline used to be two stdio calls, and another worker's
+# puts could land between them. The interleaving of whole lines is free to
+# vary, so the check is by shape: every line is W/I and there are 8 x 300.
+thread-puts-test: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-tputs.XXXXXX); ok=1; \
+	$(SPINEL) test/threads/puts_lines_atomic.rb -o "$$tmp/p" >/dev/null 2>&1 || \
+	  { echo "thread-puts-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	for r in 1 2 3; do \
+	  $(TIMEOUT60) "$$tmp/p" > "$$tmp/out" 2>/dev/null || { echo "thread-puts-test: FAIL (crashed or timed out)"; ok=0; }; \
+	  n=$$(wc -l < "$$tmp/out"); bad=$$(grep -vcE '^[0-7]/[0-9]+$$' "$$tmp/out"); \
+	  [ "$$n" -eq 2400 ] && [ "$$bad" -eq 0 ] || { echo "thread-puts-test: FAIL (run $$r: $$n lines, $$bad malformed)"; grep -vE '^[0-7]/[0-9]+$$' "$$tmp/out" | head -3; ok=0; }; \
+	done; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "thread-puts-test: pass"; else exit 1; fi
+
 byref-capture-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-byrefcap.XXXXXX); ok=1; \
 	$(SPINEL) test/rbs-seed/byref_capture_scan.rb --rbs test/rbs-seed/sig -o "$$tmp/b" >/dev/null 2>&1 || \
