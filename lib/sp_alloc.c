@@ -859,7 +859,7 @@ void sp_PolyArray_pool_recycle(sp_gc_hdr *h) {
   n = sp_polyarr_pool_count;
 #endif
   if (n >= SP_POLYARR_POOL_MAX || a->cap > SP_POLYARR_POOL_KEEP_CAP) {
-    free(a->data);
+    sp_pl_free(a->data);
     sp_slab_free(h);
     return;
   }

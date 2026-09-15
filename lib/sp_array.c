@@ -25,7 +25,7 @@
    cap (1 << 30 elements; ~8 GB at 8 bytes/elem). Without the cap,
    `(1..INTPTR_MAX).to_a` overflows the realloc size_t to a tiny number,
    then writes past the allocation. */
-sp_IntArray*sp_IntArray_from_range(sp_int s,sp_int e){sp_IntArray*a=sp_IntArray_new();sp_int n=e-s+1;if(n<0)n=0;if(n>(sp_int)(1LL<<30))n=(sp_int)(1LL<<30);if(n>a->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*a->cap);h->size-=sizeof(sp_int)*a->cap;a->cap=n;a->data=(sp_int*)realloc(a->data,sizeof(sp_int)*a->cap);h->size+=sizeof(sp_int)*a->cap;sp_gc_bytes_add(sizeof(sp_int)*a->cap);}for(sp_int i=0;i<n;i++)a->data[i]=s+i;a->len=n;return a;}
+sp_IntArray*sp_IntArray_from_range(sp_int s,sp_int e){sp_IntArray*a=sp_IntArray_new();sp_int n=e-s+1;if(n<0)n=0;if(n>(sp_int)(1LL<<30))n=(sp_int)(1LL<<30);if(n>a->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*a->cap);h->size-=sizeof(sp_int)*a->cap;a->cap=n;a->data=(sp_int*)sp_pl_realloc(a->data,sizeof(sp_int)*a->cap);h->size+=sizeof(sp_int)*a->cap;sp_gc_bytes_add(sizeof(sp_int)*a->cap);}for(sp_int i=0;i<n;i++)a->data[i]=s+i;a->len=n;return a;}
 /* (beg..end).step(step) materialised as an IntArray. step==0 raises like
    CRuby; a negative step descends; exclusive ranges drop the endpoint. The
    loop tests the bound directly and guards v+=step, so a range near the
@@ -62,7 +62,7 @@ sp_IntArray*sp_IntArray_from_range_step(sp_int beg,sp_int end,sp_int step,sp_int
   }
   return a;
 }
-sp_IntArray*sp_IntArray_dup(sp_IntArray*a){SP_GC_ROOT(a);sp_IntArray*b=sp_IntArray_new();if(a->len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*b->cap);h->size-=sizeof(sp_int)*b->cap;b->cap=a->len;void*nd=realloc(b->data,sizeof(sp_int)*b->cap);if(!nd)sp_oom_die();b->data=(sp_int*)nd;h->size+=sizeof(sp_int)*b->cap;sp_gc_bytes_add(sizeof(sp_int)*b->cap);}memcpy(b->data,a->data+a->start,sizeof(sp_int)*a->len);b->len=a->len;return b;}
+sp_IntArray*sp_IntArray_dup(sp_IntArray*a){SP_GC_ROOT(a);sp_IntArray*b=sp_IntArray_new();if(a->len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*b->cap);h->size-=sizeof(sp_int)*b->cap;b->cap=a->len;void*nd=sp_pl_realloc(b->data,sizeof(sp_int)*b->cap);if(!nd)sp_oom_die();b->data=(sp_int*)nd;h->size+=sizeof(sp_int)*b->cap;sp_gc_bytes_add(sizeof(sp_int)*b->cap);}memcpy(b->data,a->data+a->start,sizeof(sp_int)*a->len);b->len=a->len;return b;}
 /* a[start, len] / a[start..end] for IntArray. Negative start counts from
    the end. start past the array length yields an empty result; len is
    clamped so we never read past the source. CRuby returns nil for
@@ -77,7 +77,7 @@ sp_IntArray*sp_IntArray_dup(sp_IntArray*a){SP_GC_ROOT(a);sp_IntArray*b=sp_IntArr
    heap -- a segfault today on ordinary -O2 for an index CRuby answers fine.
    By this point start is already known to be in [0, N), so N - start cannot
    underflow. */
-sp_IntArray*sp_IntArray_slice(sp_IntArray*a,sp_int start,sp_int len){SP_GC_ROOT(a);if(start<0)start+=a->len;if(start<0)start=0;sp_IntArray*b=sp_IntArray_new();if(start>=a->len||len<=0)return b;if(len>a->len-start)len=a->len-start;if(len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*b->cap);h->size-=sizeof(sp_int)*b->cap;b->cap=len;b->data=(sp_int*)realloc(b->data,sizeof(sp_int)*b->cap);h->size+=sizeof(sp_int)*b->cap;sp_gc_bytes_add(sizeof(sp_int)*b->cap);}memcpy(b->data,a->data+a->start+start,sizeof(sp_int)*len);b->len=len;return b;}
+sp_IntArray*sp_IntArray_slice(sp_IntArray*a,sp_int start,sp_int len){SP_GC_ROOT(a);if(start<0)start+=a->len;if(start<0)start=0;sp_IntArray*b=sp_IntArray_new();if(start>=a->len||len<=0)return b;if(len>a->len-start)len=a->len-start;if(len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*b->cap);h->size-=sizeof(sp_int)*b->cap;b->cap=len;b->data=(sp_int*)sp_pl_realloc(b->data,sizeof(sp_int)*b->cap);h->size+=sizeof(sp_int)*b->cap;sp_gc_bytes_add(sizeof(sp_int)*b->cap);}memcpy(b->data,a->data+a->start+start,sizeof(sp_int)*len);b->len=len;return b;}
 /* a[start..end] / a[start...end] with possibly negative endpoints.
    Normalize end against a->len first; the bare _slice already handles
    negative start. Issue #496. */
@@ -90,7 +90,7 @@ sp_IntArray*sp_IntArray_slice_range(sp_IntArray*a,sp_int start,sp_int end_,sp_in
    And a FROZEN receiver raises before the truncation, not after: every other
    mutator here checks, but replace did not, so `[1, 2].freeze.replace([3, 4])`
    quietly rewrote it. */
-void sp_IntArray_replace(sp_IntArray*dst,sp_IntArray*src){if(dst==src)return;if(dst->frozen){sp_raise_frozen_array_at(dst,SP_BUILTIN_INT_ARRAY);return;}dst->len=0;dst->start=0;if(src->len>dst->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)dst-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*dst->cap);h->size-=sizeof(sp_int)*dst->cap;void*nd=realloc(dst->data,sizeof(sp_int)*src->len);if(!nd){perror("realloc");exit(1);}dst->data=(sp_int*)nd;dst->cap=src->len;h->size+=sizeof(sp_int)*dst->cap;sp_gc_bytes_add(sizeof(sp_int)*dst->cap);}memcpy(dst->data,src->data+src->start,sizeof(sp_int)*src->len);dst->len=src->len;}
+void sp_IntArray_replace(sp_IntArray*dst,sp_IntArray*src){if(dst==src)return;if(dst->frozen){sp_raise_frozen_array_at(dst,SP_BUILTIN_INT_ARRAY);return;}dst->len=0;dst->start=0;if(src->len>dst->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)dst-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*dst->cap);h->size-=sizeof(sp_int)*dst->cap;void*nd=sp_pl_realloc(dst->data,sizeof(sp_int)*src->len);if(!nd){perror("realloc");exit(1);}dst->data=(sp_int*)nd;dst->cap=src->len;h->size+=sizeof(sp_int)*dst->cap;sp_gc_bytes_add(sizeof(sp_int)*dst->cap);}memcpy(dst->data,src->data+src->start,sizeof(sp_int)*src->len);dst->len=src->len;}
 /* arr[start,len] = src / arr[range] = src : remove `len` elements at `start`
    and insert the `srcn` elements of `src` in their place, shifting the tail.
    Reuses push so capacity growth + GC byte accounting stay in one place. src
@@ -116,14 +116,14 @@ void sp_IntArray_splice(sp_IntArray*a,sp_int start,sp_int len,const sp_int*src,s
   if(len==srcn){if(srcn>0)memmove(a->data+a->start+s,src,sizeof(sp_int)*(size_t)srcn);return;}
   SP_GC_ROOT(a);
   sp_int*sb=NULL;
-  if(srcn>0){sb=(sp_int*)malloc(sizeof(sp_int)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,src,sizeof(sp_int)*(size_t)srcn);}
+  if(srcn>0){sb=(sp_int*)sp_pl_alloc(sizeof(sp_int)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,src,sizeof(sp_int)*(size_t)srcn);}
   sp_int tail_from=s+len,tail_n=alen-tail_from;
   sp_int*tb=NULL;
-  if(tail_n>0){tb=(sp_int*)malloc(sizeof(sp_int)*(size_t)tail_n);if(!tb){free(sb);sp_oom_die();}memcpy(tb,a->data+a->start+tail_from,sizeof(sp_int)*(size_t)tail_n);}
+  if(tail_n>0){tb=(sp_int*)sp_pl_alloc(sizeof(sp_int)*(size_t)tail_n);if(!tb){sp_pl_free(sb);sp_oom_die();}memcpy(tb,a->data+a->start+tail_from,sizeof(sp_int)*(size_t)tail_n);}
   a->len=s;
   for(sp_int i=0;i<srcn;i++)sp_IntArray_push(a,sb[i]);
   for(sp_int i=0;i<tail_n;i++)sp_IntArray_push(a,tb[i]);
-  free(sb);free(tb);
+  sp_pl_free(sb);sp_pl_free(tb);
 }
 void sp_FloatArray_splice(sp_FloatArray*a,sp_int start,sp_int len,const sp_float*src,sp_int srcn){
   if(!a)return;
@@ -137,14 +137,14 @@ void sp_FloatArray_splice(sp_FloatArray*a,sp_int start,sp_int len,const sp_float
   if(len==srcn){if(srcn>0)memmove(a->data+s,src,sizeof(sp_float)*(size_t)srcn);return;}  /* see the int form */
   SP_GC_ROOT(a);
   sp_float*sb=NULL;
-  if(srcn>0){sb=(sp_float*)malloc(sizeof(sp_float)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,src,sizeof(sp_float)*(size_t)srcn);}
+  if(srcn>0){sb=(sp_float*)sp_pl_alloc(sizeof(sp_float)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,src,sizeof(sp_float)*(size_t)srcn);}
   sp_int tail_from=s+len,tail_n=alen-tail_from;
   sp_float*tb=NULL;
-  if(tail_n>0){tb=(sp_float*)malloc(sizeof(sp_float)*(size_t)tail_n);if(!tb){free(sb);sp_oom_die();}memcpy(tb,a->data+tail_from,sizeof(sp_float)*(size_t)tail_n);}
+  if(tail_n>0){tb=(sp_float*)sp_pl_alloc(sizeof(sp_float)*(size_t)tail_n);if(!tb){sp_pl_free(sb);sp_oom_die();}memcpy(tb,a->data+tail_from,sizeof(sp_float)*(size_t)tail_n);}
   a->len=s;
   for(sp_int i=0;i<srcn;i++)sp_FloatArray_push(a,sb[i]);
   for(sp_int i=0;i<tail_n;i++)sp_FloatArray_push(a,tb[i]);
-  free(sb);free(tb);
+  sp_pl_free(sb);sp_pl_free(tb);
 }
 void sp_StrArray_splice(sp_StrArray*a,sp_int start,sp_int len,const char*const*src,sp_int srcn){
   if(!a)return;
@@ -158,7 +158,7 @@ void sp_StrArray_splice(sp_StrArray*a,sp_int start,sp_int len,const char*const*s
   if(len==srcn){if(srcn>0)memmove(a->data+s,src,sizeof(const char*)*(size_t)srcn);return;}  /* see the int form */
   SP_GC_ROOT(a);
   const char**sb=NULL;
-  if(srcn>0){sb=(const char**)malloc(sizeof(const char*)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,src,sizeof(const char*)*(size_t)srcn);}
+  if(srcn>0){sb=(const char**)sp_pl_alloc(sizeof(const char*)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,src,sizeof(const char*)*(size_t)srcn);}
   /* Snapshot the tail into a *rooted* holder before truncating a->len: once
      a->len shrinks, a no longer scans the tail, so a raw buffer would leave the
      tail's GC strings unrooted across the pushes below (which can collect). The
@@ -170,7 +170,7 @@ void sp_StrArray_splice(sp_StrArray*a,sp_int start,sp_int len,const char*const*s
   a->len=s;
   for(sp_int i=0;i<srcn;i++)sp_StrArray_push(a,sb[i]);
   if(tb)for(sp_int i=0;i<tb->len;i++)sp_StrArray_push(a,tb->data[i]);
-  free(sb);
+  sp_pl_free(sb);
 }
 /* poly-array splice: like the typed forms but elements are boxed, so a nil gap
    (start past the end) is filled with nil rather than raising. Ruby's `a[s,l]=`
@@ -198,16 +198,16 @@ void sp_PolyArray_splice(sp_PolyArray*a,sp_int start,sp_int len,sp_RbVal src){
   if(src_is_array){
     void*p=src.v.p;
     switch(src.cls_id){
-      case SP_BUILTIN_INT_ARRAY:{sp_IntArray*x=(sp_IntArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)malloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_box_int(x->data[x->start+i]);}break;}
-      case SP_BUILTIN_FLT_ARRAY:{sp_FloatArray*x=(sp_FloatArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)malloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_box_float(x->data[i]);}break;}
-      case SP_BUILTIN_STR_ARRAY:{sp_StrArray*x=(sp_StrArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)malloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_box_str(x->data[i]);}break;}
-      case SP_BUILTIN_POLY_ARRAY:{sp_PolyArray*x=(sp_PolyArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)malloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,x->data,sizeof(sp_RbVal)*(size_t)srcn);}break;}
-      case SP_BUILTIN_PTR_ARRAY:{sp_PtrArray*x=(sp_PtrArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)malloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_PtrArray_elem_box(x,x->data[i]);}break;}   /* rows or objects (#4486) */
+      case SP_BUILTIN_INT_ARRAY:{sp_IntArray*x=(sp_IntArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)sp_pl_alloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_box_int(x->data[x->start+i]);}break;}
+      case SP_BUILTIN_FLT_ARRAY:{sp_FloatArray*x=(sp_FloatArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)sp_pl_alloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_box_float(x->data[i]);}break;}
+      case SP_BUILTIN_STR_ARRAY:{sp_StrArray*x=(sp_StrArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)sp_pl_alloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_box_str(x->data[i]);}break;}
+      case SP_BUILTIN_POLY_ARRAY:{sp_PolyArray*x=(sp_PolyArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)sp_pl_alloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();memcpy(sb,x->data,sizeof(sp_RbVal)*(size_t)srcn);}break;}
+      case SP_BUILTIN_PTR_ARRAY:{sp_PtrArray*x=(sp_PtrArray*)p;srcn=x->len;if(srcn>0){sb=(sp_RbVal*)sp_pl_alloc(sizeof(sp_RbVal)*(size_t)srcn);if(!sb)sp_oom_die();for(sp_int i=0;i<srcn;i++)sb[i]=sp_PtrArray_elem_box(x,x->data[i]);}break;}   /* rows or objects (#4486) */
       default:break;
     }
   }
   else{
-    srcn=1;sb=(sp_RbVal*)malloc(sizeof(sp_RbVal));if(!sb)sp_oom_die();sb[0]=src;
+    srcn=1;sb=(sp_RbVal*)sp_pl_alloc(sizeof(sp_RbVal));if(!sb)sp_oom_die();sb[0]=src;
   }
   /* clamp/gap: when start is past the end, the [s+len) tail is empty and the
      [alen,s) gap fills with nil */
@@ -225,7 +225,7 @@ void sp_PolyArray_splice(sp_PolyArray*a,sp_int start,sp_int len,sp_RbVal src){
   for(sp_int i=0;i<gap;i++)sp_PolyArray_push(a,sp_box_nil());
   for(sp_int i=0;i<srcn;i++)sp_PolyArray_push(a,sb[i]);
   if(tb)for(sp_int i=0;i<tb->len;i++)sp_PolyArray_push(a,tb->data[i]);
-  free(sb);
+  sp_pl_free(sb);
 }
 void sp_IntArray_reverse_bang(sp_IntArray*a){SP_GC_ROOT(a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return;}for(sp_int i=0,j=a->len-1;i<j;i++,j--){sp_int t=a->data[a->start+i];a->data[a->start+i]=a->data[a->start+j];a->data[a->start+j]=t;}}
 /* Array#rotate!: move the first n elements to the end. Two block moves --
@@ -257,10 +257,10 @@ void sp_IntArray_rotate_bang(sp_IntArray*a,sp_int n){SP_GC_ROOT(a);
      it never repeats, so that keeps the in-place form. */
   if(a->start+a->len+n>a->cap && a->len+n>a->cap && a->len<=256){
     sp_int nc=a->len*2+n;
-    sp_int*nd=(sp_int*)malloc(sizeof(sp_int)*(size_t)nc);
+    sp_int*nd=(sp_int*)sp_pl_alloc(sizeof(sp_int)*(size_t)nc);
     if(nd){
       memcpy(nd,a->data+a->start,sizeof(sp_int)*(size_t)a->len);
-      free(a->data); a->data=nd; a->start=0; a->cap=nc;
+      sp_pl_free(a->data); a->data=nd; a->start=0; a->cap=nc;
     }
   }
   if(a->start+a->len+n<=a->cap){
@@ -272,7 +272,7 @@ void sp_IntArray_rotate_bang(sp_IntArray*a,sp_int n){SP_GC_ROOT(a);
   sp_int rest=a->len-n;
   sp_int keep=n<rest?n:rest;          /* the side we buffer */
   sp_int stackbuf[32];
-  sp_int*t=keep<=32?stackbuf:(sp_int*)malloc(sizeof(sp_int)*(size_t)keep);
+  sp_int*t=keep<=32?stackbuf:(sp_int*)sp_pl_alloc(sizeof(sp_int)*(size_t)keep);
   if(!t)sp_oom_die();
   if(n<=rest){                          /* buffer the head, slide the tail down */
     memcpy(t,d,sizeof(sp_int)*(size_t)n);
@@ -284,7 +284,7 @@ void sp_IntArray_rotate_bang(sp_IntArray*a,sp_int n){SP_GC_ROOT(a);
     memmove(d+rest,d,sizeof(sp_int)*(size_t)n);
     memcpy(d,t,sizeof(sp_int)*(size_t)rest);
   }
-  if(t!=stackbuf)free(t);
+  if(t!=stackbuf)sp_pl_free(t);
 }
 static int _sp_int_cmp(const void*a,const void*b){sp_int va=*(const sp_int*)a,vb=*(const sp_int*)b;return(va>vb)-(va<vb);}
 sp_IntArray*sp_IntArray_sort(sp_IntArray*a){SP_GC_ROOT(a);sp_IntArray*b=sp_IntArray_dup(a);qsort(b->data+b->start,b->len,sizeof(sp_int),_sp_int_cmp);return b;}
@@ -318,8 +318,8 @@ sp_IntArray*sp_IntArray_union(sp_IntArray*a,sp_IntArray*b){SP_GC_ROOT(a);SP_GC_R
    preserving the LHS's duplicates. `[1,1,2,3] - [3]` is `[1,1,2]`. */
 sp_IntArray*sp_IntArray_difference(sp_IntArray*a,sp_IntArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_IntArray*r=sp_IntArray_new();if(!a)return r;for(sp_int i=0;i<a->len;i++){sp_int v=a->data[a->start+i];if(!sp_IntArray_include(b,v))sp_IntArray_push(r,v);}return r;}
 void sp_IntArray_unshift(sp_IntArray*a,sp_int v){SP_GC_ROOT(a);if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return;}if(a->start>0){a->start--;a->data[a->start]=v;a->len++;}
-else{sp_int e=a->len+1;if(e>a->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*a->cap);h->size-=sizeof(sp_int)*a->cap;a->cap=(((((a->cap*2)))))+1;a->data=(sp_int*)realloc(a->data,sizeof(sp_int)*a->cap);h->size+=sizeof(sp_int)*a->cap;sp_gc_bytes_add(sizeof(sp_int)*a->cap);}memmove(a->data+1,a->data,sizeof(sp_int)*a->len);a->data[0]=v;a->len++;}}
-const char*sp_IntArray_join(sp_IntArray*a,const char*sep){if(!sep)sep="";size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)malloc(cap);size_t len=0;for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}char tmp[32];int n=snprintf(tmp,32,"%lld",(long long)a->data[a->start+i]);if(len+n>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,tmp,n);len+=n;}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);free(buf);return r;}
+else{sp_int e=a->len+1;if(e>a->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_int)*a->cap);h->size-=sizeof(sp_int)*a->cap;a->cap=(((((a->cap*2)))))+1;a->data=(sp_int*)sp_pl_realloc(a->data,sizeof(sp_int)*a->cap);h->size+=sizeof(sp_int)*a->cap;sp_gc_bytes_add(sizeof(sp_int)*a->cap);}memmove(a->data+1,a->data,sizeof(sp_int)*a->len);a->data[0]=v;a->len++;}}
+const char*sp_IntArray_join(sp_IntArray*a,const char*sep){if(!sep)sep="";size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)sp_pl_alloc(cap);size_t len=0;for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}char tmp[32];int n=snprintf(tmp,32,"%lld",(long long)a->data[a->start+i]);if(len+n>=cap){cap*=2;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,tmp,n);len+=n;}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);sp_pl_free(buf);return r;}
 sp_bool sp_IntArray_eq(sp_IntArray*a,sp_IntArray*b){if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(sp_int i=0;i<a->len;i++)if(a->data[a->start+i]!=b->data[b->start+i])return FALSE;return TRUE;}
 /* Array#<=> for IntArray. Lexicographic: per-element compare, shorter
    array sorts before longer if all common elements match
@@ -386,10 +386,10 @@ sp_float sp_FloatArray_sum(sp_FloatArray*a,sp_float init){sp_float s=init,c=0.0;
    0.6000000000000001 where `.sum(0)` and `.sum` are 0.6. The boxed fold in
    spinel_rt.h draws the same line; these two must not disagree. */
 sp_float sp_FloatArray_sum_plain(sp_FloatArray*a,sp_float init){sp_float s=init;for(sp_int i=0;i<a->len;i++)s+=a->data[i];return s;}
-void sp_FloatArray_replace(sp_FloatArray*dst,sp_FloatArray*src){if(dst==src)return;if(dst->frozen){sp_raise_frozen_array_at(dst,SP_BUILTIN_FLT_ARRAY);return;}dst->len=0;if(src->len>dst->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)dst-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_float)*dst->cap);h->size-=sizeof(sp_float)*dst->cap;void*nd=realloc(dst->data,sizeof(sp_float)*src->len);if(!nd){perror("realloc");exit(1);}dst->data=(sp_float*)nd;dst->cap=src->len;h->size+=sizeof(sp_float)*dst->cap;sp_gc_bytes_add(sizeof(sp_float)*dst->cap);}memcpy(dst->data,src->data,sizeof(sp_float)*src->len);dst->len=src->len;}
+void sp_FloatArray_replace(sp_FloatArray*dst,sp_FloatArray*src){if(dst==src)return;if(dst->frozen){sp_raise_frozen_array_at(dst,SP_BUILTIN_FLT_ARRAY);return;}dst->len=0;if(src->len>dst->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)dst-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_float)*dst->cap);h->size-=sizeof(sp_float)*dst->cap;void*nd=sp_pl_realloc(dst->data,sizeof(sp_float)*src->len);if(!nd){perror("realloc");exit(1);}dst->data=(sp_float*)nd;dst->cap=src->len;h->size+=sizeof(sp_float)*dst->cap;sp_gc_bytes_add(sizeof(sp_float)*dst->cap);}memcpy(dst->data,src->data,sizeof(sp_float)*src->len);dst->len=src->len;}
 /* a[start, len] / a[start..end] for FloatArray. Same negative-start and
    length-clamping semantics as sp_IntArray_slice. */
-sp_FloatArray*sp_FloatArray_slice(sp_FloatArray*a,sp_int start,sp_int len){SP_GC_ROOT(a);if(start<0)start+=a->len;if(start<0)start=0;sp_FloatArray*b=sp_FloatArray_new();if(start>=a->len||len<=0)return b;if(len>a->len-start)len=a->len-start;if(len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_float)*b->cap);h->size-=sizeof(sp_float)*b->cap;b->cap=len;b->data=(sp_float*)realloc(b->data,sizeof(sp_float)*b->cap);h->size+=sizeof(sp_float)*b->cap;sp_gc_bytes_add(sizeof(sp_float)*b->cap);}memcpy(b->data,a->data+start,sizeof(sp_float)*len);b->len=len;return b;}
+sp_FloatArray*sp_FloatArray_slice(sp_FloatArray*a,sp_int start,sp_int len){SP_GC_ROOT(a);if(start<0)start+=a->len;if(start<0)start=0;sp_FloatArray*b=sp_FloatArray_new();if(start>=a->len||len<=0)return b;if(len>a->len-start)len=a->len-start;if(len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_float)*b->cap);h->size-=sizeof(sp_float)*b->cap;b->cap=len;b->data=(sp_float*)sp_pl_realloc(b->data,sizeof(sp_float)*b->cap);h->size+=sizeof(sp_float)*b->cap;sp_gc_bytes_add(sizeof(sp_float)*b->cap);}memcpy(b->data,a->data+start,sizeof(sp_float)*len);b->len=len;return b;}
 sp_FloatArray*sp_FloatArray_slice_range(sp_FloatArray*a,sp_int start,sp_int end_,sp_int excl){SP_GC_ROOT(a);if(end_<0)end_+=a->len;if(start<0)start+=a->len;sp_int n=end_-start+(excl?0:1);if(n<0||start<0)n=0;return sp_FloatArray_slice(a,start,n);}
 void sp_FloatArray_reverse_bang(sp_FloatArray*a){SP_GC_ROOT(a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return;}for(sp_int i=0,j=a->len-1;i<j;i++,j--){sp_float t=a->data[i];a->data[i]=a->data[j];a->data[j]=t;}}
 void sp_FloatArray_rotate_bang(sp_FloatArray*a,sp_int n){SP_GC_ROOT(a);
@@ -402,7 +402,7 @@ void sp_FloatArray_rotate_bang(sp_FloatArray*a,sp_int n){SP_GC_ROOT(a);
   sp_int rest=a->len-n;
   sp_int keep=n<rest?n:rest;
   sp_float stackbuf[32];
-  sp_float*t=keep<=32?stackbuf:(sp_float*)malloc(sizeof(sp_float)*(size_t)keep);
+  sp_float*t=keep<=32?stackbuf:(sp_float*)sp_pl_alloc(sizeof(sp_float)*(size_t)keep);
   if(!t)sp_oom_die();
   if(n<=rest){
     memcpy(t,d,sizeof(sp_float)*(size_t)n);
@@ -414,7 +414,7 @@ void sp_FloatArray_rotate_bang(sp_FloatArray*a,sp_int n){SP_GC_ROOT(a);
     memmove(d+rest,d,sizeof(sp_float)*(size_t)n);
     memcpy(d,t,sizeof(sp_float)*(size_t)rest);
   }
-  if(t!=stackbuf)free(t);
+  if(t!=stackbuf)sp_pl_free(t);
 }
 static int _sp_float_cmp(const void*a,const void*b){sp_float va=*(const sp_float*)a,vb=*(const sp_float*)b;return(va>vb)-(va<vb);}
 void sp_FloatArray_sort_bang(sp_FloatArray*a){SP_GC_ROOT(a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return;}qsort(a->data,a->len,sizeof(sp_float),_sp_float_cmp);}
@@ -455,7 +455,7 @@ void sp_PtrArray_rotate_bang(sp_PtrArray*a,sp_int n){
   sp_int rest=a->len-n;
   sp_int keep=n<rest?n:rest;
   void* stackbuf[32];
-  void**t=keep<=32?stackbuf:(void**)malloc(sizeof(void*)*(size_t)keep);
+  void**t=keep<=32?stackbuf:(void**)sp_pl_alloc(sizeof(void*)*(size_t)keep);
   if(!t)sp_oom_die();
   if(n<=rest){
     memcpy(t,d,sizeof(void*)*(size_t)n);
@@ -467,7 +467,7 @@ void sp_PtrArray_rotate_bang(sp_PtrArray*a,sp_int n){
     memmove(d+rest,d,sizeof(void*)*(size_t)n);
     memcpy(d,t,sizeof(void*)*(size_t)rest);
   }
-  if(t!=stackbuf)free(t);
+  if(t!=stackbuf)sp_pl_free(t);
 }
 sp_PtrArray*sp_PtrArray_dup(sp_PtrArray*a){SP_GC_ROOT(a);sp_PtrArray*b=sp_PtrArray_new_scan(a->scan_elem);for(sp_int i=0;i<a->len;i++)sp_PtrArray_push(b,a->data[i]);return b;}
 sp_PtrArray*sp_PtrArray_slice(sp_PtrArray*a,sp_int start,sp_int len){SP_GC_ROOT(a);if(start<0)start+=a->len;if(start<0)start=0;sp_PtrArray*b=sp_PtrArray_new_scan(a->scan_elem);if(start>=a->len||len<=0)return b;if(len>a->len-start)len=a->len-start;for(sp_int i=0;i<len;i++)sp_PtrArray_push(b,a->data[start+i]);return b;}
@@ -476,8 +476,8 @@ sp_PtrArray*sp_PtrArray_shuffle(sp_PtrArray*a){SP_GC_ROOT(a);sp_PtrArray*b=sp_Pt
 void *sp_PtrArray_sample(sp_PtrArray*a){SP_GC_ROOT(a);if(a->len<=0)return NULL;return a->data[sp_krand_below(a->len)];}
 
 /* ============================= sp_StrArray ============================ */
-void sp_StrArray_replace(sp_StrArray*dst,sp_StrArray*src){if(dst==src)return;if(dst->frozen){sp_raise_frozen_array_at(dst,SP_BUILTIN_STR_ARRAY);return;} sp_gc_wb((void*)dst);dst->len=0;if(src->len>dst->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)dst-sizeof(sp_gc_hdr));void*nd;if(dst->data==dst->inline_data){nd=malloc(sizeof(const char*)*src->len);if(!nd){perror("malloc");exit(1);}}
-else{sp_gc_bytes_sub(sizeof(const char*)*dst->cap);h->size-=sizeof(const char*)*dst->cap;nd=realloc(dst->data,sizeof(const char*)*src->len);if(!nd){perror("realloc");exit(1);}}dst->data=(const char**)nd;dst->cap=src->len;h->size+=sizeof(const char*)*dst->cap;sp_gc_bytes_add(sizeof(const char*)*dst->cap);}memcpy(dst->data,src->data,sizeof(const char*)*src->len);dst->len=src->len;}
+void sp_StrArray_replace(sp_StrArray*dst,sp_StrArray*src){if(dst==src)return;if(dst->frozen){sp_raise_frozen_array_at(dst,SP_BUILTIN_STR_ARRAY);return;} sp_gc_wb((void*)dst);dst->len=0;if(src->len>dst->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)dst-sizeof(sp_gc_hdr));void*nd;if(dst->data==dst->inline_data){nd=sp_pl_alloc(sizeof(const char*)*src->len);if(!nd){perror("malloc");exit(1);}}
+else{sp_gc_bytes_sub(sizeof(const char*)*dst->cap);h->size-=sizeof(const char*)*dst->cap;nd=sp_pl_realloc(dst->data,sizeof(const char*)*src->len);if(!nd){perror("realloc");exit(1);}}dst->data=(const char**)nd;dst->cap=src->len;h->size+=sizeof(const char*)*dst->cap;sp_gc_bytes_add(sizeof(const char*)*dst->cap);}memcpy(dst->data,src->data,sizeof(const char*)*src->len);dst->len=src->len;}
 const char*sp_StrArray_pop(sp_StrArray*a){SP_GC_ROOT(a);if(!a||a->len<=0)return NULL;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return NULL;}return a->data[--a->len];}
 const char*sp_StrArray_shift(sp_StrArray*a){SP_GC_ROOT(a);if(!a||a->len<=0)return NULL;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return NULL;}const char*v=a->data[0];memmove(a->data,a->data+1,(size_t)(--a->len)*sizeof(const char*));return v;}
 /* a[start, len] / a[start..end] for StrArray. Same negative-start and
@@ -495,7 +495,7 @@ void sp_StrArray_rotate_bang(sp_StrArray*a,sp_int n){SP_GC_ROOT(a);
   sp_int rest=a->len-n;
   sp_int keep=n<rest?n:rest;
   const char* stackbuf[32];
-  const char**t=keep<=32?stackbuf:(const char**)malloc(sizeof(const char*)*(size_t)keep);
+  const char**t=keep<=32?stackbuf:(const char**)sp_pl_alloc(sizeof(const char*)*(size_t)keep);
   if(!t)sp_oom_die();
   if(n<=rest){
     memcpy(t,d,sizeof(const char*)*(size_t)n);
@@ -507,7 +507,7 @@ void sp_StrArray_rotate_bang(sp_StrArray*a,sp_int n){SP_GC_ROOT(a);
     memmove(d+rest,d,sizeof(const char*)*(size_t)n);
     memcpy(d,t,sizeof(const char*)*(size_t)rest);
   }
-  if(t!=stackbuf)free(t);
+  if(t!=stackbuf)sp_pl_free(t);
 }
 static int _sp_str_cmp(const void*a,const void*b){return sp_str_cmp_bytes(*(const char*const*)a,*(const char*const*)b);}
 void sp_StrArray_sort_bang(sp_StrArray*a){SP_GC_ROOT(a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return;}qsort(a->data,a->len,sizeof(const char*),_sp_str_cmp);}
@@ -516,7 +516,7 @@ else i++;}}
 sp_StrArray*sp_StrArray_uniq(sp_StrArray*a){SP_GC_ROOT(a);sp_StrArray*b=sp_StrArray_new();if(!a)return b;for(sp_int i=0;i<a->len;i++){int found=0;for(sp_int j=0;j<b->len;j++){if(b->data[j]==a->data[i]||(b->data[j]&&a->data[i]&&!sp_str_cmp_bytes(b->data[j],a->data[i]))){found=1;break;}}if(!found)sp_StrArray_push(b,a->data[i]);}return b;}
 /* byte_len for both the separator and each element: an embedded NUL is a byte
    of the string, and strlen stopped at it (the opportunistic NUL policy). */
-const char*sp_StrArray_join(sp_StrArray*a,const char*sep){if(!sep)sep="";if(!a)return sp_str_empty;size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)malloc(cap);size_t len=0;for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}const char*_e=a->data[i]?a->data[i]:"";size_t el=sp_str_byte_len(_e);if(len+el>=cap){cap=((len+el)*2)+1;buf=(char*)realloc(buf,cap);}memcpy(buf+len,_e,el);len+=el;}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);free(buf);/* the joined bytes are binary if any part was: see sp_str_bin_from */if(sp_str_is_binary(sep))sp_str_mark_binary(r);for(sp_int i=0;i<a->len;i++)if(a->data[i]&&sp_str_is_binary(a->data[i])){sp_str_mark_binary(r);break;}return r;}
+const char*sp_StrArray_join(sp_StrArray*a,const char*sep){if(!sep)sep="";if(!a)return sp_str_empty;size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)sp_pl_alloc(cap);size_t len=0;for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}const char*_e=a->data[i]?a->data[i]:"";size_t el=sp_str_byte_len(_e);if(len+el>=cap){cap=((len+el)*2)+1;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,_e,el);len+=el;}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);sp_pl_free(buf);/* the joined bytes are binary if any part was: see sp_str_bin_from */if(sp_str_is_binary(sep))sp_str_mark_binary(r);for(sp_int i=0;i<a->len;i++)if(a->data[i]&&sp_str_is_binary(a->data[i])){sp_str_mark_binary(r);break;}return r;}
 sp_bool sp_StrArray_include(sp_StrArray*a,const char*v){SP_GC_ROOT(a);SP_GC_ROOT_STR(v);if(!a)return FALSE;for(sp_int i=0;i<a->len;i++)if(sp_str_cmp_bytes(a->data[i],v)==0)return TRUE;return FALSE;}
 sp_StrArray*sp_StrArray_intersect(sp_StrArray*a,sp_StrArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_StrArray*r=sp_StrArray_new();if(!a||!b)return r;for(sp_int i=0;i<a->len;i++){const char*v=a->data[i];if(sp_StrArray_include(b,v)&&!sp_StrArray_include(r,v))sp_StrArray_push(r,v);}return r;}
 sp_bool sp_StrArray_intersect_p(sp_StrArray*a,sp_StrArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);if(!a||!b)return 0;for(sp_int i=0;i<a->len;i++)if(sp_StrArray_include(b,a->data[i]))return 1;return 0;}
@@ -580,7 +580,7 @@ sp_StrArray *sp_StrArray_from_string_range(const char *s, const char *e, sp_int 
 }
 const char*sp_IntArray_inspect(sp_IntArray*a){SP_GC_ROOT(a);return a?sp_inspect_container(sp_box_obj(a,SP_BUILTIN_INT_ARRAY)):"nil";}
 const char*sp_FloatArray_inspect(sp_FloatArray*a){SP_GC_ROOT(a);return a?sp_inspect_container(sp_box_obj(a,SP_BUILTIN_FLT_ARRAY)):"nil";}
-const char*sp_FloatArray_join(sp_FloatArray*a,const char*sep){if(!sep)sep="";SP_GC_ROOT(a);size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)malloc(cap);size_t len=0;if(a){for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}const char*es=sp_float_to_s(a->data[i]);size_t el=strlen(es);if(len+el>=cap){while(len+el>=cap)cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,es,el);len+=el;}}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);free(buf);return r;}
+const char*sp_FloatArray_join(sp_FloatArray*a,const char*sep){if(!sep)sep="";SP_GC_ROOT(a);size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)sp_pl_alloc(cap);size_t len=0;if(a){for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}const char*es=sp_float_to_s(a->data[i]);size_t el=strlen(es);if(len+el>=cap){while(len+el>=cap)cap*=2;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,es,el);len+=el;}}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);sp_pl_free(buf);return r;}
 sp_bool sp_FloatArray_eq(sp_FloatArray*a,sp_FloatArray*b){if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(sp_int i=0;i<a->len;i++)if(a->data[i]!=b->data[i])return FALSE;return TRUE;}
 const char*sp_StrArray_inspect(sp_StrArray*a){SP_GC_ROOT(a);return a?sp_inspect_container(sp_box_obj(a,SP_BUILTIN_STR_ARRAY)):"nil";}
 const char*sp_PtrArray_inspect(sp_PtrArray*a){if(!a)return SPL("nil");SP_GC_ROOT(a);sp_String*s=sp_String_new("[");SP_GC_ROOT(s);for(sp_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,"#<Object>");}sp_String_append(s,"]");return sp_str_dup(s->data);}

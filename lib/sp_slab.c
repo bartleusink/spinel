@@ -348,6 +348,29 @@ void sp_slab_free_flush(void) {
 #endif
 }
 
+/* A container payload resized: a slab block's capacity is its size class,
+   so a smaller or equal request keeps the block, a larger one moves to a
+   fresh block (slab or malloc, by size) and frees the old; a malloc block
+   is realloc'd, which for the largest is an mremap with no copy. */
+void *sp_pl_realloc(void *p, size_t newn) {
+  if (!p) return sp_slab_alloc_raw(newn);
+  if (!sp_slab_owns(p)) {
+    if (sp_slab_on > 0 && newn <= SP_SLAB_MAX) {
+      /* the payload of a container that shrank into the slab's range: keep
+         it where malloc put it, realloc is fine there */
+    }
+    void *q = realloc(p, newn);
+    if (!q) sp_oom_die();
+    return q;
+  }
+  sp_slab_chunk *ch = sp_slab_chunk_of(p);
+  size_t have = sp_slab_csize[ch->cls];
+  if (newn <= have) return p;
+  void *q = sp_slab_alloc_raw(newn);
+  memcpy(q, p, have);
+  sp_slab_free(p);
+  return q;
+}
 void sp_slab_free(void *p) {
   if (!sp_slab_owns(p)) { free(p); return; }
   sp_slab_chunk *ch = sp_slab_chunk_of(p);

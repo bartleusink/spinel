@@ -542,6 +542,20 @@ static inline const char *sp_int_to_s(sp_int n) {
    TU that formats a float. */
 const char *sp_float_to_s(sp_float f);
 
+/* ---- container payloads: a hash's tables, an array's data ----
+   The blocks a container keeps beside its object (bucket arrays, an
+   element buffer) came from malloc, and a request on campfire made 3,600 of
+   them: a keyword hash is three 128-byte tables, and glibc's arena lock and
+   coalescing were a sixth of the CPU. A block up to the slab's largest
+   class comes from the calling worker's slab instead, lock-free; anything
+   larger, or the slab off, is malloc as before, and sp_slab_free tells the
+   two apart by address. A payload freed by the program (a grow, a rehash)
+   goes into the thread's batched free list like a sweep's would. */
+static inline void *sp_pl_alloc(size_t n) { return sp_slab_alloc_raw(n); }
+static inline void *sp_pl_zalloc(size_t n) { void *p = sp_slab_alloc_raw(n); memset(p, 0, n); return p; }
+static inline void sp_pl_free(void *p) { if (p) sp_slab_free(p); }
+void *sp_pl_realloc(void *p, size_t newn);   /* lib/sp_slab.c: a slab block knows its size class, a malloc block is realloc'd */
+
 /* ---- object construction (shared so lib C files can build values) ----
    The built-in cls_id sentinels, the core sp_box_* constructors, the object
    allocator, and sp_PolyArray. Moved here from spinel_rt.h so a standalone TU
@@ -692,7 +706,7 @@ static void __attribute__((noinline, cold)) sp_raise_frozen_array_v(sp_RbVal v) 
 /* sp_PolyArray: a growable array of boxed values. */
 typedef struct { sp_RbVal *data; sp_int len; sp_int cap; sp_int frozen; } sp_PolyArray;
 static inline void sp_PolyArray_scan(void *p) { sp_PolyArray *a = (sp_PolyArray *)p; for (sp_int i = 0; i < a->len; i++) sp_mark_rbval(a->data[i]); }
-static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *)p; sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; free(a->data); }
+static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *)p; sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; sp_pl_free(a->data); }
 /* Free-list pool for PolyArray, header AND data buffer kept together. The
    allocation-heaviest programs (per-point tuple building: BabyStark's
    constraint evaluation) churn millions of short-lived PolyArrays; recycling
@@ -725,11 +739,11 @@ static inline sp_PolyArray *sp_PolyArray_new(void) {
     return a;
   }
   sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), sp_PolyArray_fin, sp_PolyArray_scan);
-  a->cap = 16; a->data = (sp_RbVal *)malloc(sizeof(sp_RbVal) * a->cap); if (!a->data) sp_oom_die(); a->len = 0;
+  a->cap = 16; a->data = (sp_RbVal *)sp_pl_alloc(sizeof(sp_RbVal) * a->cap); a->len = 0;
   { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); h->recycle = sp_PolyArray_pool_recycle; h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); }
   return a;
 }
-static inline void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v) { if (!a) return; sp_gc_wb((void*)a); if (a->frozen) { sp_raise_frozen_array(); return; } if (a->len >= a->cap) { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; a->cap = (a->cap * 2) + 1; void *nd = realloc(a->data, sizeof(sp_RbVal) * a->cap); if (!nd) sp_oom_die(); a->data = (sp_RbVal *)nd; h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); } a->data[a->len++] = v; }
+static inline void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v) { if (!a) return; sp_gc_wb((void*)a); if (a->frozen) { sp_raise_frozen_array(); return; } if (a->len >= a->cap) { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; a->cap = (a->cap * 2) + 1; void *nd = sp_pl_realloc(a->data, sizeof(sp_RbVal) * a->cap); a->data = (sp_RbVal *)nd; h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); } a->data[a->len++] = v; }
 static inline sp_RbVal sp_PolyArray_get(sp_PolyArray *a, sp_int i) { if (!a) return sp_box_nil(); if (i < 0) i += a->len; if (i < 0 || i >= a->len) return sp_box_nil(); return a->data[i]; }
 /* ---- relocated from spinel_rt.h: frozen-string check primitives used
    by lib/sp_cold.c's sp_str_setbyte_cow, and the SPL frozen-literal macro
