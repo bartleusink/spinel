@@ -4092,7 +4092,15 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   const char *sv_prh_fb = g_proc_return_home; int sv_ptr_fb = g_proc_toplevel_return;
   g_proc_return_home = "-1"; g_proc_toplevel_return = 0;
   g_pre = NULL; g_indent = 1; g_nren = 0; g_block_id = blk; g_block_nren = 0;
-  g_block_param_name = bp0; g_self = sv_self;
+  /* g_block_param_name is the name of the &block a body calls through
+     (`blk.call(x)`, `blk[x]`), which is_block_call splices the active block
+     for. A Thread.new / Fiber.new block's own first parameter is not that: it
+     is a plain value, and naming it here made `ab[1]` on a yielded Array
+     splice the body into itself with ab rebound to 1 (`Thread.new([lo, hi])
+     { |ab| ab[1] - ab[0] }` answered a nonsense difference). Only the
+     Enumerator generator's yielder rides this name (`y << v` / `y.yield v`
+     lower to Fiber.yield through g_yielder_name). */
+  g_block_param_name = as_gen ? bp0 : NULL; g_self = sv_self;
   g_yielder_name = as_gen ? bp0 : NULL;   /* `y << v` -> Fiber.yield in the body */
   g_ret_type = TY_POLY; g_result_poly = 0; g_result_var = NULL;
   /* Value-type self is captured by value (sp_X self), so ivar access in the
