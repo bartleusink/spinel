@@ -7437,6 +7437,25 @@ static int narrow_object_arrays(Compiler *c) {
   OAS *sl = (OAS *)malloc(sizeof(OAS) * cap);
   g_oa_empt_n = 0;
   g_oa_src_n = 0;
+  /* Drop every want this pass stamped on a map source in an earlier round,
+     before the round re-derives them. OA_DROP_SRC_STAMP below only reaches the
+     sources RECORDED this round, and a node stops being recorded for reasons
+     that have nothing to do with it still carrying a stamp -- its slot is no
+     longer a candidate, the receiver's type no longer reads as an array, the
+     row it aliases is no longer a slot. Such a node kept a pointer-array want
+     while its destination went back to the poly array, and infer_type hands
+     that want back ahead of the poly fallback.
+     A map/collect CallNode is the exact discriminator: this pass is the only
+     producer that stamps one. The other producers stamp empty `[]` literals,
+     which are ArrayNodes, so their wants are untouched. */
+  if (c->arr_want) {
+    for (int id = 0; id < c->nt->count && id < c->node_cap; id++) {
+      if (!ty_is_ptr_array(c->arr_want[id])) continue;
+      if (nt_kind(nt, id) != NK_CallNode) continue;
+      const char *rn = nt_str(nt, id, "name");
+      if (rn && (sp_streq(rn, "map") || sp_streq(rn, "collect"))) c->arr_want[id] = TY_UNKNOWN;
+    }
+  }
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
     for (int li = 0; li < sc->nlocals; li++) {
