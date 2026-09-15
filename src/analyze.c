@@ -14526,7 +14526,19 @@ void analyze_program(Compiler *c) {
        function typed sp_int, producing no binary at all (#4145). */
     if (!thread_yld &&
         (m->ret == TY_UNKNOWN || m->ret == TY_VOID || m->lowered_carries_block_value))
-      m->ret = TY_INT;
+      /* A method whose value comes out of a `yield` hands back whatever the
+         block answered, and one C function serves every call site -- the same
+         `countdown` is called with a String block and an Integer block. TY_INT
+         was the RAW CARRIER for that: the slot's bits, cast back to the real
+         type at the call site. Only some consumer paths emitted that cast
+         (`puts x` did, `p x` did not), so a block answering a String or an
+         Array reached a `const char *` slot as an sp_int and the C did not
+         compile; a block answering poly had no cast that could work, the bits
+         being unable to carry a tag. Box instead, and let method_call_ret
+         agree: a poly return is the one shape every consumer already handles,
+         and it is what "the block answered something only the call site
+         knows" has meant everywhere else. */
+      m->ret = m->lowered_carries_block_value ? TY_POLY : TY_INT;
     if (!m->blk_param) m->blk_param = strdup("__yblk__");
     LocalVar *yblk = scope_local_intern(m, m->blk_param);
     if (yblk) {
