@@ -133,6 +133,28 @@ static unsigned udr_hash(const char *s) {
   return h;
 }
 
+/* Does the program spawn a Thread anywhere (`Thread.new` / `.start` /
+   `.fork`)? Then a boxed receiver's `join` may be a Thread's, whose answer is
+   the thread itself, not the arrays' joined String (#4466 gave the dispatch
+   the arm; the call's type still said String, so the thread came back as
+   "" and `t.join.value` had nothing to ask). Cached per node table. */
+int an_program_spawns_threads(Compiler *c) {
+  static const NodeTable *cached_nt = NULL;
+  static int cached_count = -1, cached = 0;
+  const NodeTable *nt = c->nt;
+  if (cached_nt == nt && cached_count == nt->count) return cached;
+  cached_nt = nt; cached_count = nt->count; cached = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || (!sp_streq(nm, "new") && !sp_streq(nm, "start") && !sp_streq(nm, "fork"))) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || nt_kind(nt, recv) != NK_ConstantReadNode) continue;
+    const char *cn = nt_str(nt, recv, "name");
+    if (cn && sp_streq(cn, "Thread")) { cached = 1; break; }
+  }
+  return cached;
+}
+
 int an_user_defines_or_reads(Compiler *c, const char *name) {
   if (an_builtin_only) return 0;
   if (!name) return 0;
@@ -4366,6 +4388,10 @@ else {
       /* a numeric argument makes it Thread#join(limit), whose answer is the
          thread or nil, not a joined string (#4287) */
       if (sp_streq(name, "join") && argc == 1 && ty_is_numeric(infer_type(c, argv[0])))
+        return TY_POLY;
+      /* in a program that spawns threads the receiver may be one, and
+         Thread#join answers the thread: the slot has to hold either */
+      if (sp_streq(name, "join") && argc == 0 && an_program_spawns_threads(c))
         return TY_POLY;
       if (sp_streq(name, "join")) return an_poly_concrete(c, name, TY_STRING);
       /* The multi-set forms of String#count/#delete/#squeeze, and

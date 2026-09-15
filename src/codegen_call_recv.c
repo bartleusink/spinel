@@ -13598,7 +13598,11 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       !user_defines_or_reads(c, name)) {
     /* the helper renders a non-container as its to_s, which is right for a
        nested element and wrong for the receiver: nil has no join (#4485) */
-    buf_puts(b, "sp_poly_join(sp_poly_coll_chk("); emit_expr(c, recv, b);
+    /* a program that spawns threads types this call poly (the receiver may
+       be a Thread, whose join answers the thread): the boxed form waits on a
+       Thread and joins anything else */
+    const char *jfn = comp_ntype(c, id) == TY_POLY ? "sp_poly_join_v" : "sp_poly_join";
+    buf_printf(b, "%s(sp_poly_coll_chk(", jfn); emit_expr(c, recv, b);
     buf_puts(b, ", \"join\"), "); if (argc >= 1) emit_str_expr_nilable(c, argv[0], b); else buf_puts(b, "sp_str_empty");
     buf_puts(b, ")"); return 1;
   }

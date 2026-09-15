@@ -239,6 +239,7 @@ int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out);
 /* A range endpoint that is the infinite Float constant (analyze_infer.c). */
 int infer_end_is_float_inf(Compiler *c, int right);
 int propagate_prep_params(Compiler *c);
+int an_program_spawns_threads(Compiler *c);
 int infer_default_param_types(Compiler *c);
 int is_string_only_method(const char *m);
 int infer_params_from_ivar_hash_ops(Compiler *c);

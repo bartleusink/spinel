@@ -8564,6 +8564,15 @@ static int sp_poly_time_cmp_arg(sp_Time a, sp_RbVal b) {
   sp_raise_cls("ArgumentError", "comparison of Time with an incompatible value failed");
   return 0;
 }
+/* `join` on a boxed receiver in a program that spawns threads: a Thread is
+   waited on and answers itself, as Thread#join does; anything else joins
+   as an Array does, the string boxed. */
+static sp_RbVal sp_poly_fiber_join(sp_RbVal v);
+static sp_RbVal sp_poly_join_v(sp_RbVal v, const char *sep) {
+  if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_THREAD || v.cls_id == SP_BUILTIN_FIBER))
+    return sp_poly_fiber_join(v);
+  return sp_box_str(sp_poly_join(v, sep));
+}
 static sp_RbVal sp_poly_fiber_join(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) {
     sp_Thread_join((sp_thread *)v.v.p);
