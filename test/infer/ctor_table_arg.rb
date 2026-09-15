@@ -6,6 +6,12 @@
 # and every helper it feeds bound a boxed parameter. The identical table
 # assigned to the ivar inside `initialize` narrowed, which made the boxing
 # depend only on WHERE the table was built.
+#
+# BOTH spellings of the call are covered, because they resolve through
+# different branches and each can regress on its own: `T.new(rows)` through the
+# named constant, and a receiverless `new(rows)` inside a class method through
+# the enclosing scope's own class. The receiverless one is what a `self.load`
+# factory actually writes, and fixing only the constant form left it boxed.
 class F
   def self.mul(a, b)
     (a * b) % 97
@@ -38,3 +44,33 @@ end
 tb = load(4)
 p tb.total(3)
 p tb.t[2][1]
+
+# The receiverless spelling, resolved through the calling scope's class rather
+# than a named constant.
+class U
+  attr_reader :u
+
+  def initialize(bare)
+    @u = bare
+  end
+
+  def self.load(n)
+    bare = Array.new(n) { |c| [c * 2, c + 5, c] }
+    new(bare)
+  end
+
+  def total(s)
+    acc = 0
+    i = 0
+    while i < @u.length
+      urow = @u[i]
+      acc += F.mul(urow[1], s)
+      i += 1
+    end
+    acc
+  end
+end
+
+ub = U.load(4)
+p ub.total(2)
+p ub.u[3][0]
