@@ -1049,9 +1049,23 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
     return;
   }
   if (g_block_id >= 0 && nt_type(c->nt, node) && sp_streq(nt_type(c->nt, node), "YieldNode")) {
-    int bbody = nt_ref(c->nt, g_block_id, "body");
-    int bn = 0; const int *bb = bbody >= 0 ? nt_arr(c->nt, bbody, "body", &bn) : NULL;
-    TyKind bt = bn > 0 ? comp_ntype(c, bb[bn - 1]) : TY_NIL;
+    /* A forwarding block (`wrap { yield }` handing its own block on) has a
+       yield for its tail, and that node's cached type is one site's too:
+       the value at THIS site is what the block one level out answers, the
+       one the splice will run (#4495). One level is all the expander
+       records (g_yield_block_fallback). */
+    int tblk = g_block_id;
+    TyKind bt = TY_NIL;
+    for (int depth = 0; tblk >= 0; depth++) {
+      int bbody = nt_ref(c->nt, tblk, "body");
+      int bn = 0; const int *bb = bbody >= 0 ? nt_arr(c->nt, bbody, "body", &bn) : NULL;
+      if (bn <= 0) { bt = TY_NIL; break; }
+      int tail = bb[bn - 1];
+      if (depth == 0 && g_yield_block_fallback >= 0 && nt_type(c->nt, tail) &&
+          sp_streq(nt_type(c->nt, tail), "YieldNode")) { tblk = g_yield_block_fallback; continue; }
+      bt = comp_ntype(c, tail);
+      break;
+    }
     if (bt != t && bt != TY_UNKNOWN) {
       if (bt == TY_POLY) { emit_expr(c, node, b); return; }
       Buf yb; memset(&yb, 0, sizeof yb);
