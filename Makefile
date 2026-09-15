@@ -1030,6 +1030,11 @@ thread-puts-test: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	  SPINEL_GC_STRESS=1 $(TIMEOUT60) "$$tmp/f" > "$$tmp/fout" 2>/dev/null || { echo "thread-puts-test: FAIL (ffi blocking: crashed or timed out under GC stress)"; ok=0; }; \
 	  grep -q '^\[177, 177, 177, 177, 177, 177\]$$' "$$tmp/fout" || { echo "thread-puts-test: FAIL (ffi blocking: a value held across the call was lost)"; head -3 "$$tmp/fout"; ok=0; }; \
 	done; \
+	$(SPINEL) test/threads/fiber_stack_overflow.rb -o "$$tmp/s" >/dev/null 2>&1 || \
+	  { echo "thread-puts-test: FAIL (fiber stack overflow: compile)"; rm -rf "$$tmp"; exit 1; }; \
+	$(TIMEOUT60) "$$tmp/s" > "$$tmp/sout" 2> "$$tmp/serr"; rc=$$?; \
+	[ $$rc -ne 0 ] && [ $$rc -ne 124 ] || { echo "thread-puts-test: FAIL (fiber stack overflow: the program did not die, rc=$$rc)"; ok=0; }; \
+	grep -q 'fiber stack overflow' "$$tmp/serr" || { echo "thread-puts-test: FAIL (fiber stack overflow: the fault was not reported as one)"; head -3 "$$tmp/serr"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "thread-puts-test: pass"; else exit 1; fi
 

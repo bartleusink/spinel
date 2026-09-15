@@ -116,6 +116,17 @@ These are deliberate consequences of real parallelism, listed in
     outcomes are silently dropped elements, a heap-corruption abort, and
     SIGSEGV. A shared container needs a `Mutex`, or a `Queue`, which is
     itself thread-safe.
+- **A green thread's C stack is fixed and small.** Every thread, Fiber and
+  generator Enumerator body runs on its own 64 KB C stack (`SP_FIBER_STACK_SIZE`
+  in lib/sp_fiber.h, a build-time constant of the runtime); the process stack
+  is only the main thread's. A call chain that fits at `-O2` can run past it
+  in an unoptimised build, whose frames are many times larger, and so can a
+  large local. Below the stack sits a 256 KB guard (`SP_FIBER_GUARD_SIZE`,
+  virtual space that is never touched), so a frame that steps past the end
+  faults in the guard instead of writing into whatever mapping is below, and
+  the fault is reported as `spinel: fiber stack overflow: ...` before the
+  process dies by the signal. A program that needs deeper stacks rebuilds the
+  runtime with `-DSP_FIBER_STACK_SIZE=<bytes>` (#4496).
 - **Interleaving is nondeterministic.** The ordering of `Thread.pass`,
   `Thread.list` membership, and the exact moment a `Thread#raise` / `#kill` is
   delivered are nondeterministic, where the single-worker model was

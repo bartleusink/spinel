@@ -18,6 +18,16 @@
 #ifndef SP_FIBER_STACK_SIZE
 #define SP_FIBER_STACK_SIZE (64*1024)
 #endif
+/* The PROT_NONE guard below it. One page catches a frame that grows past the
+   stack a page at a time, and nothing else: a C compiler that emits no stack
+   probes (gcc on Linux, by default) lets a 51 KB frame step straight over a
+   4 KB guard into whatever mapping sits below, and the program runs on with
+   that mapping corrupted (#4496). The guard is virtual space only, never
+   touched, so it is sized to the largest frame a build is likely to emit
+   rather than to a page; a frame larger than this still has to be probed. */
+#ifndef SP_FIBER_GUARD_SIZE
+#define SP_FIBER_GUARD_SIZE (256*1024)
+#endif
 
 /* ThreadSanitizer support: the asm context switch swaps stacks without TSan's
    knowledge, so a fiber program reports spurious "unexpected memory mapping"

@@ -23,9 +23,16 @@
    (queried so 16K/64K-page arm64 hosts stay aligned). */
 static size_t sp_fiber_guard(void) {
   static size_t g = 0;
-  if (!g) { long p = sysconf(_SC_PAGESIZE); g = p > 0 ? (size_t)p : 4096; }
+  if (!g) {
+    long p = sysconf(_SC_PAGESIZE);
+    size_t page = p > 0 ? (size_t)p : 4096;
+    /* SP_FIBER_GUARD_SIZE rounded up to whole pages (see sp_fiber.h) */
+    g = ((size_t)SP_FIBER_GUARD_SIZE + page - 1) / page * page;
+    if (g < page) g = page;
+  }
   return g;
 }
+
 
 /* ---- Portable coroutine context switch (replaces swapcontext) ----
    sp_ctx_swap saves the callee-saved registers onto the *current* stack, stows
@@ -205,8 +212,58 @@ SP_TLS sp_Fiber *sp_fiber_current = &sp_fiber_root;    /* extern: read by the ge
    per worker before it runs any green thread (worker 0 from sp_sched_init; helper
    workers from their startup). A no-op-shaped reset in the single-threaded build
    (sp_fiber_current already equals &sp_fiber_root). */
+/* A fault inside the current fiber's guard is a stack overflow, and it is
+   reported as one: without this the program died in ___chkstk_darwin on macOS
+   or in a corrupted neighbour mapping on Linux, and nothing named the fiber
+   stack (#4496). The handler runs on a per-thread alternate stack, since the
+   fiber's own is what just ran out, writes the line with write(2) only, then
+   restores the default disposition and returns so the faulting instruction
+   re-executes and the process dies the ordinary way (a core, the signal in
+   the exit status). Any other fault is left to the default just the same.
+   Installed once, only when nothing else has claimed the signal (the GC
+   verifier's fault reporter, for one). */
+#include <signal.h>
+static void sp_fiber_fault_write(const char *s) { size_t n = strlen(s); while (n) { ssize_t w = write(2, s, n); if (w <= 0) break; s += w; n -= (size_t)w; } }
+static void sp_fiber_fault_write_num(size_t v) { char b[24]; int i = (int)sizeof b; b[--i] = 0; do { b[--i] = (char)('0' + v % 10); v /= 10; } while (v); sp_fiber_fault_write(b + i); }
+static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
+  (void)uctx;
+  sp_Fiber *f = sp_fiber_current;
+  char *a = si ? (char *)si->si_addr : NULL;
+  if (f && f != &sp_fiber_root && f->stack && a >= f->stack && a < f->stack + sp_fiber_guard()) {
+    sp_fiber_fault_write("spinel: fiber stack overflow: a green thread, Fiber or Enumerator body ran past the ");
+    sp_fiber_fault_write_num((size_t)SP_FIBER_STACK_SIZE / 1024);
+    sp_fiber_fault_write(" KB C stack every fiber runs on (a deep call chain, a large local, or an unoptimised build "
+                         "whose frames are far larger than -O2's); rebuild the runtime with -DSP_FIBER_STACK_SIZE=<bytes> to give it more\n");
+  }
+  signal(sig, SIG_DFL);
+}
+static SP_TLS int sp_fiber_fault_armed = 0;
+static void sp_fiber_fault_arm(void) {
+  if (sp_fiber_fault_armed) return;
+  sp_fiber_fault_armed = 1;
+  /* the alternate stack is per OS thread; workers live as long as the process */
+  size_t asz = 64 * 1024;
+  void *as = malloc(asz);
+  if (as) { stack_t ss; ss.ss_sp = as; ss.ss_size = asz; ss.ss_flags = 0; sigaltstack(&ss, NULL); }
+  static int installed = 0;   /* process-wide: read racily, a second install is harmless */
+  if (installed) return;
+  int sigs[2] = { SIGSEGV, SIGBUS };
+  for (int i = 0; i < 2; i++) {
+    struct sigaction cur;
+    if (sigaction(sigs[i], NULL, &cur) != 0) continue;
+    if (!(cur.sa_flags & SA_SIGINFO) && cur.sa_handler != SIG_DFL) continue;
+    if ((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction) continue;
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = sp_fiber_fault_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(sigs[i], &sa, NULL);
+  }
+  installed = 1;
+}
 void sp_fiber_worker_init(void) {
   sp_fiber_current = &sp_fiber_root;
+  sp_fiber_fault_arm();
 #ifdef SP_TSAN
   /* Register this worker's root fiber on its own OS thread, so every worker --
      including a helper spawned mid-run that only ever runs fibers created by
@@ -257,7 +314,7 @@ static void sp_Fiber_fin(void*p){sp_Fiber*f=(sp_Fiber*)p;if(f->stack)munmap(f->s
 #endif
   sp_fiber_list_remove(f);}
 static void sp_Fiber_scan(void*p){sp_Fiber*f=(sp_Fiber*)p;if(f->user_data)sp_gc_mark(f->user_data);if(f->storage)sp_gc_mark(f->storage);}
-sp_Fiber*sp_Fiber_new(void(*body)(sp_Fiber*)){sp_Fiber*f=(sp_Fiber*)sp_gc_alloc(sizeof(sp_Fiber),sp_Fiber_fin,sp_Fiber_scan);{size_t _g=sp_fiber_guard();f->stack=(char*)mmap(NULL,_g+SP_FIBER_STACK_SIZE,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK,-1,0);if(f->stack==MAP_FAILED){f->stack=NULL;sp_raise_cls("FiberError","failed to allocate fiber stack");}mprotect(f->stack,_g,PROT_NONE);}f->state=0;f->transferred=0;f->body=body;f->yielded_value=sp_box_nil();f->resumed_value=sp_box_nil();f->user_data=NULL;f->saved_exc_top=0;f->saved_catch_top=0;f->exc_ctx=sp_exc_ctx_new();f->raised=0;f->raised_cls=NULL;f->raised_msg=NULL;f->raised_obj=NULL;f->inject=0;f->inj_cls=NULL;f->inj_msg=NULL;f->inj_obj=NULL;f->storage=NULL;f->saved_roots=NULL;f->saved_nroots=0;f->saved_roots_cap=0;f->fiber_next=NULL;f->fiber_prev=NULL;sp_fiber_list_add(f);sp_fiber_install_gc_hook();if(sp_fiber_current&&sp_fiber_current->storage){sp_Fiber*volatile _froot=f;int _pushed=0;if(sp_gc_nroots<SP_GC_STACK_MAX){sp_gc_roots[sp_gc_nroots++]=(void**)&_froot;_pushed=1;}f->storage=sp_FiberStore_dup((sp_FiberStore*)sp_fiber_current->storage);if(_pushed)sp_gc_nroots--;}
+sp_Fiber*sp_Fiber_new(void(*body)(sp_Fiber*)){sp_fiber_fault_arm();sp_Fiber*f=(sp_Fiber*)sp_gc_alloc(sizeof(sp_Fiber),sp_Fiber_fin,sp_Fiber_scan);{size_t _g=sp_fiber_guard();f->stack=(char*)mmap(NULL,_g+SP_FIBER_STACK_SIZE,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK,-1,0);if(f->stack==MAP_FAILED){f->stack=NULL;sp_raise_cls("FiberError","failed to allocate fiber stack");}mprotect(f->stack,_g,PROT_NONE);}f->state=0;f->transferred=0;f->body=body;f->yielded_value=sp_box_nil();f->resumed_value=sp_box_nil();f->user_data=NULL;f->saved_exc_top=0;f->saved_catch_top=0;f->exc_ctx=sp_exc_ctx_new();f->raised=0;f->raised_cls=NULL;f->raised_msg=NULL;f->raised_obj=NULL;f->inject=0;f->inj_cls=NULL;f->inj_msg=NULL;f->inj_obj=NULL;f->storage=NULL;f->saved_roots=NULL;f->saved_nroots=0;f->saved_roots_cap=0;f->fiber_next=NULL;f->fiber_prev=NULL;sp_fiber_list_add(f);sp_fiber_install_gc_hook();if(sp_fiber_current&&sp_fiber_current->storage){sp_Fiber*volatile _froot=f;int _pushed=0;if(sp_gc_nroots<SP_GC_STACK_MAX){sp_gc_roots[sp_gc_nroots++]=(void**)&_froot;_pushed=1;}f->storage=sp_FiberStore_dup((sp_FiberStore*)sp_fiber_current->storage);if(_pushed)sp_gc_nroots--;}
 #ifdef SP_TSAN
   if(!sp_fiber_root.tsan_fiber)sp_fiber_root.tsan_fiber=__tsan_get_current_fiber();
   f->tsan_fiber=__tsan_create_fiber(0);f->caller_fiber=NULL;
