@@ -6835,6 +6835,22 @@ static int oa_cls_join(int a, int b) {
    kind from (mark_empty_array_operands uses the same one), so a stamp here
    is seen by the next round's inference and by codegen (#4484). */
 static int *g_oa_empt_slot, *g_oa_empt_node, g_oa_empt_n, g_oa_empt_cap;
+/* Nodes whose own emitted type has to follow the slot they feed: a
+   `idx.map { |k| cols[k] }` builds the table in place, so narrowing the slot
+   without retyping the map leaves the emitter building a poly array and
+   assigning it to a narrowed one -- which does not compile. The empty-literal
+   list beside this one does the same job for `[]`. */
+static int *g_oa_src_slot, *g_oa_src_node, g_oa_src_n, g_oa_src_cap;
+static void oa_note_src(int S, int node) {
+  if (node < 0) return;
+  if (g_oa_src_n >= g_oa_src_cap) {
+    g_oa_src_cap = g_oa_src_cap ? g_oa_src_cap * 2 : 64;
+    g_oa_src_slot = (int *)realloc(g_oa_src_slot, sizeof(int) * (size_t)g_oa_src_cap);
+    g_oa_src_node = (int *)realloc(g_oa_src_node, sizeof(int) * (size_t)g_oa_src_cap);
+    if (!g_oa_src_slot || !g_oa_src_node) { fprintf(stderr, "oom\n"); exit(1); }
+  }
+  g_oa_src_slot[g_oa_src_n] = S; g_oa_src_node[g_oa_src_n] = node; g_oa_src_n++;
+}
 static void oa_note_empty(Compiler *c, int S, int node) {
   if (!is_empty_array_literal(c->nt, node, c->node_cap)) return;
   if (g_oa_empt_n >= g_oa_empt_cap) {
@@ -7334,6 +7350,56 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
       else if (ec < 0 && !OA_CLS_IS_NESTED(ec)) sl[S].alive = 0;
       else sl[S].cls = oa_cls_join(sl[S].cls, ec);
     }
+    /* `raw = idx.map { |k| cols[k] }`: the mapped table's rows ARE the other
+       table's rows -- the same objects, not copies -- so the two must agree on
+       a row kind. That is an EDGE, not element evidence: the source table's
+       kind is still being derived this round (every slot is reset at the top
+       of the pass), so reading it as evidence answers "no kind yet" and the
+       slot dies. The while-loop spelling never needed this because its rows
+       come from its own `Array.new(0, 0.0)` generator.
+
+       Deliberately only this shape. Keeping every map source alive also
+       narrows `[...].map { Obj.new(s) }` to an object table, and the places
+       that consume one -- `min`, `join`, interpolation -- still want the boxed
+       element, so the C stopped compiling. The rows here are already unboxed
+       pointers read out of a narrowed table, which is what makes this shape
+       the one that pays.
+
+       The receiver must be an ARRAY. `h.map { |k, v| cols[v] }` answers the
+       same rows, but its emitter has no pointer-array container to collect
+       them into: the hash-collect path bails on the kind and the fallback it
+       drops through does not reach Hash#map at all, so the program stopped
+       running. Narrowing a slot whose builder cannot build it at that kind is
+       worse than leaving it boxed. */
+    else if (cn && (sp_streq(cn, "map") || sp_streq(cn, "collect")) && can == 0 &&
+             nt_ref(nt, v, "block") >= 0 && nt_type(nt, nt_ref(nt, v, "block")) &&
+             sp_streq(nt_type(nt, nt_ref(nt, v, "block")), "BlockNode") &&
+             crecv >= 0 && ty_is_array(infer_type(c, crecv))) {
+      int mb = nt_ref(nt, v, "block");
+      int mbody = nt_ref(nt, mb, "body");
+      int mn = 0;
+      const int *ms = mbody >= 0 ? nt_arr(nt, mbody, "body", &mn) : NULL;
+      int mtail = (ms && mn > 0) ? ms[mn - 1] : -1;
+      int joined = 0;
+      if (mtail >= 0 && nt_kind(nt, mtail) == NK_CallNode) {
+        const char *mtn = nt_str(nt, mtail, "name");
+        int mtr = nt_ref(nt, mtail, "receiver");
+        int mta = nt_ref(nt, mtail, "arguments"); int mtan = 0;
+        if (mta >= 0) nt_arr(nt, mta, "arguments", &mtan);
+        if (mtn && (sp_streq(mtn, "[]") || sp_streq(mtn, "at")) && mtan == 1 &&
+            mtr >= 0 && read_slot[mtr] >= 0) {
+          claimed[mtr] = 1;
+          oa_uf_union(sl, S, read_slot[mtr]);
+          /* the map BUILDS the table in place, so the emitter has to build it
+             at the kind this component settles on -- recorded as a want, which
+             later inference passes re-read (a c->ntype stamp would be
+             recomputed away before emission) */
+          oa_note_src(S, v);
+          joined = 1;
+        }
+      }
+      if (!joined) sl[S].alive = 0;   /* every other map source, as before */
+    }
     /* a call whose own value is a tracked slot: join the two. */
     else if (call_ret[v] >= 0) {
       claimed[v] = 1; oa_uf_union(sl, S, call_ret[v]);
@@ -7370,6 +7436,26 @@ static int narrow_object_arrays(Compiler *c) {
   int cap = 16, n = 0;
   OAS *sl = (OAS *)malloc(sizeof(OAS) * cap);
   g_oa_empt_n = 0;
+  g_oa_src_n = 0;
+  /* Drop every want this pass stamped on a map source in an earlier round,
+     before the round re-derives them. OA_DROP_SRC_STAMP below only reaches the
+     sources RECORDED this round, and a node stops being recorded for reasons
+     that have nothing to do with it still carrying a stamp -- its slot is no
+     longer a candidate, the receiver's type no longer reads as an array, the
+     row it aliases is no longer a slot. Such a node kept a pointer-array want
+     while its destination went back to the poly array, and infer_type hands
+     that want back ahead of the poly fallback.
+     A map/collect CallNode is the exact discriminator: this pass is the only
+     producer that stamps one. The other producers stamp empty `[]` literals,
+     which are ArrayNodes, so their wants are untouched. */
+  if (c->arr_want) {
+    for (int id = 0; id < c->nt->count && id < c->node_cap; id++) {
+      if (!ty_is_ptr_array(c->arr_want[id])) continue;
+      if (nt_kind(nt, id) != NK_CallNode) continue;
+      const char *rn = nt_str(nt, id, "name");
+      if (rn && (sp_streq(rn, "map") || sp_streq(rn, "collect"))) c->arr_want[id] = TY_UNKNOWN;
+    }
+  }
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
     for (int li = 0; li < sc->nlocals; li++) {
@@ -7898,6 +7984,29 @@ static int narrow_object_arrays(Compiler *c) {
   }
   for (int i = 0; i < n; i++) {
     int r = oa_uf_find(sl, i);
+    /* A component that reaches no decision this round drops any stamp an
+       earlier round left on its builder nodes. The pass is written to
+       un-narrow a slot that stops qualifying (a new escape appearing as the
+       fixpoint desugars), and the slot then goes back to the poly array while
+       a stale want would still have the emitter build an sp_PtrArray into it.
+       Used at each of the three bails that do so: no decision, and the two
+       comparator fallbacks (the nested one and the object-array one).
+       Not observed to fire -- across the suite, the packages and a large
+       application the drop site is reached constantly but the want is always
+       already UNKNOWN -- so this states the invariant rather than fixing a
+       reproduced failure.
+       Only THIS pass's own source nodes, which are `map` calls. The empty-row
+       literal of #4484 is stamped here too and has the same exposure, but its
+       node is an empty `[]`, and two other producers stamp those as well
+       (mark_empty_array_operands and the ivar-write scan); clearing one here
+       could drop a want this pass never set. */
+    #define OA_DROP_SRC_STAMP() do { \
+      for (int _e = 0; _e < g_oa_src_n; _e++) { \
+        if (oa_uf_find(sl, g_oa_src_slot[_e]) != oa_uf_find(sl, i)) continue; \
+        int _sn = g_oa_src_node[_e]; \
+        if (c->arr_want && _sn >= 0 && _sn < c->node_cap) c->arr_want[_sn] = TY_UNKNOWN; \
+      } \
+    } while (0)
     /* This pass cleared every candidate's pin on the way in, but the pin field
        is also written by the element-narrowing below it. Put a pin back when
        this pass reaches no decision, or the two passes alternate forever and
@@ -7905,6 +8014,7 @@ static int narrow_object_arrays(Compiler *c) {
     if (sl[i].ici >= 0 && c->classes[sl[i].ici].ivar_oa_seed[sl[i].iiv] < 0)
       c->classes[sl[i].ici].ivar_oa_conflict[sl[i].iiv] = (unsigned char)(sl[r].cls == -2);
     if (!sl[r].alive || sl[r].cls == -1 || sl[r].cls == -2) {
+      OA_DROP_SRC_STAMP();
       if (sl[i].ici >= 0) continue;   /* an ivar with no decision stays the poly array it was reset to */
       if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
       else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
@@ -7916,6 +8026,7 @@ static int narrow_object_arrays(Compiler *c) {
          first/last but not the boxed sort/min/max comparators yet, so a
          component that used those (needs_cmp) stays on the poly path for now. */
       if (sl[r].needs_cmp) {
+        OA_DROP_SRC_STAMP();
         if (sl[i].ici >= 0) continue;
         if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
         else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
@@ -7936,6 +8047,7 @@ static int narrow_object_arrays(Compiler *c) {
          class can actually compare (has `<=>` in its chain); otherwise it stays
          poly, where the boxed comparator raises the CRuby ArgumentError. */
       if (sl[r].needs_cmp && comp_method_in_chain(c, sl[r].cls, "<=>", NULL) < 0) {
+        OA_DROP_SRC_STAMP();
         if (sl[i].ici >= 0) continue;
         if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
         else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
@@ -7952,6 +8064,19 @@ static int narrow_object_arrays(Compiler *c) {
       sl[i].lv->type = nty; sl[i].lv->oa_pin = nty;
     }
     else { c->scopes[sl[i].sidx].ret = nty; c->scopes[sl[i].sidx].ret_oa_pin = nty; }
+    /* and the sources that BUILD the table in place, so the emitter builds it
+       at the narrowed kind rather than building a poly array and assigning it
+       into a narrowed slot */
+    for (int e = 0; e < g_oa_src_n; e++) {
+      if (oa_uf_find(sl, g_oa_src_slot[e]) != oa_uf_find(sl, i)) continue;
+      int src = g_oa_src_node[e];
+      /* a WANT, not c->ntype: the type cache is recomputed by every later
+         inference pass, so a stamp there is gone by emission. infer_type
+         re-reads arr_want on each pass, which is exactly how the empty-row
+         literal of an `Array.new(n) { [] }` table keeps the kind this pass
+         gives it (#4484). */
+      if (c->arr_want && src >= 0 && src < c->node_cap) c->arr_want[src] = nty;
+    }
   }
   /* the round changed something exactly when some slot's decision differs from
      the one it carried in -- the fixpoint's convergence test depends on this

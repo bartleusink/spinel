@@ -5136,7 +5136,14 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
 
   TyKind restype = comp_ntype(c, id);
   int res_poly = (restype == TY_POLY_ARRAY);
-  const char *rk = res_poly ? "Poly" : array_kind(restype);
+  /* A nested table result (`idx.map { |k| cols[k] }`) is an sp_PtrArray of
+     row pointers. The rest of this arm already generalizes -- ty_array_elem
+     gives the row type, emit_ctype declares the temp as that row pointer, and
+     emit_block_value_into fills it unboxed -- so naming the container is all
+     that was missing. Without it array_kind answered NULL and the whole fold
+     bailed, leaving map to build a poly array and box every row on the way
+     in, only for each read to unbox it again. */
+  const char *rk = res_poly ? "Poly" : ty_is_ptr_array(restype) ? "Ptr" : array_kind(restype);
   if (!rk) return 0;
 
   const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);

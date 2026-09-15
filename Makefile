@@ -1881,8 +1881,17 @@ check:
 # prints the right answer, so a type regression here is invisible to `make
 # test`. Assert the emitted C signature directly, the way rbs-seed-test does
 # for seeds.
+#
+# Every fixture is also BUILT and RUN first. TESTS is `test/*.rb`, which does
+# not reach this directory, and the assertions below read the emitted C as text
+# only -- so without this a fixture whose C names the right types but does not
+# compile, or compiles and then raises, passes the whole leg.
 infer-test: $(SPINEL) $(SP_RT_LIB)
 	@tmp=$$(mktemp -d /tmp/spinel-infer.XXXXXX); ok=1; \
+	for f in test/infer/*.rb; do \
+	  $(SPINEL) "$$f" -o "$$tmp/ibin" >/dev/null 2>&1 || { echo "infer-test: FAIL ($$f: the emitted C does not compile)"; ok=0; continue; }; \
+	  "$$tmp/ibin" >/dev/null 2>&1 || { echo "infer-test: FAIL ($$f: the program does not run)"; ok=0; }; \
+	done; \
 	$(SPINEL) test/infer/unsettled_index_write.rb -c --no-line-map -o "$$tmp/u.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile unsettled_index_write)"; exit 1; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_M_s_mul\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/u.c" || { echo "infer-test: FAIL (an int-keyed []= on an unsettled slot poisoned the call graph)"; grep -E 'sp_M_s_mul\(' "$$tmp/u.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_IntArray \* *lv_xs' "$$tmp/u.c" || { echo "infer-test: FAIL (the mapped array did not settle to an int array)"; ok=0; }; \
@@ -1907,6 +1916,12 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -Eq 'sp_PtrArray \* *lv_bare' "$$tmp/ca.c" || { echo "infer-test: FAIL (a table handed to a RECEIVERLESS new(...) lost its typed representation)"; grep -oE 'sp_[A-Za-z]+Array \* *lv_bare' "$$tmp/ca.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_PtrArray \* *iv_u;' "$$tmp/ca.c" || { echo "infer-test: FAIL (the ivar a receiverless new(...) stored the table in stayed boxed)"; ok=0; }; \
 	grep -Eq 'sp_IntArray \* *lv_urow' "$$tmp/ca.c" || { echo "infer-test: FAIL (a row read out of the receiverless-constructed table stayed boxed)"; ok=0; }; \
+	$(SPINEL) test/infer/map_table_rows.rb -c --no-line-map -o "$$tmp/mtr.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile map_table_rows)"; exit 1; }; \
+	grep -Eq 'sp_PtrArray \* *lv_picked' "$$tmp/mtr.c" || { echo "infer-test: FAIL (a table of rows built by map lost its typed representation)"; grep -oE 'sp_[A-Za-z]+Array \* *lv_picked' "$$tmp/mtr.c" | head -1; ok=0; }; \
+	grep -Eq 'sp_PtrArray \* *iv_rows;' "$$tmp/mtr.c" || { echo "infer-test: FAIL (the ivar holding a mapped table stayed boxed)"; ok=0; }; \
+	grep -Eq 'sp_IntArray \* *lv_row ' "$$tmp/mtr.c" || { echo "infer-test: FAIL (a row read out of a mapped table stayed boxed)"; ok=0; }; \
+	grep -Eq 'sp_PolyArray \* *lv_rows' "$$tmp/mtr.c" || { echo "infer-test: FAIL (a table mapped from a HASH must stay boxed -- its emitter cannot build a pointer array, and narrowing it stops the program running)"; grep -oE 'sp_[A-Za-z]+Array \* *lv_rows' "$$tmp/mtr.c" | head -1; ok=0; }; \
+	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_F_s_mul\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/mtr.c" || { echo "infer-test: FAIL (a helper reading an element of a mapped table bound a boxed parameter)"; grep -E 'sp_F_s_mul\(' "$$tmp/mtr.c" | head -1; ok=0; }; \
 	$(SPINEL) test/infer/generator_element_cycle.rb -c --no-line-map -o "$$tmp/g.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile generator_element_cycle)"; exit 1; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_F_s_add\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/g.c" || { echo "infer-test: FAIL (a generator whose element feeds back into its own operands latched a poly array)"; grep -E 'sp_F_s_add\(' "$$tmp/g.c" | head -1; ok=0; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_IntArray \* *sp_E_s_add\(sp_IntArray \*' "$$tmp/g.c" || { echo "infer-test: FAIL (the extension-field add did not settle on the Integer array)"; grep -E 'sp_E_s_add\(' "$$tmp/g.c" | head -1; ok=0; }; \
