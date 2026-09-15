@@ -80,11 +80,16 @@ static int inline_str_mutator_name(const char *nm) {
          sp_streq(nm, "prepend") || sp_streq(nm, "insert") || sp_streq(nm, "clear") ||
          sp_streq(nm, "[]=") || (l > 1 && nm[l - 1] == '!');
 }
-/* Does scope mi's body plainly rebind `name`? A rebind is the callee's own
-   local binding and must not reach the caller, so such a parameter is copied
-   as before. */
+/* Does scope mi's body rebind `name`? 0 = never; 1 = only by plain
+   assignment (`io = String.new(...)`), which the alias survives: the store
+   repoints the cell at a private local, so the caller's variable keeps what
+   was appended before the rebind and the body's later reads and writes go to
+   its own binding, which is what CRuby does; 2 = by an op-assign, `||=`, or
+   a multiple-assignment target, forms the store emitters do not spell that
+   way, so such a parameter is copied as before. */
 static int inline_param_rebound(Compiler *c, int mi, const char *name) {
   const NodeTable *nt = c->nt;
+  int kind = 0;
   for (int q = 0; q < nt->count; q++) {
     if (c->nscope[q] != mi) continue;
     NodeKind k = nt_kind(nt, q);
@@ -92,9 +97,11 @@ static int inline_param_rebound(Compiler *c, int mi, const char *name) {
         k != NK_LocalVariableOrWriteNode && k != NK_LocalVariableAndWriteNode &&
         k != NK_LocalVariableTargetNode) continue;
     const char *wn = nt_str(nt, q, "name");
-    if (wn && sp_streq(wn, name)) return 1;
+    if (!wn || !sp_streq(wn, name)) continue;
+    if (k != NK_LocalVariableWriteNode) return 2;
+    kind = 1;
   }
-  return 0;
+  return kind;
 }
 /* Does scope mi's body mutate `name` in place, or hand it on as a call
    argument (where a callee may)? */
@@ -113,6 +120,72 @@ static int inline_param_mutated(Compiler *c, int mi, const char *name) {
       if (nt_kind(nt, av[k]) != NK_LocalVariableReadNode) continue;
       const char *vn = nt_str(nt, av[k], "name");
       if (vn && sp_streq(vn, name)) return 1;
+    }
+  }
+  return 0;
+}
+
+/* Does the subtree under `id` mutate local `name` in place (a receiver-
+   reassigning string mutator on a plain read of it)? The block body of a
+   call site, asked about the block's own parameter. */
+static int subtree_mutates_local(const NodeTable *nt, int id, const char *name) {
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_CallNode) {
+    int r = nt_ref(nt, id, "receiver");
+    if (r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode) {
+      const char *rn = nt_str(nt, r, "name");
+      if (rn && sp_streq(rn, name) && inline_str_mutator_name(nt_str(nt, id, "name"))) return 1;
+    }
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_mutates_local(nt, nt_ref_at(nt, id, i), name)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *a = nt_arr_at(nt, id, i, &n);
+    for (int k = 0; k < n; k++)
+      if (subtree_mutates_local(nt, a[k], name)) return 1;
+  }
+  return 0;
+}
+/* A block parameter of `blk` that the block's body mutates in place, and that
+   no write site in its scope rebinds: the yield it is bound from has to lend
+   the yielded variable itself (see emit_block_invoke's alias binding), or the
+   append lands in the parameter's copy and the yielded string never sees it
+   (`fill(buf) { |s| s << "z" }` left buf empty). */
+static int block_param_wants_alias(Compiler *c, int blk, int k) {
+  const NodeTable *nt = c->nt;
+  const char *bp = block_param_name(c, blk, k);
+  if (!bp) return 0;
+  Scope *bs = comp_scope_of(c, blk);
+  LocalVar *lv = bs ? scope_local(bs, bp) : NULL;
+  if (!lv || lv->type != TY_STRING || (lv->is_cell && !lv->inline_alias)) return 0;
+  if (!subtree_mutates_local(nt, nt_ref(nt, blk, "body"), bp)) return 0;
+  for (int w = 0; w < nt->count; w++) {
+    NodeKind wk = nt_kind(nt, w);
+    if (wk != NK_LocalVariableWriteNode && wk != NK_LocalVariableOperatorWriteNode &&
+        wk != NK_LocalVariableOrWriteNode && wk != NK_LocalVariableAndWriteNode &&
+        wk != NK_LocalVariableTargetNode) continue;
+    const char *wn = nt_str(nt, w, "name");
+    if (wn && sp_streq(wn, bp) && comp_scope_of(c, w) == bs) return 0;
+  }
+  return 1;
+}
+/* Does scope mi yield `name` to a block parameter the call site's block
+   (`blk`) mutates in place? Then the parameter is mutated through the block,
+   and has to be an alias of the caller's variable like a directly mutated
+   one (inline_param_mutated). */
+static int inline_param_yielded_mutated(Compiler *c, int mi, const char *name, int blk) {
+  const NodeTable *nt = c->nt;
+  if (blk < 0) return 0;
+  for (int q = 0; q < nt->count; q++) {
+    if (c->nscope[q] != mi || nt_kind(nt, q) != NK_YieldNode) continue;
+    int aa = nt_ref(nt, q, "arguments"); int an = 0;
+    const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &an) : NULL;
+    for (int k = 0; k < an; k++) {
+      if (nt_kind(nt, av[k]) != NK_LocalVariableReadNode) continue;
+      const char *vn = nt_str(nt, av[k], "name");
+      if (vn && sp_streq(vn, name) && block_param_wants_alias(c, blk, k)) return 1;
     }
   }
   return 0;
@@ -407,7 +480,9 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       LocalVar *lv = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
       if (!lv || !lv->is_param || lv->is_block_param || lv->type != TY_STRING) continue;
       if (lv->is_cell && !lv->inline_alias) continue;
-      if (inline_param_rebound(c, mi, m->pnames[i]) || !inline_param_mutated(c, mi, m->pnames[i])) continue;
+      if (inline_param_rebound(c, mi, m->pnames[i]) == 2 ||
+          (!inline_param_mutated(c, mi, m->pnames[i]) &&
+           !inline_param_yielded_mutated(c, mi, m->pnames[i], nt_ref(nt, id, "block")))) continue;
       alias_mask |= 1u << i;
       lv->inline_alias++;
       lv->is_cell = 1;
@@ -425,7 +500,15 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     if (lv->is_param && lv->inline_alias) {
       int pi = -1;
       for (int k = 0; k < m->nparams; k++) if (m->pnames[k] && sp_streq(m->pnames[k], lv->name)) { pi = k; break; }
-      if (pi >= 0 && (alias_mask & (1u << pi))) continue;   /* the alias is declared at the binding */
+      if (pi >= 0 && (alias_mask & (1u << pi))) {
+        /* the alias is declared at the binding; a parameter the body also
+           rebinds gets the private local the rebind repoints the cell at */
+        if (inline_param_rebound(c, mi, lv->name) == 1) {
+          emit_indent(b, din);
+          buf_printf(b, "const char *lv_%s = NULL; SP_GC_ROOT_STR(lv_%s);\n", rn, rn);
+        }
+        continue;
+      }
     }
     emit_inlined_local_decl(c, lv, rn, b, din);
   }
@@ -804,6 +887,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   int yc = 0;
   const int *yargs = args_node >= 0 ? nt_arr(nt, args_node, "arguments", &yc) : NULL;
   Scope *bsc = comp_scope_of(c, blk);
+  LocalVar *yalias_lv[16]; int yalias_n = 0, yalias_open = 0;
   /* The spliced body and the block's own parameter NAMES resolve at the
      block's DEFINITION-site rename depth (g_block_nren): the entries the
      enclosing method-inline pushed above that mark must not capture
@@ -903,6 +987,26 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     BI_METHOD_SIDE();
     const char *bpr = bprbuf;
     if (!as_expr) emit_indent(b, indent);
+    /* A parameter the block mutates in place, bound from a yield of a plain
+       variable: alias the variable itself rather than copy it, so the
+       block's append reaches what was yielded. The parameter reads and
+       writes through the cell for the rest of this splice. */
+    if (poly_splat_tmp < 0 && splat_tmp < 0 && k < yc &&
+        nt_kind(nt, yargs[k]) == NK_LocalVariableReadNode &&
+        comp_ntype(c, yargs[k]) == TY_STRING && block_param_wants_alias(c, blk, k)) {
+      LocalVar *bl = bsc ? scope_local(bsc, bp) : NULL;
+      if (bl && yalias_n < (int)(sizeof yalias_lv / sizeof yalias_lv[0])) {
+        if (!as_expr && !yalias_open) { buf_puts(b, "{\n"); emit_indent(b, indent); yalias_open = 1; }
+        buf_printf(b, "const char **_cell_%s = &(", bpr);
+        emit_expr(c, yargs[k], b);
+        buf_puts(b, ")");
+        buf_puts(b, as_expr ? "; " : ";\n");
+        yalias_lv[yalias_n++] = bl;
+        bl->inline_alias++;
+        bl->is_cell = 1;
+        continue;
+      }
+    }
     buf_printf(b, "lv_%s = ", bpr);
     if (poly_splat_tmp >= 0) {
       LocalVar *bl = bsc ? scope_local(bsc, bp) : NULL;
@@ -1401,6 +1505,10 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     else { emit_indent(b, indent); buf_puts(b, "} while(0);\n"); }
     g_ie_next_var = sv_nx2; g_ie_res_poly = sv_poly2;
   }
+  for (int ya = 0; ya < yalias_n; ya++) {
+    if (--yalias_lv[ya]->inline_alias == 0) yalias_lv[ya]->is_cell = 0;
+  }
+  if (yalias_open) { emit_indent(b, indent); buf_puts(b, "}\n"); }
   g_self = sv_bself; g_self_deref = sv_bderef;
   g_emitting_class_id = sv_bemcls;
   g_current_scope_is_lowered = sv_blow;

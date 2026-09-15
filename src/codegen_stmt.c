@@ -1099,6 +1099,16 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
     buf_puts(b, ");\n");
     return;
   }
+  /* A parameter an inlined expansion bound as an ALIAS of the caller's
+     variable (emit_inline_call_x): a plain rebind is the callee's own new
+     binding, so it repoints the cell at the expansion's private local and
+     the caller's variable keeps what the body appended before it. */
+  if (lv && lv->is_param && lv->is_cell && lv->inline_alias &&
+      !(g_cap_struct && g_cap_names && nameset_has(g_cap_names, nm))) {
+    const char *arn = rename_local(nm);
+    buf_printf(b, "(*(_cell_%s = &lv_%s))", arn, arn);
+  }
+  else
   emit_local_ref(c, id, nm, b);
   buf_puts(b, " = ");
   /* `x = nil` -> the variable's type-appropriate default */

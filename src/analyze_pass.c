@@ -6509,6 +6509,21 @@ static int a_proc_forwarded_with_amp(Compiler *c, int create) {
   return 0;
 }
 
+/* A block parameter no write site in its scope assigns. Its type comes from
+   the binding alone; the usage pass, which runs ahead of the binders in a
+   round, may still have guessed one from a push inside the block (`r <<
+   1.5` reads as "r is a float array") before the receiver or the yield had
+   a type. */
+static int pure_block_param(Compiler *c, Scope *s, const char *name) {
+  const NodeTable *nt = c->nt;
+  for (int w = 0; w < nt->count; w++) {
+    if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
+    const char *wn = nt_str(nt, w, "name");
+    if (wn && sp_streq(wn, name) && comp_scope_of(c, w) == s) return 0;
+  }
+  return 1;
+}
+
 int infer_block_params(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -7132,6 +7147,15 @@ int infer_block_params(Compiler *c) {
             }
           }
           TyKind m = ty_unify(lv->type, at);
+          /* the yield says what the parameter IS; an array kind the usage
+             pass guessed from a push inside the block (`s << "z"` on a
+             yielded String read as "s is a string array") is not evidence
+             about that, and unified with the real type it made the
+             parameter poly, where `<<` on the boxed immediate string built
+             a new string and the yielded one never saw the append */
+          if (ty_is_array(lv->type) && at != TY_UNKNOWN && !ty_is_array(at) &&
+              at != TY_POLY && pure_block_param(c, bs, bp))
+            m = at;
           if (m != lv->type) { lv->type = m; changed = 1; }
         }
         /* Params beyond the first yield's arity might still be nil if there
@@ -8184,15 +8208,8 @@ int infer_block_params(Compiler *c) {
          is; the receiver does, and it says poly. Keeping the array type
          assigned the loop's sp_RbVal element to an sp_FloatArray * and the
          program did not compile. */
-      if (pt != TY_POLY) continue;
-      int has_write = 0;
-      for (int w = 0; w < nt->count && !has_write; w++) {
-        if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
-        const char *wn = nt_str(nt, w, "name");
-        if (wn && sp_streq(wn, p0) && comp_scope_of(c, w) == s) has_write = 1;
-      }
-      if (has_write) continue;
-      lv->type = TY_POLY; changed = 1;
+      if (pt == TY_UNKNOWN || !pure_block_param(c, s, p0)) continue;
+      lv->type = pt; changed = 1;
       continue;
     }
     TyKind merged = ty_unify(lv->type, pt);
