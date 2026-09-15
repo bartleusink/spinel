@@ -130,6 +130,13 @@ static void sp_slab_reserve(void) {
       if (hi > top) munmap((void *)top, hi - top);
       sp_slab_base = sp_slab_brk = base;
       sp_slab_cap = want;
+      /* Keep the untouched reservation out of a core dump: the kernel writes a
+         mapping's every page, zero or not, and 16 GB of them took a crashing
+         program 20 s to die (a minute and more on CI). The arenas actually
+         carved are put back in, one at a time, as they are handed out. */
+#ifdef MADV_DONTDUMP
+      madvise((void *)base, want, MADV_DONTDUMP);
+#endif
       return;
     }
     want >>= 2;
@@ -184,6 +191,9 @@ static int sp_slab_next_arena(void) {
   if (sp_slab_brk + SP_SLAB_ARENA > sp_slab_base + sp_slab_cap) return 0;
   sp_slab_arena *ar = (sp_slab_arena *)sp_slab_brk;
   sp_slab_brk += SP_SLAB_ARENA;
+#ifdef MADV_DODUMP
+  madvise((void *)ar, SP_SLAB_ARENA, MADV_DODUMP);   /* this arena holds objects: dump it */
+#endif
   for (int i = (int)SP_SLAB_NCHUNK - 1; i >= 1; i--) {   /* pops then ascend in address */
     ar->ch[i].next_avail = sp_slab_empty;
     sp_slab_empty = &ar->ch[i];
