@@ -11595,6 +11595,12 @@ int make_yield_proc_forms(Compiler *c) {
     if (src->is_transplanted_source || !src->name) continue;
     if (src->body < 0) continue;
     if (!pf_wanted(c, src->name)) continue;
+    /* A method the program reopens has two definitions in the scope table
+       and the last one wins (comp_method_in_class): only that one gets the
+       clone. Cloning the first left the poly dispatch arm running the
+       package's transport where every other call site ran the program's
+       stub in front of it (#4502). */
+    if (comp_method_in_class(c, src->class_id, src->name) != s) continue;
     /* `#` cannot appear in a Ruby method name, so the clone is invisible to
        the by-name lookups while still mangling to a valid C identifier. */
     char pfname[192];
@@ -11648,7 +11654,15 @@ int make_yield_proc_forms(Compiler *c) {
       for (int p = 0; p < d->nparams; p++) {
         if (!d->pnames[p]) continue;
         LocalVar *lv = scope_local_intern(d, d->pnames[p]);
-        if (lv) lv->is_param = 1;
+        if (!lv) continue;
+        lv->is_param = 1;
+        /* No call site binds the clone's parameters (the dispatch arm is the
+           only caller, and it boxes what it passes), so a parameter no
+           inference touches stays unknown, and an unknown local in a value
+           position is emitted as nil: `perform(req)` inside the clone ran
+           `perform(nil)` (#4502). The signature spells it sp_RbVal; the
+           local is that from the start. */
+        if (lv->type == TY_UNKNOWN) lv->type = TY_POLY;
       }
       if (d->blk_param) {
         LocalVar *bl = scope_local_intern(d, d->blk_param);
