@@ -13312,6 +13312,17 @@ void analyze_program(Compiler *c) {
      scan (which made the escape analysis O(methods * reads * nodes)). */
   char *blk_call_recv = (char *)calloc((size_t)c->nt->count, 1);
   char *blk_arg_expr = (char *)calloc((size_t)c->nt->count, 1);
+  /* blk_cond_pred[id] -- id is the `predicate` of an if/unless/while/until.
+     A bare `blk` there asks only "was a block given?", which emit_cond answers
+     at the inline site without naming the slot. It is not an approved use (the
+     method still cannot be spliced through it) but it is not a VALUE use
+     either, so it must not drag the method into the lowered form -- that turns
+     the folded `yield if block` into a real proc call. */
+  char *blk_cond_pred = (char *)calloc((size_t)c->nt->count, 1);
+  for (int p = 0; blk_cond_pred && p < c->nt->count; p++) {
+    int pr = nt_ref(c->nt, p, "predicate");
+    if (pr >= 0 && pr < c->nt->count) blk_cond_pred[pr] = 1;
+  }
   for (int p = 0; (blk_call_recv && blk_arg_expr) && p < c->nt->count; p++) {
     const char *pty = nt_type(c->nt, p);
     if (!pty) continue;
@@ -13451,8 +13462,8 @@ void analyze_program(Compiler *c) {
         if (body >= 0) a_mark_subtree(c, body, inproc_m);
       }
     }
-    int escapes = 0, uses = 0;
-    for (int id = 0; id < c->nt->count && !escapes; id++) {
+    int escapes = 0, uses = 0, value_use = 0;
+    for (int id = 0; id < c->nt->count && !(escapes && value_use); id++) {
       const char *ty = nt_type(c->nt, id);
       if (!ty || !sp_streq(ty, "LocalVariableReadNode")) continue;
       if (comp_scope_of(c, id) != m) continue;
@@ -13460,14 +13471,24 @@ void analyze_program(Compiler *c) {
       if (!nm || !sp_streq(nm, m->blk_param)) continue;
       /* A read inside a nested proc body is a capture-escape: the proc
          holds a reference to blk independently of the call site. */
-      if (inproc_m && inproc_m[id]) { escapes = 1; break; }
+      if (inproc_m && inproc_m[id]) { escapes = 1; value_use = 1; continue; }
       uses++;
       /* approved: receiver of a `.call`, or expression of a `&block` arg */
       int ok = (blk_call_recv && blk_call_recv[id]) || (blk_arg_expr && blk_arg_expr[id]);
-      if (!ok) escapes = 1;
+      if (!ok) {
+        escapes = 1;
+        /* Everything the inline path can still answer without the slot --
+           `blk.nil?`, `!blk`, and a bare `blk` in a condition -- is approved
+           above or folded by emit_cond. What is left genuinely wants the
+           block's VALUE, and no call site can supply one. */
+        if (!(blk_cond_pred && blk_cond_pred[id])) value_use = 1;
+      }
       /* ... but a forward into a user method that keeps the block is an
-         escape all the same, one call deeper (#3772) */
-      else if (blk_arg_expr && blk_arg_expr[id] && blk_fwd_callee) {
+         escape all the same, one call deeper (#3772). Only while nothing has
+         escaped yet: the scan used to stop at the first escape, and an already
+         disqualified method adding edges here would crowd real ones out of the
+         fixed-size list. */
+      else if (!escapes && blk_arg_expr && blk_arg_expr[id] && blk_fwd_callee) {
         int callee = blk_fwd_callee[id];
         if (callee >= 0 && callee < c->nscopes) {
           Scope *cs2 = &c->scopes[callee];
@@ -13478,6 +13499,11 @@ void analyze_program(Compiler *c) {
       }
     }
     free(inproc_m);
+    /* Recorded for the lowering pass further down: a method that wants its
+       block's VALUE cannot be spliced, and if it also contains a literal
+       `yield` the inline path is the only one it has -- which emits no
+       storage for the block while the value use still names it. */
+    m->blk_param_value_use = value_use;
     if (!escapes && uses > 0) {
       /* Don't mark yields=1 if the method has an explicit return: emit_inlined_call
          would reject inlining anyway (scope_has_return), but the method would then
@@ -13513,6 +13539,7 @@ void analyze_program(Compiler *c) {
   free(inline_cand); free(fwd_from); free(fwd_to);
   free(blk_call_recv);
   free(blk_arg_expr);
+  free(blk_cond_pred);
   free(blk_fwd_callee);
 
   /* intern every symbol literal so codegen can emit the id table */
@@ -14463,7 +14490,14 @@ void analyze_program(Compiler *c) {
        form does not. */
     int self_rec = scope_calls_itself(c, mi);
     int thread_yld = !self_rec && scope_yields_inside_lifted_body(c, mi);
-    if (!self_rec && !thread_yld) continue;
+    /* The declared `&blk` is also used as a VALUE -- handed to another method,
+       assigned to a local, captured by a nested proc. The inline path has no
+       storage to name there (it emitted a reference to an `lv_blk` it never
+       declared), and a `yield` next to such a use is otherwise the only thing
+       standing between the method and the ordinary proc-parameter form it
+       already compiles without the `yield`. */
+    int blk_value_use = !self_rec && !thread_yld && m->blk_param_value_use;
+    if (!self_rec && !thread_yld && !blk_value_use) continue;
     m->is_lowered_yield = 1;
     m->lowered_lifted_yield = thread_yld;
     m->yields = 0;

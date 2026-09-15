@@ -182,6 +182,13 @@ typedef struct {
                                back. A lowered method whose tail is its own
                                expression carries THAT, and both the call site
                                and the signature follow `ret` (#4145). */
+  int blk_param_value_use; /* the named &block is read for its VALUE -- handed
+                            to another method, assigned to a local, captured by
+                            a nested proc. Not merely unapproved for splicing:
+                            `blk.nil?`, `!blk` and a bare `blk` in a condition
+                            ask only whether a block was given, which an inline
+                            site answers by folding. A real value use has no
+                            such answer -- the block must be an sp_Proc *. */
   char *blk_param;  /* name of the `&block` parameter, or NULL (anon -> "") */
 
   /* Compile-time `define_method` unrolling: a method synthesized from
