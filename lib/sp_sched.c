@@ -1680,12 +1680,18 @@ static void sp_sched_par_sweep(void) {
    second and trims when a full cycle has asked since the last one. */
 #if defined(__GLIBC__)
 #include <malloc.h>
+/* The trimmer sleeps in short steps and trims as soon as a full cycle has
+   asked (the cadence, once a second, is the requester's): a trim a second
+   after the request found the arena mid-cycle, with the freed memory of the
+   last sweep only partly in it, and the process kept 260 MB more resident
+   than the inline trim used to leave. Trimming promptly after the request,
+   which follows the sweep, hands back what the sweep freed. */
 static void *sp_trim_thread_main(void *arg) {
   (void)arg;
   sigset_t blk; sigemptyset(&blk); sigaddset(&blk, g_preempt_sig);
   pthread_sigmask(SIG_BLOCK, &blk, NULL);
   for (;;) {
-    struct timespec ts = { 1, 0 };
+    struct timespec ts = { 0, 20 * 1000 * 1000 };
     nanosleep(&ts, NULL);
     if (__atomic_load_n(&g_shutdown, __ATOMIC_RELAXED)) break;   /* set under the sched lock at drain; read here without it */
     if (__atomic_exchange_n(&sp_gc_trim_wanted, 0, __ATOMIC_ACQ_REL)) malloc_trim(0);
