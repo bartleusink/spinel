@@ -6084,6 +6084,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
     }
     int ncand = 0;
     for (int k = 0; k < c->nclasses; k++) {
+      /* a native class's methods are its declared bindings (#4504) */
+      if (c->classes[k].is_native_class) {
+        if (kwh < 0 && !has_splat_arg && c->classes[k].instantiated) {
+          int nmi = comp_native_method_find(c, k, name, pos_argc, 0);
+          if (nmi >= 0 && c->native_methods[nmi].nargs == pos_argc) ncand++;
+        }
+        continue;
+      }
       int mi = comp_method_in_chain(c, k, name, NULL);
       /* Include if call supplies all required params (pad defaults / truncate
          extras). A collapsed keyword hash funds one of them: without counting
@@ -6476,6 +6484,66 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       emit_poly_dispatch_key(c, tv, cls0_cand2, prim_cand2, b);
       buf_puts(b, ") {");
       for (int k = 0; k < c->nclasses; k++) {
+        /* native (C-backed) class arm: a declared method of this arity takes
+           the hoisted temps in its native representation, as the zero-arg
+           dispatch's arm and the typed-receiver call do. The argument
+           dispatch had no such arm, so a native object reached through a
+           poly slot answered NoMethodError for every call with an argument
+           while its zero-arg calls dispatched (#4504). Positional calls
+           only: a binding declares no keywords and no splat. */
+        if (c->classes[k].is_native_class) {
+          if (kwh >= 0 || has_splat_arg || !c->classes[k].instantiated) continue;
+          int nmi = comp_native_method_find(c, k, name, pos_argc, 0);
+          if (nmi < 0 || c->native_methods[nmi].nargs != pos_argc) continue;
+          NativeMethod *nmet = &c->native_methods[nmi];
+          Buf cb; memset(&cb, 0, sizeof cb);
+          buf_printf(&cb, "%s((%s *)_t%d.v.p", nmet->csym, c->classes[k].c_struct, tv);
+          int ok = 1;
+          for (int ai = 0; ai < pos_argc && ok; ai++) {
+            const char *spec = nmet->args[ai];
+            char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[ai]);
+            buf_puts(&cb, ", ");
+            if (!spec || sp_streq(spec, "any")) {
+              if (atmp_ty[ai] == TY_POLY) buf_puts(&cb, tn);
+              else emit_boxed_text(c, atmp_ty[ai], tn, &cb);
+            }
+            else if (sp_streq(spec, "regexp")) {
+              /* a :regexp binds a regex LITERAL at the site, nothing else */
+              int rl = re_lit_index(c, argv[ai]);
+              if (rl < 0) { ok = 0; break; }
+              buf_printf(&cb, "sp_re_pat_%d", rl);
+            }
+            else {
+              TyKind aw = ffi_spec_to_ty(spec);
+              if (sp_streq(spec, "text")) aw = TY_STRING;
+              if (aw == TY_UNKNOWN) { ok = 0; break; }
+              if (atmp_ty[ai] == TY_POLY) emit_unbox_text(c, aw, tn, &cb);
+              else if (atmp_ty[ai] == aw || (aw == TY_STRING && atmp_ty[ai] == TY_STRBUF)) buf_puts(&cb, tn);
+              else if (aw == TY_FLOAT && atmp_ty[ai] == TY_INT) buf_printf(&cb, "(sp_float)%s", tn);
+              else { ok = 0; break; }
+            }
+          }
+          if (!ok) { free(cb.p); continue; }
+          buf_puts(&cb, ")");
+          if (sp_streq(nmet->ret, "string?")) {
+            Buf wb; memset(&wb, 0, sizeof wb);
+            buf_printf(&wb, "sp_box_nullable_str(%s)", cb.p ? cb.p : "");
+            free(cb.p); cb = wb;
+          }
+          TyKind mret = sp_streq(nmet->ret, "self") ? ty_object(k) : native_spec_to_ty(nmet->ret);
+          buf_printf(b, " case %d: ", k);
+          if (mret == TY_NIL) buf_puts(b, cb.p ? cb.p : "");
+          else {
+            buf_printf(b, "_t%d = ", tr);
+            if (ret == TY_POLY && mret != TY_POLY) emit_boxed_text(c, mret, cb.p, b);
+            else if (ret != TY_POLY && mret == TY_POLY)
+              emit_unbox_text(c, is_scalar_ret(ret) ? ret : TY_INT, cb.p, b);
+            else buf_puts(b, cb.p ? cb.p : "");
+          }
+          buf_puts(b, "; break;");
+          free(cb.p);
+          continue;
+        }
         int defcls = -1;
         int mi = comp_method_in_chain(c, k, name, &defcls);
         if (mi < 0) continue;
@@ -10627,7 +10695,11 @@ static int any_class_defines(Compiler *c, const char *qm) {
   for (int k = 0; k < c->nclasses; k++)
     if (comp_method_in_chain(c, k, qm, NULL) >= 0 ||
         comp_reader_in_chain(c, k, qm, NULL) ||
-        (is_wr && comp_writer_in_chain(c, k, wbase, NULL)))
+        (is_wr && comp_writer_in_chain(c, k, wbase, NULL)) ||
+        /* a native class's methods are its declared bindings, not scopes:
+           without this a native object in a poly slot answered false to
+           respond_to? for every method it has (#4504) */
+        (c->classes[k].is_native_class && comp_native_method_find(c, k, qm, 0, 0) >= 0))
       return 1;
   return 0;
 }
@@ -28451,7 +28523,8 @@ else {
           for (int k = 0; k < c->nclasses; k++) {
             int has = comp_method_in_chain(c, k, qm, NULL) >= 0 ||
                       comp_reader_in_chain(c, k, qm, NULL) ||
-                      (is_wr && comp_writer_in_chain(c, k, wbase, NULL));
+                      (is_wr && comp_writer_in_chain(c, k, wbase, NULL)) ||
+                      (c->classes[k].is_native_class && comp_native_method_find(c, k, qm, 0, 0) >= 0);
             if (has) { buf_printf(b, "%s_t%d.cls_id == %d", first ? "" : " || ", tv, k); first = 0; }
           }
           if (first) buf_puts(b, "0");

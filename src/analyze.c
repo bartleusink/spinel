@@ -505,9 +505,13 @@ void compute_instantiated(Compiler *c, int early) {
   int *keep = NULL;
   if (early) { keep = (int *)malloc(sizeof(int) * (size_t)(c->nclasses ? c->nclasses : 1)); for (int k = 0; k < c->nclasses; k++) keep[k] = c->classes[k].instantiated; }
   for (int k = 0; k < c->nclasses; k++) c->classes[k].instantiated = 0;
-  /* Struct classes: conservatively live (their instances flow as poly). */
+  /* Struct classes: conservatively live (their instances flow as poly). A
+     native (C-backed) class too: its instances can be minted on the C side
+     and handed back boxed through a :any binding, with no `.new` in the
+     program for this census to see, and a class it left uninstantiated had
+     its arms dropped from every poly dispatch (#4504). */
   for (int k = 0; k < c->nclasses; k++)
-    if (c->classes[k].is_struct) c->classes[k].instantiated = 1;
+    if (c->classes[k].is_struct || c->classes[k].is_native_class) c->classes[k].instantiated = 1;
   for (int id = 0; id < nt->count && !disable; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *name = nt_str(nt, id, "name");
