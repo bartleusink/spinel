@@ -10533,6 +10533,10 @@ char *codegen_program(const NodeTable *nt) {
        value after its reader is done, so it can name a freed object by the
        next cycle: the scratch marker skips a slab slot that is free. */
     if (g_has_dyn_syms) buf_puts(&mk, "  sp_mark_dyn_syms();\n");
+    /* $0 is a heap string held by a static of the runtime and by nothing the
+       program can name: without this it was freed by a full string sweep,
+       and read afterwards from whatever the slot held next */
+    buf_puts(&mk, "  sp_mark_string(sp_program_name);\n");
     buf_puts(&mk, "  sp_mark_rbval_scratch(_sp_proc_poly_ret);\n");
     buf_puts(&mk, "  for (int _i = 0; _i < 16; _i++) sp_mark_rbval_scratch(_sp_proc_poly_args[_i]);\n");
     g_has_user_global_marks = (mk.p && mk.len > 0);

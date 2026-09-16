@@ -405,6 +405,9 @@ void sp_gc_mark_str(const char *s) {
   sp_str_hdr *h = ((sp_str_hdr *)(s - 1)) - 1;
   if (sp_slab_owns(h)) {
     int wy;
+    /* SPINEL_GC_VERIFY: a string slot the sweep has freed is nobody's to
+       mark; marking it would set generation bits on a free slot */
+    if (__builtin_expect(sp_gc_verify, 0) && !sp_slab_is_live(h)) { fprintf(stderr, "*** SPINEL_GC_VERIFY: the mark reached a freed heap string %p\n", (const void *)s); sp_gc_verify_fail((void *)s, (sp_gc_hdr *)h); }
     if (!sp_slab_mark(h, 0, &wy)) return;
     size_t sz = h->size & 0x3FFFFFFFu;
     sp_gc_mkl_str += sz;
@@ -804,6 +807,8 @@ static void sp_gc_rem_invariant_cb(void *hp,void *arg){
   if(!!h->dirty!=listed){
     fprintf(stderr,"spinel: GC remembered-set invariant broken: obj=%p scan=%p dirty=%d listed=%d full=%d age=%d cycle=%d\n",
             o,(void*)h->scan,(int)h->dirty,listed,*(int*)arg,sp_gc_age_survivors,sp_gc_cycle);
+    fprintf(stderr,"  size=%zu old=%d marked=%u gen=%u fin=%p\n",h->size,(int)h->old,(unsigned)h->marked,(unsigned)sp_gc_mark_gen,(void*)h->finalize);
+    sp_slab_describe(hp); sp_slab_history(hp);
     abort();
   }
 }
