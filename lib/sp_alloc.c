@@ -647,10 +647,8 @@ void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   if (!sp_gc_stress_checked) { sp_gc_stress_checked = 1; const char *e = getenv("SPINEL_GC_STRESS"); if (e && *e && *e != '0') { SP_GC_CTR_SET(sp_gc_threshold, 2048); sp_gc_threshold_init = 2048; sp_gc_stress_pin = 1; } }
   if (SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold)) sp_stw_collect();
   size_t need = sizeof(sp_gc_hdr) + sz;
-  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
-  h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
-  if (fin) sp_slab_set_fin(h);
-  if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
+  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc_obj(need, fin, scn);
+  if (__builtin_expect(sp_alloc_report_on, 0)) sp_alloc_report_count((void *)scn, sz);
   SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
   return (char *)h + sizeof(sp_gc_hdr);
 #else
@@ -663,10 +661,8 @@ void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
     sp_gc_collect_retune();
   }
   size_t need = sizeof(sp_gc_hdr) + sz;
-  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
-  h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
-  if (fin) sp_slab_set_fin(h);
-  if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
+  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc_obj(need, fin, scn);
+  if (__builtin_expect(sp_alloc_report_on, 0)) sp_alloc_report_count((void *)scn, sz);
   SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
   SP_HEAP_UNLOCK();
   return (char *)h + sizeof(sp_gc_hdr);
@@ -896,12 +892,21 @@ void sp_str_sweep(void) {
    the cap bounds. The cap is per thread for the same reason. */
 SP_TLS sp_gc_hdr *sp_polyarr_pool_head = NULL;
 SP_TLS long sp_polyarr_pool_count = 0;
-#define SP_POLYARR_POOL_MAX 4096
+/* The cap is per thread, so threaded it is a fraction of what the one
+   process-wide pool held (up to 64k, which a tree benchmark churning tens
+   of thousands of arrays a cycle leaned on): 8k a worker bounds thirty
+   workers where 64k each would not, and single-threaded the one pool keeps
+   the old cap. */
+#ifdef SP_THREADS
+#define SP_POLYARR_POOL_MAX 8192
+#else
+#define SP_POLYARR_POOL_MAX 65536
+#endif
 #define SP_POLYARR_POOL_KEEP_CAP 64   /* don't retain unusually large buffers */
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h) {
   sp_PolyArray *a = (sp_PolyArray *)((char *)h + sizeof(sp_gc_hdr));
   if (sp_polyarr_pool_count >= SP_POLYARR_POOL_MAX || a->cap > SP_POLYARR_POOL_KEEP_CAP) {
-    sp_pl_free(a->data);
+    if (a->data != a->inl) sp_pl_free(a->data);
     sp_slab_free(h);
     return;
   }

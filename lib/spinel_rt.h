@@ -728,9 +728,13 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
       sp_##CLS##_pool_hwm, sp_##CLS##_pool_count, sp_##CLS##_pool_max); \
   }
 
+/* With the slab on the pool is bypassed: the slab's own allocation is as
+   cheap as a pop, and a pooled header is one the sweep must touch dead to
+   run its recycler, where an unpooled one dies in its chunk's bitmap
+   untouched (lib/sp_slab.c). The pool keeps serving the malloc fallback. */
 #define SP_POOL_NEW(CLS, SCAN) (__extension__ ({ \
   sp_##CLS *_p; \
-  sp_gc_hdr *_h = sp_pool_try_pop(&sp_##CLS##_pool_head); \
+  sp_gc_hdr *_h = sp_slab_on > 0 ? NULL : sp_pool_try_pop(&sp_##CLS##_pool_head); \
   if (_h) { \
     SP_POOL_CTR_DEC(sp_##CLS##_pool_count); \
     SP_POOL_CTR_INC(sp_##CLS##_pool_pops); \
@@ -738,6 +742,9 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
     _h->recycle = sp_##CLS##_pool_recycle; \
     _p = (sp_##CLS *)((char *)_h + sizeof(sp_gc_hdr)); \
     if (sp_alloc_report_on) sp_alloc_report_count((void *)(SCAN), sizeof(sp_##CLS)); \
+  } \
+  else if (sp_slab_on > 0) { \
+    _p = (sp_##CLS *)sp_gc_alloc(sizeof(sp_##CLS), NULL, SCAN); \
   } \
   else { \
     _p = (sp_##CLS *)sp_gc_alloc_pool(sizeof(sp_##CLS), SCAN, sp_##CLS##_pool_recycle); \

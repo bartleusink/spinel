@@ -705,21 +705,34 @@ static void __attribute__((noinline, cold)) sp_raise_frozen_array_v(sp_RbVal v) 
   sp_raise_cls("FrozenError", (&("\xff" "can't modify frozen Array")[1]));
 }
 
-/* sp_PolyArray: a growable array of boxed values. */
-typedef struct { sp_RbVal *data; sp_int len; sp_int cap; sp_int frozen; } sp_PolyArray;
+/* sp_PolyArray: a growable array of boxed values. The first
+   SP_POLYARR_INLINE elements live in the object itself: an array that never
+   outgrows them has no payload, so no finalizer, so the sweep never touches
+   it dead (lib/sp_slab.c) -- and most arrays never do. Growing past them
+   moves the elements to a payload and installs the finalizer that frees it. */
+#define SP_POLYARR_INLINE 8
+typedef struct { sp_RbVal *data; sp_int len; sp_int cap; sp_int frozen; sp_RbVal inl[SP_POLYARR_INLINE]; } sp_PolyArray;
 static inline void sp_PolyArray_scan(void *p) { sp_PolyArray *a = (sp_PolyArray *)p; for (sp_int i = 0; i < a->len; i++) sp_mark_rbval(a->data[i]); }
-static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *)p; sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; sp_pl_free(a->data); }
+static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *)p; if (a->data == a->inl) return; sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; sp_pl_free(a->data); }
 /* Free-list pool for PolyArray, header AND data buffer kept together. The
    allocation-heaviest programs (per-point tuple building: BabyStark's
    constraint evaluation) churn millions of short-lived PolyArrays; recycling
    them turns the calloc+malloc pair and the sweep-side free into list ops.
-   Pool state lives in sp_alloc.c; the recycle hook runs inside the sweep. */
+   Pool state lives in sp_alloc.c; the recycle hook runs inside the sweep.
+   With the slab on there is no pool: the slab's own allocation is as cheap
+   as a pop, and a pooled header is one the sweep has to touch dead (to run
+   its recycler) where an unpooled one dies in its chunk's bitmap. */
 /* The pool is per thread (sp_alloc.c says why), so the pop is a plain
    list operation on both builds. */
 extern SP_TLS sp_gc_hdr *sp_polyarr_pool_head;
 extern SP_TLS long sp_polyarr_pool_count;
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h);
 static inline sp_PolyArray *sp_PolyArray_new(void) {
+  if (sp_slab_on > 0) {
+    sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), NULL, sp_PolyArray_scan);
+    a->data = a->inl; a->cap = SP_POLYARR_INLINE; a->len = 0;
+    return a;
+  }
   sp_gc_hdr *ph = sp_polyarr_pool_head;
   if (ph) { sp_polyarr_pool_head = ph->next; sp_polyarr_pool_count--; }
   if (ph) {
@@ -736,11 +749,29 @@ static inline sp_PolyArray *sp_PolyArray_new(void) {
     return a;
   }
   sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), sp_PolyArray_fin, sp_PolyArray_scan);
-  a->cap = 16; a->data = (sp_RbVal *)sp_pl_alloc(sizeof(sp_RbVal) * a->cap); a->len = 0;
-  { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); h->recycle = sp_PolyArray_pool_recycle; sp_slab_set_fin(h); h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); }
+  a->data = a->inl; a->cap = SP_POLYARR_INLINE; a->len = 0;
+  { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); h->recycle = sp_PolyArray_pool_recycle; sp_slab_set_fin(h); }
   return a;
 }
-static inline void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v) { if (!a) return; sp_gc_wb((void*)a); if (a->frozen) { sp_raise_frozen_array(); return; } if (a->len >= a->cap) { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; a->cap = (a->cap * 2) + 1; void *nd = sp_pl_realloc(a->data, sizeof(sp_RbVal) * a->cap); a->data = (sp_RbVal *)nd; h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); } a->data[a->len++] = v; }
+/* past the inline elements: the first growth moves them to a payload and
+   gives the object the finalizer that will free it; later growths resize */
+static SP_NOINLINE void sp_PolyArray_grow(sp_PolyArray *a) {
+  sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr));
+  sp_int nc = (a->cap * 2) + 1;
+  if (a->data == a->inl) {
+    sp_RbVal *nd = (sp_RbVal *)sp_pl_alloc(sizeof(sp_RbVal) * (size_t)nc);
+    memcpy(nd, a->inl, sizeof(sp_RbVal) * (size_t)a->len);
+    a->data = nd;
+    if (!h->finalize) { h->finalize = sp_PolyArray_fin; sp_slab_set_fin(h); }
+  }
+  else {
+    sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap;
+    a->data = (sp_RbVal *)sp_pl_realloc(a->data, sizeof(sp_RbVal) * (size_t)nc);
+  }
+  a->cap = nc;
+  h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap);
+}
+static inline void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v) { if (!a) return; sp_gc_wb((void*)a); if (a->frozen) { sp_raise_frozen_array(); return; } if (a->len >= a->cap) sp_PolyArray_grow(a); a->data[a->len++] = v; }
 static inline sp_RbVal sp_PolyArray_get(sp_PolyArray *a, sp_int i) { if (!a) return sp_box_nil(); if (i < 0) i += a->len; if (i < 0 || i >= a->len) return sp_box_nil(); return a->data[i]; }
 /* ---- relocated from spinel_rt.h: frozen-string check primitives used
    by lib/sp_cold.c's sp_str_setbyte_cow, and the SPL frozen-literal macro

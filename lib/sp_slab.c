@@ -15,16 +15,19 @@
  * metadata chunks, one bit per slot each, never in the slot itself:
  *
  *   young[0], young[1]  allocated in the epoch of that parity (see below)
- *   old                 promoted, or allocated as a container payload
+ *   old                 promoted
  *   mark                reached by this cycle's mark
  *   fin                 an object whose death runs a finalizer or recycler
  *   str                 a heap string (its bytes count on the string side)
- *   pin                 never freed by a sweep (a frozen heap string, a
- *                       payload: both die by an explicit free)
+ *   pin                 never freed by a sweep: a frozen heap string, a
+ *                       container payload, a dead header parked on its
+ *                       pool (the last two are in no generation at all and
+ *                       die by an explicit free, or come back by a relive)
  *
- * A slot is free when it is in no generation (young[0], young[1], old all
- * clear), and allocation is a find-first-zero over those three words and
- * one atomic or into the current epoch's young word. That replaced the
+ * A slot is free when it is in no generation and not pinned (young[0],
+ * young[1], old, pin all clear), and allocation is a find-first-zero over
+ * those four words and one or into the current epoch's young word (atomic
+ * when threaded; single-threaded the words are plain). That replaced the
  * per-chunk free list linked through the blocks, and the reason is the
  * sweep: with the list, a sweep touched the header of every dead object to
  * unlink it and to thread the free list through it, and on a server that
@@ -151,10 +154,19 @@ typedef struct sp_slab_arena {
 typedef struct {
   sp_slab_chunk *cur[SP_SLAB_NCLS];
   sp_slab_chunk *avail[SP_SLAB_NCLS];
+  /* the free slots of one word of the current chunk, as the last search read
+     them: the fast path pops a bit from here and touches the bitmaps once,
+     to claim; a bit that went stale (a pool relived the slot meanwhile) is
+     caught by the claim and skipped */
+  uint64_t fmask[SP_SLAB_NCLS];
+  uint64_t *fclaim[SP_SLAB_NCLS];   /* the word a claim goes into: young of the current epoch, or pin */
+  uint64_t *ffin[SP_SLAB_NCLS];     /* the same word of the fin bitmap: an object with a finalizer sets its bit there */
+  char *fbase[SP_SLAB_NCLS];        /* slot 0 of that word */
+  uint8_t fkind[SP_SLAB_NCLS];      /* 1: the cached word claims payloads (pin), 0: objects (young) */
   sp_slab_chunk *owned;              /* every chunk this worker carved, doubly linked */
   long taken;        /* chunks this worker started allocating into since the last release */
   int sweeping;      /* a sweep of this worker's chunks is running (the release waits it out) */
-  char _pad[64 - ((2 * SP_SLAB_NCLS * sizeof(void *) + sizeof(void *) + sizeof(long) + sizeof(int)) % 64)];
+  char _pad[64 - ((5 * SP_SLAB_NCLS * sizeof(void *) + SP_SLAB_NCLS * (sizeof(uint64_t) + 1) + sizeof(void *) + sizeof(long) + sizeof(int)) % 64)];
 } sp_slab_worker;
 
 static sp_slab_worker sp_slab_wk[SP_SLAB_NWK];
@@ -174,6 +186,22 @@ static pthread_mutex_t sp_slab_lock = PTHREAD_MUTEX_INITIALIZER;
 #else
 #define SP_SLAB_LOCK()   ((void)0)
 #define SP_SLAB_UNLOCK() ((void)0)
+#endif
+/* The bitmap operations. Threaded, every one is atomic: a sweeper clears
+   bits of a chunk its owner allocates from, a pool hands a header back on
+   another thread, a finalizer frees a payload from anywhere. Single-
+   threaded nothing runs beside the program, and a locked instruction per
+   allocation and per death was a fifth of an allocation-bound benchmark. */
+#ifdef SP_THREADS
+static inline uint64_t bm_or(uint64_t *p, uint64_t v) { return __atomic_fetch_or(p, v, __ATOMIC_ACQ_REL); }
+static inline uint64_t bm_and(uint64_t *p, uint64_t v) { return __atomic_fetch_and(p, v, __ATOMIC_ACQ_REL); }
+static inline uint64_t bm_load(const uint64_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+static inline void bm_store(uint64_t *p, uint64_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+#else
+static inline uint64_t bm_or(uint64_t *p, uint64_t v) { uint64_t o = *p; *p = o | v; return o; }
+static inline uint64_t bm_and(uint64_t *p, uint64_t v) { uint64_t o = *p; *p = o & v; return o; }
+static inline uint64_t bm_load(const uint64_t *p) { return *p; }
+static inline void bm_store(uint64_t *p, uint64_t v) { *p = v; }
 #endif
 
 /* One reservation, aligned to the arena size so a slot's arena and chunk are
@@ -228,8 +256,22 @@ extern int mallctl(const char *, void *, size_t *, void *, size_t) __attribute__
 static int sp_slab_jemalloc_present(void) { return mallctl != NULL; }
 #endif
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 static void sp_slab_init(void) {
   const char *e = getenv("SPINEL_GC_SLAB");
+#if defined(__GLIBC__)
+  /* The blocks past the slab's largest class are malloc's, and glibc trims
+     the top of its heap whenever a free leaves 128 KB there: a program
+     churning arrays of a few tens of kilobytes had the heap's top shrink
+     and grow again on every one (900 brk calls and 6,000 page faults on a
+     20 ms benchmark). The collector returns memory itself, with a
+     malloc_trim after every full cycle, so the automatic trim can wait
+     for a much larger top. */
+  mallopt(M_TRIM_THRESHOLD, 32 << 20);
+  mallopt(M_TOP_PAD, 1 << 20);
+#endif
   int c = 0;
   for (unsigned i = 0; i <= SP_SLAB_MAX / 16; i++) {
     while (c < SP_SLAB_NCLS - 1 && sp_slab_csize[c] < i * 16) c++;
@@ -302,35 +344,37 @@ static int sp_slab_next_arena(void) {
    clear can be set by anyone but itself. The claim is an atomic or all the
    same, because a sweep carrying an aged survivor into the current epoch
    writes the same word. NULL when the chunk has no free slot. */
-static inline void *sp_slab_take(sp_slab_chunk *ch, unsigned csize, int payload) {
+static inline void *sp_slab_take(sp_slab_worker *wk, int cls, sp_slab_chunk *ch, unsigned csize, int payload) {
   sp_slab_bm *bm = sp_slab_bm_of(ch);
   unsigned nw = (ch->nslots + 63) >> 6;
   unsigned w = ch->hint;
   unsigned e = sp_slab_epoch & 1;
+  wk->fmask[cls] = 0;
   for (unsigned n = 0; n < nw; n++, w = (w + 1 == nw) ? 0 : w + 1) {
     uint64_t tail = (w == nw - 1 && (ch->nslots & 63)) ? ~(uint64_t)0 << (ch->nslots & 63) : 0;
     for (;;) {
-      /* The three words are not one snapshot. The one writer that moves a
+      /* The four words are not one snapshot. The one writer that moves a
          slot from used to used on another thread is a pool handing a parked
          header back (sp_slab_relive): it sets the young bit and THEN clears
-         the old bit, so reading old first and young after cannot see the
-         slot in neither -- old is either still set, or young already is. A
+         the pin, so reading pin first and young after cannot see the slot
+         in neither -- the pin is either still set, or young already is. A
          free (sp_slab_free) only ever turns used into free. The claim's own
          result is still checked: two claims of one slot cannot both win. */
-      uint64_t used = __atomic_load_n(&bm->old[w], __ATOMIC_ACQUIRE);
-      used |= __atomic_load_n(&bm->young[0][w], __ATOMIC_ACQUIRE) |
-              __atomic_load_n(&bm->young[1][w], __ATOMIC_ACQUIRE) | tail;
+      uint64_t used = bm_load(&bm->old[w]) | bm_load(&bm->pin[w]);
+      used |= bm_load(&bm->young[0][w]) | bm_load(&bm->young[1][w]) | tail;
       if (used == ~(uint64_t)0) break;
       unsigned i = (unsigned)__builtin_ctzll(~used);
       uint64_t bit = (uint64_t)1 << i;
-      uint64_t *claim = payload ? &bm->old[w] : &bm->young[e][w];
-      if (payload) __atomic_fetch_or(&bm->pin[w], bit, __ATOMIC_RELAXED);   /* pin before old: see sp_slab_pin */
-      uint64_t was = __atomic_fetch_or(claim, bit, __ATOMIC_ACQ_REL);
-      if (was & bit) {
-        if (payload) __atomic_fetch_and(&bm->pin[w], ~bit, __ATOMIC_RELAXED);
-        continue;
-      }
+      uint64_t was = bm_or(payload ? &bm->pin[w] : &bm->young[e][w], bit);
+      if (was & bit) continue;
       ch->hint = (uint16_t)w;
+      /* the rest of the word, for the fast path: its claim word (this
+         epoch's parity, or pin for a payload) and its first slot */
+      wk->fmask[cls] = ~used & ~bit;
+      wk->fclaim[cls] = payload ? &bm->pin[w] : &bm->young[e][w];
+      wk->ffin[cls] = &bm->fin[w];
+      wk->fkind[cls] = (uint8_t)payload;
+      wk->fbase[cls] = sp_slab_chunk_base(ch) + (size_t)(w << 6) * csize;
       if (sp_slab_verify_on) sp_slab_note(sp_slab_chunk_base(ch) + (size_t)((w << 6) + i) * csize, 40 + (int)e + (payload ? 2 : 0));
       return sp_slab_chunk_base(ch) + (size_t)((w << 6) + i) * csize;
     }
@@ -365,7 +409,7 @@ static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, unsigned cs
        from the front by then: take a slot if one is left, else drop it and
        move on. */
     ch->hint = 0;
-    p = sp_slab_take(ch, csize, payload);
+    p = sp_slab_take(wk, cls, ch, csize, payload);
     if (p) break;
   }
   if (!ch) {
@@ -386,7 +430,7 @@ static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, unsigned cs
     ch->own_next = wk->owned;
     if (wk->owned) wk->owned->own_prev = ch;
     __atomic_store_n(&wk->owned, ch, __ATOMIC_RELEASE);
-    p = sp_slab_take(ch, csize, payload);
+    p = sp_slab_take(wk, cls, ch, csize, payload);
   }
   __atomic_store_n(&wk->cur[cls], ch, __ATOMIC_RELEASE);
   wk->taken++;
@@ -394,7 +438,10 @@ static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, unsigned cs
   return p;
 }
 
-static inline void *sp_slab_alloc_in(size_t need, int payload) {
+/* The slow half of an allocation: the cached word is empty, so search the
+   current chunk, else refill; past the largest class, or with the slab
+   off, malloc. */
+static SP_NOINLINE void *sp_slab_alloc_slow(size_t need, int payload) {
   if (__builtin_expect(sp_slab_on < 0, 0)) sp_slab_init();
   if (sp_slab_on && need <= SP_SLAB_MAX) {
     int cls = sp_slab_cls_of[(need + 15) >> 4];
@@ -402,7 +449,7 @@ static inline void *sp_slab_alloc_in(size_t need, int payload) {
     sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
     sp_slab_chunk *ch = wk->cur[cls];
     void *p;
-    if (ch && (p = sp_slab_take(ch, csize, payload)) != NULL) return p;
+    if (ch && (p = sp_slab_take(wk, cls, ch, csize, payload)) != NULL) return p;
     p = sp_slab_refill(wk, cls, csize, payload);
     if (p) return p;
   }
@@ -410,25 +457,78 @@ static inline void *sp_slab_alloc_in(size_t need, int payload) {
   if (!p) sp_oom_die();
   return p;
 }
+/* The fast half, inlined into the three entry points: a free bit of the
+   word the last search read, claimed with one or; the claim's result says
+   whether it was still free (a pool may have relived the slot meanwhile). */
+static inline __attribute__((always_inline)) void *sp_slab_alloc_in(size_t need, int payload, int fin) {
+  if (__builtin_expect(sp_slab_on > 0 && need <= SP_SLAB_MAX, 1)) {
+    int cls = sp_slab_cls_of[(need + 15) >> 4];
+    sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
+    uint64_t m;
+    /* a payload's claim word is pin, an object's the epoch's young word: the
+       cached word was chosen for one of the two, so the other kind takes
+       the slow path (rare: a class is mostly one or the other) */
+    while ((m = wk->fmask[cls]) != 0 && wk->fkind[cls] == (uint8_t)payload) {
+      unsigned i = (unsigned)__builtin_ctzll(m);
+      uint64_t bit = m & -m;
+      wk->fmask[cls] = m & ~bit;
+      uint64_t was = bm_or(wk->fclaim[cls], bit);
+      if (__builtin_expect(was & bit, 0)) continue;
+      /* the finalizer bit goes into the same word of the fin bitmap, while
+         the bit is in hand: no second locate for it */
+      if (fin) bm_or(wk->ffin[cls], bit);
+      void *p = wk->fbase[cls] + (size_t)i * sp_slab_csize[cls];
+      if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(p, 40 + (int)(sp_slab_epoch & 1) + (payload ? 2 : 0));
+      return p;
+    }
+  }
+  void *p = sp_slab_alloc_slow(need, payload);
+  if (fin && sp_slab_on > 0 && sp_slab_owns(p)) {
+    sp_slab_loc l; sp_slab_locate(p, &l);
+    bm_or(&l.bm->fin[l.w], l.bit);
+  }
+  return p;
+}
+/* An object with its header written, in one call: the fast path above, the
+   zeroing, and the three header fields the collector reads (the flags are
+   zero already). What sp_gc_alloc used to do in two calls and a memset. */
+void *sp_slab_alloc_obj(size_t need, void (*fin)(void *), void (*scn)(void *)) {
+  void *p = sp_slab_alloc_in(need, 0, fin != NULL);
+  if (need <= 256) {
+    uint64_t *q = (uint64_t *)p; size_t n = (need + 7) >> 3;
+    for (size_t k = 0; k < n; k += 2) { q[k] = 0; q[k + 1] = 0; }
+  }
+  else memset(p, 0, need);
+  sp_gc_hdr *h = (sp_gc_hdr *)p;
+  h->finalize = fin; h->scan = scn; h->size = need;
+  if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(p, 1);
+  return p;
+}
 /* A block the collector will sweep: an object (zeroed) or a heap string */
 void *sp_slab_alloc(size_t need) {
-  void *p = sp_slab_alloc_in(need, 0);
-  memset(p, 0, need);
-  if (sp_slab_verify_on) sp_slab_note(p, 1);
+  void *p = sp_slab_alloc_in(need, 0, 0);
+  /* the block is zeroed in 16-byte stores when small: a memset call costs
+     more than the bytes it clears at these sizes */
+  if (need <= 256) {
+    uint64_t *q = (uint64_t *)p; size_t n = (need + 7) >> 3;
+    for (size_t k = 0; k < n; k += 2) { q[k] = 0; q[k + 1] = 0; }
+  }
+  else memset(p, 0, need);
+  if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(p, 1);
   return p;
 }
 void *sp_slab_alloc_str(size_t need) {
-  void *p = sp_slab_alloc_in(need, 0);
+  void *p = sp_slab_alloc_in(need, 0, 0);
   if (sp_slab_on > 0 && sp_slab_owns(p)) {
     sp_slab_loc l; sp_slab_locate(p, &l);
-    __atomic_fetch_or(&l.bm->str[l.w], l.bit, __ATOMIC_RELAXED);
+    bm_or(&l.bm->str[l.w], l.bit);
     if (sp_slab_verify_on) sp_slab_note(p, 2);
   }
   return p;
 }
 /* A block no sweep frees: a container's payload, dying by an explicit free */
 void *sp_slab_alloc_raw(size_t need) {
-  void *p = sp_slab_alloc_in(need, 1);
+  void *p = sp_slab_alloc_in(need, 1, 0);
   if (sp_slab_verify_on) sp_slab_note(p, 3);
   return p;
 }
@@ -436,38 +536,33 @@ void *sp_slab_alloc_raw(size_t need) {
 void sp_slab_set_fin(void *h) {
   if (sp_slab_on <= 0 || !sp_slab_owns(h)) return;
   sp_slab_loc l; sp_slab_locate(h, &l);
-  __atomic_fetch_or(&l.bm->fin[l.w], l.bit, __ATOMIC_RELAXED);
+  bm_or(&l.bm->fin[l.w], l.bit);
   if (sp_slab_verify_on) sp_slab_note(h, 4);
 }
 /* a frozen heap string: kept until the program ends, as a static literal is */
 void sp_slab_pin(const void *p) {
   if (sp_slab_on <= 0 || !sp_slab_owns(p)) return;
   sp_slab_loc l; sp_slab_locate(p, &l);
-  __atomic_fetch_or(&l.bm->pin[l.w], l.bit, __ATOMIC_RELAXED);
-  __atomic_fetch_or(&l.bm->old[l.w], l.bit, __ATOMIC_RELEASE);
+  bm_or(&l.bm->pin[l.w], l.bit);
   if (sp_slab_verify_on) sp_slab_note(p, 9);
 }
-/* A dead header about to be handed to its pool: parked (old and pin, out
-   of every generation's reach, like a payload) until the pool hands it out
-   again or frees it. Its finalizer bit stays: a parked slot is never dead,
-   and the bit is what makes its next death run the recycler again. */
+/* A dead header about to be handed to its pool: pinned, out of every
+   sweep's reach, until the pool hands it out again or frees it. Its
+   finalizer bit stays: a pinned slot is never dead, and the bit is what
+   makes its next death run the recycler again. */
 void sp_slab_park(void *h) {
   if (sp_slab_on <= 0 || !sp_slab_owns(h)) return;
   sp_slab_loc l; sp_slab_locate(h, &l);
-  __atomic_fetch_or(&l.bm->pin[l.w], l.bit, __ATOMIC_RELAXED);
-  __atomic_fetch_or(&l.bm->old[l.w], l.bit, __ATOMIC_RELEASE);
+  bm_or(&l.bm->pin[l.w], l.bit);
 }
-/* A pooled header handed out again: back into the current epoch, its
-   finalizer bit with it (idempotent: parking left it set). */
+/* A pooled header handed out again: into the current epoch, and unpinned
+   -- in that order, since the owner's search reads pin before young
+   (sp_slab_take) and must never find the slot in neither. */
 void sp_slab_relive(void *h) {
   if (sp_slab_on <= 0 || !sp_slab_owns(h)) return;
   sp_slab_loc l; sp_slab_locate(h, &l);
-  /* young before old is cleared: the owner's search reads old first and
-     young after (sp_slab_take), and must never find the slot in neither */
-  __atomic_fetch_or(&l.bm->young[sp_slab_epoch & 1][l.w], l.bit, __ATOMIC_RELEASE);
-  __atomic_fetch_or(&l.bm->fin[l.w], l.bit, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->old[l.w], ~l.bit, __ATOMIC_RELEASE);
-  __atomic_fetch_and(&l.bm->pin[l.w], ~l.bit, __ATOMIC_RELAXED);
+  bm_or(&l.bm->young[sp_slab_epoch & 1][l.w], l.bit);
+  bm_and(&l.bm->pin[l.w], ~l.bit);
   if (sp_slab_verify_on) sp_slab_note(h, 5 + 10 * (int)(sp_slab_epoch & 1));
 }
 int sp_slab_is_str(const void *p) {
@@ -510,8 +605,8 @@ static void sp_slab_verify_chunk(sp_slab_chunk *ch, const char *when) {
   sp_slab_bm *bm = sp_slab_bm_of(ch);
   unsigned nw = (ch->nslots + 63) >> 6, csize = sp_slab_csize[ch->cls];
   for (unsigned w = 0; w < nw; w++) {
-    uint64_t gen = bm->young[0][w] | bm->young[1][w] | bm->old[w];
-    uint64_t stray = (bm->fin[w] | bm->str[w] | bm->pin[w] | bm->mark[w]) & ~gen;
+    uint64_t gen = bm->young[0][w] | bm->young[1][w] | bm->old[w] | bm->pin[w];
+    uint64_t stray = (bm->fin[w] | bm->str[w] | bm->mark[w]) & ~gen;
     uint64_t both = bm->young[0][w] & bm->young[1][w];
     uint64_t finstr = bm->fin[w] & bm->str[w];
     uint64_t ymark = (bm->young[0][w] | bm->young[1][w]) & bm->mark[w] & (when[0] == 'a' && when[1] == 't' ? ~(uint64_t)0 : 0);   /* at the barrier: no young slot carries a mark */
@@ -549,7 +644,7 @@ void sp_slab_verify_all(void) {
 int sp_slab_is_live(const void *p) {
   if (sp_slab_on <= 0 || !sp_slab_owns(p)) return 0;
   sp_slab_loc l; sp_slab_locate(p, &l);
-  return ((l.bm->young[0][l.w] | l.bm->young[1][l.w] | l.bm->old[l.w]) & l.bit) != 0;
+  return ((l.bm->young[0][l.w] | l.bm->young[1][l.w] | l.bm->old[l.w] | l.bm->pin[l.w]) & l.bit) != 0;
 }
 int sp_slab_is_old(const void *p) {
   sp_slab_loc l; sp_slab_locate(p, &l);
@@ -585,25 +680,23 @@ static void sp_slab_avail_push(sp_slab_chunk *ch) {
 /* An explicit free, from anywhere: a payload its container dropped, a pooled
    header over the pool's cap, a malloc'd block. The slot leaves every
    generation and loses its marks; the chunk goes back on the owner's list. */
+SP_TLS unsigned long sp_slab_frees = 0;   /* this thread's explicit frees, counted (sp_gc_die_cb reads it around a recycler) */
 void sp_slab_free(void *p) {
   if (!sp_slab_owns(p)) { free(p); return; }
   sp_slab_loc l; sp_slab_locate(p, &l);
   uint64_t nb = ~l.bit;
-  /* only the words that hold the bit: a payload is old and pin, a pooled
-     header the same plus fin, and each clear is a locked instruction */
-#define SP_SLAB_CLEAR(word) do { if (__atomic_load_n(&(word), __ATOMIC_RELAXED) & l.bit) __atomic_fetch_and(&(word), nb, __ATOMIC_RELAXED); } while (0)
+  /* only the words that hold the bit: a payload is pinned and nothing else,
+     and (threaded) each clear is a locked instruction */
+#define SP_SLAB_CLEAR(word) do { if (bm_load(&(word)) & l.bit) bm_and(&(word), nb); } while (0)
   SP_SLAB_CLEAR(l.bm->young[0][l.w]);
   SP_SLAB_CLEAR(l.bm->young[1][l.w]);
   SP_SLAB_CLEAR(l.bm->fin[l.w]);
   SP_SLAB_CLEAR(l.bm->str[l.w]);
   SP_SLAB_CLEAR(l.bm->mark[l.w]);
-  /* old before pin: a full sweep reads old and then pin, and a slot it
-     finds in old must still carry its pin, or it would take a payload
-     mid-free for dead and clear the old bit of whatever the owner puts in
-     the slot next (the setters go the other way: pin, then old) */
   SP_SLAB_CLEAR(l.bm->old[l.w]);
   SP_SLAB_CLEAR(l.bm->pin[l.w]);
 #undef SP_SLAB_CLEAR
+  sp_slab_frees++;
   if (sp_slab_verify_on) sp_slab_note(p, 6);
   sp_slab_avail_push(l.ch);
 }
@@ -638,30 +731,33 @@ void *sp_pl_realloc(void *p, size_t newn) {
    (or an aged survivor) from an old object reached again. */
 int sp_slab_mark(const void *p, int aging, int *was_young) {
   sp_slab_loc l; sp_slab_locate(p, &l);
-  uint64_t o = __atomic_fetch_or(&l.bm->mark[l.w], l.bit, __ATOMIC_ACQ_REL);
+  uint64_t o = bm_or(&l.bm->mark[l.w], l.bit);
   if (o & l.bit) { *was_young = 0; return 0; }
-  uint64_t ow = __atomic_load_n(&l.bm->old[l.w], __ATOMIC_RELAXED);
+  uint64_t ow = bm_load(&l.bm->old[l.w]);
   if (ow & l.bit) { *was_young = 0; return 1; }
   *was_young = 1;
-  if (!aging) __atomic_fetch_or(&l.bm->old[l.w], l.bit, __ATOMIC_RELAXED);
+  if (!aging) bm_or(&l.bm->old[l.w], l.bit);
   return 1;
 }
 /* is the slot marked this cycle? (the string side's "already marked" test) */
 int sp_slab_is_marked(const void *p) {
   sp_slab_loc l; sp_slab_locate(p, &l);
-  return (__atomic_load_n(&l.bm->mark[l.w], __ATOMIC_RELAXED) & l.bit) != 0;
+  return (bm_load(&l.bm->mark[l.w]) & l.bit) != 0;
 }
 /* the verifiers' probe unmarks a slot to see who marks it again */
 void sp_slab_unmark(const void *p) {
   sp_slab_loc l; sp_slab_locate(p, &l);
-  __atomic_fetch_and(&l.bm->mark[l.w], ~l.bit, __ATOMIC_RELAXED);
+  bm_and(&l.bm->mark[l.w], ~l.bit);
 }
 
 /* ---- the sweep ----
    Under the barrier, before the sweep of the epoch that just closed starts:
    new allocations go to the other parity from here. */
 void sp_slab_epoch_flip(void) {
-  __atomic_store_n(&sp_slab_epoch, sp_slab_epoch + 1, __ATOMIC_RELEASE);
+  sp_slab_epoch = sp_slab_epoch + 1;   /* under the barrier: nobody allocates or sweeps meanwhile */
+  /* the cached claim words name the parity that just closed */
+  for (int w = 0; w < SP_SLAB_NWK; w++)
+    for (int c = 0; c < SP_SLAB_NCLS; c++) sp_slab_wk[w].fmask[c] = 0;
 }
 /* Every chunk one worker owns, in one pass over the bitmaps. The epoch to
    reclaim from is the one before the current; `full` frees the old
@@ -683,58 +779,74 @@ void sp_slab_sweep_worker(int wid, int full, int aging, int (*die)(void *hdr), s
     unsigned csize = sp_slab_csize[ch->cls];
     size_t freed = 0;
     for (unsigned w = 0; w < nw; w++) {
-      uint64_t yv = __atomic_load_n(&bm->young[pe][w], __ATOMIC_RELAXED);
-      uint64_t ov = __atomic_load_n(&bm->old[w], __ATOMIC_ACQUIRE)   /* before pin: see sp_slab_pin */;
-      uint64_t mv = __atomic_load_n(&bm->mark[w], __ATOMIC_RELAXED);
+      uint64_t yv = bm_load(&bm->young[pe][w]);
+      uint64_t ov = bm_load(&bm->old[w]);
+      uint64_t mv = bm_load(&bm->mark[w]);
+      uint64_t pv = bm_load(&bm->pin[w]);
+      /* the headers a pool holds (pinned, in no generation, with their
+         finalizer bit) are resident like any live object: the object budget
+         is sized from them too, as it was when the lists counted them */
+      if (pv) {
+        uint64_t parked_now = pv & bm_load(&bm->fin[w]) & ~(yv | ov | bm_load(&bm->young[e][w]));
+        if (parked_now) acc.parked += (size_t)__builtin_popcountll(parked_now) * csize;
+      }
       /* a word with nothing to reclaim is skipped, unless it carries marks:
          a minor's mark reaches old strings too, and a mark left behind would
          read as "already marked" next cycle and keep a dead string */
       if (!yv && !mv && !(full && ov)) continue;
-
-      uint64_t dead = yv & ~mv & ~ov;
-      if (full) dead |= ov & ~mv & ~__atomic_load_n(&bm->pin[w], __ATOMIC_RELAXED);
+      uint64_t dead = yv & ~mv & ~ov & ~pv;
+      if (full) dead |= ov & ~mv & ~pv;
       if (aging) {
         uint64_t carry = yv & mv & ~ov;
-        if (carry) { __atomic_fetch_or(&bm->young[e][w], carry, __ATOMIC_RELAXED); acc.kept_young += (size_t)__builtin_popcountll(carry) * csize; }
+        if (carry) { bm_or(&bm->young[e][w], carry); acc.kept_young += (size_t)__builtin_popcountll(carry) * csize; }
       }
       /* a dead object with a finalizer or a recycler: the callback runs it
          and says whether the slot is freed or kept. A pooled header stays
-         allocated: the callback parks it (old and pin, out of every
-         generation's reach, as a payload is: sp_slab_park) BEFORE handing it
-         to its pool, since the pool may hand it out again on another thread
-         at once, and that thread's relive undoes the parking. So nothing here
+         allocated: the callback pins it (sp_slab_park) BEFORE handing it to
+         its pool, since the pool may hand it out again on another thread at
+         once, and that thread's relive undoes the pin. So nothing here
          writes a kept slot's bits after the callback: it is either still
-         parked or already alive again, and either way it is not dead. */
-      uint64_t fdead = dead & __atomic_load_n(&bm->fin[w], __ATOMIC_RELAXED);
+         pinned or already alive again, and either way it is not dead. */
+      uint64_t fdead = dead & bm_load(&bm->fin[w]);
       uint64_t parked = 0;
-      /* what the pass costs per slot is the finalizers it runs: the rest is
-         a few words per chunk (the object budget's mark-share gate reads
-         `swept` as the sweep's per-slot work, sp_gc_retune_object) */
-      acc.swept += (size_t)__builtin_popcountll(fdead);
-      while (fdead) {
-        unsigned i = (unsigned)__builtin_ctzll(fdead);
-        fdead &= fdead - 1;
-        if (!die(sp_slab_chunk_base(ch) + (size_t)((w << 6) + i) * csize)) parked |= (uint64_t)1 << i;
+      if (fdead) {
+        /* what the pass costs per slot is the finalizers it runs: the rest is
+           a few words per chunk (the object budget's mark-share gate reads
+           `swept` as the sweep's per-slot work, sp_gc_retune_object) */
+        acc.swept += (size_t)__builtin_popcountll(fdead);
+        /* pinned as a word before any callback runs, unpinned as a word for
+           those the callbacks freed: a slot the recycler kept is pinned by
+           then, whatever its pool did with the header meanwhile */
+        bm_or(&bm->pin[w], fdead);
+        uint64_t left = fdead, freed_now = 0;
+        while (left) {
+          unsigned i = (unsigned)__builtin_ctzll(left);
+          left &= left - 1;
+          if (die(sp_slab_chunk_base(ch) + (size_t)((w << 6) + i) * csize)) freed_now |= (uint64_t)1 << i;
+        }
+        if (freed_now) bm_and(&bm->pin[w], ~freed_now);
+        parked = fdead & ~freed_now;
       }
       if (parked) {
         dead &= ~parked;
+        acc.parked += (size_t)__builtin_popcountll(parked) * csize;   /* this cycle's, beside the ones counted above */
         if (sp_slab_verify_on) { uint64_t v = parked; while (v) { unsigned b = (unsigned)__builtin_ctzll(v); v &= v - 1; sp_slab_note(sp_slab_chunk_base(ch) + (size_t)((w << 6) + b) * csize, 8 + 10 * (int)pe); } }
       }
       if (sp_slab_verify_on) { uint64_t v = yv & ~dead; while (v) { unsigned b = (unsigned)__builtin_ctzll(v); v &= v - 1; sp_slab_note(sp_slab_chunk_base(ch) + (size_t)((w << 6) + b) * csize, 30 + (int)pe); } }
-      if (sp_slab_verify_on && dead) { uint64_t v = dead; while (v) { unsigned b = (unsigned)__builtin_ctzll(v); v &= v - 1; sp_slab_note(sp_slab_chunk_base(ch) + (size_t)((w << 6) + b) * csize, 7); } }
       if (dead) {
-        uint64_t sd = dead & __atomic_load_n(&bm->str[w], __ATOMIC_RELAXED);
+        uint64_t sd = dead & bm_load(&bm->str[w]);
         acc.freed_str += (size_t)__builtin_popcountll(sd) * csize;
         acc.freed_obj += (size_t)__builtin_popcountll(dead & ~sd) * csize;
-        __atomic_fetch_and(&bm->fin[w], ~dead, __ATOMIC_RELAXED);
-        __atomic_fetch_and(&bm->str[w], ~dead, __ATOMIC_RELAXED);
-        if (full) __atomic_fetch_and(&bm->old[w], ~dead, __ATOMIC_RELAXED);
+        if (fdead | (dead & bm_load(&bm->fin[w]))) bm_and(&bm->fin[w], ~dead);
+        if (sd) bm_and(&bm->str[w], ~dead);
+        if (full && (ov & dead)) bm_and(&bm->old[w], ~dead);
         freed += (size_t)__builtin_popcountll(dead);
+        if (sp_slab_verify_on) { uint64_t v = dead; while (v) { unsigned b = (unsigned)__builtin_ctzll(v); v &= v - 1; sp_slab_note(sp_slab_chunk_base(ch) + (size_t)((w << 6) + b) * csize, 7); } }
       }
       /* the epoch's word is spent: dead, promoted or carried, every bit is
          accounted for. So are the marks: the next cycle starts clean. */
-      __atomic_store_n(&bm->young[pe][w], 0, __ATOMIC_RELAXED);
-      __atomic_store_n(&bm->mark[w], 0, __ATOMIC_RELAXED);
+      bm_store(&bm->young[pe][w], 0);
+      bm_store(&bm->mark[w], 0);
     }
     acc.slots += ch->nslots;
     if (freed) { acc.freed_slots += freed; sp_slab_avail_push(ch); }
@@ -758,7 +870,7 @@ void sp_slab_each_object(int young, int old, void (*fn)(void *hdr, void *arg), v
         uint64_t v = 0;
         if (young) v |= bm->young[0][w] | bm->young[1][w];
         if (old) v |= bm->old[w];
-        v &= ~bm->str[w] & ~(bm->pin[w] & bm->old[w]);   /* not strings, not payloads */
+        v &= ~bm->str[w];   /* not strings; a payload or a parked header is pinned and in no generation */
         while (v) {
           unsigned b = (unsigned)__builtin_ctzll(v); v &= v - 1;
           fn(sp_slab_chunk_base(ch) + (size_t)((w << 6) + b) * csize, arg);
@@ -828,8 +940,7 @@ static inline int sp_slab_chunk_empty(sp_slab_chunk *ch) {
   sp_slab_bm *bm = sp_slab_bm_of(ch);
   unsigned nw = (ch->nslots + 63) >> 6;
   for (unsigned w = 0; w < nw; w++)
-    if (__atomic_load_n(&bm->young[0][w], __ATOMIC_ACQUIRE) | __atomic_load_n(&bm->young[1][w], __ATOMIC_ACQUIRE) |
-        __atomic_load_n(&bm->old[w], __ATOMIC_ACQUIRE)) return 0;
+    if (bm_load(&bm->young[0][w]) | bm_load(&bm->young[1][w]) | bm_load(&bm->old[w]) | bm_load(&bm->pin[w])) return 0;
   return 1;
 }
 
@@ -971,7 +1082,7 @@ void sp_slab_release(void) {
           sp_slab_bm *bm = sp_slab_bm_of(ch);
           size_t used = 0;
           for (unsigned w = 0; w < (ch->nslots + 63u) / 64u; w++)
-            used += (size_t)__builtin_popcountll(bm->young[0][w] | bm->young[1][w] | bm->old[w]);
+            used += (size_t)__builtin_popcountll(bm->young[0][w] | bm->young[1][w] | bm->old[w] | bm->pin[w]);
           if (!used) nempty++;
           live += used * sp_slab_csize[ch->cls];
         }

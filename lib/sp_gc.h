@@ -354,6 +354,7 @@ static inline int sp_slab_owns(const void *p) { return (uintptr_t)p - sp_slab_ba
  * address: every chunk lives inside one reserved range. sp_slab_release, at
  * the end of a full cycle, returns fully free chunks to the OS. */
 void *sp_slab_alloc(size_t need);        /* an object: zeroed, in the current epoch's young generation */
+void *sp_slab_alloc_obj(size_t need, void (*fin)(void *), void (*scn)(void *));   /* the same, with the header written */
 void *sp_slab_alloc_str(size_t need);    /* a heap string: young, its bytes counted on the string side */
 void *sp_slab_alloc_raw(size_t need);    /* a payload: no sweep frees it, only sp_slab_free */
 void  sp_slab_free(void *p);
@@ -372,8 +373,9 @@ void  sp_slab_unmark(const void *p);
    keeps it young); 0 when the slot was already marked this cycle */
 int   sp_slab_mark(const void *p, int aging, int *was_young);
 extern unsigned sp_slab_epoch;
+extern SP_TLS unsigned long sp_slab_frees;   /* this thread's explicit frees, counted */
 void  sp_slab_epoch_flip(void);          /* under the barrier: new allocations go to the other parity */
-typedef struct { size_t freed_obj, freed_str, freed_slots, slots, swept, kept_young; } sp_slab_sweep_stats;   /* swept: slots the pass decided over */
+typedef struct { size_t freed_obj, freed_str, freed_slots, slots, swept, kept_young, parked; } sp_slab_sweep_stats;   /* swept: finalizers run; parked: bytes of headers held by their pools */
 /* one worker's chunks: frees what the closed epoch holds unmarked (and,
    at a full cycle, the old generation's unmarked); `die` runs a dead
    object's finalizer or recycler and answers 1 when the slot is freed, 0

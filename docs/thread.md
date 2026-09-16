@@ -309,3 +309,18 @@ less CPU. `SPINEL_GC_AGE` (a survivor stays young until its second
 survival) applies to the lists only; with the slab on it is off, since
 the remembered-set repair it needs walks the old list for what a cycle
 promoted, and a slab promotion is a bit no list carries.
+
+Since the sweep leaves the dead alone, the object pools (the per-thread
+free lists of dead containers a recycler kept for the next allocation) are
+bypassed with the slab on: a pooled header is one the sweep has to touch
+dead to run its recycler, where an unpooled one dies in its chunk's bitmap
+untouched, and the slab's own allocation, a bit found and claimed in one
+word the last search cached, costs what a pop did. The general Array keeps
+its first eight elements inside the object for the same reason: an array
+that never outgrows them has no payload, so no finalizer, so nothing about
+its death is anyone's work. On glibc the runtime also raises the trim
+threshold (32 MB, with a 1 MB top pad), since the payloads that do not fit
+the slab were handed back to the kernel and faulted in again on every
+cycle. Programs that live in the pools, tree and list churn at tens of
+thousands of short-lived arrays a cycle, run 1.3 to 1.6 times slower than
+they did on the free lists; everything else, and every server, is faster.

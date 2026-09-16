@@ -786,10 +786,12 @@ static int sp_gc_die_cb(void *hp){
   }
   if(h->recycle){
     /* parked before the pool sees it: another thread may pop and relive it
-       the moment it is pushed, and parking after that would undo the relive */
-    sp_slab_park(h);
-    h->recycle(h);
-    return !sp_slab_is_live(h);   /* the recycler frees an over-cap header itself */
+       the moment it is pushed, and parking after that would undo the relive.
+       An over-cap header the recycler frees itself, which this thread's
+       free count shows. */
+    unsigned long f0=sp_slab_frees;
+    h->recycle(h);   /* the sweep pinned the slot before calling (sp_slab_sweep_worker) */
+    return sp_slab_frees!=f0;
   }
   if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));
   return 1;
@@ -807,6 +809,16 @@ static void sp_gc_rem_invariant_cb(void *hp,void *arg){
 }
 static int sp_gc_sweep_full_now=0;   /* the cycle the stop-the-world sweep tasks are for */
 size_t sp_gc_ph_slab_freed_obj=0, sp_gc_ph_slab_freed_str=0;
+/* bytes of headers the pools hold, summed over the sweep of one cycle and
+   folded into the live total the budget is sized from (sp_gc_parked_take) */
+static size_t sp_gc_parked_acc=0;
+size_t sp_gc_parked_take(void){ size_t v; 
+#ifdef SP_THREADS
+  v=__atomic_exchange_n(&sp_gc_parked_acc,0,__ATOMIC_RELAXED);
+#else
+  v=sp_gc_parked_acc; sp_gc_parked_acc=0;
+#endif
+  return v; }
 void sp_gc_sweep_chunks(int wid,int full){
   sp_slab_sweep_stats st;
   sp_slab_sweep_worker(wid,full,0,sp_gc_die_cb,&st);
@@ -814,8 +826,9 @@ void sp_gc_sweep_chunks(int wid,int full){
 #ifdef SP_THREADS
   __atomic_fetch_add(&sp_gc_ph_slab_freed_obj,st.freed_obj,__ATOMIC_RELAXED);
   __atomic_fetch_add(&sp_gc_ph_slab_freed_str,st.freed_str,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_parked_acc,st.parked,__ATOMIC_RELAXED);
 #else
-  sp_gc_ph_slab_freed_obj+=st.freed_obj; sp_gc_ph_slab_freed_str+=st.freed_str;
+  sp_gc_ph_slab_freed_obj+=st.freed_obj; sp_gc_ph_slab_freed_str+=st.freed_str; sp_gc_parked_acc+=st.parked;
 #endif
 }
 /* the form the stop-the-world parallel sweep (sp_sched.c) runs per slot */
@@ -1228,7 +1241,7 @@ void sp_gc_collect(void){
     int str_sweep=sp_str_sweep_begin(&str_major);
     if(sp_gc_str_minor_only) str_major=0;
     sp_gc_old_bytes+=sp_gc_mk_young_bytes;
-    sp_gc_bytes=sp_gc_old_bytes;
+    sp_gc_bytes=sp_gc_old_bytes+sp_gc_parked_take();   /* the pooled headers the previous sweep counted */
     /* the remembered set: what it recorded led the mark to young objects
        that are old now, so the record is spent; a full cycle cannot lean on
        the old sweep to clear the bits the way the barrier form does. Cleared
@@ -1283,7 +1296,7 @@ void sp_gc_collect(void){
      counter below zero; the retune read the wrapped value and set a threshold
      near SIZE_MAX, which never fires again (#4073). */
   SP_GC_PH(sp_gc_ph_slotsweep);
-  sp_gc_bytes=sp_gc_old_bytes+SP_GC_CTR_GET(sp_gc_young_kept_bytes);   /* the kept young still occupy the heap */
+  sp_gc_bytes=sp_gc_old_bytes+SP_GC_CTR_GET(sp_gc_young_kept_bytes)+sp_gc_parked_take();   /* the kept young and the pooled headers still occupy the heap */
   /* The remembered set has done its job and starts over after EVERY cycle, not
      only a full one. Every young object it led the mark to has just been
      promoted by the sweep above, so a holder that is not written to again has
