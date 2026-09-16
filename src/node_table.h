@@ -225,8 +225,18 @@ const int *nt_nodes_of_kind(const NodeTable *nt, NodeKind k, int *count);
    Replaces `for (int id=0; id<nt->count; id++) { if (kind!=K) continue; ... }`.
    The inner one-shot loop scopes IDV; nesting/multiple uses don't collide. */
 typedef struct { const int *ids; int n, i, id; } NtKindIter;
+/* A loop body may append nodes (a desugar pass does) and, through anything
+   that asks for a kind's ids again, rebuild the cache the iterator is reading.
+   The cache keeps a count of live iterators and retires a superseded id
+   array instead of freeing it while one is open; the iterator's cleanup
+   (run at the loop's end, a break or a return alike) is what lets the
+   retired arrays go. */
+void nt_kind_iter_open(void);
+void nt_kind_iter_close(NtKindIter *it);
 static inline NtKindIter nt_kind_iter_begin(const NodeTable *nt, NodeKind k) {
-  NtKindIter it; it.ids = nt_nodes_of_kind(nt, k, &it.n); it.i = 0; it.id = -1; return it;
+  NtKindIter it; it.ids = nt_nodes_of_kind(nt, k, &it.n); it.i = 0; it.id = -1;
+  nt_kind_iter_open();
+  return it;
 }
 static inline int nt_kind_iter_next(NtKindIter *it) {
   if (it->i >= it->n) return 0;
@@ -234,7 +244,7 @@ static inline int nt_kind_iter_next(NtKindIter *it) {
   return 1;
 }
 #define NT_FOREACH_KIND(NT, KIND, IDV) \
-  for (NtKindIter _it_##IDV = nt_kind_iter_begin((NT), (KIND)); nt_kind_iter_next(&_it_##IDV); ) \
+  for (NtKindIter _it_##IDV __attribute__((cleanup(nt_kind_iter_close))) = nt_kind_iter_begin((NT), (KIND)); nt_kind_iter_next(&_it_##IDV); ) \
     for (int IDV = _it_##IDV.id, _once_##IDV = 1; _once_##IDV; _once_##IDV = 0)
 
 /* Build a node table from the parser's text AST (NUL-terminated). The

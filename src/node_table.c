@@ -527,9 +527,33 @@ static const NodeTable *nki_nt = NULL;
 static int nki_ntc = -1;
 static int *nki_ids = NULL;   /* all ids, grouped by kind */
 static int *nki_off = NULL;   /* size NK__COUNT+1; kind k spans [off[k], off[k+1]) */
+/* Id arrays superseded while an NT_FOREACH_KIND loop was open (its body
+   appended nodes and something rebuilt the cache): kept until the last open
+   iterator closes, since the loop is still reading its own. */
+static int nki_live = 0;
+static int **nki_retired = NULL;
+static int nki_nretired = 0, nki_cretired = 0;
+static void nki_retire(int *p) {
+  if (!p) return;
+  if (nki_nretired == nki_cretired) {
+    int nc = nki_cretired ? nki_cretired * 2 : 8;
+    int **np = (int **)realloc(nki_retired, (size_t)nc * sizeof(int *));
+    if (!np) return;   /* kept alive by the leak rather than freed under a reader */
+    nki_retired = np; nki_cretired = nc;
+  }
+  nki_retired[nki_nretired++] = p;
+}
+void nt_kind_iter_open(void) { nki_live++; }
+void nt_kind_iter_close(NtKindIter *it) {
+  (void)it;
+  if (--nki_live > 0) return;
+  for (int i = 0; i < nki_nretired; i++) free(nki_retired[i]);
+  nki_nretired = 0;
+}
 static void nki_build(const NodeTable *nt) {
   int n = nt->count;
-  free(nki_ids); free(nki_off);
+  if (nki_live > 0) nki_retire(nki_ids); else free(nki_ids);
+  free(nki_off);
   nki_off = (int *)calloc((size_t)NK__COUNT + 1, sizeof(int));
   nki_ids = (int *)malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
   nki_nt = nt; nki_ntc = n;

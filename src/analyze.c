@@ -5197,6 +5197,7 @@ int desugar_enum_method_recv(Compiler *c) {
           if (erecv_enum) nt_node_set_int(nt, id, "enum_self_result", erecv);
           nt_node_set_str(nt, id, "name", "each");
           changed = 1;
+          continue;   /* `nm` was the name just replaced (freed): the arms below read it */
         }
       }
     }
