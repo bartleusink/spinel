@@ -64,8 +64,8 @@
  *
  * SPINEL_GC_SLAB=0 turns this off and every block is a malloc again, which
  * is the configuration ASAN wants: a slab hides a use-after-free from it.
- * With jemalloc as the process's malloc it is off by default (see
- * sp_slab_jemalloc_present); SPINEL_GC_SLAB=1 turns it on there. */
+ * It is on by default whatever the process's malloc (it used to default off
+ * under jemalloc; see sp_slab_jemalloc_present for why that changed). */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -207,14 +207,19 @@ static void sp_slab_reserve(void) {
   sp_slab_on = 0;   /* no range at all: every block is a malloc */
 }
 
-/* Is jemalloc the process's malloc? Its thread caches already do what the
-   slab does, and measured beside them the slab is a loss (campfire's room
-   page 2,680 req/s with jemalloc alone against 2,470 with the slab on top:
-   the per-free atomics land on caches that were already free-list pops),
-   where on glibc it is a gain (2,140 against 1,940). So the slab defaults
-   off when jemalloc is present, and SPINEL_GC_SLAB=1 asks for it anyway.
-   Detection is jemalloc's own mallctl symbol, resolved by the dynamic linker
-   from a linked or preloaded jemalloc; nothing else defines it. */
+/* Is jemalloc the process's malloc? Its thread caches did what the free
+   list did, and measured beside them the free-list slab was a loss
+   (campfire's room page 2,680 req/s with jemalloc alone against 2,470 with
+   the slab on top: the per-free atomics landed on caches that were already
+   free-list pops), so the slab used to default off when jemalloc was
+   present. The bitmap sweep changed the comparison: with it the slab under
+   jemalloc answers the same requests a second as jemalloc alone (5,570
+   against 5,560) on 17% less CPU and 13% less memory, the part jemalloc's
+   caches cannot do being the sweep that never touches the dead. So the slab
+   is on regardless now; the detection stays for the report and for
+   SPINEL_GC_SLAB=0. Detection is jemalloc's own mallctl symbol, resolved by
+   the dynamic linker from a linked or preloaded jemalloc; nothing else
+   defines it. */
 #if defined(__APPLE__)
 #include <dlfcn.h>
 static int sp_slab_jemalloc_present(void) { return dlsym(RTLD_DEFAULT, "mallctl") != NULL; }
@@ -240,7 +245,8 @@ static void sp_slab_init(void) {
     sp_slab_recip[k] = r;   /* 0: divide (never, checked here) */
   }
   if (e && *e) sp_slab_on = (*e != '0');
-  else sp_slab_on = !sp_slab_jemalloc_present();
+  else sp_slab_on = 1;
+  (void)sp_slab_jemalloc_present;
   if (sp_slab_on) sp_slab_reserve();
 }
 
