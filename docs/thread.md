@@ -149,6 +149,7 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_OBJ_BUDGET` | the default GATES the widening on what the last collection cost. `obj` pins it off (the object heap alone, as spinel did before 2026-09-09), `walk` pins it on (everything a mark walks). `fixed` is a separate axis: it stops re-aiming the budget after each collection and holds it at its floor |
 | `SPINEL_GC_STR_BUDGET` | `fixed` does the same for the STRING budget |
 | `SPINEL_GC_SLAB` | `0` turns the slab allocator off: every object and heap string is then its own malloc, which is what ASAN needs to see a use-after-free (the slab hides one). On by default whatever the process's malloc. It used to default off under jemalloc (linked or preloaded), whose thread caches did what the slab's free lists did and beside which the free-list slab measured 8% slower; the bitmap sweep is what jemalloc's caches cannot do, and with it the slab under jemalloc answers the same requests a second on 17% less CPU and 13% less memory |
+| `SPINEL_SLAB_HUGE` | `0` stops the slab asking for transparent huge pages on its arenas (`madvise(MADV_HUGEPAGE)`, effective where `transparent_hugepage` is `madvise` or `always`). On by default: an arena faults in as two 2 MB pages instead of a thousand 4 KB ones, and a list benchmark spent a third of its time in those faults |
 | `SPINEL_GC_CONC` | `0` sweeps under the stop-the-world barrier instead of beside the program, which is also what the verifiers (`SPINEL_GC_VERIFY`, `SPINEL_GC_VERIFY_GEN`) and aging (`SPINEL_GC_AGE`) do on their own, since they read the heap the sweep is rewriting. `SPINEL_GC_VERIFY` also checks the slab's bitmaps against their invariants at every barrier and after every chunk's sweep |
 | `SPINEL_GC_PAR_MARK` | `0` marks on the collector alone. By default the mark's drain runs on the collector and up to `SPINEL_GC_MARKERS` parked workers (default min(workers, 4)), sharing the pending objects in small chunks; the verifiers and aging mark serially on their own |
 | `SPINEL_GC_SWEEPERS` | how many sweeper threads sweep the old lists (default the worker count, at most 8). `SPINEL_GC_OWNER=0` hands them the young lists too, instead of each worker sweeping its own |
@@ -321,6 +322,29 @@ that never outgrows them has no payload, so no finalizer, so nothing about
 its death is anyone's work. On glibc the runtime also raises the trim
 threshold (32 MB, with a 1 MB top pad), since the payloads that do not fit
 the slab were handed back to the kernel and faulted in again on every
-cycle. Programs that live in the pools, tree and list churn at tens of
-thousands of short-lived arrays a cycle, run 1.3 to 1.6 times slower than
-they did on the free lists; everything else, and every server, is faster.
+cycle.
+
+What the pools had over the first bitmap allocator was the cost of one
+allocation: a pop was a dozen instructions, a bit found and claimed and
+zeroed was a hundred, and a tree benchmark that allocates fifteen million
+nodes felt every one of them. The allocation is a bump now. A worker
+claims a whole run of consecutive free slots of the word it is working
+from, in the bitmap, in one write, and hands the slots out by advancing a
+pointer; the collector unclaims every worker's remainder under the barrier
+before it reads any young bit. The front of the allocation has no call on
+its path, so it keeps no frame, and its zeroing is the class size in
+16-byte stores. An arena is asked for huge pages where the kernel offers
+them (transparent_hugepage=madvise), which took a list benchmark's page
+faults from a third of its time to nothing. With the three, the tree and
+list benchmarks that lived in the pools are back at or under the free
+lists' times, and so is everything else.
+
+Two more things the same measurements turned up. A worker keeps a reserve
+of fully free chunks across a full cycle so that it does not hand them to
+the kernel and fault them in again the next cycle; the reserve was one
+count shared by all the size classes, spent by the first few, so the rest
+carved fresh chunks every cycle (37,000 a second on a server, each an
+madvise and four faults). It is per class now, sized from what the class
+took in the cycle. And on a full cycle the remembered set's dirty bits are
+cleared through the set's own array, as the concurrent form always did,
+instead of by a walk of every old object.

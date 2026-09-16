@@ -375,6 +375,9 @@ int   sp_slab_mark(const void *p, int aging, int *was_young);
 extern unsigned sp_slab_epoch;
 extern SP_TLS unsigned long sp_slab_frees;   /* this thread's explicit frees, counted */
 void  sp_slab_epoch_flip(void);          /* under the barrier: new allocations go to the other parity */
+void  sp_slab_runs_release(void);
+void  sp_slab_history(const void *p);    /* SPINEL_GC_VERIFY: print a slot's recorded events */
+extern int sp_gc_alloc_fast_ok;         /* sp_gc_alloc's lean front may run: drop to 0 to route every allocation through the full form */        /* under the barrier: the workers' claimed-not-allocated runs are unclaimed */
 typedef struct { size_t freed_obj, freed_str, freed_slots, slots, swept, kept_young, parked; } sp_slab_sweep_stats;   /* swept: finalizers run; parked: bytes of headers held by their pools */
 /* one worker's chunks: frees what the closed epoch holds unmarked (and,
    at a full cycle, the old generation's unmarked); `die` runs a dead

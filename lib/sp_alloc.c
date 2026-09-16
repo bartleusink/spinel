@@ -635,39 +635,9 @@ int sp_gc_collection_wanted(void) {
 #endif
 }
 
-void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
-#ifdef SP_THREADS
-  /* Lock-free fast path: the list push is a CAS (SP_GC_HEAP_PUSH) and the live-
-     byte counter is atomic, so concurrent allocations need no mutex -- the old
-     sp_heap_lock only serialized them and the string sweep, and both string
-     allocation (per-worker heap) and every collection (stop-the-world) have
-     moved off it. Removals happen only under stop-the-world with every mutator
-     parked, so a push never races the sweep. The stress-threshold one-shot is
-     idempotent under a race. */
-  if (!sp_gc_stress_checked) { sp_gc_stress_checked = 1; const char *e = getenv("SPINEL_GC_STRESS"); if (e && *e && *e != '0') { SP_GC_CTR_SET(sp_gc_threshold, 2048); sp_gc_threshold_init = 2048; sp_gc_stress_pin = 1; } }
-  if (SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold)) sp_stw_collect();
-  size_t need = sizeof(sp_gc_hdr) + sz;
-  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc_obj(need, fin, scn);
-  if (__builtin_expect(sp_alloc_report_on, 0)) sp_alloc_report_count((void *)scn, sz);
-  SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
-  return (char *)h + sizeof(sp_gc_hdr);
-#else
-  SP_HEAP_LOCK();
-  /* The threshold store is atomic: sp_gc_collection_wanted reads it without
-     the heap lock. threshold_init stays plain -- only retune reads it, under
-     stop-the-world, ordered after this by the writer's park. */
-  if (!sp_gc_stress_checked) { sp_gc_stress_checked = 1; const char *e = getenv("SPINEL_GC_STRESS"); if (e && *e && *e != '0') { SP_GC_CTR_SET(sp_gc_threshold, 2048); sp_gc_threshold_init = 2048; sp_gc_stress_pin = 1; } }
-  if (SP_GC_CTR_GET(sp_gc_bytes) > sp_gc_threshold) {
-    sp_gc_collect_retune();
-  }
-  size_t need = sizeof(sp_gc_hdr) + sz;
-  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc_obj(need, fin, scn);
-  if (__builtin_expect(sp_alloc_report_on, 0)) sp_alloc_report_count((void *)scn, sz);
-  SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
-  SP_HEAP_UNLOCK();
-  return (char *)h + sizeof(sp_gc_hdr);
-#endif
-}
+/* sp_gc_alloc lives in lib/sp_slab.c: the allocation fast path is one
+   function there, the slab's claim and the collector's bookkeeping in one
+   frame. */
 void *sp_gc_alloc_nogc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   size_t need = sizeof(sp_gc_hdr) + sz;
   sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
@@ -1427,7 +1397,7 @@ static void sp_alloc_report_start_reader(void) {
 __attribute__((constructor)) static void sp_alloc_report_boot(void) {
   const char *e = getenv("SPINEL_ALLOC_REPORT");
   if (e && *e && strcmp(e, "0") != 0) {
-    sp_alloc_report_on = 1;
+    sp_alloc_report_on = 1; sp_gc_alloc_fast_ok = 0;
     { const char *sv = getenv("SPINEL_ALLOC_SITES");
       sp_alloc_sites_on = (sv && *sv && strcmp(sv, "0") != 0) ? 1 : 0; }
 #ifdef SP_THREADS

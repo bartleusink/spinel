@@ -6004,7 +6004,6 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
                 ci->c_name, ci->c_name,
                 class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
                 class_needs_scan(ci) ? "_scan" : "");
-      buf_puts(b, "  memset(self, 0, sizeof(*self));\n");
       buf_puts(b, "  SP_GC_ROOT(self);\n");
       buf_printf(b, "  self->cls_id = %d;\n", ctor_cls_id(c, cid));
       emit_ivar_nil_inits(b, ci, "self->", "  ", ";\n");
@@ -6059,7 +6058,6 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
               ci->c_name, ci->c_name,
               class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
               class_needs_scan(ci) ? "_scan" : "");
-    buf_puts(b, "  memset(self, 0, sizeof(*self));\n");  /* recycled slots are not zeroed */
     buf_puts(b, "  SP_GC_ROOT(self);\n");
     buf_printf(b, "  self->cls_id = %d;\n", ctor_cls_id(c, cid));
     for (int i = 0; i < ci->nivars; i++)
@@ -6256,7 +6254,6 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
          work; the ivars live after and are set by initialize. */
       buf_printf(b, ") {\n  sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s_scan);\n",
                  ci->c_name, ci->c_name, ci->c_name, ci->c_name);
-      buf_puts(b, "  memset(self, 0, sizeof(*self));\n");
       buf_printf(b, "  self->cls_name = \"%s\";\n", cn2);
       buf_printf(b, "  self->parent_cls_name = \"%s\";\n", par);
       buf_puts(b, "  self->msg = (&(\"\\xff\")[1]);\n");
@@ -6273,7 +6270,6 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
             ci->c_name, ci->c_name,
             class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
             class_needs_scan(ci) ? "_scan" : "");
-  buf_puts(b, "  memset(self, 0, sizeof(*self));\n");  /* recycled slots are not zeroed */
   buf_printf(b, "  SP_GC_ROOT(self);\n");
   buf_printf(b, "  self->cls_id = %d;\n", ctor_cls_id(c, cid));
   /* memset zero-inits fields, but a poly ivar's zero pattern is not nil and an

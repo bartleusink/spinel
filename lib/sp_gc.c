@@ -1017,6 +1017,9 @@ void sp_gc_collect(void){
      finish it before anything here walks a list or reads a live total. */
   double ph_top0 = sp_gc_ph_on ? sp_gc_stat_now() : 0;
   if(sp_gc_conc_wait_hook) sp_gc_conc_wait_hook();
+  /* the slab's workers hold slots claimed ahead of use: unclaimed before
+     anything here reads the young bits (they would name garbage) */
+  sp_slab_runs_release();
   size_t ob_before = sp_gc_bytes;
   double stat_t0 = sp_gc_stat_now();
   double ph_t = stat_t0;
@@ -1153,12 +1156,17 @@ void sp_gc_collect(void){
     /* the old LIST: the objects too large for the slab. The slab's old
        generation is swept with each worker's chunks below, and what stays of
        both is what the mark reached, known now. */
+    /* the remembered set's bits, cleared through the array while it still
+       names live memory (the sweep below frees some of what it names), as
+       the concurrent form does; only an overflowed set costs the walk of
+       every old object, which on a list benchmark was a tenth of the run */
+    if(sp_gc_rem_overflow){ for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next)h->dirty=0; sp_slab_each_object(0,1,sp_gc_clear_dirty_cb,NULL); }
+    else for(int ri=0;ri<sp_gc_nremembered;ri++)((sp_gc_hdr*)sp_gc_remembered[ri]-1)->dirty=0;
     sp_gc_hdr**pp=&sp_gc_old_heap;
     while(*pp){sp_gc_hdr*h=*pp;__builtin_prefetch(h->next);SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
     else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));sp_slab_free(h);}}
-    else{h->dirty=0;pp=&h->next;}}
+    else{pp=&h->next;}}
     sp_gc_old_bytes=sp_gc_mk_bytes-sp_gc_mk_young_bytes;
-    sp_slab_each_object(0,1,sp_gc_clear_dirty_cb,NULL);
     }
     /* Retune the cadence on what this sweep actually reclaimed. A heap the
        full cycle barely touches is one the minor mark was re-walking for

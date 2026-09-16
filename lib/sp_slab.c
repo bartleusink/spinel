@@ -76,6 +76,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include "sp_gc.h"
+#include "sp_alloc.h"   /* sp_gc_alloc is here: the collector's bookkeeping around the claim */
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
 #endif
@@ -92,8 +93,8 @@
    bitmaps (256 x 448 B = 112 KB = 7 chunks); the rest are carved */
 #define SP_SLAB_META    7
 #define SP_SLAB_FIRST   (1 + SP_SLAB_META)
-/* fully free chunks a worker keeps resident across a full cycle, at least (256 KB) */
-#define SP_SLAB_RESERVE 16
+/* fully free chunks a worker keeps resident across a full cycle per class, at least (64 KB) */
+#define SP_SLAB_RESERVE 4
 /* the most slots a chunk holds (16 KB / 32 B), in 64-bit words */
 #define SP_SLAB_NW      8
 
@@ -154,19 +155,33 @@ typedef struct sp_slab_arena {
 typedef struct {
   sp_slab_chunk *cur[SP_SLAB_NCLS];
   sp_slab_chunk *avail[SP_SLAB_NCLS];
-  /* the free slots of one word of the current chunk, as the last search read
-     them: the fast path pops a bit from here and touches the bitmaps once,
-     to claim; a bit that went stale (a pool relived the slot meanwhile) is
-     caught by the claim and skipped */
-  uint64_t fmask[SP_SLAB_NCLS];
-  uint64_t *fclaim[SP_SLAB_NCLS];   /* the word a claim goes into: young of the current epoch, or pin */
-  uint64_t *ffin[SP_SLAB_NCLS];     /* the same word of the fin bitmap: an object with a finalizer sets its bit there */
-  char *fbase[SP_SLAB_NCLS];        /* slot 0 of that word */
-  uint8_t fkind[SP_SLAB_NCLS];      /* 1: the cached word claims payloads (pin), 0: objects (young) */
+  /* The allocation cache, per class: a word of the current chunk with its
+     free bits (wmask, not claimed yet), and per KIND (0: objects and
+     strings, claimed in the epoch's young word; 1: payloads, claimed in
+     pin) a RUN of consecutive slots cut from that word, claimed in the
+     bitmap all at once and handed out by a bump of rnext up to rend. The
+     two kinds keep their runs through each other's refills: dropping a
+     run on a kind switch orphaned its claimed rest until the next
+     collection, and a server alternating hash tables with objects of the
+     same class orphaned gigabytes that way. A slot claimed and not yet
+     handed out is in the bitmap and garbage in memory; nothing reads it,
+     and the collector unclaims every worker's remainders under the barrier
+     (sp_slab_runs_release) before it walks or sweeps anything. */
+  uint64_t wmask[SP_SLAB_NCLS];     /* free bits of the cached word not claimed yet */
+  uint64_t *wyoung[SP_SLAB_NCLS];   /* the cached word in this epoch's young bitmap */
+  uint64_t *wpin[SP_SLAB_NCLS];     /* the same word of the pin bitmap */
+  uint64_t *wfin[SP_SLAB_NCLS];     /* the same word of the fin bitmap */
+  char *wbase[SP_SLAB_NCLS];        /* slot 0 of that word */
+  char *rnext[2][SP_SLAB_NCLS];     /* the run's next slot, per kind */
+  char *rend[2][SP_SLAB_NCLS];      /* one past the run's last slot */
+  char *rbase[2][SP_SLAB_NCLS];     /* slot 0 of the run's word (the fin bit is computed from it) */
+  uint64_t *rclaim[2][SP_SLAB_NCLS];   /* the word the run was claimed in (unclaimed from there at a release) */
+  uint64_t *rfin[2][SP_SLAB_NCLS];     /* the run's word in the fin bitmap */
   sp_slab_chunk *owned;              /* every chunk this worker carved, doubly linked */
   long taken;        /* chunks this worker started allocating into since the last release */
+  int taken_cls[SP_SLAB_NCLS];   /* the same, per class: what each class will need again next cycle */
   int sweeping;      /* a sweep of this worker's chunks is running (the release waits it out) */
-  char _pad[64 - ((5 * SP_SLAB_NCLS * sizeof(void *) + SP_SLAB_NCLS * (sizeof(uint64_t) + 1) + sizeof(void *) + sizeof(long) + sizeof(int)) % 64)];
+  char _pad[64 - ((14 * SP_SLAB_NCLS * sizeof(void *) + SP_SLAB_NCLS * (sizeof(uint64_t) + sizeof(int)) + sizeof(void *) + sizeof(long) + sizeof(int)) % 64)];
 } sp_slab_worker;
 
 static sp_slab_worker sp_slab_wk[SP_SLAB_NWK];
@@ -197,7 +212,25 @@ static inline uint64_t bm_or(uint64_t *p, uint64_t v) { return __atomic_fetch_or
 static inline uint64_t bm_and(uint64_t *p, uint64_t v) { return __atomic_fetch_and(p, v, __ATOMIC_ACQ_REL); }
 static inline uint64_t bm_load(const uint64_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 static inline void bm_store(uint64_t *p, uint64_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+#endif
+/* The claim of an object slot writes the current epoch's young word, which
+   has one writer: the chunk's owner, on its own thread. Nothing else sets or
+   clears a bit there -- the sweep works the epoch that closed, the mark
+   writes the old and mark words, the pools that used to hand a slot back
+   (sp_slab_relive) are bypassed with the slab on -- so the claim is a plain
+   read-modify-write on both builds. A payload's claim word is pin, which a
+   freeze or a sweep on another thread writes too, and stays atomic. */
+#ifdef SP_THREADS
+/* atomic load and store, not a locked instruction: the sweeper reads this
+   word (a parked header is one in no generation), and the model wants the
+   two sides atomic; with one writer the read-modify-write loses nothing.
+   Aging's carry into the current epoch would be a second writer, which is
+   one more reason it stays off with the slab on. */
+static inline uint64_t bm_or_owned(uint64_t *p, uint64_t v) { uint64_t o = __atomic_load_n(p, __ATOMIC_RELAXED); __atomic_store_n(p, o | v, __ATOMIC_RELEASE); return o; }
 #else
+static inline uint64_t bm_or_owned(uint64_t *p, uint64_t v) { uint64_t o = *p; *p = o | v; return o; }
+#endif
+#ifndef SP_THREADS
 static inline uint64_t bm_or(uint64_t *p, uint64_t v) { uint64_t o = *p; *p = o | v; return o; }
 static inline uint64_t bm_and(uint64_t *p, uint64_t v) { uint64_t o = *p; *p = o & v; return o; }
 static inline uint64_t bm_load(const uint64_t *p) { return *p; }
@@ -268,9 +301,18 @@ static void sp_slab_init(void) {
      and grow again on every one (900 brk calls and 6,000 page faults on a
      20 ms benchmark). The collector returns memory itself, with a
      malloc_trim after every full cycle, so the automatic trim can wait
-     for a much larger top. */
-  mallopt(M_TRIM_THRESHOLD, 32 << 20);
+     for a larger top. Setting any of these switches off glibc's dynamic
+     mmap threshold (which climbs as large blocks are freed), so it is set
+     here too: left at its 128 KB start, every page a server rendered
+     (400 KB) was an mmap and a munmap, 140 page faults a request, and a
+     test building a megabyte string 4,800 times faulted 760,000 pages.
+     A megabyte of top and a 4 MB mmap threshold: a server's arenas keep
+     at most a megabyte of free top each (32 MB kept 100 MB more resident
+     across 33 workers, and 4 MB 60 MB more), and its 400 KB pages stay
+     on the heap. */
+  mallopt(M_TRIM_THRESHOLD, 1 << 20);
   mallopt(M_TOP_PAD, 1 << 20);
+  mallopt(M_MMAP_THRESHOLD, 4 << 20);
 #endif
   int c = 0;
   for (unsigned i = 0; i <= SP_SLAB_MAX / 16; i++) {
@@ -330,6 +372,16 @@ static int sp_slab_next_arena(void) {
 #ifdef MADV_DODUMP
   madvise((void *)ar, SP_SLAB_ARENA, MADV_DODUMP);   /* this arena holds objects: dump it */
 #endif
+#ifdef MADV_HUGEPAGE
+  /* An arena is 4 MB, aligned: two huge pages where the kernel offers them
+     (transparent_hugepage=madvise, the common setting). The program then
+     faults an arena in twice instead of a thousand times, and walks it on
+     two TLB entries; a list benchmark spent a third of its time in those
+     faults. */
+  { static int huge = -1;
+    if (huge < 0) { const char *e = getenv("SPINEL_SLAB_HUGE"); huge = e ? atoi(e) : 1; }   /* SPINEL_SLAB_HUGE=0 turns it off */
+    if (huge) madvise((void *)ar, SP_SLAB_ARENA, MADV_HUGEPAGE); }
+#endif
   for (int i = (int)SP_SLAB_NCHUNK - 1; i >= SP_SLAB_FIRST; i--) {   /* pops then ascend in address */
     ar->ch[i].next_avail = sp_slab_empty;
     sp_slab_empty = &ar->ch[i];
@@ -344,39 +396,69 @@ static int sp_slab_next_arena(void) {
    clear can be set by anyone but itself. The claim is an atomic or all the
    same, because a sweep carrying an aged survivor into the current epoch
    writes the same word. NULL when the chunk has no free slot. */
+/* The lowest run of consecutive free bits of the cached word, claimed
+   whole for one kind and installed as its bump range. 0 when the word
+   has none left. */
+static int sp_slab_run(sp_slab_worker *wk, int cls, int payload) {
+  uint64_t m = wk->wmask[cls];
+  unsigned csize = sp_slab_csize[cls];
+  uint64_t *claim = payload ? wk->wpin[cls] : wk->wyoung[cls];
+  while (m) {
+    uint64_t low = m & -m;
+    uint64_t run = m & ~(m + low);   /* the carry from the lowest bit stops at the run's end */
+    wk->wmask[cls] = m & ~run;
+    uint64_t was = payload ? bm_or(claim, run) : bm_or_owned(claim, run);
+    if (__builtin_expect(was & run, 0)) {
+      /* a bit of it was taken meanwhile (a pin on a slot the sweep is
+         finalizing: only the pin word has other writers); keep what came
+         before the first such bit, unclaim the rest */
+      uint64_t bad = was & run;
+      uint64_t keep = run & ((bad & -bad) - 1);
+      bm_and(claim, ~(run & ~keep));
+      run = keep;
+      if (!run) { m = wk->wmask[cls]; continue; }
+    }
+    unsigned i = (unsigned)__builtin_ctzll(run), n = (unsigned)__builtin_popcountll(run);
+    wk->rnext[payload][cls] = wk->wbase[cls] + (size_t)i * csize;
+    wk->rend[payload][cls] = wk->rnext[payload][cls] + (size_t)n * csize;
+    wk->rbase[payload][cls] = wk->wbase[cls];
+    wk->rclaim[payload][cls] = claim;
+    wk->rfin[payload][cls] = wk->wfin[cls];
+    return 1;
+  }
+  return 0;
+}
 static inline void *sp_slab_take(sp_slab_worker *wk, int cls, sp_slab_chunk *ch, unsigned csize, int payload) {
   sp_slab_bm *bm = sp_slab_bm_of(ch);
   unsigned nw = (ch->nslots + 63) >> 6;
   unsigned w = ch->hint;
   unsigned e = sp_slab_epoch & 1;
-  wk->fmask[cls] = 0;
+  wk->wmask[cls] = 0;
   for (unsigned n = 0; n < nw; n++, w = (w + 1 == nw) ? 0 : w + 1) {
     uint64_t tail = (w == nw - 1 && (ch->nslots & 63)) ? ~(uint64_t)0 << (ch->nslots & 63) : 0;
-    for (;;) {
-      /* The four words are not one snapshot. The one writer that moves a
-         slot from used to used on another thread is a pool handing a parked
-         header back (sp_slab_relive): it sets the young bit and THEN clears
-         the pin, so reading pin first and young after cannot see the slot
-         in neither -- the pin is either still set, or young already is. A
-         free (sp_slab_free) only ever turns used into free. The claim's own
-         result is still checked: two claims of one slot cannot both win. */
-      uint64_t used = bm_load(&bm->old[w]) | bm_load(&bm->pin[w]);
-      used |= bm_load(&bm->young[0][w]) | bm_load(&bm->young[1][w]) | tail;
-      if (used == ~(uint64_t)0) break;
-      unsigned i = (unsigned)__builtin_ctzll(~used);
-      uint64_t bit = (uint64_t)1 << i;
-      uint64_t was = bm_or(payload ? &bm->pin[w] : &bm->young[e][w], bit);
-      if (was & bit) continue;
-      ch->hint = (uint16_t)w;
-      /* the rest of the word, for the fast path: its claim word (this
-         epoch's parity, or pin for a payload) and its first slot */
-      wk->fmask[cls] = ~used & ~bit;
-      wk->fclaim[cls] = payload ? &bm->pin[w] : &bm->young[e][w];
-      wk->ffin[cls] = &bm->fin[w];
-      wk->fkind[cls] = (uint8_t)payload;
-      wk->fbase[cls] = sp_slab_chunk_base(ch) + (size_t)(w << 6) * csize;
-      if (sp_slab_verify_on) sp_slab_note(sp_slab_chunk_base(ch) + (size_t)((w << 6) + i) * csize, 40 + (int)e + (payload ? 2 : 0));
-      return sp_slab_chunk_base(ch) + (size_t)((w << 6) + i) * csize;
+    /* The four words are not one snapshot. The one writer that moves a
+       slot from used to used on another thread is a pool handing a parked
+       header back (sp_slab_relive): it sets the young bit and THEN clears
+       the pin, so reading pin first and young after cannot see the slot
+       in neither -- the pin is either still set, or young already is. A
+       free (sp_slab_free) only ever turns used into free. The claim's own
+       result is still checked (sp_slab_run). */
+    uint64_t used = bm_load(&bm->old[w]) | bm_load(&bm->pin[w]);
+    used |= bm_load(&bm->young[0][w]) | bm_load(&bm->young[1][w]) | tail;
+    if (used == ~(uint64_t)0) continue;
+    ch->hint = (uint16_t)w;
+    /* the word, for the fast path: its claim word (this epoch's parity,
+       or pin for a payload), its free bits, its first slot */
+    wk->wmask[cls] = ~used;
+    wk->wyoung[cls] = &bm->young[e][w];
+    wk->wpin[cls] = &bm->pin[w];
+    wk->wfin[cls] = &bm->fin[w];
+    wk->wbase[cls] = sp_slab_chunk_base(ch) + (size_t)(w << 6) * csize;
+    if (sp_slab_run(wk, cls, payload)) {
+      char *p = wk->rnext[payload][cls];
+      wk->rnext[payload][cls] = p + csize;
+      if (sp_slab_verify_on) sp_slab_note(p, 40 + (int)e + (payload ? 2 : 0));
+      return p;
     }
   }
   return NULL;
@@ -433,56 +515,117 @@ static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, unsigned cs
     p = sp_slab_take(wk, cls, ch, csize, payload);
   }
   __atomic_store_n(&wk->cur[cls], ch, __ATOMIC_RELEASE);
-  wk->taken++;
+  wk->taken++; wk->taken_cls[cls]++;
   ch->touched = 1;
   return p;
 }
 
+/* Zero a block of a class's size: 16 bytes a store, the count from the
+   size, entered at the store that leaves exactly the block. Sizes above
+   256 go to memset, which earns its call there. */
+typedef struct { uint64_t a, b; } sp_slab_u16;
+static inline __attribute__((always_inline)) void sp_slab_zero(void *p, unsigned csize) {
+  sp_slab_u16 *q = (sp_slab_u16 *)p;
+  const sp_slab_u16 z = { 0, 0 };
+  switch (csize >> 4) {
+  case 16: q[15] = z; /* fallthrough */
+  case 15: q[14] = z; /* fallthrough */
+  case 14: q[13] = z; /* fallthrough */
+  case 13: q[12] = z; /* fallthrough */
+  case 12: q[11] = z; /* fallthrough */
+  case 11: q[10] = z; /* fallthrough */
+  case 10: q[9] = z; /* fallthrough */
+  case 9: q[8] = z; /* fallthrough */
+  case 8: q[7] = z; /* fallthrough */
+  case 7: q[6] = z; /* fallthrough */
+  case 6: q[5] = z; /* fallthrough */
+  case 5: q[4] = z; /* fallthrough */
+  case 4: q[3] = z; /* fallthrough */
+  case 3: q[2] = z; /* fallthrough */
+  case 2: q[1] = z; /* fallthrough */
+  case 1: q[0] = z; return;
+  default: memset(p, 0, csize); return;
+  }
+}
+/* the same for a block known to be 256 bytes or less: no call on any path,
+   which is what lets sp_gc_alloc's front run without a frame */
+static inline __attribute__((always_inline)) void sp_slab_zero_small(void *p, unsigned csize) {
+  sp_slab_u16 *q = (sp_slab_u16 *)p;
+  const sp_slab_u16 z = { 0, 0 };
+  switch (csize >> 4) {
+  case 16: q[15] = z; /* fallthrough */
+  case 15: q[14] = z; /* fallthrough */
+  case 14: q[13] = z; /* fallthrough */
+  case 13: q[12] = z; /* fallthrough */
+  case 12: q[11] = z; /* fallthrough */
+  case 11: q[10] = z; /* fallthrough */
+  case 10: q[9] = z; /* fallthrough */
+  case 9: q[8] = z; /* fallthrough */
+  case 8: q[7] = z; /* fallthrough */
+  case 7: q[6] = z; /* fallthrough */
+  case 6: q[5] = z; /* fallthrough */
+  case 5: q[4] = z; /* fallthrough */
+  case 4: q[3] = z; /* fallthrough */
+  case 3: q[2] = z; /* fallthrough */
+  case 2: q[1] = z; /* fallthrough */
+  case 1: q[0] = z; return;
+  default: __builtin_unreachable();
+  }
+}
 /* The slow half of an allocation: the cached word is empty, so search the
    current chunk, else refill; past the largest class, or with the slab
    off, malloc. */
-static SP_NOINLINE void *sp_slab_alloc_slow(size_t need, int payload) {
+static SP_NOINLINE void *sp_slab_alloc_slow(size_t need, int payload, int zero) {
   if (__builtin_expect(sp_slab_on < 0, 0)) sp_slab_init();
   if (sp_slab_on && need <= SP_SLAB_MAX) {
     int cls = sp_slab_cls_of[(need + 15) >> 4];
     unsigned csize = sp_slab_csize[cls];
     sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
     sp_slab_chunk *ch = wk->cur[cls];
-    void *p;
-    if (ch && (p = sp_slab_take(wk, cls, ch, csize, payload)) != NULL) return p;
-    p = sp_slab_refill(wk, cls, csize, payload);
-    if (p) return p;
+    void *p = NULL;
+    /* the next run of the cached word, if the word is of this kind */
+    if (sp_slab_run(wk, cls, payload)) {
+      p = wk->rnext[payload][cls]; wk->rnext[payload][cls] = (char *)p + csize;
+      if (sp_slab_verify_on) sp_slab_note(p, 40 + (int)(sp_slab_epoch & 1) + (payload ? 2 : 0));
+    }
+    if (!p && ch) p = sp_slab_take(wk, cls, ch, csize, payload);
+    if (!p) p = sp_slab_refill(wk, cls, csize, payload);
+    if (p) {
+      if (zero) memset(p, 0, need);
+      return p;
+    }
   }
-  void *p = malloc(need);
+  void *p = zero ? calloc(1, need) : malloc(need);
   if (!p) sp_oom_die();
   return p;
 }
-/* The fast half, inlined into the three entry points: a free bit of the
-   word the last search read, claimed with one or; the claim's result says
-   whether it was still free (a pool may have relived the slot meanwhile). */
-static inline __attribute__((always_inline)) void *sp_slab_alloc_in(size_t need, int payload, int fin) {
+/* The fast half, inlined into the entry points: the next slot of the
+   claimed run, a bump. The claim was made for the whole run when it was
+   cut (sp_slab_run), so the bitmap is not touched here; an object with a
+   finalizer sets its fin bit, in the word cached beside the claim word. */
+static inline __attribute__((always_inline)) void *sp_slab_alloc_in(size_t need, int payload, int fin, int zero) {
   if (__builtin_expect(sp_slab_on > 0 && need <= SP_SLAB_MAX, 1)) {
     int cls = sp_slab_cls_of[(need + 15) >> 4];
     sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
-    uint64_t m;
-    /* a payload's claim word is pin, an object's the epoch's young word: the
-       cached word was chosen for one of the two, so the other kind takes
-       the slow path (rare: a class is mostly one or the other) */
-    while ((m = wk->fmask[cls]) != 0 && wk->fkind[cls] == (uint8_t)payload) {
-      unsigned i = (unsigned)__builtin_ctzll(m);
-      uint64_t bit = m & -m;
-      wk->fmask[cls] = m & ~bit;
-      uint64_t was = bm_or(wk->fclaim[cls], bit);
-      if (__builtin_expect(was & bit, 0)) continue;
-      /* the finalizer bit goes into the same word of the fin bitmap, while
-         the bit is in hand: no second locate for it */
-      if (fin) bm_or(wk->ffin[cls], bit);
-      void *p = wk->fbase[cls] + (size_t)i * sp_slab_csize[cls];
+    char *p = wk->rnext[payload][cls];
+    if (__builtin_expect(p != wk->rend[payload][cls], 1)) {
+      unsigned csize = sp_slab_csize[cls];
+      wk->rnext[payload][cls] = p + csize;
+      if (fin) {
+        unsigned i = (unsigned)(((uint64_t)(size_t)(p - wk->rbase[payload][cls]) * sp_slab_recip[cls]) >> 32);
+        bm_or(wk->rfin[payload][cls], (uint64_t)1 << i);
+      }
+      /* zeroed slot by slot, the class size in 16-byte stores entered
+         mid-run (a memset call, or a counted loop, costs more than the
+         bytes at these sizes). Zeroing a whole free word in one memset at
+         the refill measured worse: the string stores miss the cache on
+         purpose, and the demand fills quintupled. */
+      if (zero) sp_slab_zero(p, csize);
       if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(p, 40 + (int)(sp_slab_epoch & 1) + (payload ? 2 : 0));
       return p;
     }
   }
-  void *p = sp_slab_alloc_slow(need, payload);
+  void *p = sp_slab_alloc_slow(need, payload, zero);
   if (fin && sp_slab_on > 0 && sp_slab_owns(p)) {
     sp_slab_loc l; sp_slab_locate(p, &l);
     bm_or(&l.bm->fin[l.w], l.bit);
@@ -493,32 +636,91 @@ static inline __attribute__((always_inline)) void *sp_slab_alloc_in(size_t need,
    zeroing, and the three header fields the collector reads (the flags are
    zero already). What sp_gc_alloc used to do in two calls and a memset. */
 void *sp_slab_alloc_obj(size_t need, void (*fin)(void *), void (*scn)(void *)) {
-  void *p = sp_slab_alloc_in(need, 0, fin != NULL);
-  if (need <= 256) {
-    uint64_t *q = (uint64_t *)p; size_t n = (need + 7) >> 3;
-    for (size_t k = 0; k < n; k += 2) { q[k] = 0; q[k + 1] = 0; }
-  }
-  else memset(p, 0, need);
+  void *p = sp_slab_alloc_in(need, 0, fin != NULL, 1);
   sp_gc_hdr *h = (sp_gc_hdr *)p;
   h->finalize = fin; h->scan = scn; h->size = need;
   if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(p, 1);
   return p;
 }
+/* The object allocation of the program, moved here from lib/sp_alloc.c so
+   that the claim above, the header, and the collector's bookkeeping (the
+   trigger, the byte count, the report) are one frame: what was two calls
+   deep is inlined into one. The semantics are sp_alloc.c's. */
+/* The lean front of sp_gc_alloc: no call on its path, so the compiler
+   keeps it in caller-saved registers with no frame to build (every other
+   case tail-calls the full form below). It runs when the slab is on and
+   nothing wants a look at each allocation (the verifier, the report, the
+   stress switch not yet read): sp_gc_alloc_fast_ok, recomputed by the full
+   form and dropped by whoever turns one of those on. */
+int sp_gc_alloc_fast_ok = 0;
+static void *sp_gc_alloc_full(size_t sz, void (*fin)(void *), void (*scn)(void *));
+void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
+  size_t need = sizeof(sp_gc_hdr) + sz;
+  if (__builtin_expect(!sp_gc_alloc_fast_ok || need > 256, 0)) return sp_gc_alloc_full(sz, fin, scn);
+  if (__builtin_expect(SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold), 0)) return sp_gc_alloc_full(sz, fin, scn);
+  int cls = sp_slab_cls_of[(need + 15) >> 4];
+  sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
+  char *p = wk->rnext[0][cls];
+  if (__builtin_expect(p == wk->rend[0][cls], 0)) return sp_gc_alloc_full(sz, fin, scn);
+  unsigned csize = sp_slab_csize[cls];
+  wk->rnext[0][cls] = p + csize;
+  if (fin) {
+    unsigned i = (unsigned)(((uint64_t)(size_t)(p - wk->rbase[0][cls]) * sp_slab_recip[cls]) >> 32);
+    bm_or(wk->rfin[0][cls], (uint64_t)1 << i);
+  }
+  sp_slab_zero_small(p, csize);
+  sp_gc_hdr *h = (sp_gc_hdr *)p;
+  h->finalize = fin; h->scan = scn; h->size = need;
+  sp_gc_bytes_add(need);
+  return p + sizeof(sp_gc_hdr);
+}
+static SP_NOINLINE void *sp_gc_alloc_full(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
+#ifdef SP_THREADS
+  /* Lock-free fast path: the list push is a CAS (SP_GC_HEAP_PUSH) and the live-
+     byte counter is atomic, so concurrent allocations need no mutex -- the old
+     sp_heap_lock only serialized them and the string sweep, and both string
+     allocation (per-worker heap) and every collection (stop-the-world) have
+     moved off it. Removals happen only under stop-the-world with every mutator
+     parked, so a push never races the sweep. The stress-threshold one-shot is
+     idempotent under a race. */
+  if (!sp_gc_stress_checked) { sp_gc_stress_checked = 1; const char *e = getenv("SPINEL_GC_STRESS"); if (e && *e && *e != '0') { SP_GC_CTR_SET(sp_gc_threshold, 2048); sp_gc_threshold_init = 2048; sp_gc_stress_pin = 1; } }
+  if (SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold)) sp_stw_collect();
+  size_t need = sizeof(sp_gc_hdr) + sz;
+  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc_in(need, 0, fin != NULL, 1);
+  h->finalize = fin; h->scan = scn; h->size = need;
+  if (__builtin_expect(sp_alloc_report_on, 0)) sp_alloc_report_count((void *)scn, sz);
+  SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
+  if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(h, 1);
+  sp_gc_alloc_fast_ok = sp_gc_stress_checked && sp_slab_on > 0 && !sp_slab_verify_on && !sp_alloc_report_on;
+  return (char *)h + sizeof(sp_gc_hdr);
+#else
+  SP_HEAP_LOCK();
+  /* The threshold store is atomic: sp_gc_collection_wanted reads it without
+     the heap lock. threshold_init stays plain -- only retune reads it, under
+     stop-the-world, ordered after this by the writer's park. */
+  if (!sp_gc_stress_checked) { sp_gc_stress_checked = 1; const char *e = getenv("SPINEL_GC_STRESS"); if (e && *e && *e != '0') { SP_GC_CTR_SET(sp_gc_threshold, 2048); sp_gc_threshold_init = 2048; sp_gc_stress_pin = 1; } }
+  if (SP_GC_CTR_GET(sp_gc_bytes) > sp_gc_threshold) {
+    sp_gc_collect_retune();
+  }
+  size_t need = sizeof(sp_gc_hdr) + sz;
+  sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc_in(need, 0, fin != NULL, 1);
+  h->finalize = fin; h->scan = scn; h->size = need;
+  if (__builtin_expect(sp_alloc_report_on, 0)) sp_alloc_report_count((void *)scn, sz);
+  SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
+  if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(h, 1);
+  sp_gc_alloc_fast_ok = sp_gc_stress_checked && sp_slab_on > 0 && !sp_slab_verify_on && !sp_alloc_report_on;
+  SP_HEAP_UNLOCK();
+  return (char *)h + sizeof(sp_gc_hdr);
+#endif
+}
 /* A block the collector will sweep: an object (zeroed) or a heap string */
 void *sp_slab_alloc(size_t need) {
-  void *p = sp_slab_alloc_in(need, 0, 0);
-  /* the block is zeroed in 16-byte stores when small: a memset call costs
-     more than the bytes it clears at these sizes */
-  if (need <= 256) {
-    uint64_t *q = (uint64_t *)p; size_t n = (need + 7) >> 3;
-    for (size_t k = 0; k < n; k += 2) { q[k] = 0; q[k + 1] = 0; }
-  }
-  else memset(p, 0, need);
+  void *p = sp_slab_alloc_in(need, 0, 0, 1);
   if (__builtin_expect(sp_slab_verify_on, 0)) sp_slab_note(p, 1);
   return p;
 }
 void *sp_slab_alloc_str(size_t need) {
-  void *p = sp_slab_alloc_in(need, 0, 0);
+  void *p = sp_slab_alloc_in(need, 0, 0, 0);
   if (sp_slab_on > 0 && sp_slab_owns(p)) {
     sp_slab_loc l; sp_slab_locate(p, &l);
     bm_or(&l.bm->str[l.w], l.bit);
@@ -528,7 +730,7 @@ void *sp_slab_alloc_str(size_t need) {
 }
 /* A block no sweep frees: a container's payload, dying by an explicit free */
 void *sp_slab_alloc_raw(size_t need) {
-  void *p = sp_slab_alloc_in(need, 1, 0);
+  void *p = sp_slab_alloc_in(need, 1, 0, 0);
   if (sp_slab_verify_on) sp_slab_note(p, 3);
   return p;
 }
@@ -628,9 +830,16 @@ static void sp_slab_verify_chunk(sp_slab_chunk *ch, const char *when) {
     }
   }
 }
+/* the verifiers' report of a slot's recorded history (SPINEL_GC_VERIFY) */
+void sp_slab_history(const void *p) {
+  if (sp_slab_on <= 0 || !sp_slab_owns(p)) return;
+  sp_slab_shadow_rec *sh = SP_SHADOW(p);
+  fprintf(stderr, "  history (1 obj alloc, 2 str alloc, 3 raw alloc, 4 set_fin, 5/15 relive, 6 free, 7 swept dead, 8/18 parked, 9 pin, 30/31 survived sweep, 40-43 take), oldest first; now cycle %d:\n", sp_gc_cycle);
+  if (sh) for (unsigned k = 0; k < 8; k++) { sp_slab_shadow_ev *e = &sh->ev[(sh->n + k) & 7]; if (e->what) fprintf(stderr, "    what=%d worker=%d cycle=%d\n", e->what, e->wid, e->cycle); }
+}
 void sp_slab_verify_all(void) {
   if (sp_slab_on <= 0) return;
-  sp_slab_verify_on = 1;
+  sp_slab_verify_on = 1; sp_gc_alloc_fast_ok = 0;
   for (uintptr_t a = sp_slab_base; a < sp_slab_brk; a += SP_SLAB_ARENA) {
     sp_slab_arena *ar = (sp_slab_arena *)a;
     for (int i = SP_SLAB_FIRST; i < (int)SP_SLAB_NCHUNK; i++) {
@@ -753,11 +962,32 @@ void sp_slab_unmark(const void *p) {
 /* ---- the sweep ----
    Under the barrier, before the sweep of the epoch that just closed starts:
    new allocations go to the other parity from here. */
+/* Under the barrier: every worker's claimed-and-not-handed-out run is
+   unclaimed, and its cache dropped. Before the collector walks the young
+   bits (they would name slots holding garbage) and before the epoch flips
+   (the claim words name the parity that is about to close). */
+void sp_slab_runs_release(void) {
+  if (sp_slab_on <= 0) return;
+  for (int w = 0; w < SP_SLAB_NWK; w++) {
+    sp_slab_worker *wk = &sp_slab_wk[w];
+    for (int c = 0; c < SP_SLAB_NCLS; c++) {
+      for (int k = 0; k < 2; k++) {
+        char *p = wk->rnext[k][c], *end = wk->rend[k][c];
+        if (p && p < end) {
+          unsigned i = (unsigned)(((uint64_t)(size_t)(p - wk->rbase[k][c]) * sp_slab_recip[c]) >> 32);
+          unsigned n = (unsigned)(((uint64_t)(size_t)(end - p) * sp_slab_recip[c]) >> 32);
+          uint64_t mask = (n >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << n) - 1)) << i;
+          bm_and(wk->rclaim[k][c], ~mask);
+        }
+        wk->rnext[k][c] = wk->rend[k][c] = NULL;
+      }
+      wk->wmask[c] = 0;
+    }
+  }
+}
 void sp_slab_epoch_flip(void) {
+  sp_slab_runs_release();
   sp_slab_epoch = sp_slab_epoch + 1;   /* under the barrier: nobody allocates or sweeps meanwhile */
-  /* the cached claim words name the parity that just closed */
-  for (int w = 0; w < SP_SLAB_NWK; w++)
-    for (int c = 0; c < SP_SLAB_NCLS; c++) sp_slab_wk[w].fmask[c] = 0;
 }
 /* Every chunk one worker owns, in one pass over the bitmaps. The epoch to
    reclaim from is the one before the current; `full` frees the old
@@ -968,11 +1198,17 @@ void sp_slab_release_worker(int wid) {
   if (sp_slab_on <= 0 || wid < 0 || wid >= SP_SLAB_NWK) return;
   sp_slab_worker *wk = &sp_slab_wk[wid];
   if (__atomic_load_n(&wk->sweeping, __ATOMIC_ACQUIRE)) return;
-  long reserve = wk->taken;
-  if (reserve < SP_SLAB_RESERVE) reserve = SP_SLAB_RESERVE;
   wk->taken = 0;
   if (sp_gc_ph_on) sp_slab_rel_calls++;
   for (int cls = 0; cls < SP_SLAB_NCLS; cls++) {
+    /* The reserve is per class: what the class took this cycle it will
+       take again next cycle, and a reserve shared across the classes was
+       spent by the first few, so the rest handed their empties back and
+       carved fresh ones every cycle -- 37,000 chunks a second on a server,
+       each handed to the kernel and faulted in again. */
+    long reserve = wk->taken_cls[cls];
+    wk->taken_cls[cls] = 0;
+    if (reserve < SP_SLAB_RESERVE) reserve = SP_SLAB_RESERVE;
     sp_slab_chunk *ch = __atomic_exchange_n(&wk->avail[cls], NULL, __ATOMIC_ACQ_REL);
     if (!ch) continue;
     sp_slab_chunk *keep = NULL, *give = NULL;
