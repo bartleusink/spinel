@@ -2759,6 +2759,11 @@ sp_StrStrHash *sp_env_update_h(sp_StrStrHash *h, int replace) {
 /* Keys are spinel rodata literals (SPL: 0xff marker prefix) so the str-hash
    header cache's s[-1] read is in-bounds -- a bare C literal here would
    overread (and could alias a heap marker on some rodata layouts). */
+struct sp_gc_stat_str_acc { size_t *b; sp_int *c; };
+static void sp_gc_stat_str_cb(void *hdr, void *arg) {
+  struct sp_gc_stat_str_acc *a = (struct sp_gc_stat_str_acc *)arg;
+  *a->b += ((sp_str_hdr *)hdr)->size & SP_STR_SIZE_MASK; (*a->c)++;
+}
 sp_StrIntHash*sp_gc_stat(void){
   /* The string heap (sp_str_heap) is malloc'd separately and deliberately
      excluded from sp_gc_bytes (see sp_str_alloc). Surface its footprint so
@@ -2769,6 +2774,11 @@ sp_StrIntHash*sp_gc_stat(void){
      node. Unlock before building the hash -- sp_gc_alloc takes the same
      (non-recursive) lock. */
   size_t str_bytes=0; sp_int str_count=0;
+  /* the slab strings: a bit per slot in the chunks' bitmaps, either
+     generation (a racy read against the allocating workers, benign for an
+     introspection stat), then the lists of the strings too large for it */
+  { struct sp_gc_stat_str_acc acc = { &str_bytes, &str_count };
+    sp_slab_each_string(1, 1, sp_gc_stat_str_cb, &acc); }
 #ifdef SP_THREADS
   /* Per-worker lists (see sp_alloc.h): each has a single pusher, and only the
      head moves, so a snapshot walk reaches fully-linked nodes -- at worst it

@@ -139,9 +139,9 @@ static size_t g_str_promoted[SP_MAX_WORKERS];
    until none is left. The tasks of one slot touch distinct lists; what they
    share (the slot's old string head and byte counters) is settled by the
    collector afterwards from the per-task results. */
-enum { SW_OBJ, SW_STR_OLD, SW_STR_YOUNG };
+enum { SW_OBJ, SW_STR_OLD, SW_STR_YOUNG, SW_CHUNKS };
 typedef struct { short kind, wid, sub; } sp_sw_task;
-#define SW_TASK_MAX (SP_MAX_WORKERS * (2 + SP_STR_YSUB))
+#define SW_TASK_MAX (SP_MAX_WORKERS * (3 + SP_STR_YSUB))
 static sp_sw_task     g_sw_tasks[SW_TASK_MAX];
 static int            g_sw_ntasks = 0;
 static int            g_sw_next = 0;    /* claimed by fetch-add, off the lock */
@@ -158,16 +158,17 @@ static size_t         g_sy_held[SP_MAX_WORKERS][SP_STR_YSUB];
    are not. */
 static unsigned long g_sw_slot_max_us = 0;
 static unsigned long g_sw_task_sum_us = 0;   /* every task's time added: the work the phase spread */
-static unsigned long g_sw_task_max_kind[3];  /* the kind of the longest task, for the report */
+static unsigned long g_sw_task_max_kind[4];  /* the kind of the longest task, for the report */
+void sp_gc_sweep_chunks_slot(int wid);   /* lib/sp_gc.c: the slab bitmaps of one slot, this cycle */
 static void sp_sweep_task(const sp_sw_task *t) {
   double t0 = sp_gc_ph_on ? sp_monotonic_now() : 0;
   switch (t->kind) {
     case SW_OBJ: sp_gc_sweep_slot(t->wid, &g_sw_head[t->wid], &g_sw_tail[t->wid], &g_sw_bytes[t->wid]); break;
+    case SW_CHUNKS: sp_gc_sweep_chunks_slot(t->wid); break;
     case SW_STR_OLD: sp_str_sweep_old_one(t->wid); break;
     default: sp_str_sweep_young_one(t->wid, t->sub, &g_sy_keep[t->wid][t->sub], &g_sy_tail[t->wid][t->sub],
                                     &g_sy_moved[t->wid][t->sub], &g_sy_held[t->wid][t->sub]); break;
   }
-  sp_slab_free_flush();
   if (sp_gc_ph_on) {
     /* microseconds in an integer, so the max is one atomic */
     unsigned long d = (unsigned long)((sp_monotonic_now() - t0) * 1e6), m;
@@ -394,6 +395,7 @@ static sp_Fiber *g_native_fiber[SP_MAX_WORKERS][2];    /* per worker: the fibers
 static int       g_native_nfiber[SP_MAX_WORKERS];
 static void sp_stw_publish_locked(void);
 static void sp_stw_park_locked(void);
+static int sp_cs_chunks_settled(int wid);   /* the concurrent sweep is out of this slot's chunks (below) */
 static SP_TLS int g_native_noop = 0;                   /* entered before the pool existed: nothing to undo */
 /* Leave the world (PRE: sched lock held, no collection active): publish, record
    the fibers to mark, and count this worker as out. Shared by a blocking
@@ -436,7 +438,7 @@ static void sp_out_leave_locked(int wid) {
   if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0 || (g_cs_full && sp_slab_on > 0)) {
     SCHED_UNLOCK();
     if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sp_cs_owner_run(sp_worker_id);
-    if (g_cs_full && sp_slab_on > 0) sp_slab_release_worker(sp_worker_id);
+    if (g_cs_full && sp_slab_on > 0 && sp_cs_chunks_settled(sp_worker_id)) sp_slab_release_worker(sp_worker_id);
     SCHED_LOCK();
   }
 }
@@ -543,7 +545,7 @@ static void sp_stw_park_locked(void) {
     if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sp_cs_owner_run(sp_worker_id);
     /* and, after a full cycle, its own slab chunks: the release that used
        to run for every worker under the next barrier */
-    if (g_cs_full && sp_slab_on > 0) sp_slab_release_worker(sp_worker_id);
+    if (g_cs_full && sp_slab_on > 0 && sp_cs_chunks_settled(sp_worker_id)) sp_slab_release_worker(sp_worker_id);
     SCHED_LOCK();
   }
 }
@@ -657,7 +659,7 @@ static void sp_stw_collect_impl(int force) {
   SCHED_UNLOCK();
   /* the collector's own young lists, like every released worker's */
   if (__atomic_load_n(&g_cs_unclaimed, __ATOMIC_RELAXED) > 0) sp_cs_owner_run(sp_worker_id);
-  if (g_cs_full && sp_slab_on > 0) sp_slab_release_worker(sp_worker_id);
+  if (g_cs_full && sp_slab_on > 0 && sp_cs_chunks_settled(sp_worker_id)) sp_slab_release_worker(sp_worker_id);
 #else
   (void)force;
   sp_gc_collect_retune();
@@ -1297,7 +1299,8 @@ void sp_sched_init(void) {
 #define CS_OBJ_OLD 1
 #define CS_STR_YOUNG 2
 #define CS_STR_OLD 3
-#define CS_TASK_MAX (SP_MAX_WORKERS * (2 + SP_STR_YSUB) + 1)
+#define CS_CHUNKS 4     /* a slot's slab chunks, by their bitmaps (objects and strings, both generations) */
+#define CS_TASK_MAX (SP_MAX_WORKERS * (3 + SP_STR_YSUB) + 1)
 #define CS_SWEEPER_MAX 32
 static pthread_mutex_t g_cs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cs_go = PTHREAD_COND_INITIALIZER;
@@ -1332,6 +1335,9 @@ static void sp_cs_run_task(const sp_sw_task *t) {
     case CS_OBJ_OLD:
       sp_gc_sweep_old_list(&g_cs_obj_old, &dummy, &g_cs_obj_old_tail);
       break;
+    case CS_CHUNKS:
+      sp_gc_sweep_chunks(t->wid, g_cs_full);
+      break;
     case CS_STR_YOUNG: {
       size_t held = 0;
       sp_str_sweep_young_list(&g_cs_str_young[t->wid][t->sub], &g_cs_sy_keep[t->wid][t->sub],
@@ -1341,7 +1347,6 @@ static void sp_cs_run_task(const sp_sw_task *t) {
       g_cs_so_freed[t->wid] = sp_str_sweep_old_list(&g_cs_str_old[t->wid]);
       break;
   }
-  sp_slab_free_flush();
   if (sp_gc_ph_on) {
     unsigned long d = (unsigned long)((sp_monotonic_now() - t0) * 1e6), m;
     do { m = __atomic_load_n(&g_cs_task_max_us, __ATOMIC_RELAXED); if (d <= m) break; }
@@ -1359,7 +1364,7 @@ static unsigned char g_cs_claimed[CS_TASK_MAX];
    sweeper thread takes its lists, or the next barrier would be spent
    finishing them. */
 static int sp_cs_task_is_owned(const sp_sw_task *t) {
-  return (t->kind == CS_OBJ || t->kind == CS_STR_YOUNG) && t->wid != CS_SWEEPER_WID &&
+  return (t->kind == CS_OBJ || t->kind == CS_STR_YOUNG || t->kind == CS_CHUNKS) && t->wid != CS_SWEEPER_WID &&
          !(t->wid >= 0 && t->wid < SP_MAX_WORKERS && __atomic_load_n(&g_native_out[t->wid], __ATOMIC_RELAXED) == SP_OUT_NATIVE);
 }
 #define CS_RUN_SWEEPER 0
@@ -1378,10 +1383,22 @@ static int sp_cs_run_tasks(int mode, int wid) {
     if (!__atomic_compare_exchange_n(&g_cs_claimed[i], &z, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) continue;
     __atomic_fetch_sub(&g_cs_unclaimed, 1, __ATOMIC_RELAXED);
     sp_cs_run_task(t);
+    __atomic_store_n(&g_cs_claimed[i], 2, __ATOMIC_RELEASE);   /* done: the owner's release reads this */
     ran++;
   }
   if (sp_gc_ph_on && ran) __atomic_fetch_add(&g_cs_task_us, (unsigned long)((sp_monotonic_now() - t0) * 1e6), __ATOMIC_RELAXED);
   return ran;
+}
+/* May this worker hand its empty chunks back? Not while a sweeper thread is
+   still in the chunk task of its slot (claimed, not done): that sweep clears
+   bits of the very chunks the pool would carve for someone else. A slot with
+   no task in this sweep, or whose task this worker ran itself, is settled. */
+static int sp_cs_chunks_settled(int wid) {
+  if (!g_cs_pending) return 1;
+  for (int i = 0; i < g_cs_ntasks; i++)
+    if (g_cs_tasks[i].kind == CS_CHUNKS && g_cs_tasks[i].wid == wid)
+      return __atomic_load_n(&g_cs_claimed[i], __ATOMIC_ACQUIRE) == 2;
+  return 1;
 }
 /* Leaving the task list: count what was run, and count ourselves out.
    The collector reuses the task array for the next sweep only once nobody is
@@ -1462,6 +1479,10 @@ static void sp_sched_conc_start(int full, int str_sweep, int str_major) {
     g_cs_pro_head[i] = g_cs_pro_tail[i] = NULL;
     g_cs_obj[i] = sp_gc_wslot[i].young; sp_gc_wslot[i].young = NULL;
     if (g_cs_obj[i]) g_cs_tasks[nt++] = (sp_sw_task){ CS_OBJ, (short)i, 0 };
+    /* the slot's chunks: the young slab generation every cycle, the old one
+       at a full, strings with objects -- the string gate below governs only
+       the lists of the strings too large for the slab (and their retune) */
+    g_cs_tasks[nt++] = (sp_sw_task){ CS_CHUNKS, (short)i, 0 };
     if (str_sweep) {
       g_cs_so_freed[i] = 0;
       if (str_major) {
@@ -1635,6 +1656,11 @@ static void sp_sched_par_sweep(void) {
   }
   for (int i = 0; i < g_sw_hi; i++)
     if (sp_gc_wslot[i].young) g_sw_tasks[nt++] = (sp_sw_task){ SW_OBJ, (short)i, 0 };
+  /* every slot's slab chunks, the slots no worker runs included: a chunk is
+     swept exactly once a cycle, and a second pass over one at a full cycle
+     would read its cleared marks as "nothing reached" */
+  for (int i = 0; i < SP_MAX_WORKERS; i++)
+    g_sw_tasks[nt++] = (sp_sw_task){ SW_CHUNKS, (short)i, 0 };
   /* The collector's own length cache: every parked worker cleared its own
      at the park, and until now the collector dropped its entries one by one
      as it swept its own strings. Its strings may now be swept by any worker,

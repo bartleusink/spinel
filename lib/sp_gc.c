@@ -22,6 +22,8 @@
 #include <unistd.h>
 #include "sp_marshal.h"   /* sp_marshal_vt -- the instance lives here (always linked) */
 void sp_str_verify_begin(void);   /* lib/sp_alloc.c: string side of the generational check */
+void sp_str_lcache_clear(void);   /* lib/sp_alloc.c: this thread's string-length cache */
+void sp_str_mark_settle(int full);  /* lib/sp_alloc.c: the slab strings' old total, from this mark */
 size_t sp_str_verify_end(void);
 void sp_str_verify_probe_arm(void);
 int sp_str_verify_probe_hit(void);
@@ -162,13 +164,15 @@ static void sp_gc_verify_snapshot(void){ sp_gc_vsnap_n=0;
   for(sp_gc_hdr*p=sp_gc_heap;p;p=p->next)sp_gc_vsnap_push(p);
 #endif
   for(sp_gc_hdr*p=sp_gc_old_heap;p;p=p->next)sp_gc_vsnap_push(p); if(sp_gc_vsnap_n>1)qsort(sp_gc_vsnap,sp_gc_vsnap_n,sizeof(sp_gc_hdr*),sp_gc_vsnap_cmp); }
-static int sp_gc_obj_registered(sp_gc_hdr *h){ uintptr_t hv=(uintptr_t)h; size_t lo=0,hi=sp_gc_vsnap_n; while(lo<hi){ size_t m=lo+(hi-lo)/2; uintptr_t x=(uintptr_t)sp_gc_vsnap[m]; if(x==hv)return 1; if(x<hv)lo=m+1; else hi=m; } return 0; }
+static int sp_gc_obj_registered(sp_gc_hdr *h){ if(sp_slab_owns(h))return sp_slab_is_live(h)&&!sp_slab_is_str(h); uintptr_t hv=(uintptr_t)h; size_t lo=0,hi=sp_gc_vsnap_n; while(lo<hi){ size_t m=lo+(hi-lo)/2; uintptr_t x=(uintptr_t)sp_gc_vsnap[m]; if(x==hv)return 1; if(x<hv)lo=m+1; else hi=m; } return 0; }
 /* Verify diagnostics: which phase/slot the bad pointer came from. */
 int sp_gc_verify_on(void) { return sp_gc_verify; }
 const char *sp_gc_dbg_phase = "?";
 void *sp_gc_dbg_ctx = NULL;
 static void sp_gc_verify_fail(void *obj, sp_gc_hdr *h){
   fprintf(stderr, "  [phase=%s ctx=%p]\n", sp_gc_dbg_phase, sp_gc_dbg_ctx);
+  sp_slab_describe(h);
+  if (sp_gc_dbg_ctx) sp_slab_describe((char*)sp_gc_dbg_ctx - sizeof(sp_gc_hdr));
   if (sp_gc_dbg_ctx && sp_gc_dbg_phase && sp_gc_dbg_phase[0] == 's') {
     sp_gc_hdr *hc = (sp_gc_hdr *)((char *)sp_gc_dbg_ctx - sizeof(sp_gc_hdr));
     fprintf(stderr, "  holder scan=%p size=%u old=%d\n", (void *)hc->scan, (unsigned)hc->size, (int)hc->old);
@@ -383,13 +387,39 @@ static void sp_gc_mark_drain_all(void) {
 #endif
   sp_gc_mark_drain();
 }
-void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){
+/* What this thread's marking counted on the string side: bytes reached, and
+   of those the young ones the mark promoted (the bitmap strings; a string
+   too large for the slab is counted by its list sweep). */
+static SP_TLS size_t sp_gc_mkl_str = 0, sp_gc_mkl_str_young = 0;
+size_t sp_gc_mk_str_bytes = 0, sp_gc_mk_str_young_bytes = 0;
+/* and the slab objects the mark promoted (their bytes; the list sweep counts
+   its own promotions as it splices them) */
+static SP_TLS size_t sp_gc_mkl_promo = 0;
+size_t sp_gc_mk_promo_bytes = 0;
+/* A heap string the mark reached. A slab string's mark is a bit in its
+   chunk, and the bit is also the "already marked" test: the marker byte
+   stays 0xfe, since nothing resets a byte the sweep does not touch. A
+   string that fell back to malloc keeps the byte protocol (0xfe -> 0xfc,
+   reset by the list sweep that frees or promotes it). */
+void sp_gc_mark_str(const char *s) {
+  sp_str_hdr *h = ((sp_str_hdr *)(s - 1)) - 1;
+  if (sp_slab_owns(h)) {
+    int wy;
+    if (!sp_slab_mark(h, 0, &wy)) return;
+    size_t sz = h->size & 0x3FFFFFFFu;
+    sp_gc_mkl_str += sz;
+    if (wy) sp_gc_mkl_str_young += sz;
+    return;
+  }
 #ifdef SP_THREADS
-  __atomic_store_n((unsigned char*)obj-1,(unsigned char)0xfc,__ATOMIC_RELAXED);   /* several markers may set it; a plain byte store, spelled so TSan reads it as intended */
+  __atomic_store_n((unsigned char *)s - 1, (unsigned char)0xfc, __ATOMIC_RELAXED);   /* several markers may set it; a plain byte store, spelled so TSan reads it as intended */
 #else
-  ((char*)obj)[-1]=(char)0xfc;
+  ((char *)s)[-1] = (char)0xfc;
 #endif
-  return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(sp_gc_young_probe_on){if(!h->old)sp_gc_young_probe_hit=1;return;}if(sp_gc_root_phase&&!h->old)h->aged=1;
+}
+void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){sp_gc_mark_str((const char*)obj);return;}
+  if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(sp_gc_young_probe_on){if(!h->old)sp_gc_young_probe_hit=1;return;}if(sp_gc_root_phase&&!h->old)h->aged=1;
+  int was_young=0;
 #ifdef SP_THREADS
   if(sp_gc_par_mark){
     /* Several threads mark at once: the stamp is claimed with an exchange
@@ -403,11 +433,33 @@ void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[
       if(sp_gc_conc_promote&&!(o&SP_GC_FL_OLD))nw|=SP_GC_FL_OLD;
       if(__atomic_compare_exchange_n(w,&o,nw,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED))break;
     }
-    sp_gc_mkl_marked++;sp_gc_mkl_bytes+=h->size;if(!(o&SP_GC_FL_OLD))sp_gc_mkl_young+=h->size;
+    sp_gc_mkl_marked++;sp_gc_mkl_bytes+=h->size;if(!(o&SP_GC_FL_OLD)){sp_gc_mkl_young+=h->size;was_young=1;}
   }
   else
 #endif
-  {if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_mkl_marked++;sp_gc_mkl_bytes+=h->size;if(!h->old){sp_gc_mkl_young+=h->size;if(sp_gc_conc_promote)h->old=1;/* promoted here, under the barrier: the concurrent sweep will not write the bit */}}
+  {if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_mkl_marked++;sp_gc_mkl_bytes+=h->size;if(!h->old){sp_gc_mkl_young+=h->size;was_young=1;if(sp_gc_conc_promote)h->old=1;/* promoted here, under the barrier: the concurrent sweep will not write the bit */}}
+  /* A slab object: its generation is a bit in its chunk, and the mark is what
+     promotes it -- the sweep reads the bitmaps and never this header. A
+     first-time survivor under aging stays young (the sweep carries it into
+     the next epoch) and is aged for the next time; the header's `old` bit
+     follows the promotion so the write barrier sees it. */
+  if(was_young&&sp_slab_owns(h)){
+    /* SPINEL_GC_AGE keeps a first-time survivor young on the lists; a slab
+       object promotes at once, since the remembered-set repair aging needs
+       (the young probe over what this cycle promoted) walks the old list */
+    int keep_young=0;
+    int wy;
+    sp_slab_mark(h,keep_young,&wy);
+    sp_gc_mkl_promo+=h->size;
+    {
+#ifdef SP_THREADS
+      if(sp_gc_par_mark)__atomic_fetch_or(sp_gc_hdr_flags(h),SP_GC_FL_OLD,__ATOMIC_RELAXED);
+      else
+#endif
+      h->old=1;
+    }
+  }
+  else if(sp_slab_owns(h)){int wy;sp_slab_mark(h,0,&wy);}
   if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap){
 #ifdef SP_THREADS
     if(sp_gc_par_mark){sp_gc_mark_spill();}
@@ -424,10 +476,14 @@ static void sp_gc_mkl_fold(void){
   __atomic_fetch_add(&sp_gc_ct_marked,sp_gc_mkl_marked,__ATOMIC_RELAXED);
   __atomic_fetch_add(&sp_gc_mk_bytes,sp_gc_mkl_bytes,__ATOMIC_RELAXED);
   __atomic_fetch_add(&sp_gc_mk_young_bytes,sp_gc_mkl_young,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_mk_str_bytes,sp_gc_mkl_str,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_mk_str_young_bytes,sp_gc_mkl_str_young,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_mk_promo_bytes,sp_gc_mkl_promo,__ATOMIC_RELAXED);
 #else
   sp_gc_ct_marked+=sp_gc_mkl_marked;sp_gc_mk_bytes+=sp_gc_mkl_bytes;sp_gc_mk_young_bytes+=sp_gc_mkl_young;
+  sp_gc_mk_str_bytes+=sp_gc_mkl_str;sp_gc_mk_str_young_bytes+=sp_gc_mkl_str_young;sp_gc_mk_promo_bytes+=sp_gc_mkl_promo;
 #endif
-  sp_gc_mkl_marked=0;sp_gc_mkl_bytes=0;sp_gc_mkl_young=0;
+  sp_gc_mkl_marked=0;sp_gc_mkl_bytes=0;sp_gc_mkl_young=0;sp_gc_mkl_str=0;sp_gc_mkl_str_young=0;sp_gc_mkl_promo=0;
 }
 
 void sp_gc_mark_drain(void){
@@ -717,6 +773,60 @@ void sp_gc_old_attach(sp_gc_hdr *head, sp_gc_hdr *tail) {
   sp_gc_old_heap = head;
 }
 #endif
+/* ---- the slab's sweep: one worker's chunks, by their bitmaps ---- */
+/* a dead object with a finalizer or a recycler (lib/sp_slab.c calls this for
+   each): 1 when the slot is freed, 0 when the recycler kept the header
+   (parked on its pool; the pool frees it itself when over the cap, and the
+   slot's bits say which happened) */
+static int sp_gc_die_cb(void *hp){
+  sp_gc_hdr *h=(sp_gc_hdr*)hp;
+  if(sp_gc_verify&&(h->size<sizeof(sp_gc_hdr)||h->size>(1u<<30)||((uintptr_t)h->recycle&&(uintptr_t)h->recycle<4096)||((uintptr_t)h->finalize&&(uintptr_t)h->finalize<4096))){
+    fprintf(stderr,"*** SPINEL_GC_VERIFY: a dead slot with a finalizer bit is no object: hdr=%p size=%zu recycle=%p finalize=%p scan=%p\n",(void*)h,(size_t)h->size,(void*)h->recycle,(void*)h->finalize,(void*)h->scan);
+    sp_slab_describe(h); abort();
+  }
+  if(h->recycle){
+    /* parked before the pool sees it: another thread may pop and relive it
+       the moment it is pushed, and parking after that would undo the relive */
+    sp_slab_park(h);
+    h->recycle(h);
+    return !sp_slab_is_live(h);   /* the recycler frees an over-cap header itself */
+  }
+  if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));
+  return 1;
+}
+static void sp_gc_clear_dirty_cb(void *hp,void *arg){(void)arg;((sp_gc_hdr*)hp)->dirty=0;}
+static void sp_gc_stamp_reset_cb(void *hp,void *arg){(void)arg;((sp_gc_hdr*)hp)->marked=0;}
+static void sp_gc_rem_invariant_cb(void *hp,void *arg){
+  sp_gc_hdr *h=(sp_gc_hdr*)hp; void *o=(char*)h+sizeof(sp_gc_hdr); int listed=0;
+  for(int ri=0;ri<sp_gc_nremembered;ri++) if(sp_gc_remembered[ri]==o){listed=1;break;}
+  if(!!h->dirty!=listed){
+    fprintf(stderr,"spinel: GC remembered-set invariant broken: obj=%p scan=%p dirty=%d listed=%d full=%d age=%d cycle=%d\n",
+            o,(void*)h->scan,(int)h->dirty,listed,*(int*)arg,sp_gc_age_survivors,sp_gc_cycle);
+    abort();
+  }
+}
+static int sp_gc_sweep_full_now=0;   /* the cycle the stop-the-world sweep tasks are for */
+size_t sp_gc_ph_slab_freed_obj=0, sp_gc_ph_slab_freed_str=0;
+void sp_gc_sweep_chunks(int wid,int full){
+  sp_slab_sweep_stats st;
+  sp_slab_sweep_worker(wid,full,0,sp_gc_die_cb,&st);
+  SP_GC_CTR_ADD(sp_gc_ct_swept,st.swept);
+#ifdef SP_THREADS
+  __atomic_fetch_add(&sp_gc_ph_slab_freed_obj,st.freed_obj,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&sp_gc_ph_slab_freed_str,st.freed_str,__ATOMIC_RELAXED);
+#else
+  sp_gc_ph_slab_freed_obj+=st.freed_obj; sp_gc_ph_slab_freed_str+=st.freed_str;
+#endif
+}
+/* the form the stop-the-world parallel sweep (sp_sched.c) runs per slot */
+void sp_gc_sweep_chunks_slot(int wid){ sp_gc_sweep_chunks(wid,sp_gc_sweep_full_now); }
+static sp_gc_hdr **sp_gc_vg_cand; static size_t sp_gc_vg_n, sp_gc_vg_cap; static unsigned sp_gc_vg_gen;
+static void sp_gc_vg_cand_cb(void *hp,void *arg){
+  (void)arg; sp_gc_hdr *h=(sp_gc_hdr*)hp;
+  if(!sp_gc_vg_cand||h->old||h->marked==sp_gc_vg_gen)return;
+  if(sp_gc_vg_n==sp_gc_vg_cap){sp_gc_vg_cap*=2;sp_gc_vg_cand=(sp_gc_hdr**)realloc(sp_gc_vg_cand,sizeof(sp_gc_hdr*)*sp_gc_vg_cap);if(!sp_gc_vg_cand)return;}
+  sp_gc_vg_cand[sp_gc_vg_n++]=h;
+}
 /* The generational check, out of line: it is off unless SPINEL_GC_VERIFY_GEN
    is set, and inline it added 1.8KB to the middle of the collector -- code
    the common cycle walks past on its way to the sweep. */
@@ -730,6 +840,10 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
     size_t cap = 4096, n = 0;
     sp_gc_hdr **cand = (sp_gc_hdr **)malloc(sizeof(sp_gc_hdr *) * cap);
     if (cand) {
+      /* the slab's young objects first, then the lists' */
+      sp_gc_vg_cand=cand; sp_gc_vg_n=0; sp_gc_vg_cap=cap; sp_gc_vg_gen=minor_gen;
+      sp_slab_each_object(1,0,sp_gc_vg_cand_cb,NULL);
+      cand=sp_gc_vg_cand; n=sp_gc_vg_n; cap=sp_gc_vg_cap;
 #ifdef SP_THREADS
       { int w=sp_active_workers; if(w<1)w=1; if(w>SP_MAX_WORKERS)w=SP_MAX_WORKERS;
         for(int i=0;i<w;i++)
@@ -894,6 +1008,12 @@ void sp_gc_collect(void){
   double stat_t0 = sp_gc_stat_now();
   double ph_t = stat_t0;
   if (sp_gc_ph_on) sp_gc_ph_wait_top += stat_t0 - ph_top0;
+  /* SPINEL_GC_AGE keeps a young survivor young for a second look and repairs
+     the remembered set by probing what the cycle promoted, which it finds at
+     the head of the old LIST. A slab object's promotion is a bit in its chunk
+     and nothing walks those, so with the slab on an aged list object held by
+     a slab object promoted this cycle would go unrecorded: aging is off then. */
+  if(sp_gc_age_on&&sp_slab_on>0)sp_gc_age_on=0;
   int full=(sp_gc_cycle%sp_gc_full_interval==0);sp_gc_cycle++;
   /* Forced by growth rather than by the schedule: the old generation has
      outgrown what the last full found live in it. */
@@ -919,6 +1039,7 @@ void sp_gc_collect(void){
   sp_gc_mark_gen=(sp_gc_mark_gen+1)&0x7ffffffu;   /* marked is 27 bits (see sp_gc_hdr) */
   if(!sp_gc_mark_gen){
     sp_gc_mark_gen=1;
+    sp_slab_each_object(1,1,sp_gc_stamp_reset_cb,NULL);
     for(sp_gc_hdr*hh=sp_gc_old_heap;hh;hh=hh->next)hh->marked=0;
 #ifdef SP_THREADS
     { int n=sp_active_workers; if(n<1)n=1; if(n>SP_MAX_WORKERS)n=SP_MAX_WORKERS; for(int i=0;i<n;i++)for(sp_gc_hdr*hh=sp_gc_wslot[i].young;hh;hh=hh->next)hh->marked=0; }
@@ -941,6 +1062,16 @@ void sp_gc_collect(void){
              !sp_gc_age_on;
   sp_gc_conc_promote = conc;
   sp_gc_mk_bytes = 0; sp_gc_mk_young_bytes = 0;
+  sp_gc_mk_str_bytes = 0; sp_gc_mk_str_young_bytes = 0; sp_gc_mk_promo_bytes = 0;
+  /* the closed epoch is what the sweep frees from; everything allocated from
+     here on is in the other parity and untouched by it (lib/sp_slab.c) */
+  if(sp_gc_verify)sp_slab_verify_all();
+  sp_slab_epoch_flip();
+  /* This thread's string-length cache: the list sweep dropped each freed
+     string from it one by one, and the bitmap sweep touches no string. Every
+     parked worker cleared its own on the way in; the collector's (and the
+     single thread's) goes here, before anything is freed. */
+  sp_str_lcache_clear();
   sp_gc_mark_all();
   if(sp_gc_minor){
     /* the remembered set is the rest of the root set for a minor: each entry is
@@ -997,6 +1128,7 @@ void sp_gc_collect(void){
        compaction has made room the set is authoritative again. */
     if (sp_gc_pin_overflow && keep < SP_GC_PINNED_MAX) sp_gc_pin_overflow = 0; }
   SP_GC_PH(sp_gc_ph_mark);
+  sp_str_mark_settle(full);
   if(full){
     size_t old_before=sp_gc_old_bytes;
     if(conc){
@@ -1005,10 +1137,15 @@ void sp_gc_collect(void){
       sp_gc_old_bytes=sp_gc_mk_bytes-sp_gc_mk_young_bytes;
     }
     else{
-    sp_gc_hdr**pp=&sp_gc_old_heap;sp_gc_old_bytes=0;
+    /* the old LIST: the objects too large for the slab. The slab's old
+       generation is swept with each worker's chunks below, and what stays of
+       both is what the mark reached, known now. */
+    sp_gc_hdr**pp=&sp_gc_old_heap;
     while(*pp){sp_gc_hdr*h=*pp;__builtin_prefetch(h->next);SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
     else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));sp_slab_free(h);}}
-    else{h->dirty=0;sp_gc_old_bytes+=h->size;pp=&h->next;}}
+    else{h->dirty=0;pp=&h->next;}}
+    sp_gc_old_bytes=sp_gc_mk_bytes-sp_gc_mk_young_bytes;
+    sp_slab_each_object(0,1,sp_gc_clear_dirty_cb,NULL);
     }
     /* Retune the cadence on what this sweep actually reclaimed. A heap the
        full cycle barely touches is one the minor mark was re-walking for
@@ -1097,7 +1234,7 @@ void sp_gc_collect(void){
        the old sweep to clear the bits the way the barrier form does. Cleared
        before the sweepers start: they read the flag word of every old object
        and nobody else may be writing it then */
-    if(sp_gc_rem_overflow){ for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next)h->dirty=0; }
+    if(sp_gc_rem_overflow){ for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next)h->dirty=0; sp_slab_each_object(0,1,sp_gc_clear_dirty_cb,NULL); }
     else for(int ri=0;ri<sp_gc_nremembered;ri++)((sp_gc_hdr*)sp_gc_remembered[ri]-1)->dirty=0;
     sp_gc_nremembered=0; sp_gc_rem_overflow=0;
     SP_GC_PH(sp_gc_ph_rembclear);
@@ -1105,7 +1242,6 @@ void sp_gc_collect(void){
     { int n=sp_active_workers; if(n<1)n=1; if(n>SP_MAX_WORKERS)n=SP_MAX_WORKERS;
       for(int i=0;i<n;i++)sp_gc_wslot[i].flush_delta=0; }
     SP_GC_PH(sp_gc_ph_slotsweep);
-    sp_slab_free_flush();
     SP_GC_PH(sp_gc_ph_strsweep);
     sp_gc_str_minor_only = 0;
     if(full) sp_gc_trim_request();   /* the slab's own release waits for the sweep (the driver runs it) */
@@ -1120,15 +1256,25 @@ void sp_gc_collect(void){
     /* Hand each parked worker its own slot. Only with a pool worth the barrier
        round trip: below that the serial walk the collector has always done is
        cheaper than waking everyone. */
-    if (sp_gc_par_sweep_hook && n > 1) sp_gc_par_sweep_hook();
-    else for(int i=0;i<n;i++)sp_gc_sweep_young(&sp_gc_wslot[i].young);
+    sp_gc_sweep_full_now=full;
+    if (sp_gc_par_sweep_hook && n > 1) sp_gc_par_sweep_hook();   /* every slot's chunks too */
+    else {
+      for(int i=0;i<n;i++)sp_gc_sweep_young(&sp_gc_wslot[i].young);
+      /* every slot's chunks, the ones no worker runs included (the sweeper
+         threads', a worker that left); a chunk is swept exactly once a cycle */
+      for(int i=0;i<SP_MAX_WORKERS;i++)sp_gc_sweep_chunks(i,full);
+    }
     /* The recompute above set sp_gc_bytes from every live object's size, so the
        workers' unflushed per-worker deltas are now subsumed -- clear them (all
        mutators are parked, so this is race-free). */
     for(int i=0;i<n;i++)sp_gc_wslot[i].flush_delta=0; }
 #else
   sp_gc_sweep_young(&sp_gc_heap);
+  sp_gc_sweep_chunks(0,full);
 #endif
+  /* the slab's promotions were counted by the mark; the list sweeps above
+     spliced theirs into the old total as they went */
+  sp_gc_old_bytes+=sp_gc_mk_promo_bytes;
   /* Take the live total AFTER the sweep, not before it. The sweep accumulates
      each survivor's size into sp_gc_old_bytes as it promotes, so this reads the
      same number either way -- but a dead object's finalizer subtracts the
@@ -1171,6 +1317,7 @@ void sp_gc_collect(void){
      collector time, collector at 65% of wall; campfire from matz/spinel#4352). */
   else if(sp_gc_rem_overflow){
     for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next)h->dirty=0;
+    sp_slab_each_object(0,1,sp_gc_clear_dirty_cb,NULL);
     sp_gc_nremembered=0; sp_gc_rem_overflow=0;
   }
   else if(sp_gc_age_survivors){
@@ -1223,6 +1370,7 @@ void sp_gc_collect(void){
   /* Under SPINEL_GC_VERIFY: the remembered set's invariant, dirty <=> listed,
      holds for every old object once the array is not overflowed. */
   if(sp_gc_verify&&!sp_gc_rem_overflow){
+    sp_slab_each_object(0,1,sp_gc_rem_invariant_cb,&full);
     for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next){
       void *o=(char*)h+sizeof(sp_gc_hdr); int listed=0;
       for(int ri=0;ri<sp_gc_nremembered;ri++) if(sp_gc_remembered[ri]==o){listed=1;break;}
@@ -1278,7 +1426,6 @@ void sp_gc_collect(void){
   /* Bump BEFORE the retune hook: the hook is where the stats line is printed
      (sp_alloc.c sees both thresholds and the string heap), and it must read
      this collection, not the previous one. */
-  sp_slab_free_flush();
   sp_gc_stat_collections++;
   if(full)sp_gc_stat_fulls++;
   sp_gc_stat_seconds+=sp_gc_stat_now()-stat_t0;

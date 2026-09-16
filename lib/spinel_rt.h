@@ -606,6 +606,7 @@ static void *sp_gc_alloc_pool(size_t sz, void(*scn)(void*), void(*recycle)(sp_gc
   void *p = sp_gc_alloc(sz, NULL, scn);
   sp_gc_hdr *h = (sp_gc_hdr *)((char *)p - sizeof(sp_gc_hdr));
   h->recycle = recycle;
+  sp_slab_set_fin(h);
   return p;
 }
 /* Re-link a previously-pooled slot back into sp_gc_heap so the next
@@ -619,7 +620,8 @@ static void *sp_gc_alloc_pool(size_t sz, void(*scn)(void*), void(*recycle)(sp_gc
    single-threaded one (see sp_gc.h). */
 static void sp_gc_pool_relink(sp_gc_hdr *h) {
   h->marked = 0; h->old = 0; h->dirty = 0;
-  SP_GC_HEAP_PUSH(h);
+  if (sp_slab_owns(h)) sp_slab_relive(h);
+  else SP_GC_HEAP_PUSH(h);
   sp_gc_bytes_add(h->size);
 }
 
@@ -938,7 +940,9 @@ static inline const char *sp_str_freeze_val(const char *s) {
   if (!s) return s;
   unsigned char m = ((const unsigned char *)s)[-1];
   if (m == 0xfe || m == 0xfc) {
+    /* a frozen heap string is immortal, as a literal is: the sweep is told */
     ((unsigned char *)s)[-1] = 0xf1;
+    sp_slab_pin(s);
     return s;
   }
   if (m == 0xff || m == 0xf1 || m != 0xfd) {
@@ -948,6 +952,7 @@ static inline const char *sp_str_freeze_val(const char *s) {
     char *r = sp_str_alloc(n);
     memcpy(r, s, n);
     ((unsigned char *)r)[-1] = 0xf1;
+    sp_slab_pin(r);
     return r;
   }
   return s;
@@ -1030,7 +1035,7 @@ static inline const char *sp_str_uminus_val(const char *s) {
 static inline const char *sp_str_clone_val(const char *s) {
   if (!s) return NULL;
   const char *r = sp_str_dup(s);  /* byte_len-aware: clone carries embedded NULs */
-  if (r && sp_str_is_frozen_val(s)) ((unsigned char *)r)[-1] = 0xf1;
+  if (r && sp_str_is_frozen_val(s)) { ((unsigned char *)r)[-1] = 0xf1; sp_slab_pin(r); }
   return r;
 }
 /* s[from, n] = val (char-based splice): prefix + val + suffix. A negative
@@ -11158,7 +11163,7 @@ static sp_Enumerator *sp_Enumerator_new_slices(sp_RbVal arr, sp_int n) {
     if (len - i <= n) break;
     i += n;
   }
-  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); sp_gc_wb((void*)e); e->source = arr; e->meth = sp_sprintf("each_slice(%lld)", (long long)n); return e; }
+  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); SP_GC_ROOT(e); /* sp_sprintf allocates */ sp_gc_wb((void*)e); e->source = arr; e->meth = sp_sprintf("each_slice(%lld)", (long long)n); return e; }
 }
 /* Array#each_cons(n) with no block: a materialized Enumerator whose items are
    the sliding windows of length n (none when len < n). */
@@ -11177,7 +11182,7 @@ static sp_Enumerator *sp_Enumerator_new_cons(sp_RbVal arr, sp_int n) {
       sp_PolyArray_push(out, sp_box_poly_array(win));
     }
   }
-  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); sp_gc_wb((void*)e); e->source = arr; e->meth = sp_sprintf("each_cons(%lld)", (long long)n); return e; }
+  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); SP_GC_ROOT(e); /* sp_sprintf allocates */ sp_gc_wb((void*)e); e->source = arr; e->meth = sp_sprintf("each_cons(%lld)", (long long)n); return e; }
 }
 /* Blockless <enum>.with_index(off): a materialized Enumerator whose items are
    the [element, off + i] pairs of the source enumerator's items. The source is
@@ -11197,6 +11202,7 @@ sp_Enumerator *sp_Enumerator_new_gen(void (*gen)(sp_Fiber *), void *cap, sp_RbVa
    receiver and renders a Generator placeholder (CRuby shows its address). */
 static const char *sp_enum_inspect(sp_Enumerator *e) {
   if (!e) return SPL("nil");
+  SP_GC_ROOT(e);   /* the source's inspect allocates; e->meth is read after it */
   if (e->gen || e->gen_label)
     return sp_sprintf("#<Enumerator: #<Enumerator::Generator:0x%016llx>:each>",
                       (unsigned long long)(uintptr_t)e);

@@ -149,7 +149,7 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_OBJ_BUDGET` | the default GATES the widening on what the last collection cost. `obj` pins it off (the object heap alone, as spinel did before 2026-09-09), `walk` pins it on (everything a mark walks). `fixed` is a separate axis: it stops re-aiming the budget after each collection and holds it at its floor |
 | `SPINEL_GC_STR_BUDGET` | `fixed` does the same for the STRING budget |
 | `SPINEL_GC_SLAB` | `0` turns the slab allocator off: every object and heap string is then its own malloc, which is what ASAN needs to see a use-after-free (the slab hides one). On by default with glibc's malloc, where it is worth 10% on a server; off by default when jemalloc is the process's malloc (linked or preloaded), whose thread caches already do the slab's work and beside which it measured 8% slower. `1` turns it on regardless |
-| `SPINEL_GC_CONC` | `0` sweeps under the stop-the-world barrier instead of beside the program, which is also what the verifiers (`SPINEL_GC_VERIFY`, `SPINEL_GC_VERIFY_GEN`) and aging (`SPINEL_GC_AGE`) do on their own, since they read the heap the sweep is rewriting |
+| `SPINEL_GC_CONC` | `0` sweeps under the stop-the-world barrier instead of beside the program, which is also what the verifiers (`SPINEL_GC_VERIFY`, `SPINEL_GC_VERIFY_GEN`) and aging (`SPINEL_GC_AGE`) do on their own, since they read the heap the sweep is rewriting. `SPINEL_GC_VERIFY` also checks the slab's bitmaps against their invariants at every barrier and after every chunk's sweep |
 | `SPINEL_GC_PAR_MARK` | `0` marks on the collector alone. By default the mark's drain runs on the collector and up to `SPINEL_GC_MARKERS` parked workers (default min(workers, 4)), sharing the pending objects in small chunks; the verifiers and aging mark serially on their own |
 | `SPINEL_GC_SWEEPERS` | how many sweeper threads sweep the old lists (default the worker count, at most 8). `SPINEL_GC_OWNER=0` hands them the young lists too, instead of each worker sweeping its own |
 | `SPINEL_GC_TRIM_SEC` | how often the container buffers glibc still holds are given back to the OS with `malloc_trim` (default 1, `0` never). A trim walks every arena, tens of milliseconds on a many-core box; it runs on its own thread beside the program, but a worker that allocates from the arena being walked waits for it, so a longer interval buys latency for memory: on a 32-core server `10` took the room page's p99 from 122 to 102 ms and its RSS from 950 MB to 1.4 GB |
@@ -276,13 +276,14 @@ CPU-bound threads scale nearly linearly (measured 8.25x on eight
 workers). Allocation-bound ones scale too, though not as steeply.
 
 The sweep does not stop the world. Once the mark is done the collector
-detaches every worker's young lists (and, on a full cycle, the old ones),
-replaces them with empty lists, and resumes the program. Each worker then
-sweeps its own young lists before it runs any program, so the memory it
+closes the allocation epoch (everything allocated from then on is in the
+other of two young bitmaps; see below), detaches the lists of the objects
+too large for the slab, and resumes the program. Each worker then sweeps
+its own chunks and lists before it runs any program, so the memory it
 frees is the memory it allocates from next, still warm in its cache; the
-old lists go to a pool of sweeper threads that run beside the program.
-What the sweep produces that the program must not see mid-way (the
-survivors, the budget for the next cycle) is applied at the next stop;
+lists of the large old objects go to a pool of sweeper threads that run
+beside the program. What the sweep produces that the program must not
+see mid-way (the budget for the next cycle) is applied at the next stop;
 an explicit `GC.start` waits for the sweep before it returns. The pause
 is the mark alone, and the mark's drain runs on the collector plus a few
 of the parked workers, which take pending objects from it in small chunks
@@ -291,3 +292,20 @@ Rails-shaped server the stop-the-world sweep was 30% of the wall clock;
 without it, and with the drain shared, the same server answers 20% more
 requests a second with a p99 20-50% lower, and the pause is under a
 millisecond.
+
+The sweep does not touch the dead either. A slab block's generation, its
+mark and whether its death runs a finalizer are bits in its chunk's
+bitmaps (seven per chunk, kept in the arena beside the chunk headers), and
+the mark promotes what it reaches by setting the old bit there. So after
+the mark, the young bitmap of the epoch that just closed holds exactly the
+dead and the promoted, and a chunk is swept in a few words: what is young
+and unmarked is dead, what is old and unmarked is dead at a full cycle,
+the dead with a finalizer bit run their finalizer or recycler, and the
+epoch's word is cleared whole. The list sweep it replaced walked every
+dead object's header to unlink it and to thread a free list through it,
+at memory latency, and on the same server that walk was a fifth of the
+process: without it the process answers 13% more requests a second on 17%
+less CPU. `SPINEL_GC_AGE` (a survivor stays young until its second
+survival) applies to the lists only; with the slab on it is off, since
+the remembered-set repair it needs walks the old list for what a cycle
+promoted, and a slab promotion is a bit no list carries.

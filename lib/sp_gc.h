@@ -321,31 +321,66 @@ static inline void sp_gc_bytes_sub(size_t n) {
    with every mutator parked, so the push never races a pop and needs no ABA
    defense. Release order publishes the node's initialized header to the
    collector. */
+/* The slab's reservation (lib/sp_slab.c): a block is the slab's when its
+   address falls inside it, which the allocation fast paths test inline. */
+extern uintptr_t sp_slab_base;
+extern size_t sp_slab_cap;
+static inline int sp_slab_owns(const void *p) { return (uintptr_t)p - sp_slab_base < sp_slab_cap; }
+/* Only a block the slab does not hold goes on a list: a slab block's
+   generation is a bit in its chunk's bitmaps, set by the allocation itself
+   (lib/sp_slab.c), and the lists carry what fell back to malloc. */
 #ifdef SP_THREADS
 /* Per-worker young list: only this worker's M pushes here (started threads are
    pinned and a worker pumps one green thread at a time), so a plain store is
    race-free -- no CAS, no shared-head cache-line bounce. */
-#define SP_GC_HEAP_PUSH(hdr) do { \
+#define SP_GC_HEAP_PUSH(hdr) do { if (!sp_slab_owns(hdr)) { \
     sp_gc_hdr **_sp_head = &sp_gc_wslot[sp_worker_id].young; \
-    (hdr)->next = *_sp_head; *_sp_head = (hdr); \
+    (hdr)->next = *_sp_head; *_sp_head = (hdr); } \
   } while (0)
 #else
-#define SP_GC_HEAP_PUSH(hdr) do { (hdr)->next = sp_gc_heap; sp_gc_heap = (hdr); } while (0)
+#define SP_GC_HEAP_PUSH(hdr) do { if (!sp_slab_owns(hdr)) { (hdr)->next = sp_gc_heap; sp_gc_heap = (hdr); } } while (0)
 #endif
 
 /* ---- Slab allocator for GC objects and heap strings (lib/sp_slab.c) ----
  * sp_slab_alloc answers a zeroed block of `need` bytes (header included) from
- * the calling worker's size-class chunks; sp_slab_alloc_raw the same block
- * unzeroed (a string is filled by its maker). A size past the largest class,
- * or the allocator off (SPINEL_GC_SLAB=0), falls back to calloc/malloc, and
- * sp_slab_free tells the two apart by address: every chunk lives inside one
- * reserved range. A free runs only inside a sweep (stop-the-world), from any
- * worker. sp_slab_release, at the end of a full cycle, returns fully free
- * chunks to the OS. */
-void *sp_slab_alloc(size_t need);
-void *sp_slab_alloc_raw(size_t need);
+ * the calling worker's size-class chunks, in the current epoch's young
+ * generation; sp_slab_alloc_str the same for a heap string (unzeroed, its
+ * bytes counted on the string side); sp_slab_alloc_raw a payload no sweep
+ * frees. A block's generation, mark and finalizer bit live in its chunk's
+ * bitmaps, which is what the sweep reads (sp_slab_sweep_worker) and the
+ * mark sets (sp_slab_mark). A size past the largest class, or the allocator
+ * off (SPINEL_GC_SLAB=0), falls back to calloc/malloc, and such a block goes
+ * on the young/old LISTS instead; sp_slab_owns tells the two apart by
+ * address: every chunk lives inside one reserved range. sp_slab_release, at
+ * the end of a full cycle, returns fully free chunks to the OS. */
+void *sp_slab_alloc(size_t need);        /* an object: zeroed, in the current epoch's young generation */
+void *sp_slab_alloc_str(size_t need);    /* a heap string: young, its bytes counted on the string side */
+void *sp_slab_alloc_raw(size_t need);    /* a payload: no sweep frees it, only sp_slab_free */
 void  sp_slab_free(void *p);
-void  sp_slab_free_flush(void);   /* end of a sweep task: publish this thread's batched frees */
+void  sp_slab_set_fin(void *hdr);        /* the object gained a finalizer or recycler after allocation */
+void  sp_slab_park(void *hdr);           /* a dead header about to be pooled: out of every generation's reach */
+void  sp_slab_relive(void *hdr);         /* a pooled header handed out again */
+void  sp_slab_pin(const void *p);        /* a frozen heap string: immortal, as a literal is */
+int   sp_slab_is_str(const void *p);
+int   sp_slab_is_live(const void *p);    /* allocated, in some generation */
+int   sp_slab_is_old(const void *p);
+int   sp_slab_is_marked(const void *p);
+void  sp_slab_describe(const void *p);   /* the verifiers: what the bitmaps say about a slot */
+void  sp_slab_verify_all(void);          /* SPINEL_GC_VERIFY: the bitmaps against their invariants */
+void  sp_slab_unmark(const void *p);
+/* the mark: sets the slot's mark bit, promotes a young slot (unless `aging`
+   keeps it young); 0 when the slot was already marked this cycle */
+int   sp_slab_mark(const void *p, int aging, int *was_young);
+extern unsigned sp_slab_epoch;
+void  sp_slab_epoch_flip(void);          /* under the barrier: new allocations go to the other parity */
+typedef struct { size_t freed_obj, freed_str, freed_slots, slots, swept, kept_young; } sp_slab_sweep_stats;   /* swept: slots the pass decided over */
+/* one worker's chunks: frees what the closed epoch holds unmarked (and,
+   at a full cycle, the old generation's unmarked); `die` runs a dead
+   object's finalizer or recycler and answers 1 when the slot is freed, 0
+   when the pool keeps the header */
+void  sp_slab_sweep_worker(int wid, int full, int aging, int (*die)(void *hdr), sp_slab_sweep_stats *st);
+void  sp_slab_each_object(int young, int old, void (*fn)(void *hdr, void *arg), void *arg);
+void  sp_slab_each_string(int young, int old, void (*fn)(void *hdr, void *arg), void *arg);
 void  sp_slab_release(void);
 void  sp_slab_release_worker(int wid);   /* one worker's lists, by their owner, beside the program */
 void  sp_slab_release_from(int first);   /* the slots from `first` on, under the barrier */
@@ -427,6 +462,7 @@ extern void (*sp_gc_conc_wait_hook)(void);
 extern int sp_gc_conc_on;
 /* The old object list, for the driver: detach it whole for a full cycle's
    sweep, attach a list (survivors, or the swept remainder) back. */
+void sp_gc_sweep_chunks(int wid, int full);   /* one slot's slab chunks, by their bitmaps (lib/sp_gc.c) */
 sp_gc_hdr *sp_gc_old_detach(void);
 void sp_gc_old_attach(sp_gc_hdr *head, sp_gc_hdr *tail);
 /* Splice one worker's survivors onto the shared old heap. Collector-only. */
@@ -540,10 +576,11 @@ extern int (*sp_class_le_id_fn)(int sub, int super);
 
 /* ---- Hot inline mark helpers (inlined into both sides) ----
  * String tag bytes: 0xfe heap-unmarked -> 0xfc marked; others skipped. */
+void sp_gc_mark_str(const char *s);   /* lib/sp_gc.c: the bitmap mark of a slab string, the byte of a malloc'd one */
 static inline void sp_mark_string(const char *s) {
   if (!s) return;
   if ((unsigned char)s[-1] == 0xfe) {
-    ((char *)s)[-1] = (char)0xfc;
+    sp_gc_mark_str(s);
     return;
   }
   /* 0xfd is a mutable String's payload, whose lifetime belongs to the handle

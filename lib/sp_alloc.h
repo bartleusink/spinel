@@ -270,14 +270,17 @@ static inline char *sp_str_alloc(size_t len) {
          allocation later rather than the next allocation. */
       sp_str_wslot[wid].ask_at = SP_GC_CTR_GET(sp_str_wslot[wid].young_bytes) + sp_str_threshold;
     } }
-  h = (sp_str_hdr *)sp_slab_alloc_raw(total);
+  h = (sp_str_hdr *)sp_slab_alloc_str(total);
   h->size = (uint32_t)total;
   h->len = (uint32_t)len;
   h->hash = 0;
-  /* Publish h->next before the head store so a concurrent GC.stat walk that
+  /* A slab block's generation is a bit in its chunk (lib/sp_slab.c); only
+     a string too large for the slab goes on the worker's young list.
+     Publish h->next before the head store so a concurrent GC.stat walk that
      observes the new head reaches a fully-linked node (only pushes touch the
      head; the sweep runs under stop-the-world). */
-  { unsigned sub = sp_str_wslot[wid].rr++ & (SP_STR_YSUB - 1);
+  if (!sp_slab_owns(h)) {
+    unsigned sub = sp_str_wslot[wid].rr++ & (SP_STR_YSUB - 1);
     h->next = sp_str_wslot[wid].young[sub];
     sp_str_wslot[wid].young[sub] = h; }
   SP_GC_CTR_ADD(sp_str_wslot[wid].young_bytes, total);
@@ -287,12 +290,11 @@ static inline char *sp_str_alloc(size_t len) {
   if (SP_GC_CTR_GET(sp_str_heap_bytes) > sp_str_threshold) {
     sp_str_collect_retune();         /* sp_gc_collect runs sp_str_sweep */
   }
-  h = (sp_str_hdr *)sp_slab_alloc_raw(total);
-  h->next = sp_str_heap;
+  h = (sp_str_hdr *)sp_slab_alloc_str(total);
   h->size = (uint32_t)total;
   h->len = (uint32_t)len;
   h->hash = 0;
-  sp_str_heap = h;
+  if (!sp_slab_owns(h)) { h->next = sp_str_heap; sp_str_heap = h; }
   SP_GC_CTR_ADD(sp_str_heap_bytes, total);
   SP_HEAP_UNLOCK();
 #endif
@@ -318,20 +320,20 @@ static inline char *sp_str_alloc(size_t len) {
    next ordinary allocation collects. */
 static inline char *sp_str_alloc_nogc(size_t len) {
   size_t total = sizeof(sp_str_hdr) + 1 + len + 1;
-  sp_str_hdr *h = (sp_str_hdr *)sp_slab_alloc_raw(total);
+  sp_str_hdr *h = (sp_str_hdr *)sp_slab_alloc_str(total);
   h->size = (uint32_t)total;
   h->len = (uint32_t)len;
   h->hash = 0;
 #ifdef SP_THREADS
   { int wid = sp_worker_id;
-    unsigned sub = sp_str_wslot[wid].rr++ & (SP_STR_YSUB - 1);
-    h->next = sp_str_wslot[wid].young[sub];
-    sp_str_wslot[wid].young[sub] = h;
+    if (!sp_slab_owns(h)) {
+      unsigned sub = sp_str_wslot[wid].rr++ & (SP_STR_YSUB - 1);
+      h->next = sp_str_wslot[wid].young[sub];
+      sp_str_wslot[wid].young[sub] = h; }
     SP_GC_CTR_ADD(sp_str_wslot[wid].young_bytes, total); }
 #else
   SP_HEAP_LOCK();
-  h->next = sp_str_heap;
-  sp_str_heap = h;
+  if (!sp_slab_owns(h)) { h->next = sp_str_heap; sp_str_heap = h; }
   SP_GC_CTR_ADD(sp_str_heap_bytes, total);
   SP_HEAP_UNLOCK();
 #endif
@@ -721,11 +723,12 @@ static inline sp_PolyArray *sp_PolyArray_new(void) {
   sp_gc_hdr *ph = sp_polyarr_pool_head;
   if (ph) { sp_polyarr_pool_head = ph->next; sp_polyarr_pool_count--; }
   if (ph) {
-    /* re-link into the live heap (the sweep unhooked it); size still counts
+    /* back into the live heap (the sweep parked it); size still counts
        header + retained data buffer, so the byte accounting stays exact */
     ph->marked = 0; ph->old = 0; ph->dirty = 0;
     ph->recycle = sp_PolyArray_pool_recycle;
-    SP_GC_HEAP_PUSH(ph);
+    if (sp_slab_owns(ph)) sp_slab_relive(ph);
+    else SP_GC_HEAP_PUSH(ph);
     sp_gc_bytes_add(ph->size);
     sp_PolyArray *a = (sp_PolyArray *)((char *)ph + sizeof(sp_gc_hdr));
     a->len = 0;
@@ -734,7 +737,7 @@ static inline sp_PolyArray *sp_PolyArray_new(void) {
   }
   sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), sp_PolyArray_fin, sp_PolyArray_scan);
   a->cap = 16; a->data = (sp_RbVal *)sp_pl_alloc(sizeof(sp_RbVal) * a->cap); a->len = 0;
-  { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); h->recycle = sp_PolyArray_pool_recycle; h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); }
+  { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); h->recycle = sp_PolyArray_pool_recycle; sp_slab_set_fin(h); h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); }
   return a;
 }
 static inline void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v) { if (!a) return; sp_gc_wb((void*)a); if (a->frozen) { sp_raise_frozen_array(); return; } if (a->len >= a->cap) { sp_gc_hdr *h = (sp_gc_hdr *)((char *)a - sizeof(sp_gc_hdr)); sp_gc_bytes_sub(sizeof(sp_RbVal) * a->cap); h->size -= sizeof(sp_RbVal) * a->cap; a->cap = (a->cap * 2) + 1; void *nd = sp_pl_realloc(a->data, sizeof(sp_RbVal) * a->cap); a->data = (sp_RbVal *)nd; h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap); } a->data[a->len++] = v; }

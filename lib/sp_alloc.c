@@ -128,15 +128,31 @@ static const char *sp_str_major_label(void) {
   return buf;
 }
 
-/* Live bytes in the old generation, across every worker's list. */
+/* The slab strings' old generation: not a list anybody walks but bits in
+   the chunks (lib/sp_slab.c), so its bytes are what the MARK counted --
+   everything it reached at a major, plus what it promoted at each minor --
+   settled at sp_str_sweep_end. The lists below hold only the strings too
+   large for the slab. */
+static size_t sp_str_old_slab_bytes = 0;
+extern size_t sp_gc_mk_str_bytes, sp_gc_mk_str_young_bytes;   /* lib/sp_gc.c: this cycle's mark */
+/* After every mark (lib/sp_gc.c): a full cycle's mark reached every live
+   slab string, and the sweep of the bitmaps leaves exactly those; a minor's
+   promoted what it reached of the young. Every cycle, whatever the string
+   gate decided for the lists: the chunk sweep frees young slab strings on
+   every cycle and old ones on every full one. */
+void sp_str_mark_settle(int full) {
+  if (full) sp_str_old_slab_bytes = sp_gc_mk_str_bytes;
+  else sp_str_old_slab_bytes += sp_gc_mk_str_young_bytes;
+}
+/* Live bytes in the old generation: the slab's, and every worker's list. */
 static size_t sp_str_old_total(void) {
 #ifdef SP_THREADS
-  size_t t = 0;
+  size_t t = sp_str_old_slab_bytes;
   int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS) n = SP_MAX_WORKERS;
   for (int i = 0; i < n; i++) t += SP_GC_CTR_GET(sp_str_wslot[i].old_bytes);
   return t;
 #else
-  return SP_GC_CTR_GET(sp_str_old_bytes);
+  return sp_str_old_slab_bytes + SP_GC_CTR_GET(sp_str_old_bytes);
 #endif
 }
 
@@ -633,6 +649,7 @@ void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   size_t need = sizeof(sp_gc_hdr) + sz;
   sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
   h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
+  if (fin) sp_slab_set_fin(h);
   if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
   SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
   return (char *)h + sizeof(sp_gc_hdr);
@@ -648,6 +665,7 @@ void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   size_t need = sizeof(sp_gc_hdr) + sz;
   sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
   h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
+  if (fin) sp_slab_set_fin(h);
   if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
   SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
   SP_HEAP_UNLOCK();
@@ -658,6 +676,7 @@ void *sp_gc_alloc_nogc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   size_t need = sizeof(sp_gc_hdr) + sz;
   sp_gc_hdr *h = (sp_gc_hdr *)sp_slab_alloc(need);
   h->finalize = fin; h->scan = scn; h->size = need; h->marked = 0; h->old = 0; h->dirty = 0;
+  if (fin) sp_slab_set_fin(h);
   if (sp_alloc_report_on) sp_alloc_report_count((void *)scn, sz);
   SP_HEAP_LOCK();
   SP_GC_HEAP_PUSH(h); sp_gc_bytes_add(need);
@@ -767,8 +786,25 @@ static void sp_str_vscan(sp_str_hdr *h) {
     if ((unsigned char)body[0] == 0xfe) sp_str_vcand_push(body);
   }
 }
+/* a slab string's mark is a bit in its chunk, a list string's the byte */
+static int sp_str_vmarked(const char *body) {
+  const sp_str_hdr *h = ((const sp_str_hdr *)body) - 1;
+  if (sp_slab_owns(h)) return sp_slab_is_marked(h);
+  return (unsigned char)body[0] == 0xfc;
+}
+static void sp_str_vunmark(const char *body) {
+  const sp_str_hdr *h = ((const sp_str_hdr *)body) - 1;
+  if (sp_slab_owns(h)) sp_slab_unmark(h);
+  else ((char *)body)[0] = (char)0xfe;
+}
+static void sp_str_vscan_slab_cb(void *hdr, void *arg) {
+  (void)arg;
+  const char *body = (const char *)((sp_str_hdr *)hdr + 1);
+  if (!sp_str_vmarked(body)) sp_str_vcand_push(body);
+}
 void sp_str_verify_begin(void) {
   sp_str_vcand_n = 0;
+  sp_slab_each_string(1, 0, sp_str_vscan_slab_cb, NULL);
 #ifdef SP_THREADS
   { int n = sp_active_workers; if (n < 1) n = 1; if (n > SP_MAX_WORKERS) n = SP_MAX_WORKERS;
     for (int i = 0; i < n; i++) for (int sub = 0; sub < SP_STR_YSUB; sub++) sp_str_vscan(sp_str_wslot[i].young[sub]); }
@@ -779,7 +815,7 @@ void sp_str_verify_begin(void) {
 size_t sp_str_verify_end(void) {
   size_t leaked = 0;
   for (size_t i = 0; i < sp_str_vcand_n; i++)
-    if ((unsigned char)sp_str_vcand[i][0] == 0xfc) sp_str_vcand[leaked++] = sp_str_vcand[i];
+    if (sp_str_vmarked(sp_str_vcand[i])) sp_str_vcand[leaked++] = sp_str_vcand[i];
   sp_str_vcand_n = leaked;   /* keep just the leaked ones, for the holder probe */
   return leaked;
 }
@@ -788,11 +824,11 @@ size_t sp_str_verify_end(void) {
    the same limit -- it names the DIRECT holder, since sp_gc_mark is inert
    while the probe is armed. */
 void sp_str_verify_probe_arm(void) {
-  for (size_t i = 0; i < sp_str_vcand_n; i++) ((char *)sp_str_vcand[i])[0] = (char)0xfe;
+  for (size_t i = 0; i < sp_str_vcand_n; i++) sp_str_vunmark(sp_str_vcand[i]);
 }
 int sp_str_verify_probe_hit(void) {
   for (size_t i = 0; i < sp_str_vcand_n; i++)
-    if ((unsigned char)sp_str_vcand[i][0] == 0xfc) return 1;
+    if (sp_str_vmarked(sp_str_vcand[i])) return 1;
   return 0;
 }
 void sp_str_verify_probe_done(void) { sp_str_vcand_n = 0; }
@@ -827,11 +863,16 @@ static size_t sp_str_sweep_gen(int major) {
     for (int sub = 0; sub < SP_STR_YSUB; sub++)
       sp_str_sweep_young_into(&sp_str_wslot[i].young[sub], &sp_str_wslot[i].young_bytes,
                               &sp_str_wslot[i].old, &sp_str_wslot[i].old_bytes, &promoted);
+    /* the young counter also carried the slab strings, swept by the chunk
+       sweep of this same stop-the-world cycle: the generation is empty now */
+    SP_GC_CTR_SET(sp_str_wslot[i].young_bytes, 0);
+    sp_str_wslot[i].ask_at = 0;
   }
 #else
   if (major) sp_str_sweep_old(&sp_str_old, &sp_str_old_bytes);
   sp_str_sweep_young_into(&sp_str_heap, &sp_str_heap_bytes,
                           &sp_str_old, &sp_str_old_bytes, &promoted);
+  SP_GC_CTR_SET(sp_str_heap_bytes, 0);
 #endif
   return promoted;
 }
@@ -941,6 +982,9 @@ void sp_str_sweep_end_excluding(int major, size_t promoted, size_t young_exclude
   sp_str_retune_young_exclude = 0;
 }
 void sp_str_sweep_end(int major, size_t promoted) {
+  /* the slab strings this cycle's mark promoted joined old too (their
+     generation is swept every cycle, gate or no gate; sp_str_mark_settle) */
+  promoted += sp_gc_mk_str_young_bytes;
   if (major) {
     sp_gc_str_majors++;
     size_t old_after = sp_str_old_total();
