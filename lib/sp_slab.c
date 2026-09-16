@@ -304,28 +304,24 @@ static inline void *sp_slab_take(sp_slab_chunk *ch, unsigned csize, int payload)
   for (unsigned n = 0; n < nw; n++, w = (w + 1 == nw) ? 0 : w + 1) {
     uint64_t tail = (w == nw - 1 && (ch->nslots & 63)) ? ~(uint64_t)0 << (ch->nslots & 63) : 0;
     for (;;) {
-      uint64_t used = __atomic_load_n(&bm->young[0][w], __ATOMIC_RELAXED) |
-                      __atomic_load_n(&bm->young[1][w], __ATOMIC_RELAXED) |
-                      __atomic_load_n(&bm->old[w], __ATOMIC_RELAXED) | tail;
+      /* The three words are not one snapshot. The one writer that moves a
+         slot from used to used on another thread is a pool handing a parked
+         header back (sp_slab_relive): it sets the young bit and THEN clears
+         the old bit, so reading old first and young after cannot see the
+         slot in neither -- old is either still set, or young already is. A
+         free (sp_slab_free) only ever turns used into free. The claim's own
+         result is still checked: two claims of one slot cannot both win. */
+      uint64_t used = __atomic_load_n(&bm->old[w], __ATOMIC_ACQUIRE);
+      used |= __atomic_load_n(&bm->young[0][w], __ATOMIC_ACQUIRE) |
+              __atomic_load_n(&bm->young[1][w], __ATOMIC_ACQUIRE) | tail;
       if (used == ~(uint64_t)0) break;
       unsigned i = (unsigned)__builtin_ctzll(~used);
       uint64_t bit = (uint64_t)1 << i;
-      /* The three words are not one snapshot: a pool handing a parked header
-         back (sp_slab_relive, from any thread) sets its young bit and then
-         clears its old bit, and a read that took young before and old after
-         sees a free slot that is not. So the claim is checked: the bit must
-         not have been set already, and the other generations must still be
-         clear once it is; otherwise the claim is undone and the word read
-         again. A payload's claim (pin, then old) is checked the same way. */
       uint64_t *claim = payload ? &bm->old[w] : &bm->young[e][w];
       if (payload) __atomic_fetch_or(&bm->pin[w], bit, __ATOMIC_RELAXED);   /* pin before old: see sp_slab_pin */
       uint64_t was = __atomic_fetch_or(claim, bit, __ATOMIC_ACQ_REL);
-      uint64_t others = __atomic_load_n(&bm->young[e ^ 1][w], __ATOMIC_RELAXED) |
-                        (payload ? __atomic_load_n(&bm->young[e][w], __ATOMIC_RELAXED)
-                                 : __atomic_load_n(&bm->old[w], __ATOMIC_RELAXED));
-      if ((was & bit) || (others & bit)) {
-        if (!(was & bit)) __atomic_fetch_and(claim, ~bit, __ATOMIC_RELAXED);
-        if (payload && !(was & bit)) __atomic_fetch_and(&bm->pin[w], ~bit, __ATOMIC_RELAXED);
+      if (was & bit) {
+        if (payload) __atomic_fetch_and(&bm->pin[w], ~bit, __ATOMIC_RELAXED);
         continue;
       }
       ch->hint = (uint16_t)w;
@@ -460,9 +456,11 @@ void sp_slab_park(void *h) {
 void sp_slab_relive(void *h) {
   if (sp_slab_on <= 0 || !sp_slab_owns(h)) return;
   sp_slab_loc l; sp_slab_locate(h, &l);
-  __atomic_fetch_or(&l.bm->young[sp_slab_epoch & 1][l.w], l.bit, __ATOMIC_RELAXED);
+  /* young before old is cleared: the owner's search reads old first and
+     young after (sp_slab_take), and must never find the slot in neither */
+  __atomic_fetch_or(&l.bm->young[sp_slab_epoch & 1][l.w], l.bit, __ATOMIC_RELEASE);
   __atomic_fetch_or(&l.bm->fin[l.w], l.bit, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->old[l.w], ~l.bit, __ATOMIC_RELAXED);
+  __atomic_fetch_and(&l.bm->old[l.w], ~l.bit, __ATOMIC_RELEASE);
   __atomic_fetch_and(&l.bm->pin[l.w], ~l.bit, __ATOMIC_RELAXED);
   if (sp_slab_verify_on) sp_slab_note(h, 5 + 10 * (int)(sp_slab_epoch & 1));
 }
@@ -585,13 +583,21 @@ void sp_slab_free(void *p) {
   if (!sp_slab_owns(p)) { free(p); return; }
   sp_slab_loc l; sp_slab_locate(p, &l);
   uint64_t nb = ~l.bit;
-  __atomic_fetch_and(&l.bm->young[0][l.w], nb, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->young[1][l.w], nb, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->old[l.w], nb, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->pin[l.w], nb, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->fin[l.w], nb, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->str[l.w], nb, __ATOMIC_RELAXED);
-  __atomic_fetch_and(&l.bm->mark[l.w], nb, __ATOMIC_RELAXED);
+  /* only the words that hold the bit: a payload is old and pin, a pooled
+     header the same plus fin, and each clear is a locked instruction */
+#define SP_SLAB_CLEAR(word) do { if (__atomic_load_n(&(word), __ATOMIC_RELAXED) & l.bit) __atomic_fetch_and(&(word), nb, __ATOMIC_RELAXED); } while (0)
+  SP_SLAB_CLEAR(l.bm->young[0][l.w]);
+  SP_SLAB_CLEAR(l.bm->young[1][l.w]);
+  SP_SLAB_CLEAR(l.bm->fin[l.w]);
+  SP_SLAB_CLEAR(l.bm->str[l.w]);
+  SP_SLAB_CLEAR(l.bm->mark[l.w]);
+  /* old before pin: a full sweep reads old and then pin, and a slot it
+     finds in old must still carry its pin, or it would take a payload
+     mid-free for dead and clear the old bit of whatever the owner puts in
+     the slot next (the setters go the other way: pin, then old) */
+  SP_SLAB_CLEAR(l.bm->old[l.w]);
+  SP_SLAB_CLEAR(l.bm->pin[l.w]);
+#undef SP_SLAB_CLEAR
   if (sp_slab_verify_on) sp_slab_note(p, 6);
   sp_slab_avail_push(l.ch);
 }
@@ -672,7 +678,7 @@ void sp_slab_sweep_worker(int wid, int full, int aging, int (*die)(void *hdr), s
     size_t freed = 0;
     for (unsigned w = 0; w < nw; w++) {
       uint64_t yv = __atomic_load_n(&bm->young[pe][w], __ATOMIC_RELAXED);
-      uint64_t ov = __atomic_load_n(&bm->old[w], __ATOMIC_RELAXED);
+      uint64_t ov = __atomic_load_n(&bm->old[w], __ATOMIC_ACQUIRE)   /* before pin: see sp_slab_pin */;
       uint64_t mv = __atomic_load_n(&bm->mark[w], __ATOMIC_RELAXED);
       /* a word with nothing to reclaim is skipped, unless it carries marks:
          a minor's mark reaches old strings too, and a mark left behind would
