@@ -845,35 +845,28 @@ void sp_str_sweep(void) {
 /* PolyArray free-list pool (see sp_alloc.h). Bounded so a burst does not pin
    memory forever; an over-cap or oversized-buffer entry frees normally. The
    scan/finalize hooks stay valid on recycled headers -- only `next` and the
-   heap-byte accounting change hands. */
-sp_gc_hdr *sp_polyarr_pool_head = NULL;
-long sp_polyarr_pool_count = 0;
-#define SP_POLYARR_POOL_MAX 65536
+   heap-byte accounting change hands.
+   PER THREAD. It was one Treiber stack for the process, pushed by every
+   owner's sweep and popped by every allocating worker, and on a 32-core
+   server the exchange on its head was the single hottest symbol (8.6% of
+   the process, ahead of memmove). A worker sweeps its own young list, so
+   what it recycles it can hand back to itself with no atomics at all; the
+   sweeper threads and the barrier helpers recycle into their own, which
+   the cap bounds. The cap is per thread for the same reason. */
+SP_TLS sp_gc_hdr *sp_polyarr_pool_head = NULL;
+SP_TLS long sp_polyarr_pool_count = 0;
+#define SP_POLYARR_POOL_MAX 4096
 #define SP_POLYARR_POOL_KEEP_CAP 64   /* don't retain unusually large buffers */
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h) {
   sp_PolyArray *a = (sp_PolyArray *)((char *)h + sizeof(sp_gc_hdr));
-  long n;
-#ifdef SP_THREADS
-  n = __atomic_load_n(&sp_polyarr_pool_count, __ATOMIC_RELAXED);
-#else
-  n = sp_polyarr_pool_count;
-#endif
-  if (n >= SP_POLYARR_POOL_MAX || a->cap > SP_POLYARR_POOL_KEEP_CAP) {
+  if (sp_polyarr_pool_count >= SP_POLYARR_POOL_MAX || a->cap > SP_POLYARR_POOL_KEEP_CAP) {
     sp_pl_free(a->data);
     sp_slab_free(h);
     return;
   }
-#ifdef SP_THREADS
-  sp_gc_hdr *old;
-  do { old = __atomic_load_n(&sp_polyarr_pool_head, __ATOMIC_ACQUIRE); h->next = old;
-  } while (!__atomic_compare_exchange_n(&sp_polyarr_pool_head, &old, h,
-                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
-  __atomic_fetch_add(&sp_polyarr_pool_count, 1, __ATOMIC_RELAXED);
-#else
   h->next = sp_polyarr_pool_head;
   sp_polyarr_pool_head = h;
   sp_polyarr_pool_count++;
-#endif
 }
 
 /* String sweep, gated on the string heap's own trigger. The object collector

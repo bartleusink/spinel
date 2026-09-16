@@ -712,20 +712,14 @@ static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *
    constraint evaluation) churn millions of short-lived PolyArrays; recycling
    them turns the calloc+malloc pair and the sweep-side free into list ops.
    Pool state lives in sp_alloc.c; the recycle hook runs inside the sweep. */
-extern sp_gc_hdr *sp_polyarr_pool_head;
-extern long sp_polyarr_pool_count;
+/* The pool is per thread (sp_alloc.c says why), so the pop is a plain
+   list operation on both builds. */
+extern SP_TLS sp_gc_hdr *sp_polyarr_pool_head;
+extern SP_TLS long sp_polyarr_pool_count;
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h);
 static inline sp_PolyArray *sp_PolyArray_new(void) {
-  sp_gc_hdr *ph;
-#ifdef SP_THREADS
-  do { ph = __atomic_load_n(&sp_polyarr_pool_head, __ATOMIC_ACQUIRE);
-  } while (ph && !__atomic_compare_exchange_n(&sp_polyarr_pool_head, &ph, ph->next,
-                                              0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
-  if (ph) __atomic_fetch_sub(&sp_polyarr_pool_count, 1, __ATOMIC_RELAXED);
-#else
-  ph = sp_polyarr_pool_head;
+  sp_gc_hdr *ph = sp_polyarr_pool_head;
   if (ph) { sp_polyarr_pool_head = ph->next; sp_polyarr_pool_count--; }
-#endif
   if (ph) {
     /* re-link into the live heap (the sweep unhooked it); size still counts
        header + retained data buffer, so the byte accounting stays exact */
