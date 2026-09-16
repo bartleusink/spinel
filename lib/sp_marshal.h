@@ -7,7 +7,7 @@
    in sp_gc.h. The construction side (intern a symbol, build a result array/hash,
    box Complex/Rational, dispatch a user object, raise) needs types and state
    that live only in the generated TU, so the generated TU fills the sp_marshal_v
-   vtable below at startup (see sp_re_init in codegen).
+   vtable below at startup (see sp_tu_init in codegen).
 
    Covers nil/true/false/Integer/Float/String/Symbol + Array + Hash + Bignum +
    Complex + Rational + plain user objects in the CRuby 4.8 wire format, with the
@@ -30,7 +30,7 @@ void sp_mar_sym(sp_mar_buf *b, const char *name);
 void sp_mar_long(sp_mar_buf *b, long n);
 void sp_mar_w(sp_mar_buf *b, sp_RbVal v);
 
-/* Runtime vtable filled by the generated TU (sp_re_init). The read side uses
+/* Runtime vtable filled by the generated TU (sp_tu_init). The read side uses
    the sp_json_* hooks in sp_gc.h instead. */
 typedef struct {
   sp_sym  (*sym_intern)(const char *);

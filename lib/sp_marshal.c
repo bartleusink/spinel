@@ -2,7 +2,7 @@
 
    A standalone translation unit. The read side uses the generic sp_json_* hooks
    (sp_gc.h); the construction side uses the sp_marshal_v vtable the generated TU
-   installs at startup (sp_re_init). Result containers are built through vtable
+   installs at startup (sp_tu_init). Result containers are built through vtable
    wrappers and rooted with SP_GC_ROOT (now shared via sp_gc.h) so a nested
    allocation during the parse can't free a partially-built value. CRuby 4.8 wire
    format; see sp_marshal.h. */

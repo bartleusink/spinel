@@ -73,7 +73,7 @@ def t_regexp_inline_flag_group_no_hang
   # directive (`:`, `=`, `!`, `<...`) and didn't advance c->p, so
   # compile_seq's outer loop spun forever on the unconsumed `?`.
   # Sam Ruby's #600 puzzle 3 (`p(/(?x:foo)/.to_s)`) hung at runtime
-  # during the sp_re_init's static-regex compilation.
+  # during the sp_tu_init's static-regex compilation.
   #
   # Fix: when the `(?` lookahead matches a recognized flag char
   # (x / i / m / s / u / a), consume to `:` (non-capturing body)

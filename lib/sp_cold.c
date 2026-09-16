@@ -3740,7 +3740,7 @@ sp_float sp_brat_to_f(sp_BigRational *r) {SP_GC_ROOT(r);
 
 /* Marshal implementation moved to lib/sp_marshal.c. These small wrappers give
    the standalone serializer construction primitives that need spinel_rt.h
-   types; sp_re_init (codegen) installs them into sp_marshal_v along with the
+   types; sp_tu_init (codegen) installs them into sp_marshal_v along with the
    generated sym_intern / obj_dump / obj_load. */
 sp_RbVal sp_marv_arr_new(void) { return sp_box_poly_array(sp_PolyArray_new()); }
 void sp_marv_arr_push(sp_RbVal a, sp_RbVal v) {SP_GC_ROOT_RBVAL(a);SP_GC_ROOT_RBVAL(v); sp_PolyArray_push((sp_PolyArray *)a.v.p, v); }

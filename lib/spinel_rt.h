@@ -1328,6 +1328,8 @@ static void sp_mark_at_exit_hooks(void);
    needed because sp_fiber_root is defined further down in the
    Fiber runtime block. */
 /* External linkage: lib/sp_gc.c's sp_gc_mark_all reaches this by name. */
+extern SP_TLS sp_RbVal _sp_proc_poly_args[16];   /* the proc calling convention's side channel, defined below */
+extern SP_TLS sp_RbVal _sp_proc_poly_ret;
 static void sp_re_mark_globals(void) {
   /* The sub-markers below are static and inline away, so a fault in one of
      them reports as this frame with nothing to distinguish them. Under verify,
@@ -1355,6 +1357,24 @@ static void sp_re_mark_globals(void) {
   sp_mark_at_exit_hooks();
   SP_GLB_PHASE("globals:fiber-storage");
   sp_mark_fiber_root_storage();
+  /* $0 is a heap string held by this static and by nothing the program can
+     name (a full string sweep freed it once, and later reads came from
+     whatever the slot held next); sp_str_empty and the literal it starts
+     as are not heap strings, and sp_mark_string skips those. */
+  SP_GLB_PHASE("globals:program-name");
+  sp_mark_string(sp_program_name);
+  /* The proc calling convention's side channel holds boxed values with
+     nothing else pointing at them: a proc writes its result to
+     _sp_proc_poly_ret and returns, and the caller reads it back after, with
+     an allocation in between (the push it is on its way to); the arguments
+     are the same on the way in. Both are roots. A slot keeps its value
+     after its reader is done, so it can name a freed object by the next
+     cycle: the scratch marker skips a slab slot that is free. Marked here
+     rather than by the generated marker so that a program with no globals
+     of its own carries no marker and no startup hook at all. */
+  SP_GLB_PHASE("globals:proc-channel");
+  sp_mark_rbval_scratch(_sp_proc_poly_ret);
+  for (int i = 0; i < 16; i++) sp_mark_rbval_scratch(_sp_proc_poly_args[i]);
   SP_GLB_PHASE("globals");
 #undef SP_GLB_PHASE
 }
@@ -8947,7 +8967,7 @@ static void sp_json_strhash_set(sp_RbVal h, const char *k, sp_RbVal v) {
    string keys to symbols. Objects become fresh SymPolyHashes (values
    recursed); arrays recurse in place (the parse output is freshly owned);
    scalars pass through. Interning goes through sp_json_sym_intern_fn (the
-   symbol table lives in the generated TU; sp_re_init installs the hook
+   symbol table lives in the generated TU; sp_tu_init installs the hook
    before any user code runs). */
 static sp_RbVal sp_json_symbolize(sp_RbVal v) {
   if (v.tag != SP_TAG_OBJ) return v;
@@ -9399,11 +9419,11 @@ static sp_bool sp_exc_matches_splat(const char *raised, sp_RbVal list) {
    sp_raise_cls) and the user's Ruby-level exception machinery. The
    library calls sp_re_set_error_handler at startup -- codegen emits
    the install call after the exception infrastructure is set up. */
-/* Issue #846: during sp_re_init (before main()'s setjmp scope is
+/* Issue #846: during sp_tu_init (before main()'s setjmp scope is
    active), a bad literal `Regexp.new("[invalid")` pattern would
    route through sp_raise_cls -> "unhandled exception" + exit
    because sp_exc_top is 0. Install a startup handler that longjmps
-   back to sp_re_init's wrapping setjmp; the codegen-emitted loop
+   back to sp_tu_init's wrapping setjmp; the codegen-emitted loop
    then stashes the error per slot for a deferred raise from the
    first use site (where the user's begin/rescue is active). The
    re_compile contract requires the error callback to not return
@@ -11096,7 +11116,7 @@ static sp_Enumerator *sp_Enumerator_new_cycle(sp_RbVal arr, sp_int n) {
    (after) each element == pattern. Groups are poly arrays. */
 /* Generic `pattern === element` on boxed values (#2847): a Class pattern
    dispatches through the generated class machinery (installed as a hook by
-   sp_re_init when the program carries it); Regexp matches a String; a Range
+   sp_tu_init when the program carries it); Regexp matches a String; a Range
    covers numerics; everything else is value equality. */
 static int (*sp_poly_is_a_hook)(sp_RbVal, sp_Class) = NULL;
 static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e) {

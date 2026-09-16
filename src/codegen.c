@@ -8010,19 +8010,19 @@ static void emit_obj_valeq_dispatch(Compiler *c, Buf *b) {
 }
 
 /* Emit the static regex-literal globals and, when g_re_init_needed, the
-   sp_re_init() that installs the symbol/regex/class/global-mark hooks and
+   sp_tu_init() that installs the symbol/regex/class/global-mark hooks and
    compiles the literals at startup. */
 void emit_regex_section(Compiler *c, Buf *b) {
   for (int i = 0; i < g_re_count; i++) {
     buf_printf(b, "static mrb_regexp_pattern *sp_re_pat_%d;\n", i);
   }
-  /* sp_re_init wires the hooks below. When none apply (a trivial program uses
+  /* sp_tu_init wires the hooks below. When none apply (a trivial program uses
      no symbols, regex, class machinery, or heap globals) neither the function
      nor its main() call is emitted, so the symbol/regex runtime it would pin
      stays unreferenced and links away. */
   if (!g_re_init_needed) return;
   /* Forward-declare the symbol interner and the Marshal object dispatchers so
-     sp_re_init can take their addresses before their definitions (emitted into
+     sp_tu_init can take their addresses before their definitions (emitted into
      the later `body` buffer). */
   if (g_uses_marshal) {
     buf_puts(b,
@@ -8062,7 +8062,11 @@ void emit_regex_section(Compiler *c, Buf *b) {
                 "static sp_bool sp_gen_obj_eql(int cls_id, void *a, void *b_);\n");
   if (g_gen_obj_valeq)
     buf_puts(b, "static sp_bool sp_obj_eq_dispatch(sp_RbVal a, sp_RbVal b);\n");
-  buf_puts(b, "static void sp_re_init(void) {\n");
+  /* sp_tu_init (once sp_re_init, from the days it only compiled the regex
+     literals): the generated TU's startup, installing into the runtime the
+     hooks this program needs and compiling its regex literals. Emitted, and
+     called from main, only when at least one hook applies. */
+  buf_puts(b, "static void sp_tu_init(void) {\n");
   /* SPINEL_ALLOC_REPORT type names: attach human names to the scan-fn keys
      the allocation counters use. Runtime-gated on the same flag, so a normal
      run does no work here (#1336). */
@@ -10489,12 +10493,12 @@ char *codegen_program(const NodeTable *nt) {
   /* GC marking for the file-scope statics above: heap objects reachable
      only through a global/constant/class-ivar slot would otherwise be
      swept (RAND = Rand.new lost its PRNG mid-render). Chained ahead of
-     the runtime's own sp_re_mark_globals via the hook in sp_re_init. */
+     the runtime's own sp_re_mark_globals via the hook in sp_tu_init. */
   {
     /* Collect the user-global mark lines into a temp buffer first. If none are
        emitted, the marker would be identical to the runtime default
        (sp_re_mark_globals, installed by a constructor before main), so skip it
-       and the sp_re_init hook override entirely -- a trivial program carries
+       and the sp_tu_init hook override entirely -- a trivial program carries
        neither. g_has_user_global_marks gates the override (see emit_regex_section). */
     Buf mk; memset(&mk, 0, sizeof mk);
     for (int i = 0; i < c->ngvars; i++) {
@@ -10523,22 +10527,10 @@ char *codegen_program(const NodeTable *nt) {
       for (int j = 0; j < ci->nsg_readers; j++)
         buf_printf(&mk, "  sp_mark_rbval(sg_%s_%s);\n", ci->name, ci->sg_readers[j]);
     }
-    /* The proc calling convention's side channel holds boxed values with
-       nothing else pointing at them: a proc writes its result to
-       _sp_proc_poly_ret and returns, and the caller reads it back after -- with
-       an allocation in between (the push it is on its way to, the next
-       element's own work) the value is unreachable and the collector takes it.
-       The arguments are the same on the way in. Both are roots. Unused slots
-       read as tag 0 (int), which sp_mark_rbval ignores. A slot keeps its
-       value after its reader is done, so it can name a freed object by the
-       next cycle: the scratch marker skips a slab slot that is free. */
+    /* $0 and the proc calling convention's side channel are marked by the
+       runtime's own sp_re_mark_globals (lib/spinel_rt.h), so a program with
+       none of the globals above carries no marker and no startup hook. */
     if (g_has_dyn_syms) buf_puts(&mk, "  sp_mark_dyn_syms();\n");
-    /* $0 is a heap string held by a static of the runtime and by nothing the
-       program can name: without this it was freed by a full string sweep,
-       and read afterwards from whatever the slot held next */
-    buf_puts(&mk, "  sp_mark_string(sp_program_name);\n");
-    buf_puts(&mk, "  sp_mark_rbval_scratch(_sp_proc_poly_ret);\n");
-    buf_puts(&mk, "  for (int _i = 0; _i < 16; _i++) sp_mark_rbval_scratch(_sp_proc_poly_args[_i]);\n");
     g_has_user_global_marks = (mk.p && mk.len > 0);
     if (g_has_user_global_marks) {
       buf_puts(&b, "static void sp_mark_user_globals(void) {\n");
@@ -10608,7 +10600,7 @@ char *codegen_program(const NodeTable *nt) {
     if (mi >= 0 && c->scopes[mi].reachable && c->scopes[mi].ret == TY_BOOL) { g_gen_obj_valeq = 1; break; }
   }
 
-  /* sp_re_init is worth emitting only if it would set at least one hook. */
+  /* sp_tu_init is worth emitting only if it would set at least one hook. */
   g_re_init_needed = g_uses_symbols || g_uses_marshal || g_uses_regex || g_needs_class_machinery ||
                      g_has_user_global_marks || g_has_user_cmp || g_gen_obj_hash || g_gen_obj_to_h || g_gen_obj_with || g_gen_obj_hashkey ||
                      g_gen_obj_valeq;
@@ -10687,16 +10679,16 @@ char *codegen_program(const NodeTable *nt) {
       "  return 1;\n}\n", g_ext_init_name);
     buf_printf(body, "void %s(void){\n", g_ext_init_name);
     buf_puts(body, "    SP_GC_SAVE();\n");
-    if (g_re_init_needed) buf_puts(body, "    sp_re_init();\n");
+    if (g_re_init_needed) buf_puts(body, "    sp_tu_init();\n");
     if (g_uses_threads) buf_puts(body, "    sp_sched_init();\n");
     if (g_uses_program_name) buf_puts(body, "    sp_program_name = sp_str_empty;\n");
   }
   else {
   buf_puts(body, "int main(int argc,char**argv){\n");
   buf_puts(body, "    SP_GC_SAVE();\n");
-  if (g_re_init_needed) buf_puts(body, "    sp_re_init();\n");
+  if (g_re_init_needed) buf_puts(body, "    sp_tu_init();\n");
   /* Adopt the main thread and chain the scheduler's GC root hook. Placed after
-     sp_re_init so it chains whatever globals hook that installed. */
+     sp_tu_init so it chains whatever globals hook that installed. */
   if (g_uses_threads) buf_puts(body, "    sp_sched_init();\n");
   /* The ARGV copy loop only matters if the program reads ARGV / ARGF / $*. */
   if (g_uses_argv)

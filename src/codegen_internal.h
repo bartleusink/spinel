@@ -323,7 +323,7 @@ extern int g_needs_proc_poly_argslot; /* any proc takes a TY_POLY arg via _sp_pr
 extern int g_fiber_counter;
 
 /* Static regex-literal table: each distinct (source, flags) pair compiles once
-   to an sp_re_pat_<i> global initialized in sp_re_init(). */
+   to an sp_re_pat_<i> global initialized in sp_tu_init(). */
 extern char **g_re_src;
 extern int *g_re_flg;
 extern int g_re_count, g_re_cap;
@@ -349,15 +349,15 @@ extern int g_needs_class_machinery;
 /* Set when sp_mark_user_globals marks at least one heap-typed user
    global/constant/class-ivar. When 0 the generated marker is identical to the
    runtime default (sp_re_mark_globals, installed by a constructor before main),
-   so it -- and the sp_re_init hook override -- are skipped. */
+   so it -- and the sp_tu_init hook override -- are skipped. */
 extern int g_has_user_global_marks;
 /* Whole-program feature presence, computed once before main is emitted, so the
    main() prologue can skip setup a trivial program never needs:
-   g_uses_symbols -> sp_re_init sets sp_sym_name_fn; g_uses_regex -> sp_re_init
+   g_uses_symbols -> sp_tu_init sets sp_sym_name_fn; g_uses_regex -> sp_tu_init
    wires the regex error handler; g_uses_argv -> the sp_argv copy loop runs.
    g_re_init_needed is the OR of the
-   conditions that give sp_re_init a body (symbols/regex/class-machinery/user
-   global marks); when 0, neither sp_re_init nor its call is emitted. */
+   conditions that give sp_tu_init a body (symbols/regex/class-machinery/user
+   global marks); when 0, neither sp_tu_init nor its call is emitted. */
 extern int g_uses_symbols;
 extern int g_uses_marshal;
 extern int g_emit_sym_rt;      /* emit sp_dyn_syms / sp_sym_to_s / sp_sym_intern */

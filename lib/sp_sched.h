@@ -65,7 +65,7 @@ typedef struct sp_thread {
   unsigned          id;
 } sp_thread;
 
-/* Called once from main()'s prologue (on the root fiber, after sp_re_init) when
+/* Called once from main()'s prologue (on the root fiber, after sp_tu_init) when
    the program uses threads. Adopts the running context as the main thread and
    chains a GC mark hook that roots every live green thread. */
 void       sp_sched_init(void);
