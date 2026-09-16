@@ -5492,7 +5492,7 @@ else if (orecv >= 0 && onm) {
                        " && sp_poly_is_hash_kind(_sp_proc_poly_args[argc-1].cls_id))"
                        " ? _sp_proc_poly_args[argc-1]"
                        " : sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH);"
-                       " (void)lv_%s;%c", krn, krn, 10);
+                       " SP_GC_ROOT_RBVAL(lv_%s); (void)lv_%s;%c", krn, krn, krn, 10);   /* the empty hash is held by nothing else */
       }
     }
   }
@@ -10533,10 +10533,12 @@ char *codegen_program(const NodeTable *nt) {
        an allocation in between (the push it is on its way to, the next
        element's own work) the value is unreachable and the collector takes it.
        The arguments are the same on the way in. Both are roots. Unused slots
-       read as tag 0 (int), which sp_mark_rbval ignores. */
+       read as tag 0 (int), which sp_mark_rbval ignores. A slot keeps its
+       value after its reader is done, so it can name a freed object by the
+       next cycle: the scratch marker skips a slab slot that is free. */
     if (g_has_dyn_syms) buf_puts(&mk, "  sp_mark_dyn_syms();\n");
-    buf_puts(&mk, "  sp_mark_rbval(_sp_proc_poly_ret);\n");
-    buf_puts(&mk, "  for (int _i = 0; _i < 16; _i++) sp_mark_rbval(_sp_proc_poly_args[_i]);\n");
+    buf_puts(&mk, "  sp_mark_rbval_scratch(_sp_proc_poly_ret);\n");
+    buf_puts(&mk, "  for (int _i = 0; _i < 16; _i++) sp_mark_rbval_scratch(_sp_proc_poly_args[_i]);\n");
     g_has_user_global_marks = (mk.p && mk.len > 0);
     if (g_has_user_global_marks) {
       buf_puts(&b, "static void sp_mark_user_globals(void) {\n");

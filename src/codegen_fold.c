@@ -9091,6 +9091,13 @@ int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent); emit_ctype(c, accT, g_pre);
     buf_printf(g_pre, " _t%d = %s;\n", tacc, accb.p ? accb.p : default_value(accT)); free(accb.p);
   }
+  /* The temp is the accumulator's one root when the memo param binds an
+     inner shadow (a forwarded callable's synthetic param, a type mismatch):
+     the loop's own allocations (the proc object it builds each iteration)
+     collected a memo nothing else held. */
+  if (needs_root(accT) && !comp_ty_value_obj(c, accT)) {
+    emit_indent(g_pre, g_indent); emit_gc_root_tmp(c, accT, tacc, g_pre); buf_puts(g_pre, "\n");
+  }
 
   /* Save outer vars if block params shadow them (same-type only) */
   Scope *cs = comp_scope_of(c, id);

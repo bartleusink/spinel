@@ -4065,10 +4065,14 @@ else {
         const char *conv_r = a0 == TY_INT_ARRAY ? "sp_IntArray_to_poly" :
                              a0 == TY_STR_ARRAY ? "sp_StrArray_to_poly_fmt" :
                              a0 == TY_FLOAT_ARRAY ? "sp_FloatArray_to_poly" : NULL;
-        buf_printf(b, "sp_PolyArray_%s(%s(", fn, conv_l); emit_expr(c, recv, b); buf_puts(b, "), ");
+        /* the boxed receiver is rooted while the argument is boxed: the two
+           conversions allocate, and a nested-call operand is nobody's root
+           between its evaluation and the call */
+        int tl = ++g_tmp;
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s(", tl, conv_l); emit_expr(c, recv, b); buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray_%s(_t%d, ", tl, fn, tl);
         if (conv_r) { buf_printf(b, "%s(", conv_r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
         else emit_expr(c, argv[0], b);  /* already poly */
-        buf_puts(b, ")"); return 1;
+        buf_puts(b, "); })"); return 1;
       }
       /* typed-array receiver, POLY argument (a value whose static type widened,
          not a poly array): coerce it at run time -- an Array becomes the poly
@@ -4082,9 +4086,10 @@ else {
         const char *fn = (sp_streq(name, "&") || sp_streq(name, "intersection")) ? "intersect" : (sp_streq(name, "|") || sp_streq(name, "union") ? "union" : "difference");
         const char *conv_l = rt == TY_INT_ARRAY ? "sp_IntArray_to_poly" :
                              rt == TY_STR_ARRAY ? "sp_StrArray_to_poly_fmt" : "sp_FloatArray_to_poly";
-        buf_printf(b, "sp_PolyArray_%s(%s(", fn, conv_l); emit_expr(c, recv, b);
-        buf_puts(b, "), sp_poly_set_operand("); emit_expr(c, argv[0], b);
-        buf_puts(b, "))"); return 1;
+        int tl = ++g_tmp;
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s(", tl, conv_l); emit_expr(c, recv, b);
+        buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray_%s(_t%d, sp_poly_set_operand(", tl, fn, tl); emit_expr(c, argv[0], b);
+        buf_puts(b, ")); })"); return 1;
       }
       /* variadic named set ops: union/intersection/difference(*others) fold the
          binary operator over each argument, accumulating in a rooted temp. */

@@ -17645,6 +17645,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_RbVal _t%d = %s;\n", t, rvb.p ? rvb.p : "sp_box_nil()");
         free(rvb.p); }
+      /* rooted: the arguments are evaluated after it and allocate (a lambda
+         literal builds its proc), and a callable a call answered is held by
+         nothing else */
+      emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", t);
       /* the poly callable may be a Proc or a bound Method (different ABIs).
          Under promote the bound method is poly-signatured, so call it through
          the poly ABI and unbox the result back to the sp_int the Proc arm

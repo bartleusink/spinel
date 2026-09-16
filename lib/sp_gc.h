@@ -603,6 +603,19 @@ static inline void sp_mark_rbval(sp_RbVal v) {
            v.cls_id != SP_BUILTIN_REGEX) sp_gc_mark(v.v.p);
   else if (v.tag == SP_TAG_BIGINT) sp_gc_mark(v.v.p);
 }
+/* A scratch root: the proc calling convention's side channel keeps its last
+   value after the value's reader is done with it, so by the next collection
+   it may name a slot a sweep has freed since. Marking that would set
+   generation bits on a free slot and run whatever scan hook its stale bytes
+   hold. A slab slot that is free now is skipped; one that was reused is
+   some live object, marked a cycle longer than needed, which is harmless. */
+static inline void sp_mark_rbval_scratch(sp_RbVal v) {
+  const void *h = NULL;
+  if (v.tag == SP_TAG_STR) { if (v.v.s && (unsigned char)v.v.s[-1] == 0xfe) h = ((const sp_str_hdr *)(v.v.s - 1)) - 1; }
+  else if ((v.tag == SP_TAG_OBJ && v.cls_id != SP_BUILTIN_FOREIGN_PTR && v.cls_id != SP_BUILTIN_REGEX) || v.tag == SP_TAG_BIGINT) { if (v.v.p) h = (const char *)v.v.p - sizeof(sp_gc_hdr); }
+  if (h && sp_slab_owns(h) && !sp_slab_is_live(h)) return;
+  sp_mark_rbval(v);
+}
 /* Closure-cell content markers. A captured non-int local is laundered into the
    pointer-sized sp_int cell as (uintptr_t)<ptr>; the cell's GC scan marks the
    referent so it survives as long as the capturing proc does. */

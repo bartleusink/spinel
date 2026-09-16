@@ -4682,11 +4682,11 @@ static sp_int sp_poly_arr_index_val(sp_RbVal a, sp_RbVal v, int rev) {
   return SP_INT_NIL;
 }
 static sp_bool sp_PolyArray_include_val(sp_PolyArray *a, sp_RbVal v) { if (!a) return FALSE; for (sp_int i = 0; i < a->len; i++) if (sp_poly_eq(a->data[i], v)) return TRUE; return FALSE; }
-static sp_PolyArray *sp_PolyArray_intersect(sp_PolyArray *a, sp_PolyArray *b) { sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a || !b) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (sp_PolyArray_include_val(b, v) && !sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } return r; }
+static sp_PolyArray *sp_PolyArray_intersect(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a || !b) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (sp_PolyArray_include_val(b, v) && !sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } return r; }
 /* intersect? predicate: early-exit, no allocation (matches CRuby's non-building Array#intersect?). */
 static sp_bool sp_PolyArray_intersect_p(sp_PolyArray *a, sp_PolyArray *b) { if (!a || !b) return 0; for (sp_int i = 0; i < a->len; i++) if (sp_PolyArray_include_val(b, a->data[i])) return 1; return 0; }
-static sp_PolyArray *sp_PolyArray_union(sp_PolyArray *a, sp_PolyArray *b) { sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } if (b) for (sp_int i = 0; i < b->len; i++) { sp_RbVal v = b->data[i]; if (!sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } return r; }
-static sp_PolyArray *sp_PolyArray_difference(sp_PolyArray *a, sp_PolyArray *b) { sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_val(b, v)) sp_PolyArray_push(r, v); } return r; }
+static sp_PolyArray *sp_PolyArray_union(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } if (b) for (sp_int i = 0; i < b->len; i++) { sp_RbVal v = b->data[i]; if (!sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } return r; }
+static sp_PolyArray *sp_PolyArray_difference(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_val(b, v)) sp_PolyArray_push(r, v); } return r; }
 /* Array#compact for poly_array: keep elements whose tag is not SP_TAG_NIL. */
 static sp_PolyArray *sp_PolyArray_compact(sp_PolyArray *a) { SP_GC_ROOT(a); sp_PolyArray *b = sp_PolyArray_new(); SP_GC_ROOT(b); if (!a) return b; for (sp_int i = 0; i < a->len; i++) { if (a->data[i].tag != SP_TAG_NIL) sp_PolyArray_push(b, a->data[i]); } return b; }
 static sp_PolyArray *sp_PolyArray_compact_bang(sp_PolyArray *a) {sp_gc_wb((void*)a);  if (!a) return a; sp_int w = 0; for (sp_int i = 0; i < a->len; i++) { if (a->data[i].tag != SP_TAG_NIL) a->data[w++] = a->data[i]; } a->len = w; return a; }
@@ -5213,9 +5213,10 @@ static sp_float sp_PolyArray_sum_float(sp_PolyArray *a) { if (!a) return 0.0; sp
 /* Bignum#downto(hi)/#upto(hi) materialized: a poly array of Bignums from `lo`
    to `hi` inclusive (descending for downto, ascending for upto) (#2305). */
 static sp_PolyArray *sp_bigint_range_array(sp_Bigint *lo, sp_Bigint *hi, int up) {
+  SP_GC_ROOT(lo); SP_GC_ROOT(hi);   /* the bound is a nested call's result: nobody else's root */
   sp_PolyArray *a = sp_PolyArray_new(); SP_GC_ROOT(a);
-  sp_Bigint *one = sp_bigint_new_int(1);
-  sp_Bigint *cur = lo;
+  sp_Bigint *one = sp_bigint_new_int(1); SP_GC_ROOT(one);
+  sp_Bigint *cur = lo; SP_GC_ROOT(cur);
   while (up ? sp_bigint_cmp(cur, hi) <= 0 : sp_bigint_cmp(cur, hi) >= 0) {
     sp_PolyArray_push(a, sp_box_bigint(cur));
     cur = up ? sp_bigint_add(cur, one) : sp_bigint_sub(cur, one);

@@ -1109,7 +1109,7 @@ sp_int sp_MatchData_hash(sp_MatchData *m) {
 }
 /* MatchData#[range]: the groups selected by a Range of indices (#2532). */
 sp_PolyArray *sp_MatchData_aref_range(sp_MatchData *m, sp_int beg, sp_int end, int excl) {SP_GC_ROOT(m);
-  sp_PolyArray *a = sp_PolyArray_new();
+  sp_PolyArray *a = sp_PolyArray_new(); SP_GC_ROOT(a);
   if (!m) return a;
   sp_int n = m->ncap;
   /* a beginless or endless bound carries the range sentinel, which the
@@ -1129,7 +1129,7 @@ sp_PolyArray *sp_MatchData_aref_range(sp_MatchData *m, sp_int beg, sp_int end, i
 /* MatchData#[start, length]: an Array of `length` groups from `start` (nil for
    a group that did not participate), like Array#[start, length] (#2507). */
 sp_PolyArray *sp_MatchData_aref_len(sp_MatchData *m, sp_int start, sp_int len) {SP_GC_ROOT(m);
-  sp_PolyArray *a = sp_PolyArray_new();
+  sp_PolyArray *a = sp_PolyArray_new(); SP_GC_ROOT(a);
   if (!m) return a;
   if (start < 0) start += m->ncap;
   if (start < 0 || start > m->ncap || len < 0) return NULL;   /* nil in Ruby */
