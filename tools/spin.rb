@@ -90,6 +90,10 @@ usage: spin <command> [args]
   publish [--direct]   validate + test, then submit this release to the index
   install [name..]     build and copy bin/ executables to ~/.local/bin
                        (--prefix DIR, --uninstall)
+  pack [name] [--out DIR]
+                       write a directory that builds the program from C
+                       alone (generated C, runtime, native packages, Makefile)
+  <command> --help     this text; no command runs
 USAGE
 
 def spin_die(msg)
@@ -2339,6 +2343,13 @@ $spin_verbose = spin_part.count("--verbose") > 0 || ENV["SPIN_VERBOSE"].to_s != 
 args = spin_part.reject { |a| a == "--verbose" } + (dd ? ["--"] : []) + app_part
 cmd = args.empty? ? "" : args[0]
 rest = args[1..] || []
+# `spin <command> --help` answers with the usage and runs nothing: a command
+# like pack or build starts work at once otherwise, which is not what someone
+# asking for help wanted (#4507). Only the part before `--` is spin's.
+if (rest.index("--") ? rest[0, rest.index("--")] : rest).any? { |a| a == "--help" || a == "-h" }
+  puts SPIN_USAGE
+  exit 0
+end
 
 case cmd
 when "new"

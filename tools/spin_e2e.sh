@@ -19,6 +19,13 @@ cd "$WORK"
 # --- scaffold + run -----------------------------------------------------------
 "$SPIN" new app >/dev/null
 cd app
+
+# --- `<command> --help` answers with the usage and runs nothing (#4507) ---------
+"$SPIN" pack --help 2>&1 | grep -q '^  pack \[name\]' || fail "pack --help: usage does not list pack"
+[ ! -d build/pack ] || fail "pack --help: ran the pack"
+"$SPIN" build -h 2>&1 | grep -q '^usage: spin' || fail "build -h: no usage"
+[ ! -f build/bin/app ] || fail "build -h: built"
+
 expect "scaffold run" "Hello from app" "$("$SPIN" run 2>&1 | tail -1)"
 
 # --- `--` with no target ahead of it names every target, not `--` itself --------
