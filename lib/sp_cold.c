@@ -420,7 +420,7 @@ static void sp_glob_walk(const char *fsdir, const char *outprefix,
          tree from looping forever (#4258). */
       { struct stat lst;
         if (lstat(fspath, &lst) == 0 && S_ISDIR(lst.st_mode)) {
-          char sub[2048];
+          char sub[sizeof outpath + 1];   /* outpath and its trailing slash, whatever outpath holds */
           snprintf(sub, sizeof sub, "%s%s/", outprefix, name);
           /* stay on the same component: ** consumes any number of levels */
           sp_glob_walk(fspath, sub, comps, ncomp, ci, a);
@@ -436,7 +436,7 @@ static void sp_glob_walk(const char *fsdir, const char *outprefix,
     snprintf(outpath, sizeof outpath, "%s%s", outprefix, comp);
     if (last) { if (sp_glob_exists(fspath)) sp_glob_push(a, outpath); return; }
     if (sp_glob_is_dir(fspath)) {
-      char sub[2048];
+      char sub[sizeof outpath + 1];   /* outpath and its trailing slash, whatever outpath holds */
       snprintf(sub, sizeof sub, "%s/", outpath);
       sp_glob_walk(fspath, sub, comps, ncomp, ci + 1, a);
     }
@@ -457,7 +457,7 @@ static void sp_glob_walk(const char *fsdir, const char *outprefix,
     snprintf(outpath, sizeof outpath, "%s%s", outprefix, name);
     if (last) { sp_glob_push(a, outpath); continue; }
     if (sp_glob_is_dir(fspath)) {
-      char sub[2048];
+      char sub[sizeof outpath + 1];   /* outpath and its trailing slash, whatever outpath holds */
       snprintf(sub, sizeof sub, "%s/", outpath);
       sp_glob_walk(fspath, sub, comps, ncomp, ci + 1, a);
     }
