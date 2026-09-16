@@ -1474,7 +1474,8 @@ else {                                        /* macOS: "<idx> <image> <addr> <s
   /* De-mangle sp_<Class>_<method> back to Ruby. A Spinel symbol is a path of
      CamelCase class segments (each from a `::`, joined by `_`) followed by the
      method; the method is the first segment that starts lowercase. A literal
-     `cls` segment marks a singleton method:
+     `s` (what the emitter writes) or `cls` segment marks a singleton method:
+       sp_Helper_s_boom            -> Helper.boom
        sp_Helper_cls_boom          -> Helper.boom
        sp_Tep_Url_parse_query      -> Tep::Url#parse_query
        sp_Tep_AuthOAuth2_cls_find  -> Tep::AuthOAuth2.find
@@ -1489,11 +1490,13 @@ else {                                        /* macOS: "<idx> <image> <addr> <s
   if (!mstart) return strdup(name);            /* all-uppercase: leave as-is */
   if (mstart == name) {                        /* no class path: top-level */
     if (strncmp(name, "cls_", 4) == 0) return strdup(name + 4);  /* top-level singleton */
+    if (strncmp(name, "s_", 2) == 0) return strdup(name + 2);
     return strdup(name);
   }
   char out[256]; size_t o = 0;
   const char *meth; char sep;
   if (strncmp(mstart, "cls_", 4) == 0) { meth = mstart + 4; sep = '.'; }  /* singleton */
+  else if (strncmp(mstart, "s_", 2) == 0) { meth = mstart + 2; sep = '.'; }
   else                                 { meth = mstart;     sep = '#'; }  /* instance */
   for (const char *p = name; p < mstart - 1 && o + 2 < sizeof(out); p++) {
     if (*p == '_') { out[o++] = ':'; out[o++] = ':'; }   /* class-path `_` was a `::` */
