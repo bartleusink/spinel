@@ -678,7 +678,7 @@ void sp_slab_sweep_worker(int wid, int full, int aging, int (*die)(void *hdr), s
          a minor's mark reaches old strings too, and a mark left behind would
          read as "already marked" next cycle and keep a dead string */
       if (!yv && !mv && !(full && ov)) continue;
-      acc.swept += (size_t)__builtin_popcountll(yv) + (full ? (size_t)__builtin_popcountll(ov) : 0);
+
       uint64_t dead = yv & ~mv & ~ov;
       if (full) dead |= ov & ~mv & ~__atomic_load_n(&bm->pin[w], __ATOMIC_RELAXED);
       if (aging) {
@@ -695,6 +695,10 @@ void sp_slab_sweep_worker(int wid, int full, int aging, int (*die)(void *hdr), s
          parked or already alive again, and either way it is not dead. */
       uint64_t fdead = dead & __atomic_load_n(&bm->fin[w], __ATOMIC_RELAXED);
       uint64_t parked = 0;
+      /* what the pass costs per slot is the finalizers it runs: the rest is
+         a few words per chunk (the object budget's mark-share gate reads
+         `swept` as the sweep's per-slot work, sp_gc_retune_object) */
+      acc.swept += (size_t)__builtin_popcountll(fdead);
       while (fdead) {
         unsigned i = (unsigned)__builtin_ctzll(fdead);
         fdead &= fdead - 1;
