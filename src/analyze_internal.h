@@ -11,6 +11,10 @@
 #include <string.h>
 
 /* The receiver class for a node inside an instance_eval/exec block, or -1. */
+/* codegen_util.c's refusal, called from the analyzer too: declared here so
+   no analyzer TU calls it undeclared (an implicit `int` prototype, which a
+   wasm link reports as a signature mismatch and an LP64 link hides) */
+__attribute__((noreturn)) void unsupported_feature(Compiler *c, int id, const char *msg);
 int ie_class_of(Compiler *c, int node);
 
 /* Forward declarations for FFI helpers defined later in this file. */

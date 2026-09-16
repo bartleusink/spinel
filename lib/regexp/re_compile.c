@@ -2604,10 +2604,12 @@ uint32_t sp_re_source_len(void *vpat) {
 /* Regexp#options: CRuby's public option bits IGNORECASE=1, EXTENDED=2,
    MULTILINE=4 (the /m "dot matches newline", our internal DOTALL). The
    internal RE_FLAG_MULTILINE (^/$ at line ends) is not a Ruby-visible option. */
-mrb_int sp_re_options(void *vpat) {
+/* returns the runtime's sp_int (intptr_t), as sp_re.h declares it: mrb_int
+   is int64_t, which is the same width only on LP64 */
+intptr_t sp_re_options(void *vpat) {
   mrb_regexp_pattern *pat = (mrb_regexp_pattern *)vpat;
   uint32_t f = pat ? pat->flags : 0;
-  mrb_int o = 0;
+  intptr_t o = 0;
   if (f & RE_FLAG_IGNORECASE) o |= 1;
   if (f & RE_FLAG_EXTENDED)   o |= 2;
   if (f & RE_FLAG_DOTALL)     o |= 4;

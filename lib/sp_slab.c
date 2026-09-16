@@ -132,7 +132,7 @@ typedef struct sp_slab_chunk {
   uint8_t on_avail;                   /* listed on the owner's available list */
   uint8_t in_use;                     /* holds a class; 0 = empty, on the global pool */
   uint8_t touched;                    /* has resident pages since the last release */
-  uint8_t _pad[64 - 8 * 3 - 4 - 2 * 3 - 3];
+  uint8_t _pad[64 - sizeof(void *) * 3 - 4 - 2 * 3 - 3];   /* a 64-byte header on any pointer width */
 } sp_slab_chunk;
 typedef char sp_slab_chunk_is_one_line[sizeof(sp_slab_chunk) == 64 ? 1 : -1];
 

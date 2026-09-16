@@ -1,5 +1,4 @@
 #include "analyze_internal.h"
-__attribute__((noreturn)) void unsupported_feature(Compiler *c, int id, const char *msg);
 
 
 static int narrow_int_table_ivars(Compiler *c);  /* declared early: the fixpoint calls it */
