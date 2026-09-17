@@ -20,7 +20,7 @@
 #include <stdio.h>      /* snprintf for the int/float formatters below */
 #include <math.h>       /* HUGE_VAL / signbit for sp_float_to_s */
 
-const char *sp_sprintf(const char *fmt, ...);  /* defined in the generated TU */
+const char *sp_sprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));  /* defined in the generated TU */
 
 /* Global heap lock (Phase 1, design 6.1). Under SP_THREADS one mutex serializes
    the object- and string-heap mutations -- the trigger+collect, the calloc/

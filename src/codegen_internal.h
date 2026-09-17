@@ -34,7 +34,7 @@ void buf_erase(Buf *b, size_t off, size_t n);
 extern int g_no_root_elision;
 extern int g_inline_hot;
 extern int g_no_write_barrier;
-void buf_printf(Buf *b, const char *fmt, ...);
+void buf_printf(Buf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 static inline void emit_indent(Buf *b, int n) { for (int i = 0; i < n; i++) buf_puts(b, "  "); }
 

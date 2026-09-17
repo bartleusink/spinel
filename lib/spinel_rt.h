@@ -308,7 +308,7 @@ static inline sp_int sp_iremainder(sp_int a, sp_int b) {
 /* sp_gcd / sp_lcm / sp_powmod / sp_ceildiv / sp_int_clamp / sp_int_sqrt
    now live in libspinel_rt.a (lib/sp_core.c); declared via sp_core.h. */
 static inline char *sp_str_alloc_raw(size_t total_with_null);  /* fwd decl */
-const char *sp_sprintf(const char *fmt, ...);                  /* fwd decl */
+const char *sp_sprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   /* fwd decl */
 /* sp_ipow10 / sp_int_round / sp_int_ceil / sp_int_floor /
    sp_int_truncate / sp_str_oct now live in libspinel_rt.a
    (lib/sp_core.c); declared via sp_core.h. */

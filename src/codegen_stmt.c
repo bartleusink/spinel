@@ -2038,7 +2038,7 @@ static void emit_pm_array_cond(Compiler *c, int pat, const char *arr, Buf *b) {
   /* posts are checked from the tail (post j sits at len - (npost - j)). */
   for (int j = 0; j < npost; j++) {
     Buf e; memset(&e, 0, sizeof e);
-    buf_printf(&e, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %dLL))",
+    buf_printf(&e, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %lldLL))",
                arr, arr, (long long)(npost - j));
     Buf sub; memset(&sub, 0, sizeof sub);
     if (emit_pm_subcond_expr(c, posts[j], e.p, &sub)) {
@@ -2443,7 +2443,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       }
       if (class_mismatch) { buf_puts(b, "0"); return 1; }
     }
-    buf_printf(b, "(_t%d && _t%d->len %s %dLL", t, t, has_rest ? ">=" : "==", (long long)(apn + npost));
+    buf_printf(b, "(_t%d && _t%d->len %s %lldLL", t, t, has_rest ? ">=" : "==", (long long)(apn + npost));
     const char *ak = array_kind(pt);
     if (ak) {
       const char *lo = sp_streq(ak, "Int") ? "int" : (sp_streq(ak, "Float") ? "float" : "str");
@@ -2460,7 +2460,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       }
       for (int j = 0; j < npost; j++) {
         Buf e; memset(&e, 0, sizeof e);
-        buf_printf(&e, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %dLL))",
+        buf_printf(&e, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %lldLL))",
                    boxed, boxed, (long long)(npost - j));
         Buf sub; memset(&sub, 0, sizeof sub);
         if (emit_pm_subcond_expr(c, posts[j], e.p, &sub)) {
@@ -2820,8 +2820,8 @@ static void emit_pm_bind_poly(Compiler *c, int pat, const char *arr, int indent,
         /* the rest captures the middle: elements after the requireds and before
            the posts, i.e. length - apn - npost of them starting at apn. */
         Buf rsrc; memset(&rsrc, 0, sizeof rsrc);
-        buf_printf(&rsrc, "sp_poly_slice(%s, %dLL, sp_poly_length(%s) - %dLL)",
-                   arr, apn, arr, (long long)(apn + npost));
+        buf_printf(&rsrc, "sp_poly_slice(%s, %lldLL, sp_poly_length(%s) - %lldLL)",
+                   arr, (long long)apn, arr, (long long)(apn + npost));
         emit_pm_typed_assign(sc, rnm, rsrc.p, b, indent);
         free(rsrc.p);
       }
@@ -2832,7 +2832,7 @@ static void emit_pm_bind_poly(Compiler *c, int pat, const char *arr, int indent,
     const char *rty = nt_type(nt, posts[j]);
     if (!rty) continue;
     Buf src; memset(&src, 0, sizeof src);
-    buf_printf(&src, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %dLL))",
+    buf_printf(&src, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %lldLL))",
                arr, arr, (long long)(npost - j));
     if (sp_streq(rty, "LocalVariableTargetNode")) {
       const char *lnm = nt_str(nt, posts[j], "name");
@@ -2992,7 +2992,7 @@ static void emit_massign_poly_target(Compiler *c, int tgt, const char *val,
     int has_rest = (rest >= 0 && nt_type(nt, rest) && sp_streq(nt_type(nt, rest), "SplatNode"));
     for (int i = 0; i < ln; i++) {
       Buf s; memset(&s, 0, sizeof s);
-      buf_printf(&s, "sp_poly_index_poly(%s, sp_box_int(%dLL))", val, (long long)i);
+      buf_printf(&s, "sp_poly_index_poly(%s, sp_box_int(%lldLL))", val, (long long)i);
       emit_massign_poly_target(c, lefts[i], s.p, indent, b, sc);
       free(s.p);
     }
@@ -3002,7 +3002,7 @@ static void emit_massign_poly_target(Compiler *c, int tgt, const char *val,
         const char *rnm = nt_str(nt, inner, "name");
         if (rnm) {
           Buf s; memset(&s, 0, sizeof s);
-          buf_printf(&s, "sp_poly_slice(%s, %dLL, sp_poly_length(%s) - %dLL - %dLL)",
+          buf_printf(&s, "sp_poly_slice(%s, %lldLL, sp_poly_length(%s) - %lldLL - %lldLL)",
                      val, (long long)ln, val, (long long)ln, (long long)rn);
           emit_pm_typed_assign(sc, rnm, s.p, b, indent);
           free(s.p);
@@ -3011,7 +3011,7 @@ static void emit_massign_poly_target(Compiler *c, int tgt, const char *val,
     }
     for (int j = 0; j < rn; j++) {
       Buf s; memset(&s, 0, sizeof s);
-      buf_printf(&s, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %dLL + %dLL))",
+      buf_printf(&s, "sp_poly_index_poly(%s, sp_box_int(sp_poly_length(%s) - %lldLL + %lldLL))",
                  val, val, (long long)rn, (long long)j);
       emit_massign_poly_target(c, rights[j], s.p, indent, b, sc);
       free(s.p);
@@ -8402,9 +8402,9 @@ else {
          makes the required+post count a floor instead of an exact size). */
       emit_indent(b, indent);
       if (has_rest)
-        buf_printf(b, "if (!_t%d || _t%d->len < %dLL) sp_raise_cls(\"NoMatchingPatternError\", \"[array pattern mismatch]\");\n", tarr, tarr, (long long)(rn + pon));
+        buf_printf(b, "if (!_t%d || _t%d->len < %lldLL) sp_raise_cls(\"NoMatchingPatternError\", \"[array pattern mismatch]\");\n", tarr, tarr, (long long)(rn + pon));
       else
-        buf_printf(b, "if (!_t%d || _t%d->len != %dLL) sp_raise_cls(\"NoMatchingPatternError\", \"[array pattern mismatch]\");\n", tarr, tarr, (long long)rn);
+        buf_printf(b, "if (!_t%d || _t%d->len != %lldLL) sp_raise_cls(\"NoMatchingPatternError\", \"[array pattern mismatch]\");\n", tarr, tarr, (long long)rn);
       for (int i = 0; i < rn + pon; i++) {
         int tnode = i < rn ? reqs[i] : posts[i - rn];
         const char *lty2 = nt_type(nt, tnode);

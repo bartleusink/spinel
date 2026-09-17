@@ -118,7 +118,7 @@ static void emit_struct_member_by_key(Compiler *c, ClassInfo *sc, const char *rt
              tk, tk, tk, tk, sc->nivars);
   buf_printf(b, " sp_RbVal _t%d = sp_box_nil();", tr);
   for (int i = 0; i < sc->nivars; i++) {
-    buf_printf(b, " if(sp_rbval_eql_key(_t%d,sp_box_sym((sp_sym)%d))||sp_rbval_eql_key(_t%d,sp_box_int(%dLL))"
+    buf_printf(b, " if(sp_rbval_eql_key(_t%d,sp_box_sym((sp_sym)%d))||sp_rbval_eql_key(_t%d,sp_box_int(%lldLL))"
                   "||sp_rbval_eql_key(_t%d,sp_box_str(\"%s\"))){ _t%d = ",
                tk, comp_sym_intern(c, sc->ivars[i] + 1), tk, (long long)i,
                tk, sc->ivars[i] + 1, tr);
@@ -9805,7 +9805,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
         tvraw = tv;
       }
       for (int i = 0; i < sc->nivars; i++) {
-        buf_printf(b, " if(sp_rbval_eql_key(_t%d,sp_box_sym((sp_sym)%d))||sp_rbval_eql_key(_t%d,sp_box_int(%dLL))"
+        buf_printf(b, " if(sp_rbval_eql_key(_t%d,sp_box_sym((sp_sym)%d))||sp_rbval_eql_key(_t%d,sp_box_int(%lldLL))"
                       "||sp_rbval_eql_key(_t%d,sp_box_str(\"%s\"))){ _t%d->iv_%s = ",
                    tk, comp_sym_intern(c, sc->ivars[i] + 1), tk, (long long)i,
                    tk, sc->ivars[i] + 1, tw, iv_c(sc->ivars[i] + 1));
@@ -9862,7 +9862,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
                    tk, tk, tk, tk, sc->nivars);
         buf_printf(b, " sp_RbVal _t%d = sp_box_nil();", tr);
         for (int i = 0; i < sc->nivars; i++) {
-          buf_printf(b, " if(sp_rbval_eql_key(_t%d,sp_box_sym((sp_sym)%d))||sp_rbval_eql_key(_t%d,sp_box_int(%dLL))){ _t%d = ",
+          buf_printf(b, " if(sp_rbval_eql_key(_t%d,sp_box_sym((sp_sym)%d))||sp_rbval_eql_key(_t%d,sp_box_int(%lldLL))){ _t%d = ",
                      tk, comp_sym_intern(c, sc->ivars[i]+1), tk, (long long)i, tr);
           char fld2[300]; snprintf(fld2, sizeof fld2, "_t%d->iv_%s", t, iv_c(sc->ivars[i] + 1));
           emit_boxed_text(c, sc->ivar_types[i], fld2, b);
