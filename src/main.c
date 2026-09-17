@@ -591,7 +591,11 @@ int main(int argc, char **argv) {
      32-bit build on a 64-bit host, `--cc='cc -m32'`), which is asked. */
   extern int sp_target_int_bits;
   int target_i386 = 0;
-  if (!sp_streq(cc_cmd, "cc")) {
+  /* A 32-bit spinel on a 64-bit host (`make CC='cc -m32'`) ships a 32-bit
+     runtime archive beside itself, and the default `cc` there is 64-bit: the
+     program is told -m32, so the toolchain it saw is the one it uses. */
+  const char *cc_width_flag = "";
+  if (!sp_streq(cc_cmd, "cc") || sizeof(void *) == 4) {
     char ccq[1024];
     snprintf(ccq, sizeof ccq, "%s -E -dM -x c /dev/null 2>/dev/null", cc_cmd);
     FILE *fp = popen(ccq, "r");
@@ -603,6 +607,13 @@ int main(int argc, char **argv) {
         if (!strncmp(line, "#define __i386__ ", 17)) target_i386 = 1;
       }
       pclose(fp);
+    }
+    if (sp_streq(cc_cmd, "cc") && sp_target_int_bits == 64) {
+      cc_width_flag = "-m32 ";
+      sp_target_int_bits = 32;
+#if defined(__i386__)
+      target_i386 = 1;
+#endif
     }
   }
 #if defined(__i386__)
@@ -753,14 +764,17 @@ int main(int argc, char **argv) {
   char tmp[8192];
   s_add(&cmd, cc_cmd);
   s_add(&cmd, " ");
+  s_add(&cmd, cc_width_flag);
   snprintf(tmp, sizeof tmp, "-O%s ", opt_level); s_add(&cmd, tmp);
   s_add(&cmd, "-Wno-all -ffunction-sections -fdata-sections ");
   /* A 32-bit target gets what common.mk gives the runtime there: 64-bit
      time_t and file offsets, and SSE arithmetic on i386 (the x87 unit rounds
      every intermediate at 80 bits, and 3.7.round(1) came out 3.8). */
+  if (cc_width_flag[0]) bi_put(&bi, "cflag", "-m32");
   if (sp_target_int_bits == 32) {
     s_add(&cmd, "-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 ");
-    if (target_i386) s_add(&cmd, "-msse2 -mfpmath=sse ");
+    bi_put(&bi, "define", "-D_TIME_BITS=64"); bi_put(&bi, "define", "-D_FILE_OFFSET_BITS=64");
+    if (target_i386) { s_add(&cmd, "-msse2 -mfpmath=sse "); bi_put(&bi, "cflag", "-msse2"); bi_put(&bi, "cflag", "-mfpmath=sse"); }
   }
   /* A pointer of the wrong type in generated code is a miscompile, not a style
      question: it reads one struct through another's layout, which segfaults or
