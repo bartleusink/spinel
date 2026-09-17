@@ -4397,6 +4397,13 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
           return ((sp_RbVal (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len);
         return ((sp_RbVal (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len);
       }
+      /* a nil-returning target is a C void function, and wasm checks the
+         callee's signature at the call (sp_method_proc_tramp has the same arm) */
+      if (m->legacy_ret == SP_BM_RET_NIL) {
+        if (m->recv_bound) ((void (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len);
+        else ((void (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len);
+        return sp_box_nil();
+      }
       if (m->recv_bound)
         return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len));
       return sp_bm_box_ret(m, ((sp_int (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len));
@@ -7291,6 +7298,11 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
           return ((sp_RbVal (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
         return ((sp_RbVal (*)(sp_int))(uintptr_t)m->fn)(i);
       }
+      if (m->legacy_ret == SP_BM_RET_NIL) {   /* a C void function: wasm checks the signature at the call */
+        if (m->recv_bound) ((void (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
+        else ((void (*)(sp_int))(uintptr_t)m->fn)(i);
+        return sp_box_nil();
+      }
       if (m->recv_bound)
         return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i));
       return sp_bm_box_ret(m, ((sp_int (*)(sp_int))(uintptr_t)m->fn)(i));
@@ -7830,7 +7842,7 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
       }
       return sp_poly_to_i(((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, sp_box_int(i)));
 #else
-      if (sp_bm_legacy_abi_ok(m, 1, "00000001")) {
+      if (sp_bm_legacy_abi_ok(m, 1, "00000001") && m->legacy_ret != SP_BM_RET_NIL) {
         if (m->recv_bound)
           return ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
         return ((sp_int (*)(sp_int))(uintptr_t)m->fn)(i);

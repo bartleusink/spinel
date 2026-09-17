@@ -213,6 +213,39 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
     }
   }
   #undef SP_BM_TRAMP_POLY
+  /* A nil-returning target is a C void function: call it as one. The sp_int
+     casts below read a leftover register on a native target and box nil
+     regardless; wasm checks the callee's signature at the call and traps. */
+  if (m->legacy_ret == SP_BM_RET_NIL) {
+    #define SP_BM_TRAMP_VOID(EXPR) do { (EXPR); _sp_proc_poly_ret = sp_box_nil(); return 0; } while (0)
+    #define A(i) args[i]
+    if (!m->recv_bound) {
+      switch (argc) {
+        case 0: SP_BM_TRAMP_VOID(((void (*)(void))(uintptr_t)m->fn)());
+        case 1: SP_BM_TRAMP_VOID(((void (*)(sp_int))(uintptr_t)m->fn)(A(0)));
+        case 2: SP_BM_TRAMP_VOID(((void (*)(sp_int, sp_int))(uintptr_t)m->fn)(A(0), A(1)));
+        case 3: SP_BM_TRAMP_VOID(((void (*)(sp_int, sp_int, sp_int))(uintptr_t)m->fn)(A(0), A(1), A(2)));
+        case 4: SP_BM_TRAMP_VOID(((void (*)(sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(A(0), A(1), A(2), A(3)));
+        case 5: SP_BM_TRAMP_VOID(((void (*)(sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(A(0), A(1), A(2), A(3), A(4)));
+        case 6: SP_BM_TRAMP_VOID(((void (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(A(0), A(1), A(2), A(3), A(4), A(5)));
+        case 7: SP_BM_TRAMP_VOID(((void (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(A(0), A(1), A(2), A(3), A(4), A(5), A(6)));
+        default: SP_BM_TRAMP_VOID(((void (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(A(0), A(1), A(2), A(3), A(4), A(5), A(6), A(7)));
+      }
+    }
+    switch (argc) {
+      case 0: SP_BM_TRAMP_VOID(((void (*)(void *))(uintptr_t)m->fn)(m->self));
+      case 1: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int))(uintptr_t)m->fn)(m->self, A(0)));
+      case 2: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)(m->self, A(0), A(1)));
+      case 3: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, A(0), A(1), A(2)));
+      case 4: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, A(0), A(1), A(2), A(3)));
+      case 5: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, A(0), A(1), A(2), A(3), A(4)));
+      case 6: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, A(0), A(1), A(2), A(3), A(4), A(5)));
+      case 7: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, A(0), A(1), A(2), A(3), A(4), A(5), A(6)));
+      default: SP_BM_TRAMP_VOID(((void (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, A(0), A(1), A(2), A(3), A(4), A(5), A(6), A(7)));
+    }
+    #undef A
+    #undef SP_BM_TRAMP_VOID
+  }
   /* A top-level method has no self parameter. The self-ful casts below would
      put `m->self` (NULL) in the leading C slot, shifting every argument by
      one -- `[method(:top_add)][0].to_proc.call(1, 2)` answered 1 instead of 3

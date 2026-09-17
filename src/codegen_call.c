@@ -2,6 +2,24 @@
 
 /* The call whose poly-hash face is being re-emitted, so the arm that installs
    the face does not fire again on its own substituted receiver. */
+/* The C type of a bound Method's self slot as the target reads it. A
+   `__bam_` wrapper over a value receiver (`0.method(:+)`,
+   `false.method(:to_s)`) declares __bam_r as that value's type, and the call
+   through the Method has to say so: on wasm the C compiler wraps a direct
+   call whose pointer type disagrees with the callee's in a thunk, and where
+   it cannot convert (a bool from a pointer) the thunk traps
+   (`bitcast_invalid`). Everything else takes `void *`, which is what the
+   slot holds. */
+static const char *bm_self_ctype(Scope *tm, int shift) {
+  if (!tm || shift != 1 || tm->nparams < 1 || !tm->pnames[0] || strcmp(tm->pnames[0], "__bam_r") != 0) return "void *";
+  LocalVar *pp = scope_local(tm, tm->pnames[0]);
+  if (!pp) return "void *";
+  if (pp->type == TY_BOOL) return "sp_bool";
+  if (pp->type == TY_INT) return "sp_int";
+  if (pp->type == TY_SYMBOL) return "sp_sym";
+  return "void *";
+}
+
 static int g_pp_hash_node = -1;
 /* Recursion guard for the boxed-handle face re-entry, the same shape as
    g_pp_hash_node: the re-emission asks the inference again, and a type cache
@@ -4937,29 +4955,31 @@ static int emit_poly_callable_prearm(Compiler *c, const char *name, int argc,
      there is no sp_bm_legacy_abi_ok gate, so the cast below would jump through
      NULL; test fn here and fall to sp_poly_callable_call's NoMethodError. */
   buf_printf(&eb, "(_t%d.cls_id == SP_BUILTIN_METHOD && ((sp_BoundMethod *)_t%d.v.p)->fn ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", tv, tv, tv);
-  for (int pass = 0; pass < (mabi_poly ? 1 : 2); pass++) {
-    const char *rty = (pass == 0) ? aty : "sp_RbVal";
+  for (int pi = 0; pi < (mabi_poly ? 1 : 3); pi++) {
+    int pass = mabi_poly ? 0 : (pi == 0 ? 2 : pi == 1 ? 0 : 1);   /* nil (void), int, poly */
+    const char *rty = pass == 2 ? "void" : (pass == 0) ? aty : "sp_RbVal";
     const char *bo = (pass == 0) ? boxopen : "";
-    if (!mabi_poly) buf_printf(&eb, pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", tv);
+    if (!mabi_poly) buf_printf(&eb, pass == 2 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret == SP_BM_RET_NIL ? (" : pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", tv);
     buf_printf(&eb, "%s((%s (*)(void *", bo, rty);
     for (int k = 0; k < argc; k++) buf_printf(&eb, ", %s", aty);
     buf_printf(&eb, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)((void *)((sp_BoundMethod *)_t%d.v.p)->self", tv, tv);
     for (int k = 0; k < argc; k++) { buf_puts(&eb, ", "); PA_MARG(k); }
-    buf_printf(&eb, ")%s", (pass == 0 && !mabi_poly) ? ")" : "");
-    if (!mabi_poly) buf_puts(&eb, pass == 0 ? " : " : ")");
+    buf_printf(&eb, ")%s", !mabi_poly ? (pass == 2 ? ", sp_box_nil())" : pass == 0 ? ")" : "") : "");
+    if (!mabi_poly) buf_puts(&eb, pass != 1 ? " : " : "))");
   }
   buf_puts(&eb, " : ");
-  for (int pass = 0; pass < (mabi_poly ? 1 : 2); pass++) {
-    const char *rty = (pass == 0) ? aty : "sp_RbVal";
+  for (int pi = 0; pi < (mabi_poly ? 1 : 3); pi++) {
+    int pass = mabi_poly ? 0 : (pi == 0 ? 2 : pi == 1 ? 0 : 1);   /* nil (void), int, poly */
+    const char *rty = pass == 2 ? "void" : (pass == 0) ? aty : "sp_RbVal";
     const char *bo = (pass == 0) ? boxopen : "";
-    if (!mabi_poly) buf_printf(&eb, pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", tv);
+    if (!mabi_poly) buf_printf(&eb, pass == 2 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret == SP_BM_RET_NIL ? (" : pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", tv);
     buf_printf(&eb, "%s((%s (*)(", bo, rty);
     for (int k = 0; k < argc; k++) buf_printf(&eb, "%s%s", k ? ", " : "", aty);
     if (argc == 0) buf_puts(&eb, "void");
     buf_printf(&eb, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)(", tv);
     for (int k = 0; k < argc; k++) { if (k) buf_puts(&eb, ", "); PA_MARG(k); }
-    buf_printf(&eb, ")%s", (pass == 0 && !mabi_poly) ? ")" : "");
-    if (!mabi_poly) buf_puts(&eb, pass == 0 ? " : " : ")");
+    buf_printf(&eb, ")%s", !mabi_poly ? (pass == 2 ? ", sp_box_nil())" : pass == 0 ? ")" : "") : "");
+    if (!mabi_poly) buf_puts(&eb, pass != 1 ? " : " : "))");
   }
   buf_puts(&eb, ")");
   /* Proc/Curry go through the callable helper, which raises NoMethodError for
@@ -17791,10 +17811,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          return no sp_int cast can read); the Method's stamp picks at run
          time. Under promote every target returns sp_RbVal already. */
       /* self-ful arm: fn((void *)self, args...) */
-      for (int pass = 0; pass < (mabi_poly ? 1 : 2); pass++) {
-        const char *rty = (pass == 0) ? aty : "sp_RbVal";
+      for (int pi = 0; pi < (mabi_poly ? 1 : 3); pi++) {
+    int pass = mabi_poly ? 0 : (pi == 0 ? 2 : pi == 1 ? 0 : 1);   /* nil (void), int, poly */
+        const char *rty = pass == 2 ? "void" : (pass == 0) ? aty : "sp_RbVal";
         const char *bo = (pass == 0) ? boxopen : "";
-        if (!mabi_poly) buf_printf(b, pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", t);
+        if (!mabi_poly) buf_printf(b, pass == 2 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret == SP_BM_RET_NIL ? (" : pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", t);
         buf_printf(b, "%s((%s (*)(void *", bo, rty);
         for (int k = 0; k < argc; k++) buf_printf(b, ", %s", aty);
         buf_printf(b, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)((void *)((sp_BoundMethod *)_t%d.v.p)->self", t, t);
@@ -17803,15 +17824,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           if (mabi_poly) emit_boxed(c, argv[k], b);
           else EMIT_POLY_CALL_SLOT(k);
         }
-        buf_printf(b, ")%s", (pass == 0 && !mabi_poly) ? ")" : "");
-        if (!mabi_poly) buf_puts(b, pass == 0 ? " : " : ")");
+        buf_printf(b, ")%s", !mabi_poly ? (pass == 2 ? ", sp_box_nil())" : pass == 0 ? ")" : "") : "");
+        if (!mabi_poly) buf_puts(b, pass != 1 ? " : " : "))");
       }
       buf_puts(b, " : ");
       /* self-less arm: fn(args...) with no leading self */
-      for (int pass = 0; pass < (mabi_poly ? 1 : 2); pass++) {
-        const char *rty = (pass == 0) ? aty : "sp_RbVal";
+      for (int pi = 0; pi < (mabi_poly ? 1 : 3); pi++) {
+    int pass = mabi_poly ? 0 : (pi == 0 ? 2 : pi == 1 ? 0 : 1);   /* nil (void), int, poly */
+        const char *rty = pass == 2 ? "void" : (pass == 0) ? aty : "sp_RbVal";
         const char *bo = (pass == 0) ? boxopen : "";
-        if (!mabi_poly) buf_printf(b, pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", t);
+        if (!mabi_poly) buf_printf(b, pass == 2 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret == SP_BM_RET_NIL ? (" : pass == 0 ? "(((sp_BoundMethod *)_t%d.v.p)->legacy_ret != SP_BM_RET_POLY ? " : "", t);
         buf_printf(b, "%s((%s (*)(", bo, rty);
         for (int k = 0; k < argc; k++) buf_printf(b, "%s%s", k ? ", " : "", aty);
         if (argc == 0) buf_puts(b, "void");
@@ -17821,8 +17843,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           if (mabi_poly) emit_boxed(c, argv[k], b);
           else EMIT_POLY_CALL_SLOT(k);
         }
-        buf_printf(b, ")%s", (pass == 0 && !mabi_poly) ? ")" : "");
-        if (!mabi_poly) buf_puts(b, pass == 0 ? " : " : ")");
+        buf_printf(b, ")%s", !mabi_poly ? (pass == 2 ? ", sp_box_nil())" : pass == 0 ? ")" : "") : "");
+        if (!mabi_poly) buf_puts(b, pass != 1 ? " : " : "))");
       }
       buf_puts(b, ")");
       /* the Proc publishes its result in _sp_proc_poly_ret (universal return
@@ -18624,13 +18646,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_puts(&selfc, "((");
       if (is_scalar_ret(tret)) emit_ctype(c, tret, &selfc);
       else buf_puts(&selfc, "void");
-      buf_puts(&selfc, " (*)(void *");
-      for (int k = shift; k < np; k++) {
-        buf_puts(&selfc, ", ");
-        LocalVar *pp = scope_local(tm, tm->pnames[k]);
-        emit_ctype(c, pp ? pp->type : TY_INT, &selfc);
-      }
-      buf_puts(&selfc, "))(uintptr_t)_m->fn)((void *)_m->self");
+      { const char *sct = bm_self_ctype(tm, shift);
+        buf_printf(&selfc, " (*)(%s", sct);
+        for (int k = shift; k < np; k++) {
+          buf_puts(&selfc, ", ");
+          LocalVar *pp = scope_local(tm, tm->pnames[k]);
+          emit_ctype(c, pp ? pp->type : TY_INT, &selfc);
+        }
+        buf_printf(&selfc, "))(uintptr_t)_m->fn)((%s)(uintptr_t)_m->self", sct); }
       if (np > shift) buf_puts(&selfc, ", ");
       buf_puts(&selfc, args.p ? args.p : "");
       buf_puts(&selfc, ")");
@@ -19686,16 +19709,26 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       if (bm_sig_ok) buf_printf(b, "!sp_bm_legacy_abi_ok(_t%d, %d, \"%s\") ? (sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_obj(_t%d, SP_BUILTIN_METHOD))), sp_box_nil()) : ", tr, eargc, bm_sig, name, tr);
       buf_printf(b, "_t%d->legacy_ret == SP_BM_RET_POLY ? (", tr);
     }
-    for (int pass = 0; pass < (bm_dyn ? 2 : 1); pass++) {
-    if (pass == 1) buf_printf(b, ") : sp_bm_box_ret(_t%d, ", tr);
+    /* A dynamic Method's target is called through the cast its stamped
+       return kind names: the 16-byte poly return as sp_RbVal, a nil-returning
+       target (C void) as void, everything else as the sp_int the legacy ABI
+       carries. The void arm is not a nicety: wasm checks the callee's
+       signature at the call and traps on an sp_int cast of a void function
+       (a native target read a leftover register and boxed nil regardless). */
+    static const int bm_passes[3] = { 0, 2, 1 };   /* poly, nil, int */
+    for (int pi = 0; pi < (bm_dyn ? 3 : 1); pi++) {
+    int pass = bm_passes[pi];
+    if (pass == 2) buf_printf(b, ") : _t%d->legacy_ret == SP_BM_RET_NIL ? ((", tr);
+    if (pass == 1) buf_printf(b, "), sp_box_nil()) : sp_bm_box_ret(_t%d, ", tr);
     buf_printf(b, "_t%d->recv_bound ? ", tr);
     for (int arm = 0; arm < 2; arm++) {
       if (arm) buf_puts(b, " : ");
       buf_puts(b, "((");
-      if (bm_dyn) buf_puts(b, pass == 0 ? "sp_RbVal" : "sp_int");
+      if (bm_dyn) buf_puts(b, pass == 0 ? "sp_RbVal" : pass == 2 ? "void" : "sp_int");
       else emit_ctype(c, tret, b);
       buf_puts(b, " (*)(");
-      if (arm == 0) buf_puts(b, "void *");
+      const char *sct = bm_self_ctype(tm, shift);
+      if (arm == 0) buf_puts(b, sct);
       for (int k = 0; k < eargc; k++) {
         if (arm == 0 || k) buf_puts(b, ", ");
         if (tm && k + shift < tm->nparams) {
@@ -19707,7 +19740,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       if (arm != 0 && eargc == 0) buf_puts(b, "void");
       buf_printf(b, "))(uintptr_t)_t%d->fn)(", tr);
-      if (arm == 0) buf_printf(b, "(void *)_t%d->self", tr);
+      if (arm == 0) buf_printf(b, "(%s)(uintptr_t)_t%d->self", sct, tr);
       for (int k = 0; k < eargc; k++) {
         if (arm == 0 || k) buf_puts(b, ", ");
         buf_printf(b, "_t%d", atmp[k]);
@@ -20168,7 +20201,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         if (is_float) {
           int tr = ++g_tmp;
           buf_printf(b, "({ sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
-          buf_printf(b, "; sp_Random_rand_float_range(", tr);
+          buf_puts(b, "; sp_Random_rand_float_range(");
           emit_expr(c, recv, b);
           buf_printf(b, ", (sp_float)_t%d.first, (sp_float)_t%d.last); })", tr, tr);
         }
@@ -20552,7 +20585,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ const char *_t%d = sp_sock_read_nb(%s, ", tw, r);
           emit_int_expr(c, argv[0], b);
           buf_printf(b, ", 0, 1, NULL); _t%d ? sp_box_str(_t%d)"
-                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw, tw);
+                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw);
         }
         else {
           buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);

@@ -140,7 +140,24 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args);
 sp_Proc *sp_method_to_proc(sp_BoundMethod *m);
 void sp_BoundMethod_scan(void *p);
 
-static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = fn; m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; m->recv_bound = 0; m->legacy_int_abi = 0; m->legacy_sig = NULL; m->legacy_fixed = 0; m->legacy_rest = 0; m->legacy_ret = SP_BM_RET_INT; return m; }
+/* The target's address as the Method stores it. On wasm the C compiler
+   turns a direct call through a function pointer of another type into a
+   thunk, and where it cannot convert an argument or the return (a bool
+   against a pointer or an sp_int) the thunk is a trap; it sees such a call
+   when it can prove which function the slot holds, which after inlining
+   the constructor it can. The slot goes through memory the optimiser may
+   not look through, and every call is the indirect one the ABI means, whose
+   check is the wasm signature (all i32) and passes. Elsewhere the store is
+   the store. */
+static inline sp_int sp_bm_fn_opaque(sp_int fn) {
+#if defined(__wasm__)
+  volatile sp_int v = fn;
+  return v;
+#else
+  return fn;
+#endif
+}
+static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = sp_bm_fn_opaque(fn); m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; m->recv_bound = 0; m->legacy_int_abi = 0; m->legacy_sig = NULL; m->legacy_fixed = 0; m->legacy_rest = 0; m->legacy_ret = SP_BM_RET_INT; return m; }
 /* Tag a freshly-built Method with whether its target has the legacy sp_int C
    ABI, the per-position type signature, the fixed/rest slot counts, and how
    its sp_int C return boxes. The constructors default to 0 (unsafe), so every
