@@ -3776,15 +3776,51 @@ else {
 /* For each class, find `include M` declarations in ALL class bodies
    (including reopenings) and transplant M's instance methods into the
    class so they are reachable via comp_method_in_chain. */
+/* The class indices a body's `include` statements name (the ones that resolve
+   to a class of the program), for the ordering below. */
+static int body_included_mods(Compiler *c, int body_node, int *out, int cap) {
+  const NodeTable *nt = c->nt;
+  int n = 0, cnt = 0;
+  const int *stmts = body_node >= 0 ? nt_arr(nt, body_node, "body", &n) : NULL;
+  for (int k = 0; k < n && cnt < cap; k++) {
+    int s = stmts[k];
+    const char *sty = nt_type(nt, s);
+    if (!sty || !sp_streq(sty, "CallNode")) continue;
+    const char *nm = nt_str(nt, s, "name");
+    if (!nm || !sp_streq(nm, "include") || nt_ref(nt, s, "receiver") >= 0) continue;
+    int anode = nt_ref(nt, s, "arguments");
+    int an = 0;
+    const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+    for (int j = 0; j < an && cnt < cap; j++) {
+      const char *aty = nt_type(nt, args[j]);
+      const char *mname = (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode")))
+                          ? nt_str(nt, args[j], "name") : NULL;
+      int mod_id = mname ? comp_class_index(c, mname) : -1;
+      if (mod_id >= 0) out[cnt++] = mod_id;
+    }
+  }
+  return cnt;
+}
+
 void register_includes(Compiler *c) {
   const NodeTable *nt = c->nt;
   g_inc_did_clone = 0;
-  /* First pass: process def_node bodies (first class definition). */
-  for (int ci = 0; ci < c->nclasses; ci++) {
-    int body = nt_ref(nt, c->classes[ci].def_node, "body");
-    process_include_body(c, ci, body);
-  }
-  /* Second pass: scan all ClassNode/ModuleNode in the AST for reopenings. */
+  /* Every class body that can carry an `include`: the definition first, then
+     each reopening in source order. A body is processed only once every
+     module it includes has had ALL of its own bodies processed, because the
+     transplant copies the module's method list as it stands: with
+     `module M; include Inner; end` in a reopening that came after
+     `class C; include M; end` in the walk, C copied M before M had Inner's
+     methods and could not reach them (#4517). A cycle (mutual includes)
+     falls back to source order. */
+  int nb = 0, cap = 64;
+  int *bci = malloc((size_t)cap * sizeof(int));
+  int *bnode = malloc((size_t)cap * sizeof(int));
+  #define ADD_BODY(CI, NODE) do { \
+    if (nb == cap) { cap *= 2; bci = realloc(bci, (size_t)cap * sizeof(int)); bnode = realloc(bnode, (size_t)cap * sizeof(int)); } \
+    bci[nb] = (CI); bnode[nb] = (NODE); nb++; } while (0)
+  for (int ci = 0; ci < c->nclasses; ci++)
+    ADD_BODY(ci, nt_ref(nt, c->classes[ci].def_node, "body"));
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || (!sp_streq(ty, "ClassNode") && !sp_streq(ty, "ModuleNode"))) continue;
@@ -3793,10 +3829,40 @@ void register_includes(Compiler *c) {
     if (!cname) continue;
     int ci = comp_class_index(c, cname);
     if (ci < 0) continue;
-    if (id == c->classes[ci].def_node) continue;  /* already processed above */
-    int body = nt_ref(nt, id, "body");
-    process_include_body(c, ci, body);
+    if (id == c->classes[ci].def_node) continue;  /* the definition, listed above */
+    ADD_BODY(ci, nt_ref(nt, id, "body"));
   }
+  #undef ADD_BODY
+  int *remaining = calloc((size_t)c->nclasses, sizeof(int));
+  char *done = calloc((size_t)nb, 1);
+  for (int b = 0; b < nb; b++) remaining[bci[b]]++;
+  int left = nb;
+  while (left > 0) {
+    int progress = 0;
+    for (int b = 0; b < nb; b++) {
+      if (done[b]) continue;
+      int ready = 1;
+      /* this class's earlier bodies first (the definition before a reopening) */
+      for (int b2 = 0; b2 < b && ready; b2++)
+        if (!done[b2] && bci[b2] == bci[b]) ready = 0;
+      int mods[64];
+      int nm = ready ? body_included_mods(c, bnode[b], mods, 64) : 0;
+      for (int m = 0; m < nm && ready; m++)
+        if (mods[m] != bci[b] && remaining[mods[m]] > 0) ready = 0;
+      if (!ready) continue;
+      process_include_body(c, bci[b], bnode[b]);
+      done[b] = 1; remaining[bci[b]]--; left--; progress = 1;
+    }
+    if (!progress) {   /* a cycle: take the first body left, in source order */
+      for (int b = 0; b < nb; b++) {
+        if (done[b]) continue;
+        process_include_body(c, bci[b], bnode[b]);
+        done[b] = 1; remaining[bci[b]]--; left--;
+        break;
+      }
+    }
+  }
+  free(bci); free(bnode); free(remaining); free(done);
   if (g_inc_did_clone) register_locals(c);
 }
 
