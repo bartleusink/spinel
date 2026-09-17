@@ -115,6 +115,40 @@ int desugar_builtin_class_var_recv(Compiler *c) {
   return changed;
 }
 
+/* A bare `new(...)` in a class body (`MAP = { 0 => new(0) }`, `ONE = new(1)`)
+   is a call on the class itself, which is the implicit self there. Nothing
+   resolved it: the constant it initialised typed unknown and was dropped,
+   with a warning that said the constant was defined nowhere (#4515). Give
+   it the class as its receiver, the way the body's own methods reach it
+   (`K.new(0)`). A method body is left alone: bare `new` inside a class
+   method already constructs the emitting class (codegen), and inside an
+   instance method it is CRuby's NameError. */
+int desugar_class_body_bare_new(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !sp_streq(nm, "new")) continue;
+    if (nt_ref(nt, id, "receiver") >= 0) continue;
+    if (id >= c->node_cap) continue;
+    int cid = c->node_cbody[id];
+    if (cid < 0 || cid >= c->nclasses) continue;
+    Scope *sc = comp_scope_of(c, id);
+    if (sc && sc->name) continue;   /* inside a def: not the body */
+    const char *cn = c->classes[cid].name;
+    if (!cn || !*cn) continue;
+    int cr = nt_new_node(nt, "ConstantReadNode");
+    if (cr < 0) continue;
+    nt_node_set_str(nt, cr, "name", cn);
+    comp_grow_node_arrays(c);
+    c->nscope[cr] = c->nscope[id];
+    c->node_cbody[cr] = cid;
+    nt_node_set_ref(nt, id, "receiver", cr);
+    changed = 1;
+  }
+  return changed;
+}
+
 /* Proc#>> / #<< with a Method operand: wrap the Method side in #to_proc at the
    AST, so composition always runs proc-to-proc. The to_proc emission builds a
    real trampoline proc that publishes its boxed result through the return

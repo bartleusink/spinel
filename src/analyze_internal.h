@@ -272,6 +272,7 @@ int desugar_public_method(Compiler *c);
 int desugar_class_eval_value(Compiler *c);
 int desugar_instance_eval_builtin(Compiler *c);
 int desugar_builtin_class_var_recv(Compiler *c);
+int desugar_class_body_bare_new(Compiler *c);
 int desugar_compose_method_operand(Compiler *c);
 int desugar_method_curry(Compiler *c);
 int desugar_curry_arity_to_int(Compiler *c);
