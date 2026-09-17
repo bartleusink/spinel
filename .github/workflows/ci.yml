@@ -138,3 +138,41 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats
+
+  # A 32-bit target. sp_int is the pointer width (lib/sp_types.h), so a
+  # -m32 build is the one place the runtime's and the emitters' word-size
+  # assumptions are exercised: a `1 << 40` that is UB there, a `%d` fed a
+  # long long, a 16GB slab reservation, a literal past the target's Integer.
+  # It is also the rehearsal for wasm32. The corpus only: the C-side legs
+  # (the CRuby extension test, the rbs tooling) have no 32-bit toolchain to
+  # build against, and a test that assumes a 64-bit Integer says
+  # `# spinel: int64` in its first line and is filtered out (Makefile,
+  # SPINEL_INT_BITS). Every generated program links -lcrypt, hence the
+  # i386 libcrypt; gcc-multilib brings the 32-bit libc and libgcc.
+  linux32:
+    name: ubuntu-latest / gcc -m32
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc -m32
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Install the 32-bit toolchain
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libc6-dev-i386 libcrypt-dev:i386
+
+      - name: Fetch libprism sources
+        run: make deps
+
+      - name: Build (parse + regexp + spinelc), 32-bit
+        run: make -j$(getconf _NPROCESSORS_ONLN) all
+
+      - name: Run the test corpus as 32-bit programs
+        run: make -j$(getconf _NPROCESSORS_ONLN) test-corpus OPT=-O1
