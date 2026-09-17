@@ -7118,26 +7118,22 @@ else {
     LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
     TyKind t = lv ? lv->type : TY_UNKNOWN;
     const char *en = rename_local(nm);
+    char lhs[300]; snprintf(lhs, sizeof lhs, "lv_%s", en);
+    char cond[400];
     if (t == TY_POLY) {
-      emit_indent(b, indent);
-      buf_printf(b, "if (%ssp_poly_truthy(lv_%s)) lv_%s = ", is_or ? "!" : "", en, en);
-      emit_boxed(c, v, b); buf_puts(b, ";\n");
+      snprintf(cond, sizeof cond, "%ssp_poly_truthy(lv_%s)", is_or ? "!" : "", en);
+      emit_orw_guard(c, v, 1, cond, lhs, 0, indent, b);
     }
     else if (t == TY_BOOL) {
-      emit_indent(b, indent);
-      buf_printf(b, "if (%slv_%s) lv_%s = ", is_or ? "!" : "", en, en);
-      emit_expr(c, v, b); buf_puts(b, ";\n");
+      snprintf(cond, sizeof cond, "%slv_%s", is_or ? "!" : "", en);
+      emit_orw_guard(c, v, 0, cond, lhs, 0, indent, b);
     }
     else if (t == TY_SYMBOL) {
-      emit_indent(b, indent);
       /* nilable symbol: (sp_sym)-1 is the nil sentinel */
-      buf_printf(b, "if (lv_%s %s= (sp_sym)-1) lv_%s = ", en, is_or ? "=" : "!", en);
-      emit_expr(c, v, b); buf_puts(b, ";\n");
+      snprintf(cond, sizeof cond, "lv_%s %s= (sp_sym)-1", en, is_or ? "=" : "!");
+      emit_orw_guard(c, v, 0, cond, lhs, 0, indent, b);
     }
-    else if (!is_or) {  /* a &&= v on an always-truthy var: always assign */
-      emit_indent(b, indent);
-      buf_printf(b, "lv_%s = ", en); emit_expr(c, v, b); buf_puts(b, ";\n");
-    }
+    else if (!is_or) emit_orw_guard(c, v, 0, NULL, lhs, 0, indent, b);   /* a &&= v on an always-truthy var: always assign */
     else {
       /* `x ||= v` on a slot that can hold nil: test it. Only a slot with no
          nil representation at all is the no-op this used to assume for every
@@ -7189,47 +7185,42 @@ else {
       snprintf(ref2, sizeof ref2, "civ_Toplevel_%s", nm + 1);
     else
       snprintf(ref2, sizeof ref2, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
-    if (ivt2 == TY_POLY) {
-      emit_indent(b, indent);
-      buf_printf(b, "if (%ssp_poly_truthy(%s)) %s = ", is_or ? "!" : "", ref2, ref2);
-      emit_boxed(c, v, b); buf_puts(b, ";\n");
+    /* The RHS is rendered with its setup captured and spliced inside the
+       guard, so a composite RHS (a hash literal's fills, a block-taking
+       call's loop) runs only when the assignment is taken; see the
+       expression form in codegen_expr.c (#4513). */
+    Buf vpre; memset(&vpre, 0, sizeof vpre);
+    Buf vval; memset(&vval, 0, sizeof vval);
+    char cond2[400]; cond2[0] = 0;
+    int emitted_lit = 0;
+    {
+      Buf *saved_pre = g_pre; g_pre = &vpre;
+      if (ivt2 == TY_POLY) emit_boxed(c, v, &vval);
+      else if (ty_is_object(ivt2) || ty_is_array(ivt2) || ty_is_hash(ivt2) ||
+               ivt2 == TY_FIBER || ivt2 == TY_THREAD || ivt2 == TY_QUEUE || ivt2 == TY_MUTEX || ivt2 == TY_CONDVAR || ivt2 == TY_PROC || ivt2 == TY_IO ||
+               ivt2 == TY_MATCHDATA || ivt2 == TY_EXCEPTION || ivt2 == TY_REGEX) {
+        emitted_lit = emit_empty_literal_as(c, v, ivt2, &vval);
+        if (!emitted_lit) emit_expr(c, v, &vval);
+      }
+      else emit_expr(c, v, &vval);
+      g_pre = saved_pre;
     }
-    else if (ivt2 == TY_BOOL) {
-      emit_indent(b, indent);
-      buf_printf(b, "if (%s%s) %s = ", is_or ? "!" : "", ref2, ref2);
-      emit_expr(c, v, b); buf_puts(b, ";\n");
-    }
-    else if (ivt2 == TY_INT) {
-      emit_indent(b, indent);
-      if (is_or) buf_printf(b, "if (%s == SP_INT_NIL) %s = ", ref2, ref2);
-      else       buf_printf(b, "if (%s != SP_INT_NIL) %s = ", ref2, ref2);
-      emit_expr(c, v, b); buf_puts(b, ";\n");
-    }
-    else if (ivt2 == TY_SYMBOL) {
-      emit_indent(b, indent);
-      /* nilable symbol: (sp_sym)-1 is the nil sentinel */
-      if (is_or) buf_printf(b, "if (%s == (sp_sym)-1) %s = ", ref2, ref2);
-      else       buf_printf(b, "if (%s != (sp_sym)-1) %s = ", ref2, ref2);
-      emit_expr(c, v, b); buf_puts(b, ";\n");
-    }
-    else if (ivt2 == TY_STRING) {
-      emit_indent(b, indent);
-      if (is_or) buf_printf(b, "if (!%s) %s = ", ref2, ref2);
-      else       buf_printf(b, "if (%s) %s = ", ref2, ref2);
-      emit_expr(c, v, b); buf_puts(b, ";\n");
-    }
+    if (ivt2 == TY_POLY) snprintf(cond2, sizeof cond2, "%ssp_poly_truthy(%s)", is_or ? "!" : "", ref2);
+    else if (ivt2 == TY_BOOL || ivt2 == TY_STRING) snprintf(cond2, sizeof cond2, "%s%s", is_or ? "!" : "", ref2);
+    else if (ivt2 == TY_INT) snprintf(cond2, sizeof cond2, "%s %s= SP_INT_NIL", ref2, is_or ? "=" : "!");
+    else if (ivt2 == TY_SYMBOL) snprintf(cond2, sizeof cond2, "%s %s= (sp_sym)-1", ref2, is_or ? "=" : "!");   /* nilable symbol: (sp_sym)-1 is the nil sentinel */
     /* a pointer-backed ivar (fiber/proc/object/array/hash/...) reads falsy
        when NULL, so `@x ||= v` is `if (!@x) @x = v` (e.g. PPU's
        `@fiber ||= Fiber.new { ... }`). Without this the init was dropped. */
     else if (ty_is_object(ivt2) || ty_is_array(ivt2) || ty_is_hash(ivt2) ||
              ivt2 == TY_FIBER || ivt2 == TY_THREAD || ivt2 == TY_QUEUE || ivt2 == TY_MUTEX || ivt2 == TY_CONDVAR || ivt2 == TY_PROC || ivt2 == TY_IO ||
-             
-             ivt2 == TY_MATCHDATA || ivt2 == TY_EXCEPTION || ivt2 == TY_REGEX) {
+             ivt2 == TY_MATCHDATA || ivt2 == TY_EXCEPTION || ivt2 == TY_REGEX)
+      snprintf(cond2, sizeof cond2, "%s%s", is_or ? "!" : "", ref2);
+    if (cond2[0]) {
       emit_indent(b, indent);
-      if (is_or) buf_printf(b, "if (!%s) %s = ", ref2, ref2);
-      else       buf_printf(b, "if (%s) %s = ", ref2, ref2);
-      if (!emit_empty_literal_as(c, v, ivt2, b)) emit_expr(c, v, b);
-      buf_puts(b, ";\n");
+      buf_printf(b, "if (%s) { ", cond2);
+      if (vpre.p) buf_puts(b, vpre.p);
+      buf_printf(b, "%s = %s; }\n", ref2, vval.p ? vval.p : "");
     }
     else if (!is_or) {
       emit_indent(b, indent);
@@ -7266,25 +7257,27 @@ else {
     emit_indent(b, indent);
     buf_puts(b, "{ ");
     emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+    char lhs[300], cond[400];
     if (ivt == TY_POLY) {
-      buf_printf(b, "if (%ssp_poly_truthy(((sp_%s *)_t%d.v.p)->iv_%s)) ((sp_%s *)_t%d.v.p)->iv_%s = ",
-                 is_or ? "!" : "", c->classes[class_id].c_name, tr, attr,
-                 c->classes[class_id].c_name, tr, attr);
-      emit_boxed(c, v, b); buf_puts(b, "; }\n");
+      snprintf(lhs, sizeof lhs, "((sp_%s *)_t%d.v.p)->iv_%s", c->classes[class_id].c_name, tr, attr);
+      snprintf(cond, sizeof cond, "%ssp_poly_truthy(%s)", is_or ? "!" : "", lhs);
+      emit_orw_guard(c, v, 1, cond, lhs, 1, 0, b); buf_puts(b, "; }\n");
     }
     else if (ivt == TY_BOOL) {
-      buf_printf(b, "if (%s_t%d->iv_%s) _t%d->iv_%s = ", is_or ? "!" : "", tr, iv_c(attr), tr, iv_c(attr));
-      emit_expr(c, v, b); buf_puts(b, "; }\n");
+      snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
+      snprintf(cond, sizeof cond, "%s%s", is_or ? "!" : "", lhs);
+      emit_orw_guard(c, v, 0, cond, lhs, 1, 0, b); buf_puts(b, "; }\n");
     }
     else if (ivt == TY_INT) {
       /* nullable-int slot: nil is SP_INT_NIL (false does not inhabit an int
          slot) -- ||= assigns exactly when nil, &&= exactly when not. */
-      buf_printf(b, "if (_t%d->iv_%s %s SP_INT_NIL) _t%d->iv_%s = ",
-                 tr, attr, is_or ? "==" : "!=", tr, attr);
-      emit_expr(c, v, b); buf_puts(b, "; }\n");
+      snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, attr);
+      snprintf(cond, sizeof cond, "%s %s SP_INT_NIL", lhs, is_or ? "==" : "!=");
+      emit_orw_guard(c, v, 0, cond, lhs, 1, 0, b); buf_puts(b, "; }\n");
     }
     else if (!is_or) {  /* &&= on always-truthy type: always assign */
-      buf_printf(b, "_t%d->iv_%s = ", tr, iv_c(attr)); emit_expr(c, v, b); buf_puts(b, "; }\n");
+      snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
+      emit_orw_guard(c, v, 0, NULL, lhs, 1, 0, b); buf_puts(b, "; }\n");
     }
     else { buf_puts(b, "}\n"); }  /* ||= on always-truthy type: no-op, but receiver evaluated */
     return;
