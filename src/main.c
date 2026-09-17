@@ -294,6 +294,9 @@ static void usage(void) {
     "                 Forcing is worth a sixth of optcarrot's frame rate and\n"
     "                 costs up to twice the C compile time\n"
     "  --cc=CMD    C compiler (default: cc)\n"
+    "  --target=wasm32-wasi  Build a WebAssembly module for a WASI host with the\n"
+    "              wasi-sdk at $WASI_SDK (default /opt/wasi-sdk); Integer is 32-bit,\n"
+    "              and Fiber, Thread, processes and sockets are not available there\n"
     "  -e STR      Inline Ruby source (repeatable; joined with newlines)\n"
     "  --rbs DIR   Seed analyzer with RBS signatures from DIR (advisory)\n"
     "  --int-overflow=MODE  Int +/-/* overflow handling (default: raise)\n"
@@ -306,6 +309,10 @@ int main(int argc, char **argv) {
   const char *link_extra[64]; int n_link_extra = 0;
   const char *cc_cmd = "cc";
   const char *opt_level = "2";
+  /* --target=wasm32-wasi: the program is a WebAssembly module for a WASI
+     host (wasmtime, Node's WASI, a browser shim), built by the wasi-sdk's
+     clang against the runtime archive in lib/wasm32-wasi/. */
+  int target_wasi = 0;
   const char *int_overflow = "raise";
   const char *rbs_dir = NULL;
   int c_only = 0, stdout_mode = 0, run_mode = 0, dump_ast = 0;
@@ -323,6 +330,12 @@ int main(int argc, char **argv) {
     if (!strncmp(a, "--source=", 9))      { source = a + 9; i++; }
     else if (!strncmp(a, "--output=", 9)) { output = a + 9; i++; }
     else if (!strncmp(a, "--cc=", 5))     { cc_cmd = a + 5; i++; }
+    else if (!strncmp(a, "--target=", 9)) {
+      if (sp_streq(a + 9, "wasm32-wasi")) target_wasi = 1;
+      else if (sp_streq(a + 9, "native")) target_wasi = 0;
+      else { fprintf(stderr, "spinel: unknown --target %s (wasm32-wasi or native)\n", a + 9); return 1; }
+      i++;
+    }
     else if (!strncmp(a, "--rbs=", 6))    { rbs_dir = a + 6; i++; }
     else if (sp_streq(a, "--rbs"))         { if (++i < argc) rbs_dir = argv[i]; i++; }
     else if (sp_streq(a, "--disable=frozen-string-literal") ||
@@ -591,6 +604,21 @@ int main(int argc, char **argv) {
      32-bit build on a 64-bit host, `--cc='cc -m32'`), which is asked. */
   extern int sp_target_int_bits;
   int target_i386 = 0;
+  /* wasm32-wasi: the C compiler is the wasi-sdk's clang unless --cc named
+     one, found through $WASI_SDK (or WASI_SDK_PATH, the sdk's own name for
+     it), else /opt/wasi-sdk, where its installer puts it. */
+  char wasi_cc[4096];
+  if (target_wasi && sp_streq(cc_cmd, "cc")) {
+    const char *sdk = getenv("WASI_SDK");
+    if (!sdk || !*sdk) sdk = getenv("WASI_SDK_PATH");
+    if (!sdk || !*sdk) sdk = "/opt/wasi-sdk";
+    snprintf(wasi_cc, sizeof wasi_cc, "%s/bin/clang", sdk);
+    if (!file_exists(wasi_cc)) {
+      fprintf(stderr, "spinel: --target=wasm32-wasi needs the wasi-sdk: %s is not there (set WASI_SDK to where it is)\n", wasi_cc);
+      return 1;
+    }
+    cc_cmd = wasi_cc;
+  }
   /* A 32-bit spinel on a 64-bit host (`make CC='cc -m32'`) ships a 32-bit
      runtime archive beside itself, and the default `cc` there is 64-bit: the
      program is told -m32, so the toolchain it saw is the one it uses. */
@@ -742,6 +770,23 @@ int main(int argc, char **argv) {
   int fiber_frame_guard = strstr(csrc, "/* SPINEL_FIBER_FRAME_GUARD */") != NULL;
   const char *rt_lib = uses_threads ? "libspinel_rt_mt.a" : "libspinel_rt.a";
   free(csrc);
+  /* wasm has no threads without SharedArrayBuffer and no stack switching
+     without asyncify: the runtime archive there is the single-threaded one,
+     and a program that reaches for Thread is refused here, where the reason
+     can be said, rather than at the link. */
+  if (target_wasi) {
+    if (uses_threads) {
+      fprintf(stderr, "spinel: Thread, Mutex, Queue and ConditionVariable are not available on wasm32-wasi\n");
+      if (c_is_temp) remove(c_path);
+      return 1;
+    }
+    rt_lib = "wasm32-wasi/libspinel_rt.a";
+    if (run_mode) {
+      fprintf(stderr, "spinel: -E cannot run a wasm32-wasi module; build it and run it with wasmtime\n");
+      if (c_is_temp) remove(c_path);
+      return 1;
+    }
+  }
 
   /* Output binary path: -E uses a temp so the cwd stays clean. */
   char bin_path[4096];
@@ -753,7 +798,7 @@ int main(int argc, char **argv) {
     bin_is_temp = 1;
   }
   else {
-    snprintf(bin_path, sizeof bin_path, "%s%s", output ? output : basename, output ? "" : EXE_SUFFIX);
+    snprintf(bin_path, sizeof bin_path, "%s%s", output ? output : basename, output ? "" : target_wasi ? ".wasm" : EXE_SUFFIX);
   }
 
   Str cmd = {0};
@@ -771,7 +816,7 @@ int main(int argc, char **argv) {
      time_t and file offsets, and SSE arithmetic on i386 (the x87 unit rounds
      every intermediate at 80 bits, and 3.7.round(1) came out 3.8). */
   if (cc_width_flag[0]) bi_put(&bi, "cflag", "-m32");
-  if (sp_target_int_bits == 32) {
+  if (sp_target_int_bits == 32 && !target_wasi) {
     s_add(&cmd, "-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 ");
     bi_put(&bi, "define", "-D_TIME_BITS=64"); bi_put(&bi, "define", "-D_FILE_OFFSET_BITS=64");
     if (target_i386) { s_add(&cmd, "-msse2 -mfpmath=sse "); bi_put(&bi, "cflag", "-msse2"); bi_put(&bi, "cflag", "-mfpmath=sse"); }
@@ -822,6 +867,21 @@ int main(int argc, char **argv) {
   snprintf(tmp, sizeof tmp, "-I\"%s\" -I\"%s%cregexp\" ", lib_dir, lib_dir, PATH_SEP); s_add(&cmd, tmp);
   bi_put(&bi, "include", lib_dir);
   { char rgi[4096]; snprintf(rgi, sizeof rgi, "%s%cregexp", lib_dir, PATH_SEP); bi_put(&bi, "include", rgi); }
+  /* wasm32-wasi: what common.mk gives the runtime archive there (see its
+     WASI_CFLAGS): lib/wasi's stand-ins for the POSIX headers wasi-libc
+     leaves out, wasi-libc's emulations of signals, mmap and process clocks,
+     and setjmp/longjmp through the standard exception-handling instructions
+     (the C compiler's default is the legacy encoding, which the engines
+     refuse). The main thread's stack is linear memory too; 8 MB is the
+     native default. */
+  if (target_wasi) {
+    snprintf(tmp, sizeof tmp, "-I\"%s%cwasi\" ", lib_dir, PATH_SEP); s_add(&cmd, tmp);
+    { char wi[4096]; snprintf(wi, sizeof wi, "%s%cwasi", lib_dir, PATH_SEP); bi_put(&bi, "include", wi); }
+    static const char *const wdefs[] = { "-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS", "-D_WASI_EMULATED_GETPID", "-D_WASI_EMULATED_MMAN" };
+    for (size_t wi = 0; wi < sizeof wdefs / sizeof wdefs[0]; wi++) { s_add(&cmd, wdefs[wi]); s_add(&cmd, " "); bi_put(&bi, "define", wdefs[wi]); }
+    static const char *const wcfl[] = { "-mllvm", "-wasm-enable-sjlj", "-mllvm", "-wasm-use-legacy-eh=false", "-Wl,-z,stack-size=8388608" };
+    for (size_t wi = 0; wi < sizeof wcfl / sizeof wcfl[0]; wi++) { s_add(&cmd, wcfl[wi]); s_add(&cmd, " "); bi_put(&bi, "cflag", wcfl[wi]); }
+  }
   /* Compile the generated TU with the same threading define as the mt runtime
      archive it links, so the per-worker SP_TLS globals (sp_gc_roots, ...) it
      references through the runtime headers get the matching thread-local
@@ -901,10 +961,12 @@ int main(int argc, char **argv) {
          non-TLS and the link fails. Prefer the `_mt` variant, falling back to
          the plain one for a package (or an installed tree) that has none. */
       char tmt[4096]; tmt[0] = 0;
-      if (uses_threads) {
+      if (uses_threads || target_wasi) {
+        /* a wasm32-wasi program links the package's wasm object, `<stem>_wasi.o`
+           (the Makefile's wasm-rt target builds the bundled ones) */
         size_t tl = strlen(t);
         if (tl > 2 && strcmp(t + tl - 2, ".o") == 0)
-          snprintf(tmt, sizeof tmt, "%.*s_mt.o", (int)(tl - 2), t);
+          snprintf(tmt, sizeof tmt, "%.*s%s.o", (int)(tl - 2), t, uses_threads ? "_mt" : "_wasi");
       }
       const char *cands[2] = { tmt[0] ? tmt : t, tmt[0] ? t : NULL };
       int placed = 0;
@@ -927,9 +989,16 @@ int main(int argc, char **argv) {
      sp_format.o pulls in sqrt/sin/cos, so libm must follow libspinel_rt.a. */
   s_add(&cmd, "-lm ");
   bi_put(&bi, "lib", "-lm");
+  if (target_wasi) {
+    /* the emulations the defines above asked for, and sjlj's runtime */
+    static const char *const wlibs[] = { "-lsetjmp", "-lwasi-emulated-signal", "-lwasi-emulated-process-clocks", "-lwasi-emulated-getpid", "-lwasi-emulated-mman" };
+    for (size_t wi = 0; wi < sizeof wlibs / sizeof wlibs[0]; wi++) { s_add(&cmd, wlibs[wi]); s_add(&cmd, " "); bi_put(&bi, "lib", wlibs[wi]); }
+  }
 #if !defined(__APPLE__)
-  s_add(&cmd, "-lcrypt ");  /* String#crypt = libc crypt(3); --as-needed drops it when unused */
-  bi_put(&bi, "lib", "-lcrypt");
+  else {
+    s_add(&cmd, "-lcrypt ");  /* String#crypt = libc crypt(3); --as-needed drops it when unused */
+    bi_put(&bi, "lib", "-lcrypt");
+  }
 #endif
   for (int li = 0; li < n_link_extra; li++)
     if (strncmp(link_extra[li], "-l", 2) == 0) {

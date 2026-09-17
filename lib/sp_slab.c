@@ -242,6 +242,15 @@ static inline void bm_store(uint64_t *p, uint64_t v) { *p = v; }
    middle; the pages are untouched until a chunk is carved, so the size costs
    nothing but address space. */
 static void sp_slab_reserve(void) {
+#ifdef __wasi__
+  /* wasm has one linear memory that only grows: nothing to reserve, trim or
+     give back. 64 MB is taken as one aligned block (an engine commits its
+     pages as they are touched); past it every block is a malloc. */
+  { size_t want = (size_t)64 << 20; void *m = NULL;
+    if (posix_memalign(&m, SP_SLAB_ARENA, want) == 0) { sp_slab_base = sp_slab_brk = (uintptr_t)m; sp_slab_cap = want; }
+    else sp_slab_on = 0;
+    return; }
+#endif
   /* 16 GB of address space on a 64-bit host; a 32-bit one has 2 to 3 GB
      for everything, so it asks for 512 MB and settles for what it gets
      (16 << 30 is 0 in its size_t, which asked for nothing and turned the

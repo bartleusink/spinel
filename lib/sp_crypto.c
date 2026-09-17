@@ -703,6 +703,9 @@ int sp_crypto_entropy(uint8_t *out, int nbytes) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     arc4random_buf(out, nbytes);
     return 1;
+#elif defined(__wasi__)
+    /* the host's entropy through WASI's random_get; there is no device */
+    return getentropy(out, (size_t)nbytes) == 0;
 #else
     /* getrandom(2) first: kernel-sourced, works where /dev/urandom is not
        even visible (chroot, minimal containers) -- the very environments

@@ -42,7 +42,7 @@ RBS_SRC      = $(wildcard $(RBS_DIR)/src/*.c) $(wildcard $(RBS_DIR)/src/util/*.c
 RBS_OBJ      = $(patsubst $(RBS_DIR)/src/%.c,build/rbs/%.o,$(RBS_SRC))
 RBS_LIB      = build/librbs.a
 
-.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
+.PHONY: all regexp wasm-rt wasm-test rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test gc-str-major-test threaded-render-test gc-locality-test test-corpus test-corpus-summary \
         gate-optcarrot clean install uninstall deps tools
@@ -519,6 +519,72 @@ $(SP_RT_MT_TSAN_LIB): $(RE_MT_TSAN_OBJ) $(addprefix build/mt-tsan/,$(addsuffix .
 	ar rcs $@ $^
 
 tsan-archive: $(SP_RT_MT_TSAN_LIB)
+
+# ---- wasm32-wasi runtime archive ----
+# `spinel --target=wasm32-wasi` links lib/wasm32-wasi/libspinel_rt.a, the
+# same sources compiled by the wasi-sdk's clang (WASI_SDK, or the sdk's own
+# WASI_SDK_PATH, else /opt/wasi-sdk) with lib/wasi's stand-ins for the POSIX
+# headers wasi-libc leaves out and the flags the driver passes the program
+# (src/main.c: the same list, so the two halves of one module agree).
+# Single-threaded only: wasm has no threads without SharedArrayBuffer. The
+# bundled packages get a `<stem>_wasi.o` each, which the driver links in
+# place of the native object; openssl is glue over a system libssl and has
+# none. Not built by default: `make wasm-rt` on demand, and only where the
+# sdk is.
+WASI_SDK ?= $(if $(WASI_SDK_PATH),$(WASI_SDK_PATH),/opt/wasi-sdk)
+WASI_CC = $(WASI_SDK)/bin/clang
+WASI_AR = $(WASI_SDK)/bin/llvm-ar
+WASI_CFLAGS = -Ilib/wasi -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN \
+              -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false
+SP_RT_WASI_LIB = lib/wasm32-wasi/libspinel_rt.a
+WASI_SHIM_HDRS = $(wildcard lib/wasi/*.h lib/wasi/sys/*.h)
+
+build/wasm32-wasi/regexp/%.o: lib/regexp/%.c lib/regexp/re_internal.h lib/regexp/re_casefold.h lib/regexp/re_ctype.h lib/regexp/re_uniprop.h
+	@mkdir -p $(@D)
+	$(WASI_CC) -c $(COPT) $(SEC_FLAGS) $(RE_CASE_FLAGS) $(WASI_CFLAGS) -Ilib/regexp $< -o $@
+
+build/wasm32-wasi/wasi/%.o: lib/wasi/%.c $(WASI_SHIM_HDRS)
+	@mkdir -p $(@D)
+	$(WASI_CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(WASI_CFLAGS) -Ilib $< -o $@
+
+build/wasm32-wasi/%.o: lib/%.c $(RT_HDRS) $(WASI_SHIM_HDRS)
+	@mkdir -p $(@D)
+	$(WASI_CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(WASI_CFLAGS) -Ilib -Ilib/regexp $< -o $@
+
+RE_WASI_OBJ = $(patsubst lib/regexp/%.c,build/wasm32-wasi/regexp/%.o,$(RE_SRC))
+WASI_SHIM_OBJ = $(patsubst lib/wasi/%.c,build/wasm32-wasi/wasi/%.o,$(wildcard lib/wasi/*.c))
+
+$(SP_RT_WASI_LIB): $(RE_WASI_OBJ) $(WASI_SHIM_OBJ) $(addprefix build/wasm32-wasi/,$(addsuffix .o,$(RT_MEMBERS)))
+	@mkdir -p $(@D)
+	rm -f $@ && $(WASI_AR) rcs $@ $^
+
+BUNDLED_NATIVE_WASI_OBJS = $(patsubst %.o,%_wasi.o,$(filter-out packages/openssl/%,$(BUNDLED_NATIVE_OBJS)))
+packages/%_wasi.o: packages/%.c lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h $(WASI_SHIM_HDRS)
+	$(WASI_CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(WASI_CFLAGS) -Ilib -I$(@D) $< -o $@
+
+wasm-rt: $(SP_RT_WASI_LIB) $(BUNDLED_NATIVE_WASI_OBJS)
+
+# A few of the corpus's programs built with --target=wasm32-wasi and run
+# under wasmtime (WASMTIME, default: the one on PATH) against their expected
+# output: exceptions (the sjlj lowering), regexps, floats, a Bignum, a
+# bundled package, a 32-bit Integer. Not in the gate: it needs the sdk and
+# an engine. `make wasm-test` where both are.
+WASMTIME ?= wasmtime
+WASM_TESTS = test/string_gsub_block.rb test/rescue_roots_under_collection.rb test/float_round_half.rb \
+             test/bignum_modulo_bit_pow.rb test/json_user_to_json_bytes.rb test/array_flatten_typed_elements.rb \
+             test/string_to_i_overflow_raises.rb
+wasm-test: $(SPINEL) wasm-rt
+	@if ! command -v $(WASMTIME) >/dev/null 2>&1; then echo "wasm-test: skipped (no $(WASMTIME))"; exit 0; fi; \
+	tmp=$$(mktemp -d /tmp/spinel-wasm.XXXXXX); ok=1; \
+	for t in $(WASM_TESTS); do \
+	  bn=$$(basename $$t .rb); \
+	  if ! WASI_SDK=$(WASI_SDK) $(SPINEL) --target=wasm32-wasi --no-line-map $$t -o $$tmp/$$bn.wasm >/dev/null 2>$$tmp/$$bn.build; then \
+	    echo "wasm-test: FAIL (build) $$t"; head -3 $$tmp/$$bn.build; ok=0; continue; fi; \
+	  $(WASMTIME) run -W max-wasm-stack=16777216 --dir=. $$tmp/$$bn.wasm >$$tmp/$$bn.out 2>$$tmp/$$bn.err </dev/null; \
+	  if cmp -s $$tmp/$$bn.out $$t.expected; then echo "wasm-test: pass $$t"; \
+	  else echo "wasm-test: FAIL $$t"; diff -u $$t.expected $$tmp/$$bn.out | head -6; head -3 $$tmp/$$bn.err; ok=0; fi; \
+	done; \
+	rm -rf $$tmp; [ $$ok -eq 1 ]
 
 regexp: $(SP_RT_LIB) $(SP_RT_MT_LIB)
 

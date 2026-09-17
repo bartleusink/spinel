@@ -26,6 +26,9 @@ Start here, then open the topic you need.
   what happens when an `Integer` crosses Spinel's machine-word boundary
   (64 bits on a 64-bit target, 32 on i386 and wasm32), and how the width
   follows the target.
+- **[wasm.md](wasm.md)** — `--target=wasm32-wasi`: the program as a
+  WebAssembly module for wasmtime, Node or a browser, what it needs (the
+  wasi-sdk, `make wasm-rt`) and what the target does without.
 - **[profiling.md](profiling.md)** — where the time goes (`--profile` plus any
   frame-pointer sampler) and where the allocations come from
   (`SPINEL_ALLOC_REPORT`, with per-site attribution).
