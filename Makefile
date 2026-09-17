@@ -2155,6 +2155,16 @@ install: all bin/spin
 	for h in lib/*.h; do install -m 644 $$h $(SPNLDIR)/lib/; done
 	install -d $(SPNLDIR)/lib/spinel
 	install -m 644 lib/spinel/runtime.h  $(SPNLDIR)/lib/spinel/
+	@# The wasm32-wasi shim headers go with the runtime headers; the target's
+	@# archive goes too when `make wasm-rt` built it (packages' _wasi.o ride
+	@# the packages copy below).
+	install -d $(SPNLDIR)/lib/wasi/sys
+	for h in lib/wasi/*.h; do install -m 644 $$h $(SPNLDIR)/lib/wasi/; done
+	for h in lib/wasi/sys/*.h; do install -m 644 $$h $(SPNLDIR)/lib/wasi/sys/; done
+	@if [ -f $(SP_RT_WASI_LIB) ]; then \
+	  install -d $(SPNLDIR)/lib/wasm32-wasi; \
+	  install -m 644 $(SP_RT_WASI_LIB) $(SPNLDIR)/lib/wasm32-wasi/; \
+	fi
 	rm -rf $(SPNLDIR)/packages
 	cp -r packages $(SPNLDIR)/packages
 	rm -rf $(SPNLDIR)/packages/*/build
