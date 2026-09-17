@@ -8423,7 +8423,10 @@ else {
          steal the last positional (which the rest already collected) (#3204).
          Mirrors the callee_param_is_declared_kwarg guard in emit_args_filled. */
       int is_declkw_d = m && callee_param_is_declared_kwarg(c, m, m->pnames[k]);
-      int _sl = arg_slot_for_param(c, m, k, pos_argc_d);
+      /* no base implementation (the method exists only in subclasses): the
+         slots are the call's positionals as given, and the parameter map is
+         each implementation's own (#4514) */
+      int _sl = m ? arg_slot_for_param(c, m, k, pos_argc_d) : (k < pos_argc_d ? k : -1);
       /* a parameter after the rest is filled from the END of the call's
          positionals -- the rest takes the middle (#3204's neighbour rule, the
          one emit_args_filled and the inline lowerings already follow) */
@@ -8503,7 +8506,11 @@ else {
            happens to share a parameter's name must not resolve to the temp */
         int pd_nren_sv = g_nren;
         if (provided >= 0) g_nren = pd_ren_base;
-        emit_arg_or_default(c, m, k, provided, &ab);
+        /* no base implementation: there is no parameter list to read a
+           default or a coercion from, so the argument is the caller's
+           expression as written; each subclass arm takes it (#4514) */
+        if (!m) { if (provided >= 0) emit_expr(c, provided, &ab); else buf_puts(&ab, "0"); }
+        else emit_arg_or_default(c, m, k, provided, &ab);
         g_nren = pd_nren_sv;
         g_self = saved_self;
         g_self_deref = saved_deref3;
