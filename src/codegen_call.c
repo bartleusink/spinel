@@ -15163,6 +15163,10 @@ static void emit_utime_arg(Compiler *c, int node, Buf *b) {
 }
 
 static void emit_call_body(Compiler *c, int id, Buf *b);
+/* nonzero while a setter call is re-entered for its own emission, its value
+   already arranged (the `def x=` value-position arm); the emission may go
+   through a copy of the node, so a depth rather than the node id */
+static int g_setter_value_inner = 0;
 
 /* Every String a call's operands convert to is declared in a rooted temp in
    front of the call, inside one statement expression, so a #to_path that
@@ -27486,6 +27490,73 @@ else {
           else buf_puts(b, "0");
           buf_puts(b, "; })");
           return;
+        }
+        /* An explicit `def x=(v)` reached as `obj.x = v` in value position:
+           the expression's value is the right-hand side, as for every
+           assignment, not what the writer's body returns. The generic call
+           answered the body (a void, or a poly), and a block ending in
+           `status.interrupt = true` handed that to a slot inference had
+           typed from the right-hand side (#4516). A side-effect-free
+           argument (a literal, a variable) is re-emitted after the call; any
+           other is bound once to a temporary local that the call reads. */
+        if (argc == 1 && comp_method_in_chain(c, _arc, name, NULL) >= 0 &&
+            nt_ref(nt, id, "block") < 0 && !g_setter_value_inner &&
+            (name[0] == '_' || (name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z'))) {   /* a setter, not ==, <=, [] = */
+          const char *aty = nt_type(nt, argv[0]);
+          int simple = aty && (sp_streq(aty, "IntegerNode") || sp_streq(aty, "FloatNode") ||
+                               sp_streq(aty, "TrueNode") || sp_streq(aty, "FalseNode") ||
+                               sp_streq(aty, "NilNode") || sp_streq(aty, "SymbolNode") ||
+                               sp_streq(aty, "StringNode") || sp_streq(aty, "LocalVariableReadNode") ||
+                               sp_streq(aty, "InstanceVariableReadNode") || sp_streq(aty, "SelfNode"));
+          TyKind at = comp_ntype(c, argv[0]);
+          if (simple) {
+            buf_puts(b, "({ (void)(");
+            g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+            buf_puts(b, "); ");
+            emit_expr(c, argv[0], b);
+            buf_puts(b, "; })");
+            return;
+          }
+          if (at != TY_UNKNOWN && at != TY_VOID) {
+            Scope *esc = comp_scope_of(c, id);
+            if (esc) {
+              char svn[32]; snprintf(svn, sizeof svn, "__sv%d", ++g_tmp);
+              LocalVar *lv = scope_local_intern(esc, svn);
+              lv->type = at;
+              int rd = nt_new_node((NodeTable *)nt, "LocalVariableReadNode");
+              nt_node_set_str((NodeTable *)nt, rd, "name", svn);
+              comp_grow_node_arrays(c);
+              c->nscope[rd] = c->nscope[id];
+              c->ntype[rd] = at;
+              int saved0 = argv[0];
+              int argsn = nt_ref(nt, id, "arguments");
+              int one[1] = { rd };
+              /* the local is declared in the prelude, ahead of whatever the
+                 call's own emission hoists there (its arguments included) */
+              Buf *decl = g_pre ? g_pre : b;
+              /* the argument's own prelude (a block-taking call's loop) goes
+                 ahead of the declaration, not into the middle of it */
+              Buf apre; memset(&apre, 0, sizeof apre);
+              Buf aval; memset(&aval, 0, sizeof aval);
+              { Buf *sv_pre = g_pre; g_pre = &apre; emit_expr(c, saved0, &aval); g_pre = sv_pre; }
+              if (!g_pre) buf_puts(b, "({ ");
+              if (apre.p) buf_puts(decl, apre.p);
+              if (g_pre) emit_indent(g_pre, g_indent);
+              emit_ctype(c, at, decl); buf_printf(decl, " lv_%s = %s; ", svn, aval.p ? aval.p : "0");
+              free(apre.p); free(aval.p);
+              if (needs_root(at) && !comp_ty_value_obj(c, at)) buf_printf(decl, "SP_GC_ROOT(lv_%s); ", svn);
+              else if (at == TY_POLY) buf_printf(decl, "SP_GC_ROOT_RBVAL(lv_%s); ", svn);
+              if (g_pre) { buf_puts(g_pre, "\n"); buf_puts(b, "({ "); }
+              nt_node_set_arr((NodeTable *)nt, argsn, "arguments", one, 1);
+              buf_puts(b, "(void)(");
+              g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+              buf_puts(b, "); ");
+              int back[1] = { saved0 };
+              nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
+              buf_printf(b, "lv_%s; })", svn);
+              return;
+            }
+          }
         }
       }
     }
