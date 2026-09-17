@@ -26,9 +26,13 @@
    `require "strscan"` appears. Compiles against the stable package ABI. */
 #include "spinel/runtime.h"
 
-/* Forward decl mirrors lib/regexp/re_internal.h's public API. */
+/* Forward decl mirrors lib/regexp/re_internal.h's public API. The last
+   parameter says whether the subject is a binary (byte) string; it was
+   missing here, so the engine read it from wherever the seventh argument
+   register or stack slot happened to point (wasm-ld's signature check is
+   what said so). A scanner's subject is scanned as text. */
 typedef struct mrb_regexp_pattern mrb_regexp_pattern;
-extern int re_exec(const mrb_regexp_pattern *pat, const char *str, int64_t len, int64_t start, int *captures, int captures_size);
+extern int re_exec(const mrb_regexp_pattern *pat, const char *str, int64_t len, int64_t start, int *captures, int captures_size, int binary);
 
 /* The scanner struct lives in spinel's GC heap. `source` /
    `matched` are GC-tracked strings; the scan function below
@@ -98,7 +102,7 @@ static void sc_shift_caps(int *caps, int ncap, int64_t pos) {
 /* Anchored match: succeed only when the match starts exactly at the scan
    pointer. Returns matched length, or -1. */
 static int64_t sc_match_at_pos(const mrb_regexp_pattern *pat, const char *str, int64_t slen, int64_t pos, int *caps, int *ncap_out) {
-  int n = re_exec(pat, str + pos, slen - pos, 0, caps, SP_SS_MAXCAP);
+  int n = re_exec(pat, str + pos, slen - pos, 0, caps, SP_SS_MAXCAP, 0);
   *ncap_out = sc_clamp_ncaps(n);
   if (n <= 0 || caps[0] != 0) { *ncap_out = 0; return -1; }
   sc_shift_caps(caps, *ncap_out, pos);
@@ -108,7 +112,7 @@ static int64_t sc_match_at_pos(const mrb_regexp_pattern *pat, const char *str, i
 /* Forward-search match: returns the absolute offset of the first match at or
    after pos, and writes matched length to *mlen. -1 on miss. */
 static int64_t sc_match_forward(const mrb_regexp_pattern *pat, const char *str, int64_t slen, int64_t pos, int64_t *mlen, int *caps, int *ncap_out) {
-  int n = re_exec(pat, str + pos, slen - pos, 0, caps, SP_SS_MAXCAP);
+  int n = re_exec(pat, str + pos, slen - pos, 0, caps, SP_SS_MAXCAP, 0);
   *ncap_out = sc_clamp_ncaps(n);
   if (n <= 0 || caps[0] < 0) { *ncap_out = 0; return -1; }
   sc_shift_caps(caps, *ncap_out, pos);
