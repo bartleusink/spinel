@@ -40,6 +40,7 @@ sp_float sp_complex_abs2(sp_Complex a);
 sp_bool sp_complex_eq(sp_Complex a, sp_Complex b);
 
 sp_Rational sp_rational_new(sp_int n, sp_int d);
+sp_Rational sp_rational_new_i64(int64_t n, int64_t d);   /* reduced before it is narrowed to sp_int: Time#to_r on a 32-bit sp_int */
 sp_Rational sp_str_to_r(const char *s);
 sp_Rational sp_str_to_r_strict(const char *s);   /* Kernel#Rational(String) */
 /* Kernel's `exception: false`: while set, an unparseable string sets

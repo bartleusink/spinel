@@ -769,7 +769,7 @@ static sp_Object *sp_Object_new(void){return(sp_Object*)sp_gc_alloc(sizeof(sp_Ob
    matching CRuby's infinite two's-complement view). */
 static inline sp_int sp_int_bit(sp_int n, sp_int i) {
   if (i < 0) return 0;
-  if (i >= 64) return n < 0 ? 1 : 0;
+  if (i >= (sp_int)(sizeof(sp_int) * 8)) return n < 0 ? 1 : 0;
   return (n >> i) & 1;
 }
 /* sp_FloatArray lives in sp_array.h (hot core inline) + lib/sp_array.c
@@ -1497,15 +1497,18 @@ sp_Bigint *sp_bigint_from_le_bytes(int negative, const unsigned char *bytes, siz
    past the word width truly overflows to a Bignum in Ruby; int mode can't hold
    it, so it saturates to 0 -- the Bignum-promotion path handles the real case.) */
 static inline sp_int sp_int_shl(sp_int a, sp_int n) {
-  if (n < 0) { sp_int s = -n; return s >= 64 ? (a < 0 ? -1 : 0) : (a >> s); }
+  /* the word's width, not 64: a 32-bit sp_int shifted by 32 or more is C UB,
+     and read as 0 here where Ruby has a Bignum (or the overflow raise) */
+  const sp_int w = (sp_int)(sizeof(sp_int) * 8);
+  if (n < 0) { sp_int s = -n; return s >= w ? (a < 0 ? -1 : 0) : (a >> s); }
 #ifdef SP_INT_OVERFLOW_MODE_WRAP
-  return n >= 64 ? 0 : (sp_int)((uintptr_t)a << n);
+  return n >= w ? 0 : (sp_int)((uintptr_t)a << n);
 #else
   /* Ruby promotes to Bignum here; under raise mode that is an overflow, and a
      result of SP_INT_NIL (INTPTR_MIN) is unrepresentable even when the shift
      itself fits (it aliases the tagged nil sentinel). Shift in unsigned space:
      a signed shift into the sign bit is C UB. */
-  if (n >= 64) {
+  if (n >= w) {
     if (a != 0) sp_raise_cls("RangeError", "integer overflow in <<");
     return 0;
   }
@@ -1515,8 +1518,9 @@ static inline sp_int sp_int_shl(sp_int a, sp_int n) {
 #endif
 }
 static inline sp_int sp_int_shr(sp_int a, sp_int n) {
-  if (n < 0) { sp_int s = -n; return s >= 64 ? 0 : (a << s); }
-  return n >= 64 ? (a < 0 ? -1 : 0) : (a >> n);
+  const sp_int w = (sp_int)(sizeof(sp_int) * 8);
+  if (n < 0) { sp_int s = -n; return s >= w ? 0 : (a << s); }
+  return n >= w ? (a < 0 ? -1 : 0) : (a >> n);
 }
 /* A class known only by name (an exception's cls_name -- the id table covers
    only a few exception classes, but the name is complete for all of them,
@@ -2442,7 +2446,7 @@ static SP_INLINE sp_int sp_poly_to_i(sp_RbVal v) {
 }
 static SP_NOINLINE sp_int sp_poly_arg_int_obj(sp_RbVal v);   /* the object arm, below */
 static SP_NOINLINE sp_int sp_poly_to_i_cold(sp_RbVal v) {
-  if (v.tag == SP_TAG_BIGINT) return (sp_int)sp_bigint_to_int((sp_Bigint *)v.v.p);
+  if (v.tag == SP_TAG_BIGINT) return sp_i64_to_int(sp_bigint_to_int((sp_Bigint *)v.v.p));   /* a 32-bit sp_int refuses what does not fit (RangeError); 64-bit keeps its wrap */
   if (v.tag == SP_TAG_STR) return (sp_int)strtoll(v.v.s ? v.v.s : sp_str_empty, NULL, 10);
   if (v.tag == SP_TAG_BOOL) return v.v.b ? 1 : 0;
   /* a boxed Rational truncates toward zero, as Rational#to_i does */
@@ -3917,8 +3921,9 @@ static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
     sp_int x = sp_poly_to_i(a), n = sp_poly_to_i(b);
 #ifdef SP_INT_OVERFLOW_MODE_PROMOTE
     if (n >= 0 && x != 0) {
-      sp_int r = n >= 64 ? 0 : (sp_int)((uintptr_t)x << n);
-      if (n >= 64 || (r >> n) != x || r == SP_INT_NIL)
+      const sp_int w = (sp_int)(sizeof(sp_int) * 8);
+      sp_int r = n >= w ? 0 : (sp_int)((uintptr_t)x << n);
+      if (n >= w || (r >> n) != x || r == SP_INT_NIL)
         return sp_box_bigint(sp_bigint_shl(sp_bigint_new_int(x), n));
     }
 #endif
@@ -5894,7 +5899,7 @@ static void sp_SymPolyHash_scan(void*p){sp_SymPolyHash*h=(sp_SymPolyHash*)p;for(
 static sp_SymPolyHash*sp_SymPolyHash_new(void){sp_SymPolyHash*h=(sp_SymPolyHash*)sp_gc_alloc(sizeof(sp_SymPolyHash),sp_SymPolyHash_fin,sp_SymPolyHash_scan);h->cap=16;h->mask=15;h->keys=(sp_sym*)sp_pl_alloc(sizeof(sp_sym)*(size_t)h->cap);for(sp_int i=0;i<h->cap;i++)h->keys[i]=-1;h->vals=(sp_RbVal*)sp_pl_zalloc((size_t)h->cap*sizeof(sp_RbVal));h->order=(sp_sym*)sp_pl_alloc(sizeof(sp_sym)*(size_t)h->cap);h->len=0;h->default_v=sp_box_nil();return h;}
 static sp_SymPolyHash*sp_SymPolyHash_new_with_default(sp_RbVal d){SP_GC_ROOT_RBVAL(d);sp_SymPolyHash*h=sp_SymPolyHash_new();h->default_v=d;return h;}
 static sp_SymPolyHash*sp_SymPolyHash_new_dproc(sp_sympoly_dproc_t fn,void*self){sp_SymPolyHash*h=sp_SymPolyHash_new();h->dproc=fn;h->dproc_self=self;return h;}
-static void sp_SymPolyHash_grow(sp_SymPolyHash*h){ sp_gc_wb((void*)h);sp_int oc=h->cap;sp_sym*ok=h->keys;sp_RbVal*ov=h->vals;h->cap*=2;if(h->cap<=0||h->cap>((sp_int)1<<40))sp_oom_die();h->mask=h->cap-1;h->keys=(sp_sym*)sp_pl_alloc(sizeof(sp_sym)*(size_t)h->cap);for(sp_int i=0;i<h->cap;i++)h->keys[i]=-1;h->vals=(sp_RbVal*)sp_pl_zalloc((size_t)h->cap*sizeof(sp_RbVal));h->order=(sp_sym*)sp_pl_realloc(h->order,sizeof(sp_sym)*(size_t)h->cap);h->len=0;for(sp_int i=0;i<oc;i++){if(ok[i]>=0){sp_int idx=(sp_int)(((sp_int)ok[i])&h->mask);while(h->keys[idx]>=0)idx=(idx+1)&h->mask;h->keys[idx]=ok[i];h->vals[idx]=ov[i];h->len++;}}sp_pl_free(ok);sp_pl_free(ov);}
+static void sp_SymPolyHash_grow(sp_SymPolyHash*h){ sp_gc_wb((void*)h);sp_int oc=h->cap;sp_sym*ok=h->keys;sp_RbVal*ov=h->vals;h->cap*=2;if(h->cap<=0||h->cap>(INTPTR_MAX>>8))sp_oom_die();   /* `1 << 40` is 0 in a 32-bit sp_int, which refused every growth */h->mask=h->cap-1;h->keys=(sp_sym*)sp_pl_alloc(sizeof(sp_sym)*(size_t)h->cap);for(sp_int i=0;i<h->cap;i++)h->keys[i]=-1;h->vals=(sp_RbVal*)sp_pl_zalloc((size_t)h->cap*sizeof(sp_RbVal));h->order=(sp_sym*)sp_pl_realloc(h->order,sizeof(sp_sym)*(size_t)h->cap);h->len=0;for(sp_int i=0;i<oc;i++){if(ok[i]>=0){sp_int idx=(sp_int)(((sp_int)ok[i])&h->mask);while(h->keys[idx]>=0)idx=(idx+1)&h->mask;h->keys[idx]=ok[i];h->vals[idx]=ov[i];h->len++;}}sp_pl_free(ok);sp_pl_free(ov);}
 /* miss path split out cold+noinline: the dproc check must not sit inline in
    _get -- the extra branch/code pushed the hot inlined lookup over the inline
    threshold and cost optcarrot ~35% fps (same lesson as the string-hash cache:
@@ -6090,9 +6095,11 @@ static const char*sp_SymPolyHash_inspect(sp_SymPolyHash*h){return h?sp_inspect_c
    (floor semantics via arithmetic shift), a count past the word raises
    instead of C undefined behavior (#2423). */
 static inline sp_int sp_int_shl_ck(sp_int a, sp_int b) {
-  if ((uint64_t)b < 63u) return a << b;   /* the hot, predictable path */
-  if (b < 0) return (b <= -63) ? (a < 0 ? -1 : 0) : (a >> (-b));
-  sp_raise_cls("RangeError", "shift width too big for a 64-bit Integer (use --int-overflow=promote)");
+  const sp_int w = (sp_int)(sizeof(sp_int) * 8);
+  if ((uintptr_t)b < (uintptr_t)(w - 1)) return a << b;   /* the hot, predictable path */
+  if (b < 0) return (b <= -(w - 1)) ? (a < 0 ? -1 : 0) : (a >> (-b));
+  sp_raise_cls("RangeError", sizeof(sp_int) == 8 ? "shift width too big for a 64-bit Integer (use --int-overflow=promote)"
+                                                 : "shift width too big for a 32-bit Integer (use --int-overflow=promote)");
   return 0;
 }
 static inline sp_int sp_int_shr_ck(sp_int a, sp_int b) {
@@ -8317,8 +8324,7 @@ static sp_RbVal sp_poly_to_r_m(sp_RbVal v) {
      answers; a Time read out of a container reached here (#3866). */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p) {
     sp_Time *t = (sp_Time *)v.v.p;
-    return sp_box_rational(sp_rational_new((sp_int)t->tv_sec * 1000000000 + t->tv_nsec,
-                                           1000000000));
+    return sp_box_rational(sp_rational_new_i64((int64_t)t->tv_sec * 1000000000LL + t->tv_nsec, 1000000000));
   }
   /* String#to_r reads a leading rational and answers (0/1) when there is
      none. sp_poly_to_c_m has carried the matching String arm all along; this

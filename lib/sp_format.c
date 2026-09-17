@@ -284,6 +284,11 @@ static sp_int sp_rat_fit(sp_rat_wide v) {
     sp_raise_cls("RangeError", "Rational out of sp_int range");
   return (sp_int)v;
 }
+/* A rational from a 64-bit numerator and denominator, reduced before it is
+   narrowed: Time#to_r's nanoseconds do not fit a 32-bit sp_int, its seconds
+   do (1577923200/1), and only a value that stays too wide after the
+   reduction raises. */
+sp_Rational sp_rational_new_i64(int64_t n, int64_t d);
 static sp_Rational sp_rational_new_wide(sp_rat_wide n, sp_rat_wide d) {
   if (d == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   if (d < 0) { n = -n; d = -d; }
@@ -295,6 +300,7 @@ static sp_Rational sp_rational_new_wide(sp_rat_wide n, sp_rat_wide d) {
   r.den = sp_rat_fit(d / a);
   return r;
 }
+sp_Rational sp_rational_new_i64(int64_t n, int64_t d) { return sp_rational_new_wide((sp_rat_wide)n, (sp_rat_wide)d); }
 sp_Rational sp_rational_add(sp_Rational a, sp_Rational b) {
   return sp_rational_new_wide(((sp_rat_wide)a.num * b.den) + ((sp_rat_wide)b.num * a.den),
                               (sp_rat_wide)a.den * b.den);

@@ -8,6 +8,7 @@
 */
 
 #include "re_internal.h"
+#include <stdbool.h>
 /* mruby header removed */
 #include <string.h>
 
@@ -2617,16 +2618,18 @@ intptr_t sp_re_options(void *vpat) {
 }
 /* Regexp#== / #eql? is source AND options: /ab/ and /ab/i are different
    patterns, and comparing only the source made them equal (#3631). */
-mrb_bool sp_re_eq(void *a, void *b) {
+/* declared sp_bool (a C bool) by the runtime: returned as one, not as the
+   int mrb_bool, which only reads the same in a 32-bit-wide return register */
+bool sp_re_eq(void *a, void *b) {
   if (a == b) return 1;
   if (!a || !b) return 0;
   const char *sa = sp_re_source(a), *sb = sp_re_source(b);
   if (!sa || !sb) return sa == sb;
   return strcmp(sa, sb) == 0 && sp_re_options(a) == sp_re_options(b);
 }
-mrb_bool sp_re_casefold_p(void *vpat) {
+bool sp_re_casefold_p(void *vpat) {
   mrb_regexp_pattern *pat = (mrb_regexp_pattern *)vpat;
-  return (pat && (pat->flags & RE_FLAG_IGNORECASE)) ? TRUE : FALSE;
+  return (pat && (pat->flags & RE_FLAG_IGNORECASE)) ? true : false;
 }
 /* The engine's own internal flag word, for re-compiling a copy (Regexp.new(re))
    with the source pattern's exact options preserved. */
@@ -2637,7 +2640,7 @@ uint32_t sp_re_raw_flags(void *vpat) {
 /* Translate the public Regexp option bits (IGNORECASE=1, EXTENDED=2,
    MULTILINE=4) that Regexp.new's second argument carries into the internal
    flag bits re_compile expects (#3055). */
-uint32_t sp_re_opts_to_flags(mrb_int o) {
+uint32_t sp_re_opts_to_flags(intptr_t o) {   /* the runtime's sp_int, as sp_re.h declares it */
   uint32_t f = 0;
   if (o & 1) f |= RE_FLAG_IGNORECASE;
   if (o & 2) f |= RE_FLAG_EXTENDED;

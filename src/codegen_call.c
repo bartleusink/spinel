@@ -29250,11 +29250,13 @@ else {
     const char *aty0 = nt_type(nt, argv[0]);
     int lit_shift = aty0 && sp_streq(aty0, "IntegerNode");
     long long litc = lit_shift ? nt_int(nt, argv[0], "value", 0) : 0;
-    /* `<< 63` joins the helper path: it overflows (or lands on the nil
-       sentinel INTPTR_MIN) for every nonzero receiver, so the overflow check
-       in sp_int_shl must see it. */
+    /* Every literal `<<` goes through sp_int_shl, whose overflow check is
+       the only one there is: the raw C shift below has none, and `x << 9`
+       wrapped to 0 past 2^55 (and past 2^23 on a 32-bit sp_int) in a mode
+       whose contract is to raise. A literal `>>` cannot overflow and keeps
+       the raw shift; a count outside the word joins the helper either way. */
     if (is_shift && lit_shift &&
-        (litc < 0 || litc >= 64 || (sp_streq(name, "<<") && litc >= 63))) {
+        (litc < 0 || litc >= 64 || sp_streq(name, "<<"))) {
       buf_printf(b, "sp_int_%s(", sp_streq(name, "<<") ? "shl" : "shr");
       if (rt == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, recv, b); buf_puts(b, ")"); }
       else emit_expr(c, recv, b);

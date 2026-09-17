@@ -939,6 +939,13 @@ static inline sp_RbVal sp_box_int_or_nil(sp_int v) { return v == SP_INT_NIL ? sp
 static inline sp_RbVal sp_box_float_or_nil(sp_float v) { return sp_float_is_nil(v) ? sp_box_nil() : sp_box_float(v); }
 sp_RbVal sp_unsentinel(sp_RbVal v);
 sp_RbVal sp_box_bigint(sp_Bigint *b);
+/* A 64-bit value as a Ruby Integer: the sp_int when it fits, a Bignum when
+   it does not (a checksum, an unpacked quad, a parsed literal on a 32-bit
+   sp_int). What a package answers as :any for a value that may be wide. */
+sp_RbVal sp_box_i64(int64_t v);
+/* the inverse: a boxed Integer (or Float) as a 64-bit value, a Bignum through
+   its low 64 bits, for a package parameter that may be wider than sp_int */
+int64_t sp_unbox_i64(sp_RbVal v);
 sp_RbVal sp_box_encoding(sp_Encoding e);
 sp_RbVal sp_box_nullable_str(const char *v);
 sp_RbVal sp_box_foreign_ptr(void *p);

@@ -82,7 +82,7 @@ static int sp_zlib_out_reserve(sp_zlib_out *o, size_t extra) {
   if (o->len + extra <= o->cap) return 1;
   size_t cap = o->cap ? o->cap : 4096;
   while (cap < o->len + extra) {
-    if (cap > (size_t)1 << 40) { o->err = 1; return 0; }   /* refuse to spiral */
+    if (cap > (SIZE_MAX >> 8)) { o->err = 1; return 0; }   /* refuse to spiral (`1 << 40` is 0 in a 32-bit size_t) */
     cap *= 2;
   }
   unsigned char *np = (unsigned char *)realloc(o->p, cap);
@@ -615,12 +615,14 @@ const char *sp_zlib_deflate(const char *src, sp_int level, sp_int window_bits) {
 
 /* ------------------------------------------------------------- checksum API */
 
-sp_int sp_zlib_crc32_of(const char *src, sp_int init) {SP_GC_ROOT_STR(src);
+/* the checksums are unsigned 32-bit values, past a 32-bit sp_int's range:
+   answered as a boxed Integer (a Bignum there, the plain value on 64-bit) */
+sp_RbVal sp_zlib_crc32_of(const char *src, sp_RbVal init) {SP_GC_ROOT_STR(src);
   size_t n = src ? sp_str_byte_len(src) : 0;
-  return (sp_int)sp_zlib_crc32((uint32_t)init, (const unsigned char *)src, n);
+  return sp_box_i64((int64_t)sp_zlib_crc32((uint32_t)sp_unbox_i64(init), (const unsigned char *)src, n));
 }
 
-sp_int sp_zlib_adler32_of(const char *src, sp_int init) {SP_GC_ROOT_STR(src);
+sp_RbVal sp_zlib_adler32_of(const char *src, sp_RbVal init) {SP_GC_ROOT_STR(src);
   size_t n = src ? sp_str_byte_len(src) : 0;
-  return (sp_int)sp_zlib_adler32((uint32_t)init, (const unsigned char *)src, n);
+  return sp_box_i64((int64_t)sp_zlib_adler32((uint32_t)sp_unbox_i64(init), (const unsigned char *)src, n));
 }

@@ -242,8 +242,12 @@ static inline void bm_store(uint64_t *p, uint64_t v) { *p = v; }
    middle; the pages are untouched until a chunk is carved, so the size costs
    nothing but address space. */
 static void sp_slab_reserve(void) {
-  size_t want = (size_t)16 << 30;
-  while (want >= ((size_t)256 << 20)) {
+  /* 16 GB of address space on a 64-bit host; a 32-bit one has 2 to 3 GB
+     for everything, so it asks for 512 MB and settles for what it gets
+     (16 << 30 is 0 in its size_t, which asked for nothing and turned the
+     slab off) */
+  size_t want = sizeof(void *) >= 8 ? (size_t)16 << 30 : (size_t)512 << 20;
+  while (want >= ((size_t)64 << 20)) {
     size_t len = want + SP_SLAB_ARENA;
     void *m = mmap(NULL, len, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);

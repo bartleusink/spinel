@@ -10493,7 +10493,7 @@ int emit_value_recv_call(Compiler *c, int id, Buf *b) {
     }
     else if (sp_streq(name, "to_r") && argc == 0) {
       int tt = ++g_tmp;
-      buf_printf(b, "({ sp_Time _t%d = %s; sp_rational_new((sp_int)_t%d.tv_sec * 1000000000 + _t%d.tv_nsec, 1000000000); })",
+      buf_printf(b, "({ sp_Time _t%d = %s; sp_rational_new_i64((int64_t)_t%d.tv_sec * 1000000000LL + _t%d.tv_nsec, 1000000000); })",
                  tt, r, tt, tt);
     }
     else if (sp_streq(name, "deconstruct_keys") && argc == 1) {

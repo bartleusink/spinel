@@ -944,7 +944,7 @@ sp_IntArray *sp_file_binread_bytes(const char *path) {SP_GC_ROOT_STR(path);
 sp_int sp_str_sum_bits(const char *s, sp_int bits) {
   sp_int acc = 0;
   for (const char *p = s ? s : ""; *p; p++) acc += (unsigned char)*p;
-  return (bits <= 0 || bits >= 64) ? acc : (acc & ((((sp_int)1) << bits) - 1));
+  return (bits <= 0 || bits >= (sp_int)(sizeof(sp_int) * 8)) ? acc : (acc & ((((sp_int)1) << bits) - 1));
 }
 
 const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *val, int range_form) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(val);
@@ -2927,8 +2927,9 @@ sp_IntArray*sp_int_digits(sp_int n,sp_int base){if(base<0)sp_raise_cls("Argument
 sp_int sp_int_bit_length(sp_int n){unsigned long long x=(n<0)?(unsigned long long)(~n):(unsigned long long)n;sp_int b=0;if(x>=1ULL<<32){b+=32;x>>=32;}if(x>=1ULL<<16){b+=16;x>>=16;}if(x>=1ULL<<8){b+=8;x>>=8;}if(x>=1ULL<<4){b+=4;x>>=4;}if(x>=1ULL<<2){b+=2;x>>=2;}if(x>=1ULL<<1){b+=1;x>>=1;}return b+(sp_int)x;}
 sp_int sp_int_bit_range(sp_int n, sp_int start, sp_int len) {
   sp_int shifted;
-  if (start >= 0) shifted = (start >= 64) ? (n < 0 ? -1 : 0) : (n >> start);
-  else { sp_int s = -start; shifted = (s >= 64) ? 0 : (sp_int)((uint64_t)n << s); }
+  const sp_int w = (sp_int)(sizeof(sp_int) * 8);
+  if (start >= 0) shifted = (start >= w) ? (n < 0 ? -1 : 0) : (n >> start);
+  else { sp_int s = -start; shifted = (s >= w) ? 0 : (sp_int)((uintptr_t)n << s); }
   uint64_t mask = (len <= 0) ? (len == 0 ? (uint64_t)0 : ~(uint64_t)0)
                              : (len >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << len) - 1));
   return (sp_int)((uint64_t)shifted & mask);
@@ -3145,6 +3146,16 @@ sp_RbVal sp_unsentinel(sp_RbVal v) {SP_GC_ROOT_RBVAL(v);
 /* box a sp_Bigint* into a poly slot (heterogeneous container element, or a
    promote-mode overflow result). */
 sp_RbVal sp_box_bigint(sp_Bigint *b) { sp_RbVal r; r.tag = SP_TAG_BIGINT; r.cls_id = 0; r.v.p = b; return r; }
+int64_t sp_unbox_i64(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT) return (int64_t)v.v.i;
+  if (v.tag == SP_TAG_BIGINT) return sp_bigint_to_int((sp_Bigint *)v.v.p);
+  if (v.tag == SP_TAG_FLT) return (int64_t)v.v.f;
+  return 0;
+}
+sp_RbVal sp_box_i64(int64_t v) {
+  if (v >= (int64_t)INTPTR_MIN && v <= (int64_t)INTPTR_MAX && (sp_int)v != SP_INT_NIL) return sp_box_int((sp_int)v);
+  return sp_box_bigint(sp_bigint_new_int(v));
+}
 sp_RbVal sp_box_encoding(sp_Encoding e) { sp_RbVal r; r.tag = SP_TAG_ENCODING; r.cls_id = 0; r.v.s = sp_encoding_name(e); return r; }
 sp_RbVal sp_box_nullable_str(const char *v) { return v ? sp_box_str(v) : sp_box_nil(); }
 /* An opaque foreign/FFI pointer: boxed with SP_BUILTIN_FOREIGN_PTR so the

@@ -444,7 +444,7 @@ static sp_RbVal jp_number(jrd *j) {
   if (n == 0 || n >= sizeof tmp) jp_err("invalid number");
   memcpy(tmp, start, n); tmp[n] = 0;
   if (is_float) return sp_box_float(strtod(tmp, NULL));
-  return sp_box_int((sp_int)strtoll(tmp, NULL, 10));
+  return sp_box_i64((int64_t)strtoll(tmp, NULL, 10));   /* a Bignum past a 32-bit sp_int */
 }
 static sp_RbVal jp_array(jrd *j, int depth) {
   j->p++;  /* '[' */

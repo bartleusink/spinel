@@ -58,8 +58,8 @@ module Zlib
     # heap, so an embedded NUL survives and no strlen is taken of it.
     native_func :inflate,    [:string, :int],       :string, "sp_zlib_inflate"
     native_func :deflate,    [:string, :int, :int], :string, "sp_zlib_deflate"
-    native_func :crc32,      [:string, :int],       :int,    "sp_zlib_crc32_of"
-    native_func :adler32,    [:string, :int],       :int,    "sp_zlib_adler32_of"
+    native_func :crc32,      [:string, :any],       :any,    "sp_zlib_crc32_of"
+    native_func :adler32,    [:string, :any],       :any,    "sp_zlib_adler32_of"
     native_func :last_error, [],                    :cstring, "sp_zlib_last_error"
   end
 

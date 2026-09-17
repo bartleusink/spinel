@@ -366,7 +366,8 @@ void sp_gc_hdr_flags_check(void) {
   sp_gc_hdr h; memset(&h, 0, sizeof h);
   h.marked = 0x5a5a5a5; h.old = 1; h.aged = 1;
   unsigned w = *sp_gc_hdr_flags(&h);
-  if (w != (0x5a5a5a5u | SP_GC_FL_OLD | SP_GC_FL_AGED) || sizeof(sp_gc_hdr) != 48) {
+  /* six words on either pointer width: four pointers, the size, the flags */
+  if (w != (0x5a5a5a5u | SP_GC_FL_OLD | SP_GC_FL_AGED) || sizeof(sp_gc_hdr) != 6 * sizeof(void *)) {
     fprintf(stderr, "spinel: sp_gc_hdr flag layout is not the one the parallel mark assumes (word %08x)\n", w);
     abort();
   }

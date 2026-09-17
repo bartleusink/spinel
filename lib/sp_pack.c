@@ -237,6 +237,10 @@ static const char *pk_val_name(sp_RbVal v) {
 
 int64_t sp_bigint_to_int(sp_Bigint *b);  /* wraps mod 2^64, as pack does */
 
+/* an unpacked integer is a Ruby Integer: sp_int when it fits, a Bignum
+   otherwise (a 64-bit quantity on a 32-bit sp_int), as CRuby answers */
+#define pk_box_i64 sp_box_i64
+
 static int64_t pk_poly_to_int(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT:    return v.v.i;
@@ -1102,7 +1106,7 @@ else if (spec == 'Z') {
           v = (v << 7) | (c & 0x7F);
           if (!(c & 0x80)) break;
         }
-        sp_PolyArray_push(out, sp_box_int((sp_int)v));
+        sp_PolyArray_push(out, pk_box_i64(v));
         got++;
       }
       continue;
@@ -1140,7 +1144,7 @@ else if (spec == 'Z') {
         case 'x': break;
       }
       off += fsize;
-      if (spec != 'x') sp_PolyArray_push(out, sp_box_int((sp_int)v));
+      if (spec != 'x') sp_PolyArray_push(out, pk_box_i64(v));
     }
   }
   return out;
