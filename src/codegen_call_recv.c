@@ -869,7 +869,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ const char *_t%d = ", tp2); emit_expr(c, argv[0], b);
       buf_printf(b, "; const char *_hit%d = (_t%d && ", tp2, tp2);
       emit_expr(c, recv, b);
-      buf_printf(b, ") ? strstr(", tp2); emit_expr(c, recv, b);
+      buf_puts(b, ") ? strstr("); emit_expr(c, recv, b);
       buf_printf(b, ", _t%d) : NULL;", tp2);
       if (sb_asgn) {
         buf_printf(b, " if (_hit%d) ", tp2);
@@ -11685,7 +11685,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
         int t2 = ++g_tmp;
         buf_printf(b, "({ sp_Range _t%d = ", t2); emit_expr(c, argv[0], b);
         buf_printf(b, "; (_t%d.first <= _t%d.last - _t%d.excl && _t%d.first <= _t%d.last - _t%d.excl); })",
-                   t, t2, t2, t2, t, t, t);
+                   t, t2, t2, t2, t, t);
       }
       else if (sp_streq(name, "minmax")) {
         /* a poly pair: an empty (backwards) range yields [nil, nil] (#2412) */

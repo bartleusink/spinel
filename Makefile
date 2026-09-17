@@ -2041,9 +2041,14 @@ collect-errors-test: $(SPINEL)
 	[ $$rc -ne 0 ] || { echo "collect-errors-test: FAIL (a contradicted --rbs seed was collected and then emitted anyway)"; ok=0; }; \
 	n=$$(grep -c 'seed contradicted' "$$tmp/s.err"); \
 	[ "$$n" -eq 2 ] || { echo "collect-errors-test: FAIL (collect mode reported $$n of 2 contradicted seeds)"; ok=0; }; \
-	$(SPINEL) -c --rbs "$$seed" "$$seed/main.rb" -o "$$tmp/s2.c" >"$$tmp/s2.err" 2>&1; \
+	$(SPINEL) -c --rbs "$$seed" "$$seed/main.rb" -o "$$tmp/s2.c" >"$$tmp/s2.err" 2>&1; rc=$$?; \
 	n=$$(grep -c 'seed contradicted' "$$tmp/s2.err"); \
-	[ "$$n" -eq 1 ] || { echo "collect-errors-test: FAIL (without the flag the run reported $$n contradictions instead of stopping at the first)"; ok=0; }; \
+	[ "$$n" -eq 2 ] || { echo "collect-errors-test: FAIL (without the flag the run reported $$n of 2 contradictions: every compile collects)"; ok=0; }; \
+	[ $$rc -ne 0 ] || { echo "collect-errors-test: FAIL (a contradicted seed was emitted without the flag)"; ok=0; }; \
+	$(SPINEL) "$$src" -c --no-line-map -o "$$tmp/g2.c" >"$$tmp/g2.err" 2>&1; rc=$$?; \
+	[ $$rc -ne 0 ] || { echo "collect-errors-test: FAIL (a program with a gap compiled without the flag)"; ok=0; }; \
+	[ ! -f "$$tmp/g2.c" ] || { echo "collect-errors-test: FAIL (a refused program's C was written)"; ok=0; }; \
+	grep -q 'refusal, nothing written' "$$tmp/g2.err" || { echo "collect-errors-test: FAIL (the run did not close with the refusal count)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "collect-errors-test: pass"; else exit 1; fi
 

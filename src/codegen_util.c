@@ -14,10 +14,50 @@ Buf *g_pre = NULL;
 jmp_buf g_unsup_recover;
 int g_unsup_armed = 0;
 int g_unsup_probe = 0;   /* silent emittability probe: longjmp without printing/exiting */
-int collect_mode(void) {
-  static int collect = -1;
-  if (collect < 0) collect = getenv("SP_COLLECT_ERRORS") ? 1 : 0;
-  return collect;
+/* Collection is how every compile runs: a refusal stopped the run at the
+   first one, and a program brought over from CRuby learned its gaps one
+   compile at a time. Now each unit's refusals are reported and the next
+   unit is emitted; the run still fails at the end (codegen_program), and
+   nothing is written. SP_COLLECT_ERRORS keeps its old meaning on top: the
+   gaps are dropped and the rest is emitted anyway, which is what the
+   collect-errors gate and a reduction want. */
+int collect_mode(void) { return 1; }
+int collect_emit_anyway(void) {
+  static int v = -1;
+  if (v < 0) v = getenv("SP_COLLECT_ERRORS") ? 1 : 0;
+  return v;
+}
+/* Every refusal of this run, for --emit-types and the count at the end. */
+SpDiag *g_diags = NULL;
+int g_ndiags = 0;
+static int g_diags_cap = 0;
+static void diag_record(const char *file, int line, const char *msg) {
+  if (g_ndiags == g_diags_cap) {
+    g_diags_cap = g_diags_cap ? g_diags_cap * 2 : 16;
+    g_diags = realloc(g_diags, (size_t)g_diags_cap * sizeof *g_diags);
+  }
+  g_diags[g_ndiags].file = file ? strdup(file) : NULL;
+  g_diags[g_ndiags].line = line;
+  g_diags[g_ndiags].msg = strdup(msg);
+  g_ndiags++;
+}
+/* Report one refusal and leave: back to the driver's recovery point when one
+   is armed (the unit is abandoned), else out of the process. */
+static __attribute__((noreturn)) void unsup_leave(const char *file, int line, const char *msg) {
+  diag_record(file, line, msg);
+  if (line > 0) fprintf(stderr, "spinel: %s:%d: %s\n", file, line, msg);
+  else fprintf(stderr, "spinel: %s\n", msg);
+  if (collect_mode() && g_unsup_armed) longjmp(g_unsup_recover, 1);
+  exit(1);
+}
+/* The .rb position the parser stamped on `id`, or line 0. */
+static const char *unsup_pos(Compiler *c, int id, int *line) {
+  *line = (int)nt_int(c->nt, id, "node_line", 0);
+  int fid = (int)nt_int(c->nt, id, "node_file", 0);
+  const char *file = nt_file_path(c->nt, fid);
+  if (!file || !*file) file = c->nt->source_file;
+  if (!file || !*file) file = "source.rb";
+  return file;
 }
 
 void buf_putn(Buf *b, const char *s, size_t n) {
@@ -1045,18 +1085,8 @@ const char *rename_local(const char *nm) {
    noise when the answer is "this is a documented limit". #2652 / #2667 / #2668 */
 __attribute__((noreturn)) void unsupported_feature(Compiler *c, int id, const char *msg) {
   if (g_unsup_probe) longjmp(g_unsup_recover, 1);
-  int ln = (int)nt_int(c->nt, id, "node_line", 0);
-  char pos[1200]; pos[0] = 0;
-  if (ln > 0) {
-    int fid = (int)nt_int(c->nt, id, "node_file", 0);
-    const char *file = nt_file_path(c->nt, fid);
-    if (!file || !*file) file = c->nt->source_file;
-    if (!file || !*file) file = "source.rb";
-    snprintf(pos, sizeof pos, "%s:%d: ", file, ln);
-  }
-  fprintf(stderr, "spinel: %s%s\n", pos, msg);
-  if (collect_mode() && g_unsup_armed) longjmp(g_unsup_recover, 1);
-  exit(1);
+  int ln; const char *file = unsup_pos(c, id, &ln);
+  unsup_leave(file, ln, msg);
 }
 
 __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what) {
@@ -1068,15 +1098,8 @@ __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what
      line the parser stamped (the same position the #line machinery uses), so
      the message is anchored to the .rb file instead of an opaque node id.
      Falls back to the bare form when the position wasn't stamped. */
-  int ln = (int)nt_int(c->nt, id, "node_line", 0);
-  char pos[1200]; pos[0] = 0;
-  if (ln > 0) {
-    int fid = (int)nt_int(c->nt, id, "node_file", 0);
-    const char *file = nt_file_path(c->nt, fid);
-    if (!file || !*file) file = c->nt->source_file;
-    if (!file || !*file) file = "source.rb";
-    snprintf(pos, sizeof pos, "%s:%d: ", file, ln);
-  }
+  int ln; const char *file = unsup_pos(c, id, &ln);
+  char msg[2400];
   const char *mname = ty && sp_streq(ty, "CallNode") ? nt_str(c->nt, id, "name") : NULL;
   if (mname) {
     int recv = nt_ref(c->nt, id, "receiver");
@@ -1088,10 +1111,9 @@ __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what
     if (recv < 0 && ac == 0 && nt_ref(c->nt, id, "block") < 0 &&
         nt_int(c->nt, id, "vcall", 0)) {
       const char *cn = g_emitting_class_id >= 0 ? class_ruby_name(c, g_emitting_class_id) : NULL;
-      fprintf(stderr, "spinel: %sundefined local variable or method '%s' for %s%s (NameError)\n",
-              pos, mname, cn ? "an instance of " : "main", cn ? cn : "");
-      if (collect_mode() && g_unsup_armed) longjmp(g_unsup_recover, 1);
-      exit(1);
+      snprintf(msg, sizeof msg, "undefined local variable or method '%s' for %s%s (NameError)",
+               mname, cn ? "an instance of " : "main", cn ? cn : "");
+      unsup_leave(file, ln, msg);
     }
     /* A call on a typed user object whose class chain has no such method is
        not a compiler gap: it is the program's NoMethodError, caught ahead of
@@ -1114,10 +1136,8 @@ __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what
             !builtin_object_method_known(mname) &&
             !name_is_enumerable_module_method(mname) &&
             !an_user_defines_method(c, mname)) {
-          fprintf(stderr, "spinel: %sundefined method '%s' for an instance of %s (NoMethodError)\n",
-                  pos, mname, bcn);
-          if (collect_mode() && g_unsup_armed) longjmp(g_unsup_recover, 1);
-          exit(1);
+          snprintf(msg, sizeof msg, "undefined method '%s' for an instance of %s (NoMethodError)", mname, bcn);
+          unsup_leave(file, ln, msg);
         }
       }
       if (ty_is_object(rvt)) {
@@ -1125,29 +1145,24 @@ __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what
         if (cid >= 0 && cid < c->nclasses && !c->classes[cid].is_native_class &&
             comp_method_in_chain(c, cid, mname, NULL) < 0) {
           const char *cn = class_ruby_name(c, cid);
-          fprintf(stderr, "spinel: %sundefined method '%s' for an instance of %s (NoMethodError)\n",
-                  pos, mname, cn ? cn : "Object");
-          if (collect_mode() && g_unsup_armed) longjmp(g_unsup_recover, 1);
-          exit(1);
+          snprintf(msg, sizeof msg, "undefined method '%s' for an instance of %s (NoMethodError)", mname, cn ? cn : "Object");
+          unsup_leave(file, ln, msg);
         }
       }
     }
-    fprintf(stderr, "spinel: %sunsupported %s: node %d (%s `%s`) recv=%s/ty%d argc=%d",
-            pos, what, id, ty, mname,
-            recv >= 0 ? nt_type(c->nt, recv) : "-",
-            recv >= 0 ? (int)comp_ntype(c, recv) : -1, ac);
-    if (ac > 0 && av) fprintf(stderr, " arg0ty%d", (int)comp_ntype(c, av[0]));
-    fprintf(stderr, "\n");
+    int n = snprintf(msg, sizeof msg, "unsupported %s: node %d (%s `%s`) recv=%s/ty%d argc=%d",
+                     what, id, ty, mname,
+                     recv >= 0 ? nt_type(c->nt, recv) : "-",
+                     recv >= 0 ? (int)comp_ntype(c, recv) : -1, ac);
+    if (ac > 0 && av && n > 0 && (size_t)n < sizeof msg)
+      snprintf(msg + n, sizeof msg - (size_t)n, " arg0ty%d", (int)comp_ntype(c, av[0]));
   }
   else
-    fprintf(stderr, "spinel: %sunsupported %s: node %d (%s)\n",
-            pos, what, id, ty ? ty : "?");
-  /* SP_COLLECT_ERRORS: don't abort on the first gap -- longjmp back to the
-     driver's per-unit recovery point (when armed) so one run surfaces every
-     unsupported construct, abandoning just this unit's (discarded) output.
-     `unsupported` thus never returns: it exits, or longjmps. */
-  if (collect_mode() && g_unsup_armed) longjmp(g_unsup_recover, 1);
-  exit(1);
+    snprintf(msg, sizeof msg, "unsupported %s: node %d (%s)", what, id, ty ? ty : "?");
+  /* Back to the driver's per-unit recovery point (when armed), abandoning
+     this unit's discarded output, so one run surfaces every gap; else out.
+     `unsupported` thus never returns. */
+  unsup_leave(file, ln, msg);
 }
 
 const char *c_type_name(TyKind t) {

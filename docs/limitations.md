@@ -17,6 +17,13 @@ This document is the honest catalogue. It is organized by *kind* of limit:
 - **Now supported** — things that are *not* limits (corrects older write-ups
   that described an earlier version of the compiler).
 
+A limit the compiler meets is a *refusal*: a `spinel: FILE:LINE: ...` line on
+stderr naming the construct. One run reports every refusal in the program
+(each abandons the method it is in and the compile goes on to the next), then
+fails once with the count and writes nothing, so a program brought over from
+CRuby learns its whole list in one compile. `--emit-types` carries the same
+refusals in its `diagnostics` array with `"severity":"error"`.
+
 ---
 
 ## Fundamental limits (inherent to AOT)

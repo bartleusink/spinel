@@ -8530,6 +8530,16 @@ static char *build_types_json(Compiler *c) {
   }
   buf_puts(&b, "\n  ],\n  \"diagnostics\": [\n");
   int dn = 0;
+  /* the refusals, in the order the compile met them */
+  for (int di = 0; di < g_ndiags; di++) {
+    if (dn > 0) buf_puts(&b, ",\n");
+    buf_puts(&b, "    {\"file\":\"");
+    json_escape_into(&b, g_diags[di].file ? g_diags[di].file : "");
+    buf_printf(&b, "\",\"line\":%d,\"col\":0,\"severity\":\"error\",\"message\":\"", g_diags[di].line);
+    json_escape_into(&b, g_diags[di].msg);
+    buf_puts(&b, "\"}");
+    dn++;
+  }
   for (int si = 1; si < c->nscopes; si++) {
     Scope *s = &c->scopes[si];
     if (!s->name || !*s->name || s->def_node < 0) continue;
@@ -8795,9 +8805,28 @@ typedef struct {
   NameSet *cap_names;
   const char *iow_recv_ref;
   const char *iow_key_ref;
+  /* The scalars that shape a unit's return and nesting conventions. A
+     nested emitter (a fiber body, a proc body, an inlined call) saves them
+     in its own frame and restores them when it returns; a longjmp out of it
+     skips the restore, and the unit after the abandoned one -- main, most
+     often, which sets none of them -- inherits the nested body's: main's
+     `return` came out bare under a fiber body's g_c_ret_void, which -Werror
+     refuses. Restored here to their value before the unit, which is the
+     between-units value. */
+  TyKind ret_type, fn_ret_type, result_ty;
+  int c_ret_void, in_proc_body, result_poly, proc_body_kind, proc_toplevel_return;
+  int indent, nren, block_nren, block_id, c_loop_depth, ensure_depth;
+  int emitting_class_id, inline_recv_class, ie_class_id, dm_subst_node, exc_frame_depth;
 } EmitUnitState;
 
 static void emit_unit_state_save(EmitUnitState *s) {
+  s->ret_type = g_ret_type; s->fn_ret_type = g_fn_ret_type; s->result_ty = g_result_ty;
+  s->c_ret_void = g_c_ret_void; s->in_proc_body = g_in_proc_body; s->result_poly = g_result_poly;
+  s->proc_body_kind = g_proc_body_kind; s->proc_toplevel_return = g_proc_toplevel_return;
+  s->indent = g_indent; s->nren = g_nren; s->block_nren = g_block_nren; s->block_id = g_block_id;
+  s->c_loop_depth = g_c_loop_depth; s->ensure_depth = g_ensure_depth;
+  s->emitting_class_id = g_emitting_class_id; s->inline_recv_class = g_inline_recv_class;
+  s->ie_class_id = g_ie_class_id; s->dm_subst_node = g_dm_subst_node; s->exc_frame_depth = g_exc_frame_depth;
   s->pre = g_pre;
   s->yield_self_fallback = g_yield_self_fallback;
   s->yield_self_deref_fallback = g_yield_self_deref_fallback;
@@ -8836,6 +8865,13 @@ static void emit_unit_state_save(EmitUnitState *s) {
 }
 
 static void emit_unit_state_restore(const EmitUnitState *s) {
+  g_ret_type = s->ret_type; g_fn_ret_type = s->fn_ret_type; g_result_ty = s->result_ty;
+  g_c_ret_void = s->c_ret_void; g_in_proc_body = s->in_proc_body; g_result_poly = s->result_poly;
+  g_proc_body_kind = s->proc_body_kind; g_proc_toplevel_return = s->proc_toplevel_return;
+  g_indent = s->indent; g_nren = s->nren; g_block_nren = s->block_nren; g_block_id = s->block_id;
+  g_c_loop_depth = s->c_loop_depth; g_ensure_depth = s->ensure_depth;
+  g_emitting_class_id = s->emitting_class_id; g_inline_recv_class = s->inline_recv_class;
+  g_ie_class_id = s->ie_class_id; g_dm_subst_node = s->dm_subst_node; g_exc_frame_depth = s->exc_frame_depth;
   g_pre = s->pre;
   g_yield_self_fallback = s->yield_self_fallback;
   g_yield_self_deref_fallback = s->yield_self_deref_fallback;
@@ -8874,11 +8910,11 @@ static void emit_unit_state_restore(const EmitUnitState *s) {
 }
 
 /* Emit one top-level output unit (a method, constructor, BEGIN/END block, or the
-   top-level body). Outside SP_COLLECT_ERRORS this is just the bare call. In
-   collect mode each unit runs under a setjmp: an `unsupported` gap longjmps back
-   here (instead of exiting), so one run surfaces every unsupported construct --
-   the gap is already printed, this unit's malformed output is discarded, and the
-   driver proceeds to the next unit. `unsupported` re-sets all per-method globals
+   top-level body). Each unit runs under a setjmp: an `unsupported` gap longjmps
+   back here (instead of exiting), so one run surfaces every unsupported
+   construct -- the gap is already printed, this unit's malformed output is
+   discarded, and the driver proceeds to the next unit; the run fails once at
+   the end (codegen_program), unless SP_COLLECT_ERRORS asks for the rest. `unsupported` re-sets all per-method globals
    on the next emit_method, so an abandoned unit cannot corrupt the next.
    On recovery the buffer is rolled back to its length before this unit, so the
    abandoned unit's partial output is dropped. `body` must be the heap pointer
@@ -9353,14 +9389,12 @@ char *codegen_program(const NodeTable *nt) {
     comp_free(c);
     return strdup("");
   }
+  /* --emit-types is written after the emission below has run: a refusal is
+     a codegen verdict, and the JSON that answered "no diagnostics" for a
+     program the compile refuses was worth less than no JSON (#4509). The C
+     is discarded. */
   const char *types_out = getenv("SPINEL_EMIT_TYPES");
-  if (types_out && *types_out) {
-    char *json = build_types_json(c);
-    emit_write_file(types_out, json);
-    free(json);
-    comp_free(c);
-    return strdup("");
-  }
+  if (types_out && !*types_out) types_out = NULL;
 
   /* Reject runtime-name send before any emission so the diagnostic fires
      regardless of how the call's result is later consumed. */
@@ -10823,7 +10857,24 @@ char *codegen_program(const NodeTable *nt) {
     if (g_ext_target && sp_streq(g_ext_target, "cruby"))
       ext_generate_cruby_shim(c);
   }
+  /* Every refusal was reported as its unit was abandoned; the run fails here,
+     once, with nothing written (SP_COLLECT_ERRORS emits the rest regardless,
+     for a reduction). */
+  if (types_out) {
+    char *json = build_types_json(c);
+    emit_write_file(types_out, json);
+    free(json);
+    free(b.p); b.p = NULL;
+  }
+  if (g_ndiags > 0 && !collect_emit_anyway()) {
+    /* not "unsupported": spinel-doctor and spinel-reduce count the lines
+       that say so, and this one is the count */
+    fprintf(stderr, "spinel: %d refusal%s%s\n", g_ndiags, g_ndiags == 1 ? "" : "s",
+            types_out ? "" : ", nothing written");
+    if (types_out) fprintf(stderr, "Wrote %s\n", types_out);
+    exit(1);
+  }
   comp_free(c);
-  return b.p;
+  return types_out ? strdup("") : b.p;
 }
 

@@ -551,12 +551,16 @@ void emit_yblk_ref(Buf *b);
 /* Emit the lead of a tail value: `return ` or `<result> = `. */
 void emit_tail_lead(Buf *b);
 const char *rename_local(const char *nm);
-/* `unsupported` never returns: normal mode exits; SP_COLLECT_ERRORS mode
-   longjmps to the codegen driver's per-unit recovery (see g_unsup_recover)
-   when one is armed, else exits. Marked noreturn so every caller's
+/* `unsupported` never returns: it longjmps to the codegen driver's per-unit
+   recovery (see g_unsup_recover) when one is armed, else exits. Marked noreturn so every caller's
    "this construct is unsupported" guard correctly treats the code after it as
    unreachable. */
-int collect_mode(void);            /* 1 in SP_COLLECT_ERRORS mode (cached) */
+int collect_mode(void);            /* 1: refusals are collected per unit (always) */
+int collect_emit_anyway(void);     /* 1 under SP_COLLECT_ERRORS: emit the rest, exit 0 */
+/* One refusal: where and what. Recorded in order for --emit-types. */
+typedef struct { const char *file; int line; const char *msg; } SpDiag;
+extern SpDiag *g_diags;
+extern int g_ndiags;
 extern jmp_buf g_unsup_recover;    /* per-unit recovery point, armed by the driver */
 extern int g_unsup_armed;          /* nonzero while a recovery point is live */
 extern int g_unsup_probe;          /* silent emittability probe (drop a dynamic-send arm) */
