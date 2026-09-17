@@ -1011,7 +1011,7 @@ int main(int argc, char **argv) {
   if (want_g) s_add(&cmd, "-g ");
   if (profile) s_add(&cmd, "-fno-omit-frame-pointer ");
 #if !defined(__APPLE__)
-  if (debug) s_add(&cmd, "-rdynamic ");  /* ELF: name user frames in backtraces */
+  if (debug && !target_wasi) s_add(&cmd, "-rdynamic ");  /* ELF: name user frames in backtraces */
 #endif
   /* An ffi_lib name whose archive already arrived as an explicit --link
      input (spin's [[build]] artifacts) is satisfied: also emitting the -l
@@ -1037,8 +1037,12 @@ int main(int argc, char **argv) {
     }
     free(ltoks);
   }
+  /* The section GC flag is the LINKER's, not the host's: a wasm module is
+     linked by wasm-ld whatever the host, and lld takes --gc-sections only
+     (ld64's -dead_strip is an unknown argument to it, #4519). */
 #if defined(__APPLE__)
-  s_add(&cmd, "-Wl,-dead_strip ");
+  if (target_wasi) s_add(&cmd, "-Wl,--gc-sections ");
+  else s_add(&cmd, "-Wl,-dead_strip ");
 #else
   s_add(&cmd, "-Wl,--gc-sections ");
 #endif
