@@ -83,7 +83,10 @@ end
 seq = 0
 each_index(6, 1) { |i, _w| seq += i }
 par = 0
-each_index(6, 3) { |i, _w| par += i }
+# the block runs on three threads at once: the sum is under a lock, or an
+# update is lost now and then (CI read 12 for 15 once)
+lock = Mutex.new
+each_index(6, 3) { |i, _w| lock.synchronize { par += i } }
 p [seq, par]
 
 # `case blk` is a VALUE use: CaseNode spells its subject `predicate`, the same
