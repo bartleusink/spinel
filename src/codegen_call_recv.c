@@ -573,7 +573,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, ")");
       }
       else emit_expr(c, argv[1], b);
-      buf_puts(b, "; sp_PtrArray_set("); emit_expr(c, recv, b); buf_puts(b, ", ");
+      /* Ruby's index rules: a store past the end grows the array (nil-filled),
+         a negative index counts from the end, below -len is IndexError, and a
+         frozen array refuses. The fixed-shape setter dropped a store past the
+         end on the floor, so `banks = []; banks[0] = Rom.new` kept an empty
+         array and the read of banks[0] crashed (#4512). */
+      buf_puts(b, "; sp_PtrArray_set_grow("); emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_int_expr(c, argv[0], b); buf_printf(b, ", _t%d); _t%d; })", tv, tv);
       return 1;
     }
