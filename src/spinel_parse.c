@@ -3114,22 +3114,35 @@ static char *rewrite_syntax_sugar(char *source) {
         if (nsym >= min_syms && nsym <= max_syms && clean) {
           const char *recvtxt = syms[0];
           char line3[2048]; line3[0] = 0;
+          /* One forwarding def. A setter alias (`:timer_a=`) cannot be an
+             endless def (the grammar forbids `def x=(v) = ...`), so it is a
+             one-line classic def whose body is the assignment: the same
+             line count, and the target is written as the assignment the
+             delegate would make (`@ta.counter = v`), whether or not the
+             delegated name is itself a setter (#4518). */
+          #define FW_DEF(dst, cap, als, meth) do { \
+            size_t _al = strlen(als), _ml = strlen(meth); \
+            if (_al > 1 && (als)[_al - 1] == '=') \
+              snprintf(dst, cap, "def %s(_fw_v); %s.%.*s = _fw_v; end", als, recvtxt, \
+                       (int)(_ml > 1 && (meth)[_ml - 1] == '=' ? _ml - 1 : _ml), meth); \
+            else \
+              snprintf(dst, cap, "def %s(*_fw_a) = _fw_a.length == 0 ? %s.%s : %s.%s(*_fw_a)", \
+                       als, recvtxt, meth, recvtxt, meth); \
+          } while (0)
           if (!plural) {
             const char *meth3 = syms[1];
             const char *als3 = nsym == 3 ? syms[2] : syms[1];
-            snprintf(line3, sizeof line3,
-                     "def %s(*_fw_a) = _fw_a.length == 0 ? %s.%s : %s.%s(*_fw_a)",
-                     als3, recvtxt, meth3, recvtxt, meth3);
+            FW_DEF(line3, sizeof line3, als3, meth3);
           }
           else {
             size_t off3 = 0;
             for (int q3 = 1; q3 < nsym; q3++) {
-              off3 += (size_t)snprintf(line3 + off3, sizeof line3 - off3,
-                       "%sdef %s(*_fw_a) = _fw_a.length == 0 ? %s.%s : %s.%s(*_fw_a)",
-                       q3 > 1 ? "; " : "", syms[q3], recvtxt, syms[q3], recvtxt, syms[q3]);
+              if (q3 > 1) { off3 += (size_t)snprintf(line3 + off3, sizeof line3 - off3, "; "); }
+              if (off3 < sizeof line3 - 1) { FW_DEF(line3 + off3, sizeof line3 - off3, syms[q3], syms[q3]); off3 += strlen(line3 + off3); }
               if (off3 >= sizeof line3 - 1) { line3[0] = 0; break; }
             }
           }
+          #undef FW_DEF
           if (line3[0]) {
             OUT_STR(line3);
             i = t3;   /* resume at end-of-line remainder (newline/comment) */
