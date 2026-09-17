@@ -27544,8 +27544,12 @@ else {
               if (g_pre) emit_indent(g_pre, g_indent);
               emit_ctype(c, at, decl); buf_printf(decl, " lv_%s = %s; ", svn, aval.p ? aval.p : "0");
               free(apre.p); free(aval.p);
-              if (needs_root(at) && !comp_ty_value_obj(c, at)) buf_printf(decl, "SP_GC_ROOT(lv_%s); ", svn);
-              else if (at == TY_POLY) buf_printf(decl, "SP_GC_ROOT_RBVAL(lv_%s); ", svn);
+              /* a poly temporary is an sp_RbVal, and its root is the RbVal
+                 kind -- needs_root() answers yes for TY_POLY too, so that
+                 test has to come second, or the plain root reads the
+                 RbVal's tag word as an object pointer at the next mark */
+              if (at == TY_POLY) buf_printf(decl, "SP_GC_ROOT_RBVAL(lv_%s); ", svn);
+              else if (needs_root(at) && !comp_ty_value_obj(c, at)) buf_printf(decl, "SP_GC_ROOT(lv_%s); ", svn);
               if (g_pre) { buf_puts(g_pre, "\n"); buf_puts(b, "({ "); }
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", one, 1);
               buf_puts(b, "(void)(");
