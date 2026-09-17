@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Spinel's integers are sp_int (long long); Ruby integers don't
 # overflow in the same range. But emitting a plain `24329 * 256 *
 # 500` in C lets the C compiler fold the constant using `int`

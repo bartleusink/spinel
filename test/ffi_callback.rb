@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # ffi_callback declares a C function-pointer type. A method(:name) passed to an
 # argument of that type becomes a compile-time trampoline that converts the C
 # args, calls the compiled method, and converts the result back -- so a Ruby

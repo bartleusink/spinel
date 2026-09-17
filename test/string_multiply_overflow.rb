@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Issue #836: String * <huge> raises ArgumentError instead of
 # segfaulting (the implicit malloc-NULL + memcpy chain).
 begin

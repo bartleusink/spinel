@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Bignum-receiver methods that return an Integer/Float/bool without a Rational
 # (to_r/rationalize/quo need a bigint-backed Rational and stay unsupported).
 p(~(2**100))

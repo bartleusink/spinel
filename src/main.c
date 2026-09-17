@@ -586,6 +586,28 @@ int main(int argc, char **argv) {
   }
 
   /* ---------- pipeline: parse -> AST -> codegen ---------- */
+  /* The target's integer width is the pointer width of the C compiler that
+     builds the program: this binary's own unless --cc named another (a
+     32-bit build on a 64-bit host, `--cc='cc -m32'`), which is asked. */
+  extern int sp_target_int_bits;
+  int target_i386 = 0;
+  if (!sp_streq(cc_cmd, "cc")) {
+    char ccq[1024];
+    snprintf(ccq, sizeof ccq, "%s -E -dM -x c /dev/null 2>/dev/null", cc_cmd);
+    FILE *fp = popen(ccq, "r");
+    if (fp) {
+      char line[512];
+      while (fgets(line, sizeof line, fp)) {
+        static const char k[] = "#define __SIZEOF_POINTER__ ";
+        if (!strncmp(line, k, sizeof k - 1)) { int b = atoi(line + sizeof k - 1) * 8; if (b == 32 || b == 64) sp_target_int_bits = b; }
+        if (!strncmp(line, "#define __i386__ ", 17)) target_i386 = 1;
+      }
+      pclose(fp);
+    }
+  }
+#if defined(__i386__)
+  else target_i386 = 1;
+#endif
   char *text = sp_parse_file_to_text(source, argv[0]);
   if (eval_path[0]) remove(eval_path);
   if (!text) { fprintf(stderr, "spinel: parse failed for '%s'\n", source); if (seed_path[0]) remove(seed_path); return 1; }
@@ -733,6 +755,13 @@ int main(int argc, char **argv) {
   s_add(&cmd, " ");
   snprintf(tmp, sizeof tmp, "-O%s ", opt_level); s_add(&cmd, tmp);
   s_add(&cmd, "-Wno-all -ffunction-sections -fdata-sections ");
+  /* A 32-bit target gets what common.mk gives the runtime there: 64-bit
+     time_t and file offsets, and SSE arithmetic on i386 (the x87 unit rounds
+     every intermediate at 80 bits, and 3.7.round(1) came out 3.8). */
+  if (sp_target_int_bits == 32) {
+    s_add(&cmd, "-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 ");
+    if (target_i386) s_add(&cmd, "-msse2 -mfpmath=sse ");
+  }
   /* A pointer of the wrong type in generated code is a miscompile, not a style
      question: it reads one struct through another's layout, which segfaults or
      answers garbage (a Symbol key dereferenced as a char *, #3975; an Integer

@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # String#to_i overflow handling. Pre-fix: undefined behavior on
 # int64 wrap (#743) — addressed by overflow-detected saturation.
 # Per #842 the saturate path is gone; overflow now raises

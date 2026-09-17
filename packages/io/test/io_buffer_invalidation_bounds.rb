@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # IO::Buffer slice invalidation and overflow-safe bounds: a view whose
 # root was freed, transferred, or shrunk raises InvalidatedError (and
 # answers null? false / valid? false, as CRuby does); offset+length

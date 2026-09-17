@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # A bitwise op whose literal operand exceeds int64 (a 64-bit mask such as
 # 0xFFFFFFFFFFFFFFFF, typed as a bigint) must still lower -- the result slot
 # is int and takes the low-64 bit pattern. The xorshift64 / 64-bit-mask

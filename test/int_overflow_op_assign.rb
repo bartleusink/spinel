@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Under the default --int-overflow=raise, every integer operator raises on
 # 64-bit overflow the same way, whether written in binary or op-assign form.
 # Regression: `x *= y` (and +=, <<=, **=) bypassed the checked helpers and

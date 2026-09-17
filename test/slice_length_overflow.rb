@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Ruby hands a slice length straight through from user code, so `a[1, huge]`
 # reaches the clamp with len == INT64_MAX. Written as `start + len > N` the sum
 # overflows, wraps negative, the guard reads false, and the clamp is skipped --

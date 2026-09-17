@@ -350,9 +350,16 @@ static void emit_node_array(int id, const char *field, pm_node_list_t *list) {
 }
 
 /* ---- Integer value extraction ---- */
+/* The width of the TARGET's sp_int (a pointer's, lib/sp_types.h): 64 on a
+   64-bit host, 32 on a 32-bit one, and whatever the C compiler named by
+   --cc builds for, which main.c asks it. A literal past that width is a
+   Bignum on the target, as it is in CRuby there, so it is carried as its
+   decimal text (bigval) rather than truncated into the smaller sp_int. */
+int sp_target_int_bits = (int)(sizeof(void *) * CHAR_BIT);
+static uint64_t pm_int_max_positive(void) { return sp_target_int_bits == 32 ? (uint64_t)INT32_MAX : (uint64_t)LLONG_MAX; }
 static long long pm_int_value(pm_integer_t *integer) {
   uint64_t val = 0;
-  uint64_t max_positive = (uint64_t)LLONG_MAX;
+  uint64_t max_positive = pm_int_max_positive();
   uint64_t max_negative = max_positive + 1ULL;
   const size_t limb_bits = 32;
   const size_t value_bits = sizeof(val) * CHAR_BIT;
@@ -373,29 +380,31 @@ else {
   }
 
   if (integer->negative) {
-    if (overflow || val >= max_negative) return LLONG_MIN;
+    if (overflow || val >= max_negative) return -(long long)max_negative;
     return -(long long)val;
   }
-  if (overflow || val > max_positive) return LLONG_MAX;
+  if (overflow || val > max_positive) return (long long)max_positive;
   return (long long)val;
 }
 
 /* Whether an integer literal does not fit in a signed 64-bit `value` (so
    pm_int_value saturated it). Mirrors the limb scan above. */
 static int pm_int_overflows(pm_integer_t *integer) {
-  if (integer->values == NULL) return 0;
   const size_t limb_bits = 32;
   const size_t value_bits = sizeof(uint64_t) * CHAR_BIT;
   uint64_t val = 0;
   int overflow = 0;
-  for (size_t i = 0; i < integer->length; i++) {
+  /* a single-limb value (0xdeadbeef) sits in `value` with no limb array,
+     and on a 32-bit target it is past the sp_int all the same */
+  if (integer->values == NULL) val = (uint64_t)integer->value;
+  else for (size_t i = 0; i < integer->length; i++) {
     if (i >= value_bits / limb_bits) {
       if (integer->values[i] != 0) overflow = 1;
       continue;
     }
     val |= ((uint64_t)integer->values[i]) << (i * limb_bits);
   }
-  uint64_t max_positive = (uint64_t)LLONG_MAX;
+  uint64_t max_positive = pm_int_max_positive();
   uint64_t max_negative = max_positive + 1ULL;
   if (integer->negative) return overflow || val >= max_negative;
   return overflow || val > max_positive;

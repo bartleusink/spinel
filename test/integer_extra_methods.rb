@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Issues #875 #876 #873 #860 #894:
 # Integer methods that were not dispatched - magnitude (alias for abs),
 # modulo (alias for %), remainder (truncated division remainder, differs

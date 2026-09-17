@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # A method that returns another method's value through a local (`a = nxt; a`)
 # was inferred as void when the callee's own return -- also flowing through a
 # local (`r = ...; r`) -- only settled in the post-fixpoint write-type re-run.

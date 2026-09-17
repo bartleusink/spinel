@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Integer(s) raises ArgumentError on unparseable input, matching
 # CRuby semantics. Previously spinel emitted bare strtoll(s, NULL, 10)
 # which silently returned 0 for invalid input — that meant

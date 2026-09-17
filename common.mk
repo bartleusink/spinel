@@ -47,6 +47,20 @@ CFLAGS   = $(OPT) -Wno-all -Wno-unknown-warning-option -Wno-alloc-size-larger-th
 
 # Per-function sections let the linker strip unused bigint/regexp code.
 SEC_FLAGS = -ffunction-sections -fdata-sections
+# The target's word width, asked of the C compiler: 32 or 64. A 32-bit
+# target (`make CC='cc -m32'` on a 64-bit host, or a 32-bit host) gets a
+# 32-bit sp_int (lib/sp_types.h) and two things a Ruby needs there: 64-bit
+# time_t and file offsets on glibc, and IEEE double arithmetic on i386, whose
+# x87 unit rounds every intermediate at 80 bits otherwise (3.7.round(1) came
+# out 3.8). Tests that assume a 64-bit Integer are filtered by the width
+# (see TESTS in the Makefile).
+SPINEL_INT_BITS ?= $(shell echo | $(CC) -dM -E - 2>/dev/null | awk '/__SIZEOF_POINTER__/{print $$3*8}')
+ifeq ($(SPINEL_INT_BITS),32)
+  SEC_FLAGS += -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64
+  ifneq (,$(shell echo | $(CC) -dM -E - 2>/dev/null | grep __i386__))
+    SEC_FLAGS += -msse2 -mfpmath=sse
+  endif
+endif
 # Apple ld64 spells dead-code stripping --dead_strip; GNU ld --gc-sections.
 ifeq ($(shell uname -s),Darwin)
   GC_FLAGS = -Wl,-dead_strip

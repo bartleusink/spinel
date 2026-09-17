@@ -44,7 +44,7 @@ RBS_LIB      = build/librbs.a
 
 .PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
-        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test gc-str-major-test threaded-render-test gc-locality-test \
+        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test gc-str-major-test threaded-render-test gc-locality-test test-corpus test-corpus-summary \
         gate-optcarrot clean install uninstall deps tools
 
 # `make all` includes the RBS extractor when vendor/rbs has been fetched
@@ -592,6 +592,13 @@ else
 # --int-overflow=promote; in raise/wrap mode they would (correctly) raise.
 TESTS := $(filter-out test/promote_%.rb,$(TESTS))
 endif
+# A 32-bit target has a 32-bit Integer (lib/sp_types.h): a test that assumes
+# the 64-bit one (values or arithmetic past 2^31, `Integer#size == 8`, a
+# printed hash value, a 64-bit FFI width) says so in its first line and is
+# not run there. `make CC='cc -m32'` on a 64-bit host is such a target.
+ifeq ($(SPINEL_INT_BITS),32)
+TESTS := $(filter-out $(shell grep -l '^\# spinel: int64' test/*.rb),$(TESTS))
+endif
 TEST_TARGETS := $(patsubst test/%.rb,build/test-results/%.ok,$(TESTS))
 
 # Bundled spin packages carry their own test/*.rb (the same snapshot contract,
@@ -605,6 +612,9 @@ PKG_TESTS := $(wildcard packages/*/test/*.rb)
 # same probe, and `require "openssl"` is then an unsatisfiable require.
 ifneq ($(OPENSSL_AVAILABLE),yes)
 PKG_TESTS := $(filter-out packages/openssl/test/%.rb,$(PKG_TESTS))
+endif
+ifeq ($(SPINEL_INT_BITS),32)   # the same first-line marker as test/*.rb
+PKG_TESTS := $(filter-out $(shell grep -l '^\# spinel: int64' packages/*/test/*.rb),$(PKG_TESTS))
 endif
 pkg_of = $(word 2,$(subst /, ,$(1)))
 PKG_TEST_TARGETS := $(foreach t,$(PKG_TESTS),build/test-results/pkg.$(call pkg_of,$(t)).$(notdir $(t:.rb=)).ok)
@@ -743,7 +753,16 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test thread-puts-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test thread-puts-test ext-test ext-cruby-test test-corpus-summary
+
+# The test/*.rb corpus (and the bundled packages') on its own, without the
+# C-side legs: what a 32-bit target runs (`make test-corpus CC='cc -m32'`),
+# whose CRuby extension leg and rbs tooling have no 32-bit toolchain to
+# build against.
+test-corpus: $(SPINEL_TIMEOUT)
+	+@$(MAKE) --no-print-directory clean-test-results
+	+@$(MAKE) $(TEST_JOBS) --no-print-directory test-corpus-summary
+test-corpus-summary: $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \

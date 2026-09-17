@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # IO::Buffer typed accessors: every type symbol, endianness, and the
 # CRuby conversion edges (wrap widths, range checks, message wording).
 def try(label)

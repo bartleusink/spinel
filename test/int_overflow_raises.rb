@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Integer arithmetic that overflows sp_int (int64) raises
 # RangeError rather than silently wrapping. spinel uses
 # `__builtin_add_overflow` / `_sub_overflow` / `_mul_overflow`

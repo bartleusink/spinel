@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Variadic FFI: a trailing :varargs spec makes the extern variadic (`...`) and
 # passes each extra actual arg with C default promotions (int->long long,
 # float->double, str->const char*). printf's signature (const char *, ...)

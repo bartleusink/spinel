@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # `t = Array.new(n) { Array.new(m, 0) }` is a table of int arrays, but the
 # narrowing pass that gives an array of int-arrays its typed representation
 # only classified pushes and literals -- a generator block killed the slot, so

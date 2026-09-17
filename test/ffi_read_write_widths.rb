@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Every `ffi_read_*` / `ffi_write_*` suffix names the width of the access.
 # The bytes below are laid out by a wider write and read back one width at a
 # time, so a reader that loaded the wrong width would fold in its neighbours.

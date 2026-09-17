@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # ffi_write_u32/i32/ptr mirror ffi_read_*: they store a value at a byte
 # offset into a buffer. Round-trip each writer through its matching reader.
 # (This uses the spinel-native FFI DSL, so there is no ruby oracle; the

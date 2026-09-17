@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # The ffi-gem (CRuby `ffi`) compat frontend: require "ffi" is a native
 # no-op, `extend FFI::Library` is declarative, attach_function (plain and
 # the 4-arg rename form) lowers onto ffi_func, and the gem's type

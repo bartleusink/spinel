@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Array#pack on a Float array and the float/double directives (#pack_unpack_directives):
 # D/d/F/f native, E/e little-endian, G/g big-endian. Previously a TY_FLOAT_ARRAY
 # receiver had no codegen arm at all ("unsupported call: ... `pack` recv=.../ty18"),

@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # A big Rational's #to_s builds the numerator's text and then the
 # denominator's, and the second conversion allocates, so the first text has
 # to stay live across it. Every turn allocates before it asks, and the test

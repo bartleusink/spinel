@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # `length` / `size` on a boxed receiver that has neither: the poly length
 # helper answered 0 for nil, a number and a user object, so a nil read out of
 # a hash miss answered 0 where CRuby raises NoMethodError (#3974).

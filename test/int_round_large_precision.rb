@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Integer#round/ceil/floor/truncate(ndigits) must use exact integer
 # arithmetic: a double-based implementation loses precision above 2^53
 # and casting pow(10,-nd) is undefined once 10^(-nd) > INT64_MAX.

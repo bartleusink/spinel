@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # What makes a mark more expensive: who ALLOCATED the graph, or who marks it?
 #
 # #4384 ends with a per-object trace cost that rises with the worker count over

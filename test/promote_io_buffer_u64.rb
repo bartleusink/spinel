@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # IO::Buffer's u64 lane under --int-overflow=promote: values above 2^63-1
 # come back as Bignums (and go in as them), s64 covers INT64_MIN, and the
 # iteration surface carries the boxed values through. Only meaningful in

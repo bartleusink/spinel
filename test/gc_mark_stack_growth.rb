@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # A live set far larger than the mark stack's initial size: the walk has to
 # stay iterative rather than recursing per object.
 heap = []

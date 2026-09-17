@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # Accessors that fit their declared ffi_buffer keep compiling; the ones that run
 # past the end are refused at compile time (#3970, see the .err test).
 module M

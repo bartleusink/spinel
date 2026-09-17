@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # The Enumerable and Integer names a boxed receiver shares with its typed self:
 # a value that only reads poly (a container element, a widened local) had no arm
 # for these and raised NoMethodError naming the very class that defines them.
