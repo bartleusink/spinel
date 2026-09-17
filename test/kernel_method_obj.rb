@@ -35,6 +35,6 @@ rescue => e
   puts "zero: #{e.class}"
 end
 
-# The one-parameter wrapper forwards only the first argument.
+# The wrapper takes what its call sites pass, so both arguments arrive.
 method(:puts).call("a", "b")
 puts "after"

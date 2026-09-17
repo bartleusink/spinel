@@ -13,4 +13,5 @@
 "123"
 zero: ArgumentError
 a
+b
 after

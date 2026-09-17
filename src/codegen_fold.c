@@ -7515,12 +7515,13 @@ static void emit_rest_shortfall_raise(int given_tmp, int req) {
 
 /* True when `m` is a synthesized receiverless Kernel wrapper
    (`method(:puts)`) whose builtin takes a variable or optional count. The
-   wrapper declares a single __bam_r parameter, so it cannot express the
-   builtin's real arity and forwards only the first argument. A call with
-   extra arguments is truncated rather than raising ArgumentError, matching
-   the behavior before #4395; the UB fix (a zero-argument call reads an
-   undefined register) still raises on the shortfall. A receiver-bound wrapper
-   is excluded -- its __bam_r is the receiver, not an argument. */
+   wrapper declares as many parameters as its call sites agree on (one when
+   they do not: analyze.c, bam_call_argc), so it cannot express the
+   builtin's real arity; a call with more arguments than that is truncated
+   rather than raising ArgumentError, matching the behavior before #4395;
+   the UB fix (a zero-argument call reads an undefined register) still raises
+   on the shortfall. A receiver-bound wrapper is excluded -- its __bam_r is
+   the receiver, not an argument. */
 static int bam_variadic_kernel(const NodeTable *nt, const Scope *m) {
   if (!m->name || strncmp(m->name, "__bam_", 6) != 0 || m->body < 0) return 0;
   int bn = 0;

@@ -4051,6 +4051,39 @@ static void desugar_enum_chain_shapes(Compiler *c) {
   }
 }
 
+/* How many positional arguments the program passes a `method(:sym)` value
+   through Method#call / #() / #[] / #===: the count when every such site
+   agrees, -1 when there is none or they differ (a splat, a keyword hash or
+   a block at a site is "differ" too). The receiver is resolved the way the
+   Method machinery resolves it (method_recv_node), so `m = s.method(:x);
+   m.call(1, 2)` counts with `s.method(:x).call(1, 2)`. A synthesized
+   wrapper takes that many parameters and forwards them: with the one
+   __bam_r parameter it had, `[3, 1, 2].method(:rotate).call(2)` answered
+   rotate's default (the argument fell off the C cast on a native target,
+   and is a signature-mismatch trap on wasm32). */
+static int bam_call_argc(Compiler *c, int mnode) {
+  const NodeTable *nt = c->nt;
+  int n = -1;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !(sp_streq(nm, "call") || sp_streq(nm, "[]") || sp_streq(nm, "==="))) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || method_recv_node(c, recv) != mnode) continue;
+    if (nt_ref(nt, id, "block") >= 0) return -1;
+    int argsn = nt_ref(nt, id, "arguments");
+    int an = 0;
+    const int *av = argsn >= 0 ? nt_arr(nt, argsn, "arguments", &an) : NULL;
+    for (int k = 0; k < an; k++) {
+      const char *aty = av[k] >= 0 ? nt_type(nt, av[k]) : NULL;
+      if (!aty || sp_streq(aty, "SplatNode") || sp_streq(aty, "KeywordHashNode") ||
+          sp_streq(aty, "BlockArgumentNode") || sp_streq(aty, "ForwardingArgumentsNode")) return -1;
+    }
+    if (n >= 0 && n != an) return -1;
+    n = an;
+  }
+  return n;
+}
+
 /* `recv.method(:sym)` over a BUILTIN receiver (string/int/array/...) has no
    compiled function to bind, so calling the Method crashed. Synthesize a
    top-level wrapper `def __bam_<id>(__bam_r) = __bam_r.sym` -- the wrapper's
@@ -4085,14 +4118,26 @@ static int desugar_builtin_method_obj(Compiler *c) {
       char kwname[48];
       snprintf(kwname, sizeof kwname, "__bam_%d", id);
       if (comp_method_index(c, kwname) >= 0) continue;
-      int krp = nt_new_node(nt, "RequiredParameterNode");
-      nt_node_set_str(nt, krp, "name", "__bam_r");
+      /* the wrapper takes what the call sites pass (bam_call_argc below),
+         `def __bam_N(__bam_r, __bam_a, ...) = Integer(__bam_r, __bam_a, ...)`;
+         one parameter when they disagree or there are none */
+      int knf = bam_call_argc(c, id);
+      if (knf < 1 || knf > 8) knf = 1;
+      int kpn[8], kar[8];
+      char kpnm[8][16];
+      for (int k = 0; k < knf; k++) {
+        if (k == 0) snprintf(kpnm[k], sizeof kpnm[k], "__bam_r");
+        else if (k == 1) snprintf(kpnm[k], sizeof kpnm[k], "__bam_a");
+        else snprintf(kpnm[k], sizeof kpnm[k], "__bam_a%d", k - 1);
+        kpn[k] = nt_new_node(nt, "RequiredParameterNode");
+        nt_node_set_str(nt, kpn[k], "name", kpnm[k]);
+        kar[k] = nt_new_node(nt, "LocalVariableReadNode");
+        nt_node_set_str(nt, kar[k], "name", kpnm[k]);
+      }
       int kparams = nt_new_node(nt, "ParametersNode");
-      nt_node_set_arr(nt, kparams, "requireds", &krp, 1);
-      int krread = nt_new_node(nt, "LocalVariableReadNode");
-      nt_node_set_str(nt, krread, "name", "__bam_r");
+      nt_node_set_arr(nt, kparams, "requireds", kpn, knf);
       int kargs = nt_new_node(nt, "ArgumentsNode");
-      nt_node_set_arr(nt, kargs, "arguments", &krread, 1);
+      nt_node_set_arr(nt, kargs, "arguments", kar, knf);
       int kcall = nt_new_node(nt, "CallNode");
       nt_node_set_str(nt, kcall, "name", ksym);
       nt_node_set_ref(nt, kcall, "arguments", kargs);
@@ -4106,7 +4151,7 @@ static int desugar_builtin_method_obj(Compiler *c) {
       kws->class_id = -1;
       kws->body = kbody;
       int kws_idx = c->nscopes - 1;
-      scope_add_param(kws, "__bam_r", -1);
+      for (int k = 0; k < knf; k++) scope_add_param(kws, kpnm[k], -1);
       comp_grow_node_arrays(c);
       walk_scope(c, kbody, kws_idx, -1);
       int kargsn = nt_ref(nt, id, "arguments");
@@ -4178,30 +4223,39 @@ static int desugar_builtin_method_obj(Compiler *c) {
     char wname[48];
     snprintf(wname, sizeof wname, "__bam_%d", id);
     if (comp_method_index(c, wname) >= 0) continue;   /* synthesized on a prior pass */
-    /* def __bam_<id>(__bam_r) = __bam_r.<sym>, or for a binary operator
-       def __bam_<id>(__bam_r, __bam_a) = __bam_r <op> __bam_a */
-    int preqs[2];
+    /* def __bam_<id>(__bam_r) = __bam_r.<sym>; for a binary operator
+       def __bam_<id>(__bam_r, __bam_a) = __bam_r <op> __bam_a; and for a
+       method whose call sites pass N arguments
+       def __bam_<id>(__bam_r, __bam_a, __bam_a1, ...) = __bam_r.<sym>(__bam_a, ...) */
+    int nfwd = binop ? 1 : bam_call_argc(c, id);
+    if (nfwd < 0 || nfwd > 8) nfwd = 0;
+    int preqs[9];
     int rp = nt_new_node(nt, "RequiredParameterNode");
     nt_node_set_str(nt, rp, "name", "__bam_r");
     preqs[0] = rp;
     int params = nt_new_node(nt, "ParametersNode");
-    if (binop) {
+    char aname[8][16];
+    for (int k = 0; k < nfwd; k++) {
+      if (k == 0) snprintf(aname[k], sizeof aname[k], "__bam_a");
+      else snprintf(aname[k], sizeof aname[k], "__bam_a%d", k);
       int ap = nt_new_node(nt, "RequiredParameterNode");
-      nt_node_set_str(nt, ap, "name", "__bam_a");
-      preqs[1] = ap;
-      nt_node_set_arr(nt, params, "requireds", preqs, 2);
+      nt_node_set_str(nt, ap, "name", aname[k]);
+      preqs[1 + k] = ap;
     }
-    else nt_node_set_arr(nt, params, "requireds", preqs, 1);
+    nt_node_set_arr(nt, params, "requireds", preqs, 1 + nfwd);
     int rread = nt_new_node(nt, "LocalVariableReadNode");
     nt_node_set_str(nt, rread, "name", "__bam_r");
     int call = nt_new_node(nt, "CallNode");
     nt_node_set_str(nt, call, "name", sym);
     nt_node_set_ref(nt, call, "receiver", rread);
-    if (binop) {
-      int aread = nt_new_node(nt, "LocalVariableReadNode");
-      nt_node_set_str(nt, aread, "name", "__bam_a");
+    if (nfwd > 0) {
+      int areads[8];
+      for (int k = 0; k < nfwd; k++) {
+        areads[k] = nt_new_node(nt, "LocalVariableReadNode");
+        nt_node_set_str(nt, areads[k], "name", aname[k]);
+      }
       int cargs = nt_new_node(nt, "ArgumentsNode");
-      nt_node_set_arr(nt, cargs, "arguments", &aread, 1);
+      nt_node_set_arr(nt, cargs, "arguments", areads, nfwd);
       nt_node_set_ref(nt, call, "arguments", cargs);
     }
     int body = nt_new_node(nt, "StatementsNode");
@@ -4215,7 +4269,7 @@ static int desugar_builtin_method_obj(Compiler *c) {
     ws->body = body;
     int ws_idx = c->nscopes - 1;
     scope_add_param(ws, "__bam_r", -1);
-    if (binop) scope_add_param(ws, "__bam_a", -1);
+    for (int k = 0; k < nfwd; k++) scope_add_param(ws, aname[k], -1);
     LocalVar *plv = scope_local(ws, "__bam_r");
     if (plv) { plv->type = rt; plv->rbs_seeded = 1; }  /* pin: no call sites exist */
     comp_grow_node_arrays(c);
