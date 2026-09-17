@@ -9610,7 +9610,10 @@ static void mark_empty_hash_const_writes(Compiler *c) {
     NT_FOREACH_KIND(nt, NK_OptionalParameterNode, op) {
       int dv = nt_ref(nt, op, "value");
       const char *pnm = nt_str(nt, op, "name");
-      if (dv < 0 || !pnm || nt_kind(nt, dv) != NK_ConstantReadNode) continue;
+      /* the constant by its bare name or by a path (`Base::EMPTY`, whose node
+         carries the leaf name, qualified by qc_rewrite_reads when it has to
+         be), as the write above spells it (#4511) */
+      if (dv < 0 || !pnm || (nt_kind(nt, dv) != NK_ConstantReadNode && nt_kind(nt, dv) != NK_ConstantPathNode)) continue;
       const char *dn = nt_str(nt, dv, "name");
       if (!dn || !sp_streq(dn, cn)) continue;
       Scope *rs = comp_scope_of(c, op);

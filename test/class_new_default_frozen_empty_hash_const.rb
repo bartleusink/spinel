@@ -23,3 +23,22 @@ class T
 end
 p build(T, {n: 2}).n
 p build0(T).n
+
+# The constant spelled by its path, one hop and two (#4511): the parameter
+# evidence reaches it by the leaf name the path node carries.
+module AR
+  class Base
+    EMPTY_ATTRS = {}.freeze
+  end
+end
+class U
+  def initialize(attrs = AR::Base::EMPTY_ATTRS) = (@a = (attrs[:x] || 0).to_i)
+  def a = @a
+end
+class V < AR::Base
+  def initialize(attrs = EMPTY_ATTRS) = (@a = (attrs[:x] || 0).to_i)
+  def a = @a
+end
+p build(U, {x: 3}).a
+p build(V, {x: 4}).a
+p AR::Base::EMPTY_ATTRS.frozen?
