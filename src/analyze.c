@@ -9548,6 +9548,35 @@ static int mark_empty_hash_key_ctx(Compiler *c) {
    constant has no type of its own, so the constant got no runtime slot at all
    and every read raised "uninitialized constant". Derive the variant from the
    constant's index-writes (#2879). */
+/* The key a read or write on `recv` names, when `recv` is the local `lname`
+   of scope `rs` (lname NULL: the constant `cn`): its type unified into *kt
+   (and a write's value into *vt). */
+static void hash_key_evidence(Compiler *c, int w, const char *cn, const char *lname, Scope *rs, TyKind *kt, TyKind *vt) {
+  const NodeTable *nt = c->nt;
+  const char *wn = nt_str(nt, w, "name");
+  if (!wn) return;
+  int write = sp_streq(wn, "[]=") || sp_streq(wn, "store");
+  if (!write && !sp_streq(wn, "[]") && !sp_streq(wn, "fetch") && !sp_streq(wn, "dig") &&
+      !sp_streq(wn, "key?") && !sp_streq(wn, "has_key?") && !sp_streq(wn, "include?") && !sp_streq(wn, "member?"))
+    return;
+  int wr = nt_ref(nt, w, "receiver");
+  if (wr < 0) return;
+  if (lname) {
+    if (nt_kind(nt, wr) != NK_LocalVariableReadNode) return;
+    const char *rn = nt_str(nt, wr, "name");
+    if (!rn || !sp_streq(rn, lname) || comp_scope_of(c, wr) != rs) return;
+  }
+  else {
+    if (nt_kind(nt, wr) != NK_ConstantReadNode) return;
+    const char *rn = nt_str(nt, wr, "name");
+    if (!rn || !sp_streq(rn, cn)) return;
+  }
+  int wa = nt_ref(nt, w, "arguments");
+  int wan = 0; const int *wav = wa >= 0 ? nt_arr(nt, wa, "arguments", &wan) : NULL;
+  if (wan < 1) return;
+  *kt = ty_unify(*kt, infer_type(c, wav[0]));
+  if (write && wan >= 2) *vt = ty_unify(*vt, infer_type(c, wav[1]));
+}
 static void mark_empty_hash_const_writes(Compiler *c) {
   if (!c->hash_want) return;
   const NodeTable *nt = c->nt;
@@ -9556,23 +9585,39 @@ static void mark_empty_hash_const_writes(Compiler *c) {
     const char *cn = nt_str(nt, id, "name");
     int v = nt_ref(nt, id, "value");
     if (!cn || v < 0 || v >= c->node_cap) continue;
+    /* `EMPTY = {}.freeze` binds the same literal as `EMPTY = {}` (#4510) */
+    if (nt_kind(nt, v) == NK_CallNode) {
+      const char *fn = nt_str(nt, v, "name");
+      int fr = nt_ref(nt, v, "receiver");
+      int fa = nt_ref(nt, v, "arguments"); int fan = 0; if (fa >= 0) nt_arr(nt, fa, "arguments", &fan);
+      if (fn && fr >= 0 && fan == 0 && nt_ref(nt, v, "block") < 0 &&
+          (sp_streq(fn, "freeze") || sp_streq(fn, "dup") || sp_streq(fn, "clone") || sp_streq(fn, "itself")))
+        v = fr;
+      if (v >= c->node_cap) continue;
+    }
     if (nt_kind(nt, v) != NK_HashNode && nt_kind(nt, v) != NK_KeywordHashNode) continue;
     int en = 0; nt_arr(nt, v, "elements", &en);
     if (en != 0 || ty_is_hash(c->hash_want[v])) continue;
     TyKind kt = TY_UNKNOWN, vt = TY_UNKNOWN;
     for (int w = 0; w < nt->count; w++) {
       if (nt_kind(nt, w) != NK_CallNode) continue;
-      const char *wn = nt_str(nt, w, "name");
-      if (!wn || !sp_streq(wn, "[]=")) continue;
-      int wr = nt_ref(nt, w, "receiver");
-      if (wr < 0 || nt_kind(nt, wr) != NK_ConstantReadNode) continue;
-      const char *rn = nt_str(nt, wr, "name");
-      if (!rn || !sp_streq(rn, cn)) continue;
-      int wa = nt_ref(nt, w, "arguments");
-      int wan = 0; const int *wav = wa >= 0 ? nt_arr(nt, wa, "arguments", &wan) : NULL;
-      if (wan < 2) continue;
-      kt = ty_unify(kt, infer_type(c, wav[0]));
-      vt = ty_unify(vt, infer_type(c, wav[1]));
+      hash_key_evidence(c, w, cn, NULL, NULL, &kt, &vt);
+    }
+    /* A parameter whose default is the constant reads it under its own name:
+       `def initialize(attrs = EMPTY)` followed by `attrs[:x]` says the
+       constant's keys are Symbols, and the frozen empty hash shared by every
+       constructor of an application has no other evidence at all (#4510). */
+    NT_FOREACH_KIND(nt, NK_OptionalParameterNode, op) {
+      int dv = nt_ref(nt, op, "value");
+      const char *pnm = nt_str(nt, op, "name");
+      if (dv < 0 || !pnm || nt_kind(nt, dv) != NK_ConstantReadNode) continue;
+      const char *dn = nt_str(nt, dv, "name");
+      if (!dn || !sp_streq(dn, cn)) continue;
+      Scope *rs = comp_scope_of(c, op);
+      for (int w = 0; w < nt->count; w++) {
+        if (nt_kind(nt, w) != NK_CallNode) continue;
+        hash_key_evidence(c, w, cn, pnm, rs, &kt, &vt);
+      }
     }
     /* No resolved index-write: the constant still needs a slot, so give it the
        widest variant rather than leaving it typeless (and unreachable). */
@@ -9659,7 +9704,18 @@ static void mark_empty_hash_receivers(Compiler *c) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
     int recv = nt_ref(nt, id, "receiver");
-    if (is_empty_hash_literal(nt, recv, c->node_cap)) c->empty_hash_recv[recv] = 1;
+    if (!is_empty_hash_literal(nt, recv, c->node_cap)) continue;
+    /* `{}.freeze` (dup, clone, itself) is the literal itself, wherever the
+       call stands: its variant is the call's context's, not a receiver's
+       default. Marked here, `EMPTY = {}.freeze` came out String-keyed while
+       `EMPTY = {}` did not, and a constructor defaulting to it dropped out
+       of every Class#new dispatch whose argument was Symbol-keyed (#4510). */
+    const char *cn = nt_str(nt, id, "name");
+    int ac = 0; int args = nt_ref(nt, id, "arguments"); if (args >= 0) nt_arr(nt, args, "arguments", &ac);
+    if (cn && ac == 0 && nt_ref(nt, id, "block") < 0 &&
+        (sp_streq(cn, "freeze") || sp_streq(cn, "dup") || sp_streq(cn, "clone") || sp_streq(cn, "itself")))
+      continue;
+    c->empty_hash_recv[recv] = 1;
   }
   NT_FOREACH_KIND(nt, NK_EmbeddedStatementsNode, es) {
     int st = nt_ref(nt, es, "statements");

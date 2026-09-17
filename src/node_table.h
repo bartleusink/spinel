@@ -158,6 +158,7 @@ typedef struct {
   X(NumberedReferenceReadNode) \
   X(OperatorWriteNode) \
   X(OptionalKeywordParameterNode) \
+  X(OptionalParameterNode) \
   X(OrNode) \
   X(ParametersNode) \
   X(ParenthesesNode) \

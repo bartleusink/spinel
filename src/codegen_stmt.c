@@ -8129,6 +8129,7 @@ else {
         else emit_expr(c, v_hash_dflt, b);
         buf_puts(b, ")");
       }
+      else if (hcn && v_lit_frozen) buf_printf(b, "sp_gc_freeze(sp_%sHash_new())", hcn);   /* `X = {}.freeze`: the freeze the strip took off (#4510) */
       else if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
       else emit_expr(c, v, b);
     }
@@ -8180,7 +8181,8 @@ else {
     }
     else if (v_empty_hash && ty_is_hash(cv->type)) {
       const char *hcn = ty_hash_cname(cv->type);
-      if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
+      if (hcn && v_lit_frozen) buf_printf(b, "sp_gc_freeze(sp_%sHash_new())", hcn);
+      else if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
       else emit_expr(c, v, b);
     }
     else emit_expr(c, v, b);
