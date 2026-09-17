@@ -1,10 +1,12 @@
 # Integer overflow (`--int-overflow`)
 
 CRuby's `Integer` is arbitrary precision: it never overflows, it grows. Spinel
-compiles `Integer` to a fixed-width **64-bit** machine integer (`sp_int`,
-range `-2**63 .. 2**63 - 1`) because a machine word is what makes the generated
-C fast. `--int-overflow=MODE` chooses what happens when an `Integer` result
-crosses that 64-bit boundary.
+compiles `Integer` to a fixed-width machine integer (`sp_int`, the target's
+pointer width: **64-bit** on amd64 and arm64, range `-2**63 .. 2**63 - 1`;
+32-bit on a 32-bit target, see [below](#the-width-is-the-targets)) because a
+machine word is what makes the generated C fast. `--int-overflow=MODE` chooses
+what happens when an `Integer` result crosses that boundary. The rest of this
+page says 64 bits; read 32 on a 32-bit target.
 
 ```sh
 spinel app.rb --int-overflow=raise     # default
@@ -52,6 +54,44 @@ containers still raise rather than promote, and very large integer *literals*
 are not yet represented). Treat it as opt-in CRuby fidelity, not a finished
 guarantee. It also carries a runtime cost (bigint allocation and GC pressure),
 so the default stays `raise`.
+
+## The width is the target's
+
+`sp_int` is `intptr_t` (lib/sp_types.h): the Integer is as wide as a pointer
+on the machine the program is compiled for. On amd64, arm64 and every other
+64-bit target that is 64 bits; on i386 (`cc -m32`) and wasm32 it is 32, with
+the range `-2**31 .. 2**31 - 1`, and the overflow modes above apply at that
+boundary. Everything that depends on the width follows the target, not the
+host the compiler runs on:
+
+- An integer literal past the target's `sp_int` is a Bignum there, as it is in
+  a 32-bit CRuby: `0xdeadbeef` or `4_000_000_000` compile to a bigint
+  constant for a 32-bit target and to a plain `sp_int` for a 64-bit one.
+- The width comes from the C compiler that builds the program. `spinel` uses
+  its own (it was built with the same toolchain); with `--cc` naming another
+  compiler it asks that one once (`-dM -E`) and classifies literals for its
+  pointer width, so `spinel --cc='cc -m32' app.rb` on a 64-bit host produces a
+  correct 32-bit program.
+- A 32-bit target also gets 64-bit `time_t` and file offsets on glibc
+  (`-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64`) and, on i386, SSE arithmetic
+  (`-msse2 -mfpmath=sse`): the x87 unit rounds every intermediate at 80 bits
+  and `3.7.round(1)` would come out `3.8`. The driver adds these to the
+  program's compile; `common.mk` adds them to the runtime's when `$(CC)` is a
+  32-bit compiler (`SPINEL_INT_BITS`).
+- `Integer#size` is 4, `Integer#bit_length` and the shift helpers use the
+  width, `String#unpack` of a 64-bit directive (`Q`, `q`) boxes a Bignum when
+  the value does not fit, and a Bignum read out of a poly slot into an Integer
+  is a `RangeError` when it does not fit.
+- Known gaps on 32-bit: FFI marshalling of 64-bit C types is not done, and
+  `INT32_MIN` is the sentinel an `Integer | nil` slot uses for `nil`, as
+  `INT64_MIN` is on 64-bit.
+
+For the developer: `make test-corpus CC='cc -m32'` runs the test corpus as
+32-bit programs. Use a separate work tree, or `make clean` first: the runtime
+objects and the precompiled header are built for one width. A test that
+assumes a 64-bit Integer (values or arithmetic past 2^31, `Integer#size`, a
+printed hash, a 64-bit FFI width) says `# spinel: int64` in its first line and
+is filtered out there; CI runs that lane on every push.
 
 ## Using it when you compile the C yourself
 
