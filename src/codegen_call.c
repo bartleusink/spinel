@@ -25395,7 +25395,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     for (int j = 0; cid >= 0 && j < c->nclasses; j++) if (c->classes[j].parent == cid) { has_sub = 1; break; }
     if (cid >= 0 && !has_sub) {
       buf_printf(b, "sp_%s_new(", c->classes[cid].c_name);
-      for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
+      /* the arguments converted to initialize's parameter types, as
+         `V.new(...)` does: an `x.to_i` narrowed to sp_int passed raw into a
+         poly parameter did not compile (#4534) */
+      int initm = comp_method_in_chain(c, cid, "initialize", NULL);
+      if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
+      else for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
       buf_puts(b, ")");
       return;
     }
