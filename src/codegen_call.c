@@ -17462,7 +17462,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          guard with a concrete receiver, not a poly one. Guard those too, or
          the miss takes the result type's zero and `&.` answers false (#4070). */
       int sn_scalar = (rrt == TY_INT || rrt == TY_FLOAT);
-      if ((sn_obj || rrt == TY_STRING || sn_scalar) && g_sn_skip != id) {
+      /* a typed array or hash is a pointer too, and a slice past the end
+         (`a[4..]&.size`) or a container miss hands it NULL (#4524) */
+      int sn_cont = ty_is_array(rrt) || ty_is_hash(rrt);
+      if ((sn_obj || rrt == TY_STRING || sn_scalar || sn_cont) && g_sn_skip != id) {
         int tsn2 = ++g_tmp;
         TyKind ret2 = comp_ntype(c, id);
         /* The temp lives in g_pre (statement scope), not an inline ({ }):
@@ -17479,6 +17482,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           buf_printf(g_pre, "sp_int _sn%d = %s;\n", tsn2, rsn.p ? rsn.p : "SP_INT_NIL");
         else if (rrt == TY_FLOAT)
           buf_printf(g_pre, "sp_float _sn%d = %s;\n", tsn2, rsn.p ? rsn.p : "sp_float_nil()");
+        else if (sn_cont) {
+          emit_ctype(c, rrt, g_pre);
+          buf_printf(g_pre, " _sn%d = %s; SP_GC_ROOT(_sn%d);\n", tsn2, rsn.p ? rsn.p : "NULL", tsn2);
+        }
         else
           buf_printf(g_pre, "const char *_sn%d = %s; SP_GC_ROOT_STR(_sn%d);\n",
                      tsn2, rsn.p ? rsn.p : "NULL", tsn2);

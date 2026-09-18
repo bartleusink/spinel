@@ -81,7 +81,7 @@ sp_IntArray*sp_IntArray_slice(sp_IntArray*a,sp_int start,sp_int len){SP_GC_ROOT(
 /* a[start..end] / a[start...end] with possibly negative endpoints.
    Normalize end against a->len first; the bare _slice already handles
    negative start. Issue #496. */
-sp_IntArray*sp_IntArray_slice_range(sp_IntArray*a,sp_int start,sp_int end_,sp_int excl){SP_GC_ROOT(a);if(end_<0)end_+=a->len;if(start<0)start+=a->len;sp_int n=end_-start+(excl?0:1);if(n<0||start<0)n=0;return sp_IntArray_slice(a,start,n);}
+sp_IntArray*sp_IntArray_slice_range(sp_IntArray*a,sp_int start,sp_int end_,sp_int excl){SP_GC_ROOT(a);if(end_<0)end_+=a->len;if(start<0)start+=a->len;if(start<0||start>a->len)return NULL;/* a start outside [-len, len] is nil (#4524); start == len is [] */sp_int n=end_-start+(excl?0:1);if(n<0)n=0;return sp_IntArray_slice(a,start,n);}
 /* `a.replace(a)` is a no-op in Ruby. Truncating first and copying after made
    it empty the array instead -- the source is the destination, so its length
    was already zero by the time the copy read it. The poly form takes the same
@@ -390,7 +390,7 @@ void sp_FloatArray_replace(sp_FloatArray*dst,sp_FloatArray*src){if(dst==src)retu
 /* a[start, len] / a[start..end] for FloatArray. Same negative-start and
    length-clamping semantics as sp_IntArray_slice. */
 sp_FloatArray*sp_FloatArray_slice(sp_FloatArray*a,sp_int start,sp_int len){SP_GC_ROOT(a);if(start<0)start+=a->len;if(start<0)start=0;sp_FloatArray*b=sp_FloatArray_new();if(start>=a->len||len<=0)return b;if(len>a->len-start)len=a->len-start;if(len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_float)*b->cap);h->size-=sizeof(sp_float)*b->cap;b->cap=len;b->data=(sp_float*)sp_pl_realloc(b->data,sizeof(sp_float)*b->cap);h->size+=sizeof(sp_float)*b->cap;sp_gc_bytes_add(sizeof(sp_float)*b->cap);}memcpy(b->data,a->data+start,sizeof(sp_float)*len);b->len=len;return b;}
-sp_FloatArray*sp_FloatArray_slice_range(sp_FloatArray*a,sp_int start,sp_int end_,sp_int excl){SP_GC_ROOT(a);if(end_<0)end_+=a->len;if(start<0)start+=a->len;sp_int n=end_-start+(excl?0:1);if(n<0||start<0)n=0;return sp_FloatArray_slice(a,start,n);}
+sp_FloatArray*sp_FloatArray_slice_range(sp_FloatArray*a,sp_int start,sp_int end_,sp_int excl){SP_GC_ROOT(a);if(end_<0)end_+=a->len;if(start<0)start+=a->len;if(start<0||start>a->len)return NULL;/* a start outside [-len, len] is nil (#4524); start == len is [] */sp_int n=end_-start+(excl?0:1);if(n<0)n=0;return sp_FloatArray_slice(a,start,n);}
 void sp_FloatArray_reverse_bang(sp_FloatArray*a){SP_GC_ROOT(a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return;}for(sp_int i=0,j=a->len-1;i<j;i++,j--){sp_float t=a->data[i];a->data[i]=a->data[j];a->data[j]=t;}}
 void sp_FloatArray_rotate_bang(sp_FloatArray*a,sp_int n){SP_GC_ROOT(a);
   if(!a)return;
@@ -483,7 +483,7 @@ const char*sp_StrArray_shift(sp_StrArray*a){SP_GC_ROOT(a);if(!a||a->len<=0)retur
 /* a[start, len] / a[start..end] for StrArray. Same negative-start and
    length-clamping semantics as sp_IntArray_slice. */
 sp_StrArray*sp_StrArray_slice(sp_StrArray*a,sp_int start,sp_int len){SP_GC_ROOT(a);if(start<0)start+=a->len;if(start<0)start=0;sp_StrArray*b=sp_StrArray_new();if(start>=a->len||len<=0)return b;if(len>a->len-start)len=a->len-start;for(sp_int i=0;i<len;i++)sp_StrArray_push(b,a->data[start+i]);return b;}
-sp_StrArray*sp_StrArray_slice_range(sp_StrArray*a,sp_int start,sp_int end_,sp_int excl){SP_GC_ROOT(a);if(end_<0)end_+=a->len;if(start<0)start+=a->len;sp_int n=end_-start+(excl?0:1);if(n<0||start<0)n=0;return sp_StrArray_slice(a,start,n);}
+sp_StrArray*sp_StrArray_slice_range(sp_StrArray*a,sp_int start,sp_int end_,sp_int excl){SP_GC_ROOT(a);if(end_<0)end_+=a->len;if(start<0)start+=a->len;if(start<0||start>a->len)return NULL;/* a start outside [-len, len] is nil (#4524); start == len is [] */sp_int n=end_-start+(excl?0:1);if(n<0)n=0;return sp_StrArray_slice(a,start,n);}
 void sp_StrArray_reverse_bang(sp_StrArray*a){SP_GC_ROOT(a); sp_gc_wb((void*)a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return;}for(sp_int i=0,j=a->len-1;i<j;i++,j--){const char*t=a->data[i];a->data[i]=a->data[j];a->data[j]=t;}}
 void sp_StrArray_rotate_bang(sp_StrArray*a,sp_int n){SP_GC_ROOT(a);
   if(!a)return;
