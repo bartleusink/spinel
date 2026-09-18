@@ -3960,6 +3960,7 @@ void unmark_referenced_module_sources(Compiler *c) {
    methods as class methods (is_cmethod=1) so they are callable as C.m. */
 void register_extends(Compiler *c) {
   const NodeTable *nt = c->nt;
+  int did_clone = 0;
   for (int ci = 0; ci < c->nclasses; ci++) {
    /* Every body that defines this class, not only the first: `extend M` is
       commonly written in a REOPENING of the class, and reading def_node alone
@@ -4020,6 +4021,7 @@ void register_extends(Compiler *c) {
             specialize_cmethod_for(c, ms, mod_id, ci);
             src = &c->scopes[ms];  /* realloc-safe */
             src->is_transplanted_source = 1;
+            did_clone = 1;
             continue;
           }
           Scope *dst = comp_scope_new(c, src->name, src->def_node);
@@ -4054,6 +4056,11 @@ void register_extends(Compiler *c) {
     }
    }
   }
+  /* The cloned bodies introduced new local nodes, and register_locals ran
+     before this pass: a local first assigned in the clone had no slot, so
+     it was never declared and every read of it answered nil (#4535). The
+     include and inherited-class-method clones re-register the same way. */
+  if (did_clone) register_locals(c);
 }
 
 /* True if class method scope `mi`'s body contains a bare `new` call (which
