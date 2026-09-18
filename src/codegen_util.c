@@ -27,6 +27,26 @@ int collect_emit_anyway(void) {
   if (v < 0) v = getenv("SP_COLLECT_ERRORS") ? 1 : 0;
   return v;
 }
+/* What codegen decided at a node, for --emit-types (#4522): how a call was
+   dispatched, whether a block was inlined. Kept only under --emit-types;
+   a stamp anywhere else is a no-op, so the emitters say what they did
+   without paying for it. */
+unsigned char *g_ndecide = NULL;
+int g_ndecide_cap = 0;
+int g_nd_call_id = -1;
+void nd_stamp(int id, int kind) {
+  static int on = -1;
+  if (on < 0) { const char *et = getenv("SPINEL_EMIT_TYPES"); on = (et && *et) ? 1 : 0; }
+  if (!on || id < 0) return;
+  if (id >= g_ndecide_cap) {
+    int ncap = g_ndecide_cap ? g_ndecide_cap : 1024;
+    while (ncap <= id) ncap *= 2;
+    g_ndecide = realloc(g_ndecide, (size_t)ncap);
+    memset(g_ndecide + g_ndecide_cap, 0, (size_t)(ncap - g_ndecide_cap));
+    g_ndecide_cap = ncap;
+  }
+  g_ndecide[id] = (unsigned char)kind;
+}
 /* Every refusal of this run, for --emit-types and the count at the end. */
 SpDiag *g_diags = NULL;
 int g_ndiags = 0;

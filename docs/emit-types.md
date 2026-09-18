@@ -30,6 +30,13 @@ beyond the gate's own check.
      "message":"Spinel: the return of `widen` widened to untyped (boxed poly slow path)"},
     {"file":"app.rb","line":20,"col":0,"severity":"error",
      "message":"unsupported class variable read (no class scope): node 4 (ClassVariableReadNode)"}
+  ],
+  "codegen": [
+    {"file":"app.rb","line":11,"col":18,"end_line":11,"end_col":32,
+     "kind":"CallNode","name":"dist2","dispatch":"switch"},
+    {"file":"app.rb","line":11,"col":12,"end_line":11,"end_col":34,
+     "kind":"BlockNode","inlined":true},
+    ...
   ]
 }
 ```
@@ -62,7 +69,24 @@ unknown or void are left out), in node order.
   them, at the refused construct: the same lines the compile prints on
   stderr ([limitations.md](limitations.md) says what a refusal is).
 
+## `codegen`
+
+What codegen decided, one record per call it placed and per block:
+
+- a `CallNode` carries `dispatch`: `"direct"` (one statically bound C
+  call, or a builtin emitted in place: the fast path), `"switch"` (a
+  switch over the classes or tags the receiver can hold, each arm a
+  direct call), or `"boxed"` (the receiver is a boxed value and a runtime
+  helper answers over its tag; an unresolved call is here too).
+- a `BlockNode` carries `inlined`: `true` when the block was spliced into
+  its caller (an iterator's body, a yielding method's block), `false`
+  when it became a function of its own (a proc or lambda, a `Fiber.new`
+  or `Thread.new` body).
+
+A call the compiler never placed (unreachable, or folded into something
+else) has no record. The lens is per site: the one call in a method that
+took a switch or the boxed path is the one to look at.
+
 What the JSON does not say: why a slot widened (which call site or
-assignment unified it to untyped), and what codegen decided at a call
-(a direct call, a class switch, a boxed send). Both are open questions,
-neither is a field yet.
+assignment unified it to untyped). That is an open question, not a
+field.

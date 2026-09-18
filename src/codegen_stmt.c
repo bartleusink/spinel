@@ -6364,6 +6364,13 @@ void emit_stmt(Compiler *c, int id, Buf *b, int indent) {
     g_setter_stmt_id = id;
   emit_with_prelude(c, id, b, indent, emit_stmt_inner);
   g_setter_stmt_id = saved_setter;
+  /* a call the statement emitters placed themselves (puts, an iterator with
+     its block) never reached emit_call's stamp: the same default (#4522) */
+  if (nt_kind(c->nt, id) == NK_CallNode && !(g_ndecide_cap > id && g_ndecide[id])) {
+    int recv = nt_ref(c->nt, id, "receiver");
+    TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_VOID;
+    nd_stamp(id, (rt == TY_POLY || rt == TY_UNKNOWN) ? ND_BOXED : ND_DIRECT);
+  }
 }
 void emit_stmt_tail(Compiler *c, int id, Buf *b, int indent) {
   emit_line_directive(c, id, b);

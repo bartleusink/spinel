@@ -8164,6 +8164,7 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
   int ret_is_void = (ret == TY_VOID || ret == TY_NIL);
   TyKind disp_ret = ret_is_void ? TY_INT : ret;
   int virtual = (is_scalar_ret(ret) || ret_is_void) && (impl_n > 1 || (!m && impl_n >= 1));
+  nd_stamp(g_nd_call_id, virtual ? ND_SWITCH : ND_DIRECT);
 
   /* Arity check, the same one the free-function path already made: an over- or
      under-supplied instance call went through with the extra arguments simply

@@ -3958,6 +3958,7 @@ static int stmt_is_yielder_push(Compiler *c, int id, const char *yname) {
 
 
 void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
+  nd_stamp(nt_ref(c->nt, id, "block"), ND_BLOCK_PROC);   /* the body is a function of its own */
   const NodeTable *nt = c->nt;
   int blk = nt_ref(nt, id, "block");
   if (blk < 0) {
@@ -4620,6 +4621,7 @@ void emit_proc_literal(Compiler *c, int create, Buf *b) {
   int is_lambda_node = cty && sp_streq(cty, "LambdaNode");
   int is_block_node = cty && sp_streq(cty, "BlockNode");
   if (!is_lambda_node && !is_block_node && nt_ref(nt, create, "block") < 0) { unsupported(c, create, "proc literal without a block"); return; }
+  nd_stamp((is_lambda_node || is_block_node) ? create : nt_ref(nt, create, "block"), ND_BLOCK_PROC);
 
   Scope *bs = comp_scope_of(c, create);  /* enclosing scope: holds params + locals */
   int body = proc_body_node(c, create);
@@ -8604,8 +8606,40 @@ static char *build_types_json(Compiler *c) {
       dn++;
     }
   }
+  /* What codegen decided, per node it decided for (#4522): every emitted
+     CallNode's dispatch, every BlockNode's fate. A block nothing lowered to a
+     function of its own was spliced in place. */
+  buf_puts(&b, "\n  ],\n  \"codegen\": [\n");
+  int cn = 0;
+  for (int id = 0; id < nt->count && id < c->node_cap; id++) {
+    const char *kind = nt_type(nt, id);
+    if (!kind) continue;
+    int is_call = sp_streq(kind, "CallNode"), is_blk = sp_streq(kind, "BlockNode");
+    if (!is_call && !is_blk) continue;
+    int d = (g_ndecide && id < g_ndecide_cap) ? g_ndecide[id] : ND_NONE;
+    if (is_call && d == ND_NONE) continue;   /* never emitted: dead, or folded away */
+    int ln = (int)nt_int(nt, id, "node_line", 0);
+    if (ln <= 0) continue;
+    int col = (int)nt_int(nt, id, "node_col", 0);
+    int fid = (int)nt_int(nt, id, "node_file", 0);
+    if (cn > 0) buf_puts(&b, ",\n");
+    buf_puts(&b, "    {\"file\":\"");
+    json_escape_into(&b, emit_file_path(c, fid));
+    buf_printf(&b, "\",\"line\":%d,\"col\":%d", ln, col);
+    { int eln = (int)nt_int(nt, id, "node_end_line", 0);
+      if (eln > 0) buf_printf(&b, ",\"end_line\":%d,\"end_col\":%d", eln, (int)nt_int(nt, id, "node_end_col", 0)); }
+    buf_printf(&b, ",\"kind\":\"%s\"", kind);
+    if (is_call) {
+      const char *nm = nt_str(nt, id, "name");
+      if (nm && *nm) { buf_puts(&b, ",\"name\":\""); json_escape_into(&b, nm); buf_puts(&b, "\""); }
+      buf_printf(&b, ",\"dispatch\":\"%s\"", d == ND_SWITCH ? "switch" : d == ND_BOXED ? "boxed" : "direct");
+    }
+    else buf_printf(&b, ",\"inlined\":%s", d == ND_BLOCK_PROC ? "false" : "true");
+    buf_puts(&b, "}");
+    cn++;
+  }
   buf_puts(&b, "\n  ]\n}\n");
-  return b.p ? b.p : strdup("{\n  \"types\": [\n\n  ],\n  \"diagnostics\": [\n\n  ]\n}\n");
+  return b.p ? b.p : strdup("{\n  \"types\": [\n\n  ],\n  \"diagnostics\": [\n\n  ],\n  \"codegen\": [\n\n  ]\n}\n");
 }
 
 /* Write `text` to `path`; warn (but don't abort) on failure. */

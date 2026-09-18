@@ -15163,6 +15163,7 @@ static void emit_utime_arg(Compiler *c, int node, Buf *b) {
 }
 
 static void emit_call_body(Compiler *c, int id, Buf *b);
+static void emit_call_held(Compiler *c, int id, Buf *b);
 /* nonzero while a setter call is re-entered for its own emission, its value
    already arranged (the `def x=` value-position arm); the emission may go
    through a copy of the node, so a depth rather than the node id */
@@ -15180,6 +15181,18 @@ static int g_setter_value_inner = 0;
    every observable operand first whenever one converts here: CRuby
    evaluates all of a call's arguments before it converts any. */
 void emit_call(Compiler *c, int id, Buf *b) {
+  int nd_saved = g_nd_call_id; g_nd_call_id = id;
+  emit_call_held(c, id, b);
+  g_nd_call_id = nd_saved;
+  /* an emitter that made a switch or reached for the boxed value said so;
+     anything else bound the call statically, unless the receiver is a boxed
+     value, which the runtime then answers (#4522) */
+  if (g_ndecide_cap > id && g_ndecide[id]) return;
+  { int recv = nt_ref(c->nt, id, "receiver");
+    TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_VOID;
+    nd_stamp(id, (rt == TY_POLY || rt == TY_UNKNOWN) ? ND_BOXED : ND_DIRECT); }
+}
+static void emit_call_held(Compiler *c, int id, Buf *b) {
   ConvHold hold; memset(&hold, 0, sizeof hold);
   ConvHold *saved = g_conv_hold;
   size_t pre_mark = g_pre ? g_pre->len : 0;
@@ -30634,8 +30647,8 @@ else {
     }
   }
 
-  if (emit_poly_builtin_method(c, id, b)) return;
-  if (emit_poly_method_dispatch(c, id, b)) return;
+  if (emit_poly_builtin_method(c, id, b)) { nd_stamp(id, ND_SWITCH); return; }
+  if (emit_poly_method_dispatch(c, id, b)) { nd_stamp(id, ND_SWITCH); return; }
   /* the distinct value-type ranges (float / string) answer first */
   if (recv >= 0 && (rt == TY_STR_RANGE || rt == TY_FLOAT_RANGE) &&
       emit_range_call(c, id, b)) return;

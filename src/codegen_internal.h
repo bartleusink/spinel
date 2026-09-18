@@ -558,6 +558,17 @@ const char *rename_local(const char *nm);
    unreachable. */
 int collect_mode(void);            /* 1: refusals are collected per unit (always) */
 int collect_emit_anyway(void);     /* 1 under SP_COLLECT_ERRORS: emit the rest, exit 0 */
+/* What codegen decided at a node (--emit-types only, #4522). A call is
+   ND_DIRECT (one statically bound C call or an inline builtin), ND_SWITCH
+   (a switch over the classes or tags the receiver can hold) or ND_BOXED
+   (a runtime helper over the boxed value, or an unresolved call); a block
+   is ND_BLOCK_PROC when it became a function of its own (a proc, a fiber
+   or thread body), else it was spliced in place. */
+enum { ND_NONE = 0, ND_DIRECT, ND_SWITCH, ND_BOXED, ND_BLOCK_PROC };
+extern unsigned char *g_ndecide;
+extern int g_ndecide_cap;
+extern int g_nd_call_id;    /* the CallNode being emitted, for emitters without the id */
+void nd_stamp(int id, int kind);
 /* One refusal: where and what. Recorded in order for --emit-types. */
 typedef struct { const char *file; int line; const char *msg; } SpDiag;
 extern SpDiag *g_diags;
