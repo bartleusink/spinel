@@ -6901,6 +6901,7 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
     ClassInfo *fci = &c->classes[i];
     if (is_builtin_reopen(fci->name) || fci->is_native_class) continue;
     if (comp_ty_value_obj(c, ty_object(i))) continue;
+    if (comp_class_is_module(c, fci)) continue;
     const char *mnames[2] = { "to_s", "inspect" };
     for (int m = 0; m < 2; m++) {
       int fdef = -1;
@@ -6930,6 +6931,10 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
     }
     if (is_builtin_reopen(tci->name) || tci->is_native_class) continue;
     if (comp_ty_value_obj(c, ty_object(i))) continue;
+    /* a module has no instances and its methods are emitted only as the
+       includer's (sp_V_to_s, never sp_M_to_s): an arm for it referenced a
+       function no TU defines and the program did not link (#4533) */
+    if (comp_class_is_module(c, tci)) continue;
     int tdef = -1;
     int tmi = comp_method_in_chain(c, i, "to_s", &tdef);
     if (tmi >= 0 && c->scopes[tmi].reachable && c->scopes[tmi].ret == TY_STRING &&
@@ -6987,9 +6992,10 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
     if (!class_inspectable(c, i)) continue;
     ClassInfo *ci = &c->classes[i];
     /* a user #inspect wins over the default ivar walk, so a contained
-       element renders the same as a directly-inspected one */
+       element renders the same as a directly-inspected one. A module's own
+       arm would name a function only its includers define (#4533). */
     int uidef = -1;
-    int uimi = comp_method_in_chain(c, i, "inspect", &uidef);
+    int uimi = comp_class_is_module(c, ci) ? -1 : comp_method_in_chain(c, i, "inspect", &uidef);
     if (uimi >= 0 && c->scopes[uimi].reachable && c->scopes[uimi].ret == TY_STRING &&
         c->scopes[uimi].nparams == 0) {
       buf_printf(b, "    case %d: return sp_%s_%s((sp_%s *)p);\n",
