@@ -1223,7 +1223,7 @@ static void sp_sched_globals_mark(void) {
   /* Mark each parked worker's published roots. Reaches the per-worker root fibers
      (idle/main workers) that are not on sp_fiber_list_head; green-thread fibers
      are also covered here (harmless re-mark) and via the suspended-fibers hook. */
-  for (int i = 0; i < g_n_parked_fiber; i++) sp_fiber_mark_roots(g_parked_fiber[i]);
+  for (int i = 0; i < g_n_parked_fiber; i++) sp_fiber_mark_chain(g_parked_fiber[i]);   /* and the resumers waiting on it */
 #endif
   if (g_prev_globals_hook) g_prev_globals_hook();
 }

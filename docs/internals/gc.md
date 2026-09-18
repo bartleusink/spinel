@@ -40,8 +40,15 @@ returns to it.
 
 Beyond the root array the mark walk consults three hook groups, in this order:
 
-1. **fibers** -- `sp_gc_mark_suspended_fibers_hook`, the saved root stacks of
-   suspended green threads;
+1. **fibers** -- `sp_gc_mark_suspended_fibers_hook`: the saved root stacks of
+   the fibers whose C stacks are live, the running fiber's resumers (each
+   suspended inside `#resume`, waiting) and the worker's root fiber. Every
+   other suspended fiber is an object like any other: it lives while
+   something refers to it, and its saved roots are marked when it is scanned
+   (`sp_Fiber_scan`), so an object that owns a suspended fiber whose block
+   captures it is collectable (#4525). A fiber that has just published its
+   roots is remembered (`sp_gc_wb`), since the snapshot may name young
+   objects that only its scan reaches now;
 2. **globals** -- `sp_gc_mark_globals_hook`, installed by the *generated*
    translation unit, which owns state the collector cannot see: the regexp
    match registers, `ARGV`, `$0`, the in-flight exception stack, reassigned
