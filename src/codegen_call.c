@@ -17669,15 +17669,23 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     }
   }
   /* poly_val.call — the poly value is a proc; unbox then call. Only applies
-     when no user-defined class has a `call` method: when one does, the poly
-     method dispatch carries a callable pre-arm that routes a boxed Proc/Curry/
-     Method through this same machinery, and the user classes take their switch
-     arms (#4395). */
+     when no user-defined class has a `call` method that could take THIS
+     call: when one does, the poly method dispatch carries a callable pre-arm
+     that routes a boxed Proc/Curry/Method through this same machinery, and
+     the user classes take their switch arms (#4395). A user `call` whose
+     required arity exceeds the site's argument count is no candidate there
+     -- the dispatch counts candidates by `argc >= nrequired` and declines
+     with none -- so stepping aside for it left the site at the unresolved
+     raise, with no arm at all: one `def call(severity, time, progname,
+     message)` on a log formatter turned every `pred.call(host, port)` on a
+     Proc slot into NoMethodError. */
   if (recv >= 0 && comp_ntype(c, recv) == TY_POLY &&
       (sp_streq(name, "call") || sp_streq(name, "()"))) {
     int has_user_call = 0;
-    for (int _k = 0; _k < c->nclasses && !has_user_call; _k++)
-      if (comp_method_in_class(c, _k, name) >= 0) has_user_call = 1;
+    for (int _k = 0; _k < c->nclasses && !has_user_call; _k++) {
+      int umi = comp_method_in_class(c, _k, name);
+      if (umi >= 0 && argc >= c->scopes[umi].nrequired) has_user_call = 1;
+    }
     /* The callable ABI packs at most 16 positional args into sp_int[16];
        beyond that the publish loop writes _sp_proc_poly_args[16] out of
        bounds and the compound literal has 17+ initializers (a hard -Werror
