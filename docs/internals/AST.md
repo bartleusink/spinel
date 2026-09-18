@@ -70,7 +70,10 @@ Every subsequent record begins with a single-letter tag:
 Every node carries `node_line` / `node_file` / `node_col` integer
 attributes (the source position Prism reports); codegen reads them via
 `nt_int(nt, id, "node_line", 0)` etc. to emit `#line` directives under
-`--line-map` (on by default) and `--debug`.
+`--line-map` (on by default) and `--debug`. Under `--emit-types` a node
+also carries `node_end_line` / `node_end_col` (Prism's exclusive end),
+which the JSON reports as the node's span; the ordinary compile has no
+use for them and does not pay for them.
 
 A node is defined by its `N` line followed by zero or more attribute
 lines (`S`/`I`/`F`/`R`/`A`) that share the same `<id>`. Attribute lines

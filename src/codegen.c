@@ -8515,7 +8515,19 @@ static char *build_types_json(Compiler *c) {
     if (tn > 0) buf_puts(&b, ",\n");
     buf_puts(&b, "    {\"file\":\"");
     json_escape_into(&b, emit_file_path(c, fid));
-    buf_printf(&b, "\",\"line\":%d,\"col\":%d,\"type\":\"", ln, col);
+    buf_printf(&b, "\",\"line\":%d,\"col\":%d", ln, col);
+    /* the span's end (the parser stamps it for this mode), the node's Prism
+       kind and, where the node names something (a call, a variable, a
+       constant, a def, a parameter), that name: what a consumer needs to
+       pick the expression under a cursor and to find its other mentions
+       (#4522) */
+    { int eln = (int)nt_int(nt, id, "node_end_line", 0);
+      if (eln > 0) buf_printf(&b, ",\"end_line\":%d,\"end_col\":%d", eln, (int)nt_int(nt, id, "node_end_col", 0)); }
+    { const char *kind = nt_type(nt, id);
+      if (kind) { buf_puts(&b, ",\"kind\":\""); json_escape_into(&b, kind); buf_puts(&b, "\""); }
+      const char *nm = nt_str(nt, id, "name");
+      if (nm && *nm) { buf_puts(&b, ",\"name\":\""); json_escape_into(&b, nm); buf_puts(&b, "\""); } }
+    buf_puts(&b, ",\"type\":\"");
     Buf tag; memset(&tag, 0, sizeof tag);
     ty_tag_into(c, t, &tag);
     json_escape_into(&b, tag.p ? tag.p : "");
@@ -8540,24 +8552,57 @@ static char *build_types_json(Compiler *c) {
     buf_puts(&b, "\"}");
     dn++;
   }
+  /* One warning per widened SLOT, at the slot: a parameter's marker sits on
+     the parameter (its node, found by name under the def), a return's on the
+     def. The marker used to sit on the def and say "a parameter or return",
+     and the reader worked out which from the RBS (#4522). */
   for (int si = 1; si < c->nscopes; si++) {
     Scope *s = &c->scopes[si];
     if (!s->name || !*s->name || s->def_node < 0) continue;
     if (!scope_sig_degraded(c, s)) continue;
-    int ln = (int)nt_int(nt, s->def_node, "node_line", 0);
-    if (ln <= 0) continue;
-    int col = (int)nt_int(nt, s->def_node, "node_col", 0);
+    int dln = (int)nt_int(nt, s->def_node, "node_line", 0);
+    if (dln <= 0) continue;
+    int dcol = (int)nt_int(nt, s->def_node, "node_col", 0);
     int fid = (int)nt_int(nt, s->def_node, "node_file", 0);
-    if (dn > 0) buf_puts(&b, ",\n");
-    buf_puts(&b, "    {\"file\":\"");
-    json_escape_into(&b, emit_file_path(c, fid));
-    buf_printf(&b, "\",\"line\":%d,\"col\":%d,\"severity\":\"warning\",\"message\":\"", ln, col);
-    Buf msg; memset(&msg, 0, sizeof msg);
-    buf_printf(&msg, "Spinel: `%s` has a parameter or return widened to untyped (boxed poly slow path)", s->name);
-    json_escape_into(&b, msg.p ? msg.p : "");
-    free(msg.p);
-    buf_puts(&b, "\"}");
-    dn++;
+    for (int i = 0; i <= s->nparams; i++) {
+      const char *slot = NULL; int at = s->def_node;
+      if (i < s->nparams) {
+        LocalVar *p = scope_local(s, s->pnames[i]);
+        TyKind pt = (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY;
+        if (!ty_is_degraded(pt) || !s->pnames[i]) continue;
+        slot = s->pnames[i];
+        /* the parameter's own node: the one *ParameterNode of this scope
+           that carries the name */
+        for (int pid = 0; pid < nt->count && pid < c->node_cap; pid++) {
+          if (c->nscope[pid] != si) continue;
+          const char *pty = nt_type(nt, pid);
+          if (!pty || !strstr(pty, "ParameterNode")) continue;
+          const char *pn = nt_str(nt, pid, "name");
+          if (pn && sp_streq(pn, slot) && nt_int(nt, pid, "node_line", 0) > 0) { at = pid; break; }
+        }
+      }
+      else if (!ty_is_degraded(s->ret)) continue;
+      int ln = (int)nt_int(nt, at, "node_line", 0), col = (int)nt_int(nt, at, "node_col", 0);
+      if (ln <= 0) { ln = dln; col = dcol; }
+      if (dn > 0) buf_puts(&b, ",\n");
+      buf_puts(&b, "    {\"file\":\"");
+      json_escape_into(&b, emit_file_path(c, fid));
+      buf_printf(&b, "\",\"line\":%d,\"col\":%d", ln, col);
+      { int eln = (int)nt_int(nt, at, "node_end_line", 0);
+        if (eln > 0) buf_printf(&b, ",\"end_line\":%d,\"end_col\":%d", eln, (int)nt_int(nt, at, "node_end_col", 0)); }
+      buf_puts(&b, ",\"severity\":\"warning\",\"method\":\"");
+      json_escape_into(&b, s->name);
+      if (slot) { buf_puts(&b, "\",\"slot\":\"param\",\"param\":\""); json_escape_into(&b, slot); buf_puts(&b, "\""); }
+      else buf_puts(&b, "\",\"slot\":\"return\"");
+      buf_puts(&b, ",\"message\":\"");
+      Buf msg; memset(&msg, 0, sizeof msg);
+      if (slot) buf_printf(&msg, "Spinel: parameter `%s` of `%s` widened to untyped (boxed poly slow path)", slot, s->name);
+      else buf_printf(&msg, "Spinel: the return of `%s` widened to untyped (boxed poly slow path)", s->name);
+      json_escape_into(&b, msg.p ? msg.p : "");
+      free(msg.p);
+      buf_puts(&b, "\"}");
+      dn++;
+    }
   }
   buf_puts(&b, "\n  ]\n}\n");
   return b.p ? b.p : strdup("{\n  \"types\": [\n\n  ],\n  \"diagnostics\": [\n\n  ]\n}\n");

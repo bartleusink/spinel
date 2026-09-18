@@ -122,6 +122,11 @@ static char *g_source_file_escaped = NULL;  /* escape_str(g_source_file), set on
    `node_line` field so codegen can place C `#line` directives. Off by
    default so the AST text format (and golden tests) are unchanged. */
 static int g_emit_line = 0;
+/* --emit-types (SPINEL_EMIT_TYPES) also gets each node's END position, so a
+   consumer can pick the tightest span under a cursor: `pts`, `pts.map { }`
+   and `.inspect` all start at one column. Only then: two more attributes on
+   every node is text AST the ordinary compile has no use for (#4522). */
+static int g_emit_end = 0;
 /* Set from the ENTRY file's `# frozen_string_literal: true` magic comment.
    The pragma is per-file in Ruby: the require resolvers build g_fsl_lines
    (one flag byte per line of the final spliced buffer, from each spliced
@@ -450,6 +455,18 @@ static int flatten(pm_node_t *node) {
     /* Column is concatenation-stable (require splicing is line-based), so the
        buffer column equals the original-file column. 0-based, as Prism gives. */
     emit_int(id, "node_col", (long long)lc.column);
+    if (g_emit_end) {
+      /* Prism's end is exclusive; the line map is line-based, so the end
+         line goes through it the way the start line does */
+      pm_line_column_t le = pm_newline_list_line_column(&g_parser->newline_list,
+                                                        node->location.end,
+                                                        g_parser->start_line);
+      int32_t el = le.line;
+      int eorig = el;
+      if (sp_line_map_n > 0 && el >= 1 && el <= sp_line_map_n) eorig = sp_line_orig[el];
+      emit_int(id, "node_end_line", (long long)eorig);
+      emit_int(id, "node_end_col", (long long)le.column);
+    }
   }
 
 #define N(type_name) out_add("N %d " type_name, id)
@@ -3315,6 +3332,8 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
     int on = (dbg != NULL && dbg[0] == '1' && dbg[1] == '\0')
           || (lm  != NULL && lm[0]  == '1' && lm[1]  == '\0');
     g_emit_line = on ? 1 : 0;
+    const char *et = getenv("SPINEL_EMIT_TYPES");
+    g_emit_end = (on && et && *et) ? 1 : 0;
   }
 
   /* Resolve require_relative and plain require */

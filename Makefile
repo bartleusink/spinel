@@ -1972,6 +1972,11 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	  $(SPINEL) "$$f" -o "$$tmp/ibin" >/dev/null 2>&1 || { echo "infer-test: FAIL ($$f: the emitted C does not compile)"; ok=0; continue; }; \
 	  "$$tmp/ibin" >/dev/null 2>&1 || { echo "infer-test: FAIL ($$f: the program does not run)"; ok=0; }; \
 	done; \
+	$(SPINEL) test/infer/emit_types_fields.rb --emit-types -o "$$tmp/et.json" >/dev/null 2>&1 || { echo "infer-test: FAIL (--emit-types on emit_types_fields)"; exit 1; }; \
+	grep -q '"line":13,"col":5,"end_line":13,"end_col":8,"kind":"LocalVariableReadNode","name":"pts"' "$$tmp/et.json" || { echo "infer-test: FAIL (--emit-types: a node's span, kind and name)"; ok=0; }; \
+	grep -q '"line":13,"col":5,"end_line":13,"end_col":36,"kind":"CallNode","name":"map"' "$$tmp/et.json" || { echo "infer-test: FAIL (--emit-types: the enclosing call span)"; ok=0; }; \
+	grep -q '"line":6,"col":12,.*"method":"dist2","slot":"param","param":"o"' "$$tmp/et.json" || { echo "infer-test: FAIL (--emit-types: the widened parameter is named and placed)"; ok=0; }; \
+	grep -q '"method":"widen","slot":"return"' "$$tmp/et.json" || { echo "infer-test: FAIL (--emit-types: the widened return is named)"; ok=0; }; \
 	$(SPINEL) test/infer/unsettled_index_write.rb -c --no-line-map -o "$$tmp/u.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile unsettled_index_write)"; exit 1; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_M_s_mul\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/u.c" || { echo "infer-test: FAIL (an int-keyed []= on an unsettled slot poisoned the call graph)"; grep -E 'sp_M_s_mul\(' "$$tmp/u.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_IntArray \* *lv_xs' "$$tmp/u.c" || { echo "infer-test: FAIL (the mapped array did not settle to an int array)"; ok=0; }; \

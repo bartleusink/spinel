@@ -26,6 +26,9 @@ Start here, then open the topic you need.
   what happens when an `Integer` crosses Spinel's machine-word boundary
   (64 bits on a 64-bit target, 32 on i386 and wasm32), and how the width
   follows the target.
+- **[emit-types.md](emit-types.md)** — `--emit-types`: every typed node's
+  span, kind, name and RBS, and the diagnostics (the widened slot, the
+  refusals) as JSON, for editor tools.
 - **[wasm.md](wasm.md)** — `--target=wasm32-wasi`: the program as a
   WebAssembly module for wasmtime, Node or a browser, what it needs (the
   wasi-sdk, `make wasm-rt`) and what the target does without.
