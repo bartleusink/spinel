@@ -915,13 +915,19 @@ is false), Hash keys, slicing (`s[i]`, `s[a, n]`, ranges, `byteslice`),
 `dup` / `clone`, concatenation, `0.chr`, `File.write` / `File.read`
 round-trips, StringIO, pack/unpack, and Marshal.
 
-The transform and search methods walk the C string and stop at the first
-NUL: case ops (`upcase`, ...), `strip` family, `index` / `include?` /
-`start_with?`, `sub` / `gsub` / `tr` / `delete` / `squeeze`, `split`,
-`reverse`, `succ`, and interpolation / `%` formatting (`"x#{s}y"` drops
-the NUL and its tail). `inspect` renders `\x00` where CRuby prints
-`\u0000`. Treat embedded-NUL strings as byte containers, not text to
-transform; full binary-safe transforms are a possible future project.
+The transforms and searches are byte-exact too: the case ops, the `strip`
+family, `chomp` / `chop` / `delete_prefix` / `delete_suffix`, `index` /
+`rindex` / `include?` / `start_with?` / `end_with?`, `sub` / `gsub` /
+`tr` / `delete` / `squeeze` / `count`, `split` / `partition` / `lines` /
+`each_line`, `reverse`, `succ`, `sum`, a regexp match position, and
+padding (`ljust` / `rjust` / `center`, a `"\0"` pad included).
+
+What still walks the C string and stops at the first NUL: interpolation
+and `%` formatting (`"x#{s}y"` and `"%s" % s` drop the NUL and its
+tail). `inspect` renders `\x00` where CRuby prints `\u0000`. A string
+that carries a NUL is a byte container; build it with `<<`, `+` and
+`pack`, not with interpolation. `test/embedded_nul_method_partition.rb`
+pins which is which.
 
 #### Nested modules named after a builtin class
 
