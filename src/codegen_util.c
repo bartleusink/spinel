@@ -1674,9 +1674,14 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
     return 1;
   }
   if (t == TY_POLY) {
-    /* boxed object tag: identity via the boxed pointer */
-    buf_puts(b, "(const char *)("); emit_expr(c, id, b); buf_puts(b, ").v.p");
-    return 1;
+    /* A boxed tag is whatever the value is: a Symbol or a String matches by
+       name, an object by identity. The kind is the value's at run time, so
+       the caller gets the sp_RbVal and -1, and asks sp_catch_tag_of for the
+       tag and the kind together. Reading the payload as an object pointer
+       made a Symbol element of an Array (`throw TAGS[1]`) a kind-1 tag whose
+       pointer was the symbol's id, and it matched nothing (#4523). */
+    emit_expr(c, id, b);
+    return -1;
   }
   if (t == TY_STRING) {
     /* a dynamic string tag: a valid pointer, matched by content (like the

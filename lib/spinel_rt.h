@@ -9736,6 +9736,21 @@ static inline void sp_catch_check_depth(void) {
 /* shared counter (not SP_TLS) so `catch { |tag| }` autotags are globally
    unique; see sp_brk_seq for the same shape */
 static sp_int sp_catch_seq = 0;
+/* The tag and the kind a boxed value makes: a Symbol or a String matches by
+   name (kind 0), an Integer by value and anything else by identity (kind 1).
+   A boxed tag's kind is not known until it is thrown or caught (#4523). */
+static const char *sp_catch_tag_of(sp_RbVal v, unsigned char *kind) {
+  if (v.tag == SP_TAG_SYM) { *kind = 0; return sp_sym_name_fn ? sp_sym_name_fn((sp_sym)v.v.i) : ""; }
+  if (v.tag == SP_TAG_STR) { *kind = 0; return v.v.p ? (const char *)v.v.p : ""; }
+  if (v.tag == SP_TAG_INT) { *kind = 1; return (const char *)(intptr_t)v.v.i; }
+  *kind = 1;
+  return (const char *)v.v.p;
+}
+static void sp_throw(const char *tag, int kind, sp_RbVal val);
+static void sp_throw_boxed(sp_RbVal tagv, sp_RbVal val) {
+  unsigned char kind; const char *tag = sp_catch_tag_of(tagv, &kind);
+  sp_throw(tag, kind, val);
+}
 static void sp_throw(const char *tag, int kind, sp_RbVal val) {
   int i = sp_catch_top - 1;
   while (i >= 0) {

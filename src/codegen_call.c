@@ -16735,10 +16735,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_catch_check_depth();\n");
       int tag_kind = 0;
       if (argc == 1) {
+        Buf tgb; memset(&tgb, 0, sizeof tgb);
+        tag_kind = emit_catch_tag(c, argv[0], &tgb);
         emit_indent(g_pre, g_indent);
-        buf_puts(g_pre, "sp_catch_tag[sp_catch_top] = ");
-        tag_kind = emit_catch_tag(c, argv[0], g_pre);
-        buf_puts(g_pre, ";\n");
+        if (tag_kind < 0)   /* a boxed tag: its kind is the value's, decided at run time */
+          buf_printf(g_pre, "sp_catch_tag[sp_catch_top] = sp_catch_tag_of(%s, &sp_catch_tag_kind[sp_catch_top]);\n", tgb.p ? tgb.p : "sp_box_nil()");
+        else
+          buf_printf(g_pre, "sp_catch_tag[sp_catch_top] = %s;\n", tgb.p ? tgb.p : "");
+        free(tgb.p);
       }
       else {
         /* `catch { |tag| ... }`: mint a fresh, content-unique heap tag per
@@ -16755,8 +16759,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           buf_printf(g_pre, "lv_%s = _ctag%d;\n", rename_local(bp0), t);
         }
       }
-      emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "sp_catch_tag_kind[sp_catch_top] = %d;\n", tag_kind);
+      if (tag_kind >= 0) {
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_catch_tag_kind[sp_catch_top] = %d;\n", tag_kind);
+      }
       emit_indent(g_pre, g_indent);
       buf_puts(g_pre, "sp_catch_val[sp_catch_top] = sp_box_nil();\n");
       /* record the exception-handler depth at this catch's entry so a `throw`
@@ -16827,7 +16833,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     Buf tb; memset(&tb, 0, sizeof tb);
     if (argc >= 1) tag_kind = emit_catch_tag(c, argv[0], &tb);
     else buf_puts(&tb, "(&(\"\\xff\")[1])");
-    buf_printf(b, "sp_throw(%s, %d, ", tb.p ? tb.p : "", tag_kind);
+    if (tag_kind < 0) buf_printf(b, "sp_throw_boxed(%s, ", tb.p ? tb.p : "sp_box_nil()");
+    else buf_printf(b, "sp_throw(%s, %d, ", tb.p ? tb.p : "", tag_kind);
     free(tb.p);
     if (argc >= 2) emit_boxed(c, argv[1], b);
     else buf_puts(b, "sp_box_nil()");
