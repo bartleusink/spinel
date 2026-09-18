@@ -10974,7 +10974,8 @@ char *codegen_program(const NodeTable *nt) {
     char *json = build_types_json(c);
     emit_write_file(types_out, json);
     free(json);
-    free(b.p); b.p = NULL;
+    { const char *keep = getenv("SPINEL_EMIT_TYPES_KEEP_C");
+      if (!(keep && *keep)) { free(b.p); b.p = NULL; } }
   }
   if (g_ndiags > 0 && !collect_emit_anyway()) {
     /* not "unsupported": spinel-doctor and spinel-reduce count the lines
@@ -10985,6 +10986,8 @@ char *codegen_program(const NodeTable *nt) {
     exit(1);
   }
   comp_free(c);
-  return types_out ? strdup("") : b.p;
+  { const char *keep = getenv("SPINEL_EMIT_TYPES_KEEP_C");
+    if (types_out && !(keep && *keep)) return strdup(""); }
+  return b.p;
 }
 

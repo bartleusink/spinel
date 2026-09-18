@@ -582,6 +582,9 @@ int main(int argc, char **argv) {
     if (!output) { strncat(emit_out, ".types.json", sizeof emit_out - strlen(emit_out) - 1); }
     set_env("SPINEL_DEBUG", "1");
     set_env("SPINEL_EMIT_TYPES", emit_out);
+    /* `--emit-types -o x.json -S`: the JSON and the C of the same compile,
+       in one run rather than two (a consumer showing both, rubys/spinel-ide) */
+    if (stdout_mode) set_env("SPINEL_EMIT_TYPES_KEEP_C", "1");
   }
   else if (emit_symbol_map) {
     snprintf(emit_out, sizeof emit_out, "%s", output ? output : basename);
@@ -676,9 +679,11 @@ int main(int argc, char **argv) {
   if (seed_path[0]) remove(seed_path);
   if (!csrc) { fprintf(stderr, "spinel: codegen failed\n"); return 1; }
 
-  /* Emit modes already wrote their file; codegen returned empty C. */
+  /* Emit modes already wrote their file; codegen returned empty C, unless
+     --emit-types was asked for the C on stdout as well. */
   if (emit_rbs || emit_types || emit_symbol_map) {
     fprintf(stderr, "Wrote %s\n", emit_out);
+    if (emit_types && stdout_mode) fputs(csrc, stdout);
     free(csrc);
     return 0;
   }

@@ -9,7 +9,9 @@ spinel app.rb --emit-types -o out.json
 discarded buffer) and writes what the compiler knew as JSON: a type for
 every node it typed, and the diagnostics. No binary is written. The exit
 status is the compile's: a program the compiler refuses exits 1 and the
-JSON still carries the refusals. It is the surface the out-of-tree
+JSON still carries the refusals. With `-S` as well
+(`spinel app.rb --emit-types -o app.json -S`) the C of that same compile
+goes to stdout, so a consumer showing both runs the compiler once. It is the surface the out-of-tree
 editor tools read (rubys/spinel-ide); nothing in this tree consumes it
 beyond the gate's own check.
 
