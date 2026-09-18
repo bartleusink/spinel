@@ -63,11 +63,21 @@ is a user guarantee.
 `Kernel#sleep` and blocking I/O are **scheduler-aware**: a sleeping or
 I/O-blocked thread frees its OS worker for other green threads instead of
 holding it idle, and the monitor wakes it when the deadline passes or the fd
-becomes ready. A *timed* readiness wait on one IO -- `IO#wait_readable(t)`,
-`IO#wait_writable(t)`, `IO.select([io], nil, nil, t)` -- parks the same way,
-and wakes on whichever of the fd or the deadline comes first. `IO.select`
-over several IOs still runs on `select(2)` and holds its worker for the
-duration.
+becomes ready. Every read entry point on a socket, a pipe or a terminal
+(`#gets`, `#read`, `#readpartial`, `#sysread`, `#getc`, `#getbyte`,
+`#readbyte`, `#eof?`, `#each_line` and the rest) parks this way, and so does
+a readiness wait -- `IO#wait_readable(t)`, `IO#wait_writable(t)`,
+`IO.select` over one IO or several, with or without a timeout -- which wakes
+on whichever of an fd or the deadline comes first. A backtick, `system` and
+`Process.waitpid2` in a green thread wait for the child without holding the
+worker either.
+
+Why this matters beyond fairness: a collection stops the world at
+safepoints, and a worker sitting in a syscall never reaches one, so a thread
+that blocked its worker in the kernel would hold up every other thread's
+next allocation for as long as the syscall lasted. A `blocking: true` FFI
+call is the one place a worker deliberately leaves for the kernel, and it
+announces that on the way out so the collector does not wait for it.
 
 ### Synchronization primitives
 

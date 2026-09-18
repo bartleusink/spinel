@@ -172,21 +172,21 @@ void sp_io_wait_writable(sp_File *f) {SP_GC_ROOT(f);
 #endif
 }
 
-void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
-  if (!f || !f->fp) return;
-  if (!sp_io_parkable(f)) return;
+/* The descriptor form, for a pipe the runtime holds without a handle (a
+   backtick's child): the same park, on the bare fd. */
+void sp_io_wait_fd_readable(int fd) {
+  if (fd < 0) return;
   /* Already readable: answer from one poll rather than a park. The park is a
      monitor round trip -- register the waiter, write the self-pipe to break
      the monitor out of ITS poll, wait to be requeued and rescheduled -- and
      paying that when the bytes are already there is most of the cost in the
      shape that reads right after an IO.select says the fd is ready. */
-  { struct pollfd rp; rp.fd = fileno(f->fp); rp.events = POLLIN; rp.revents = 0;
-    if (rp.fd >= 0 && poll(&rp, 1, 0) > 0) return; }
-  if (sp_io_stdio_buffered(f->fp) > 0) return;
+  { struct pollfd rp; rp.fd = fd; rp.events = POLLIN; rp.revents = 0;
+    if (poll(&rp, 1, 0) > 0) return; }
 #ifdef SP_THREADS
   {
     extern int sp_sched_wait_io(int fd, short events);
-    sp_sched_wait_io(fileno(f->fp), POLLIN);
+    sp_sched_wait_io(fd, POLLIN);
   }
 #else
   /* Cooperative build: a blocking read here would stall EVERY green thread
@@ -195,7 +195,7 @@ void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
   {
     extern void sp_Thread_pass(void);
     struct pollfd p;
-    p.fd = fileno(f->fp);
+    p.fd = fd;
     p.events = POLLIN;
     for (;;) {
       p.revents = 0;
@@ -205,6 +205,12 @@ void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
     }
   }
 #endif
+}
+void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
+  if (!f || !f->fp) return;
+  if (!sp_io_parkable(f)) return;
+  if (sp_io_stdio_buffered(f->fp) > 0) return;
+  sp_io_wait_fd_readable(fileno(f->fp));
 }
 
 /* The socket write path: straight to the descriptor, looping over short
@@ -886,11 +892,17 @@ sp_File *sp_sock_accept_nb(sp_File *f, sp_bool exc) {SP_GC_ROOT(f);
    Buffer first, exactly as sp_sock_read_nb does: whatever stdio already holds
    is data the peer has sent, and a raw read(2) would step over it, so a #gets
    before a #readpartial would lose bytes. Then a single BLOCKING read -- that
-   is the only difference from the nonblocking sibling below. */
+   is the only difference from the nonblocking sibling below.
+
+   Park first, like every other read entry point: the blocking read(2) sits on
+   the OS worker, which never reaches a safepoint, so the next stop-the-world
+   collection waited on it forever and one green thread idle in readpartial
+   on a quiet socket froze every other thread's allocation (#4528). */
 const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
   SP_IO_OPEN(f);
   if (n < 0) sp_raise_cls("EOFError", "end of file reached");
   if (n == 0) return sp_str_empty_binary();
+  sp_io_wait_readable(f);
   char *r = sp_str_alloc((size_t)n);
   ssize_t got;
   long pend = sp_io_buffered(f);
@@ -1084,6 +1096,7 @@ sp_int sp_File_flush(sp_File *f) {
 
 sp_bool sp_File_eof_p(sp_File *f) {
   SP_IO_OPEN(f);
+  sp_io_wait_readable(f);
   int c = fgetc(f->fp);
   if (c == EOF) return TRUE;
   ungetc(c, f->fp);
@@ -1255,6 +1268,7 @@ void sp_file_rename(const char *from, const char *to) {SP_GC_ROOT_STR(from);SP_G
 /* IO#readbyte: like #getbyte but EOFError at end of file. */
 sp_int sp_File_readbyte(sp_File *f) {
   SP_IO_OPEN(f);
+  sp_io_wait_readable(f);
   int ch = fgetc(f->fp);
   if (ch == EOF) sp_raise_cls("EOFError", "end of file reached");
   return (sp_int)(unsigned char)ch;

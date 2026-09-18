@@ -725,7 +725,7 @@ static int            g_pcap = 0;        /* capacity of g_pfds / g_pths */
    is discarded. What must never happen -- a park that arms nothing and waits
    forever -- cannot, because nothing is ever assumed still armed. */
 #ifdef SP_EV_BACKEND
-typedef struct { sp_thread *waiters; } sp_ev_slot;   /* indexed by fd */
+typedef struct { sp_ev_waiter *waiters; } sp_ev_slot;   /* indexed by fd: the threads' entries parked on it */
 static int         g_ev_fd  = -1;
 static sp_ev_slot *g_ev_tab = NULL;
 static int         g_ev_cap = 0;
@@ -867,6 +867,8 @@ static int sp_ev_backend_wait(int set, sp_ev_ready *out, int max, int tmo_ms) {
 /* Arm `fd` for the union of what its waiters want. Attempted on every park --
    see the note above: never skipped on the belief that an earlier arm stands. */
 static int sp_ev_home_of(sp_thread *t) { return t->home_wid < 0 ? 0 : (int)t->home_wid; }
+/* What an entry waits for: the thread's own descriptor, or one of its set */
+static short sp_evw_events(sp_ev_waiter *e) { return e->idx < 0 ? e->t->io_events : e->t->io_set[e->idx].events; }
 static void sp_ev_arm_fd(int fd) {   /* PRE: sched lock held */
   if (fd < 0 || fd >= g_ev_cap) return;
   /* One descriptor can be waited on by threads pinned to DIFFERENT workers --
@@ -875,14 +877,14 @@ static void sp_ev_arm_fd(int fd) {   /* PRE: sched lock held */
      waiters want. The list is one element in the ordinary case, which is why
      the quadratic shape here costs nothing. */
   int done[8]; int nd = 0;
-  for (sp_thread *w = g_ev_tab[fd].waiters; w; w = w->ev_next) {
-    int h = sp_ev_home_of(w), seen = 0;
+  for (sp_ev_waiter *w = g_ev_tab[fd].waiters; w; w = w->next) {
+    int h = sp_ev_home_of(w->t), seen = 0;
     for (int i = 0; i < nd; i++) if (done[i] == h) { seen = 1; break; }
     if (seen) continue;
     if (nd < 8) done[nd++] = h;
     short want = 0;
-    for (sp_thread *x = g_ev_tab[fd].waiters; x; x = x->ev_next)
-      if (sp_ev_home_of(x) == h) want |= x->io_events;
+    for (sp_ev_waiter *x = g_ev_tab[fd].waiters; x; x = x->next)
+      if (sp_ev_home_of(x->t) == h) want |= sp_evw_events(x);
     if (!want || g_wslot[h].evfd <= 0) continue;
     g_ev_arms++;
     if (sp_ev_backend_arm(g_wslot[h].evfd, fd, want) == 0) continue;
@@ -898,7 +900,8 @@ static void sp_ev_arm_fd(int fd) {   /* PRE: sched lock held */
 /* Returns 0 when the descriptor could not be taken into the set. The waiter is
    then on its deadline alone -- the same degradation the poll path already had
    when its own array could not grow. */
-static int sp_ev_park(sp_thread *t, int fd) {   /* PRE: sched lock held */
+static int sp_ev_park_entry(sp_ev_waiter *e, int fd) {   /* PRE: sched lock held */
+  sp_thread *t = e->t;
   if (fd < 0 || !sp_ev_worker_up(sp_ev_home_of(t))) return 0;
   if (fd >= g_ev_cap) {
     int nc = g_ev_cap ? g_ev_cap : 64;
@@ -908,10 +911,14 @@ static int sp_ev_park(sp_thread *t, int fd) {   /* PRE: sched lock held */
     memset(nt + g_ev_cap, 0, sizeof(sp_ev_slot) * (size_t)(nc - g_ev_cap));
     g_ev_tab = nt; g_ev_cap = nc;
   }
-  t->ev_next = g_ev_tab[fd].waiters;
-  g_ev_tab[fd].waiters = t;
+  e->next = g_ev_tab[fd].waiters;
+  g_ev_tab[fd].waiters = e;
   sp_ev_arm_fd(fd);
   return 1;
+}
+static int sp_ev_park(sp_thread *t, int fd) {   /* the thread's own descriptor */
+  t->ev0.t = t; t->ev0.idx = -1;
+  return sp_ev_park_entry(&t->ev0, fd);
 }
 /* Hand one readiness event to the threads waiting on that descriptor. Called
    by whichever worker's set produced it, so `only_home` filters to the threads
@@ -925,9 +932,10 @@ static void sp_ev_drop(sp_thread *t);
 static int sp_ev_dispatch(int rfd, short rev, int only_home) {
   if (rfd < 0 || rfd >= g_ev_cap) return 0;
   int n = 0;
-  for (sp_thread *w = g_ev_tab[rfd].waiters, *nx = NULL; w; w = nx) {
-    nx = w->ev_next;
-    if (!(w->io_events & rev)) continue;
+  for (sp_ev_waiter *e = g_ev_tab[rfd].waiters, *nx = NULL; e; e = nx) {
+    nx = e->next;
+    sp_thread *w = e->t;
+    if (!(sp_evw_events(e) & rev)) continue;
     if (w->wait_head != &g_io_waiters) continue;
     if (only_home >= 0 && sp_ev_home_of(w) != only_home) continue;
     g_mon_readied++;
@@ -978,14 +986,18 @@ static int sp_ev_worker_wait(int wid, int tmo_ms) {
   return n;
 }
 
-/* Take a thread off its descriptor's waiter list. Every path that unlinks a
-   waiter from g_io_waiters goes through here. */
+/* Take a thread off its descriptors' waiter lists -- its own, and every entry
+   of a set wait. Every path that unlinks a waiter from g_io_waiters goes
+   through here. */
+static void sp_ev_unlink(sp_ev_waiter *e, int fd) {   /* PRE: sched lock held */
+  if (fd < 0 || fd >= g_ev_cap) { e->next = NULL; return; }
+  for (sp_ev_waiter **pp = &g_ev_tab[fd].waiters; *pp; pp = &(*pp)->next)
+    if (*pp == e) { *pp = e->next; break; }
+  e->next = NULL;
+}
 static void sp_ev_drop(sp_thread *t) {   /* PRE: sched lock held */
-  int fd = t->io_fd;
-  if (fd < 0 || fd >= g_ev_cap) { t->ev_next = NULL; return; }
-  for (sp_thread **pp = &g_ev_tab[fd].waiters; *pp; pp = &(*pp)->ev_next)
-    if (*pp == t) { *pp = t->ev_next; break; }
-  t->ev_next = NULL;
+  sp_ev_unlink(&t->ev0, t->io_fd);
+  for (int i = 0; t->ev_set && i < t->io_nset; i++) sp_ev_unlink(&t->ev_set[i], t->io_set[i].fd);
 }
 /* A handle is closing: the descriptor is about to stop being ours, so drop the
    registration while the fd still names the right thing. Waiters parked on it
@@ -996,7 +1008,7 @@ void sp_sched_ev_forget(int fd) {
   for (int wid = 0; wid < SP_MAX_WORKERS; wid++)
     if (g_wslot[wid].evfd > 0) sp_ev_backend_del(g_wslot[wid].evfd, fd);
   if (fd < g_ev_cap) {
-    for (sp_thread *w = g_ev_tab[fd].waiters; w; ) { sp_thread *n = w->ev_next; w->ev_next = NULL; w = n; }
+    for (sp_ev_waiter *w = g_ev_tab[fd].waiters; w; ) { sp_ev_waiter *n = w->next; w->next = NULL; w = n; }
     g_ev_tab[fd].waiters = NULL;
   }
   SCHED_UNLOCK();
@@ -1158,11 +1170,18 @@ static void reg_add(sp_thread *t) {
    worker, so blocking in one stalls every thread pinned there -- including the
    one that has to make progress before the syscall can return. Process.waitpid2
    and Kernel#system ask this before choosing between a blocking wait and a
-   polling one (#4381). */
+   polling one (#4381).
+
+   Main is not in the registry, so a green thread asking this saw "nobody
+   else" once every other spawned thread had ended and took the blocking
+   wait -- with main alive and allocating, and a worker in a syscall never
+   reaches a safepoint, so main's next collection waited out the child
+   (#4528). From a green thread the answer is always yes. */
 int sp_sched_other_threads_live(void) {
   int other = 0;
   SCHED_LOCK();
-  { sp_thread *t = g_all;
+  if (g_current != &g_main_thread) other = 1;
+  else { sp_thread *t = g_all;
     while (t) { if (t != g_current) { other = 1; break; } t = t->all_next; } }
   SCHED_UNLOCK();
   return other;
@@ -2397,16 +2416,22 @@ static void *sp_sysmon_main(void *arg) {
 #ifdef SP_EV_BACKEND
       if (g_ev_fd >= 0) continue;   /* the kernel holds the interest set */
 #endif
-      if (npf >= g_pcap) {
-        int nc = g_pcap ? g_pcap * 2 : 16;
-        struct pollfd *np = (struct pollfd *)realloc(g_pfds, sizeof(struct pollfd) * nc);
-        sp_thread **nh = (sp_thread **)realloc(g_pths, sizeof(sp_thread *) * nc);
-        if (np) g_pfds = np; if (nh) g_pths = nh;
-        if (!np || !nh) break;
-        g_pcap = nc;
+      /* one slot per descriptor: the thread's own, or each of its set */
+      int nslot = w->io_fd >= 0 ? 1 : w->io_nset;
+      for (int si = 0; si < nslot; si++) {
+        if (npf >= g_pcap) {
+          int nc = g_pcap ? g_pcap * 2 : 16;
+          struct pollfd *np = (struct pollfd *)realloc(g_pfds, sizeof(struct pollfd) * nc);
+          sp_thread **nh = (sp_thread **)realloc(g_pths, sizeof(sp_thread *) * nc);
+          if (np) g_pfds = np; if (nh) g_pths = nh;
+          if (!np || !nh) break;
+          g_pcap = nc;
+        }
+        if (w->io_fd >= 0) { g_pfds[npf].fd = w->io_fd; g_pfds[npf].events = w->io_events; }
+        else { g_pfds[npf].fd = w->io_set[si].fd; g_pfds[npf].events = w->io_set[si].events; }
+        g_pfds[npf].revents = 0;
+        g_pths[npf] = w; npf++;
       }
-      g_pfds[npf].fd = w->io_fd; g_pfds[npf].events = w->io_events; g_pfds[npf].revents = 0;
-      g_pths[npf] = w; npf++;
     }
     if (g_pcap < 1) {   /* ensure room for slot 0 even with no I/O waiters */
       g_pfds = (struct pollfd *)realloc(g_pfds, sizeof(struct pollfd) * 16);
@@ -2542,19 +2567,24 @@ int sp_sched_wait_io(int fd, short events) {
   return sp_sched_wait_io_timeout(fd, events, -1.0);
 }
 
-int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
-  if (fd < 0 || !g_sysmon_started) {   /* no monitor: plain blocking single-fd poll */
-    struct pollfd pf; pf.fd = fd; pf.events = events; pf.revents = 0;
-    if (timeout_s >= 0.0) {
-      double until = sp_monotonic_now() + timeout_s;
-      for (;;) {
-        double left = until - sp_monotonic_now();
-        int ms = left > 0.0 ? (int)(left * 1000.0) + 1 : 0;
-        int pr = poll(&pf, 1, ms);
-        if (pr > 0) return 1; if (pr == 0) return 0; if (errno == EINTR) continue; return 0;
-      }
+/* One descriptor (set == NULL) or a set of n: the park is the same, the
+   registration is per descriptor. */
+static int sp_poll_plain(struct pollfd *pp, nfds_t np, double timeout_s) {
+  if (timeout_s >= 0.0) {
+    double until = sp_monotonic_now() + timeout_s;
+    for (;;) {
+      double left = until - sp_monotonic_now();
+      int ms = left > 0.0 ? (int)(left * 1000.0) + 1 : 0;
+      int pr = poll(pp, np, ms);
+      if (pr > 0) return 1; if (pr == 0) return 0; if (errno == EINTR) continue; return 0;
     }
-    for (;;) { int pr = poll(&pf, 1, 1000); if (pr > 0) return 1; if (pr == 0 || errno == EINTR) continue; return 0; }
+  }
+  for (;;) { int pr = poll(pp, np, 1000); if (pr > 0) return 1; if (pr == 0 || errno == EINTR) continue; return 0; }
+}
+static int sp_sched_wait_io_impl(int fd, short events, struct pollfd *set, int n, double timeout_s) {
+  if ((set ? n <= 0 : fd < 0) || !g_sysmon_started) {   /* no monitor: plain blocking poll */
+    struct pollfd pf; pf.fd = fd; pf.events = events; pf.revents = 0;
+    return sp_poll_plain(set ? set : &pf, set ? (nfds_t)n : 1, timeout_s);
   }
   SCHED_LOCK();
   sp_thread *self = g_current;
@@ -2564,7 +2594,14 @@ int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
     sp_fiber_fire_inject_if_pending();   /* raises; does not return */
     SCHED_LOCK();
   }
-  self->io_fd = fd; self->io_events = events; self->io_revents = 0;
+  if (set) {
+    sp_ev_waiter *es = (sp_ev_waiter *)malloc(sizeof(sp_ev_waiter) * (size_t)n);
+    if (!es) { SCHED_UNLOCK(); return sp_poll_plain(set, (nfds_t)n, timeout_s); }
+    for (int i = 0; i < n; i++) { es[i].t = self; es[i].idx = i; es[i].next = NULL; }
+    self->io_fd = -1; self->io_events = 0; self->io_set = set; self->io_nset = n; self->ev_set = es;
+  }
+  else { self->io_fd = fd; self->io_events = events; }
+  self->io_revents = 0;
   /* 0 = no deadline. Set explicitly: a stale deadline from an earlier
      Kernel#sleep would otherwise read as this wait's. */
   self->wake_deadline = timeout_s >= 0.0 ? sp_monotonic_now() + timeout_s : 0.0;
@@ -2574,7 +2611,10 @@ int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
   self->wait_next = g_io_waiters; self->wait_head = &g_io_waiters; g_io_waiters = self;
   g_mon_regs++;
 #ifdef SP_EV_BACKEND
-  if (sp_ev_park(self, fd)) {
+  int registered = 1;
+  if (set) { for (int i = 0; i < n; i++) if (!sp_ev_park_entry(&self->ev_set[i], set[i].fd)) registered = 0; }
+  else registered = sp_ev_park(self, fd);
+  if (registered) {
     /* Registered: the kernel holds the interest set, so the monitor needs no
        word about the descriptor -- only about a deadline that moved earlier.
        That is what takes the self-pipe write off the park path.
@@ -2598,6 +2638,7 @@ int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
   if (self == &g_main_thread) {
     sp_sched_pump(NULL, 1);   /* main waits (and pumps at N=1) until the monitor wakes it */
     int rev = self->io_revents; self->io_revents = 0; self->io_fd = -1;
+    if (set) { free(self->ev_set); self->ev_set = NULL; self->io_set = NULL; self->io_nset = 0; }
     SCHED_UNLOCK();
     return rev ? 1 : 0;
   }
@@ -2609,9 +2650,19 @@ int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
   sp_Fiber_transfer(sp_fiber_worker_root(), sp_box_nil());
   sp_exc_ctx_load(exc_snap);
   sp_exc_ctx_free(exc_snap);
-  sp_fiber_fire_inject_if_pending();   /* a #kill/#raise delivered while waiting on I/O */
   int rev = self->io_revents; self->io_revents = 0; self->io_fd = -1;
+  /* the set entries are off every list (whoever unparked us dropped them);
+     released before an inject can raise past this frame */
+  if (set) { free(self->ev_set); self->ev_set = NULL; self->io_set = NULL; self->io_nset = 0; }
+  sp_fiber_fire_inject_if_pending();   /* a #kill/#raise delivered while waiting on I/O */
   return rev ? 1 : 0;
+}
+int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
+  return sp_sched_wait_io_impl(fd, events, NULL, 0, timeout_s);
+}
+int sp_sched_wait_io_set(struct pollfd *set, int n, double timeout_s) {
+  if (n == 1) return sp_sched_wait_io_impl(set[0].fd, set[0].events, NULL, 0, timeout_s);
+  return sp_sched_wait_io_impl(-1, 0, set, n, timeout_s);
 }
 
 /* A helper worker: adopt its native stack as a per-worker root fiber, then pull

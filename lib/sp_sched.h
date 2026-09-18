@@ -18,9 +18,18 @@
 #ifndef SP_SCHED_H
 #define SP_SCHED_H
 
+#include <poll.h>
 #include "sp_fiber.h"
 
 typedef enum { SP_TH_RUNNABLE, SP_TH_RUNNING, SP_TH_BLOCKED, SP_TH_DEAD } sp_thread_state;
+
+/* A thread's membership in one descriptor's waiter list. idx -1 names the
+   thread's own io_fd / io_events; idx >= 0 names io_set[idx]. */
+typedef struct sp_ev_waiter {
+  struct sp_thread     *t;
+  int                   idx;
+  struct sp_ev_waiter  *next;
+} sp_ev_waiter;
 
 typedef struct sp_thread {
   sp_Fiber         *fiber;       /* the green thread's coroutine; NULL for the main thread (root) */
@@ -51,9 +60,14 @@ typedef struct sp_thread {
   double            readied_at;  /* SPINEL_SCHED_STATS=2: when it was last put on a run queue */
   struct sp_thread *rq_next;     /* run-queue link while RUNNABLE */
   struct sp_thread *joiners;     /* threads parked in #join/#value on this one */
-  struct sp_thread *ev_next;     /* link within the per-DESCRIPTOR waiter list: a readiness
-                                    event names an fd, and every thread parked on that fd is
-                                    woken from it (#4306) */
+  sp_ev_waiter      ev0;         /* its entry in the per-DESCRIPTOR waiter list for io_fd: a
+                                    readiness event names an fd, and every thread parked on
+                                    that fd is woken from it (#4306) */
+  sp_ev_waiter     *ev_set;      /* one entry per descriptor of a SET wait (IO.select over
+                                    several handles), heap-allocated for the wait's duration */
+  struct pollfd    *io_set;      /* that set: fd + events per entry, the caller's array; io_fd
+                                    is -1 while it is in use (#4528) */
+  int               io_nset;
   struct sp_thread *wait_next;   /* link within the wait list it is parked on */
   struct sp_thread **wait_head;  /* head of that wait list, so #kill/#raise can unpark it */
   struct sp_thread *all_next, *all_prev;  /* registry of live threads (GC roots) */
@@ -97,6 +111,13 @@ void       sp_sleep(sp_float s);   /* Kernel#sleep; relocated from spinel_rt.h t
    errored), 0 to give up (shutdown). Falls back to a plain blocking poll in the
    single-threaded build / before the monitor starts. */
 int        sp_sched_wait_io(int fd, short events);
+/* The same over a SET of descriptors (IO.select over several handles): park
+   until any entry is ready or the timeout passes (negative: none). Returns 1
+   when something is ready -- the caller polls the set with a zero timeout to
+   learn which -- and 0 on the timeout. A blocking poll here held the OS
+   worker for the wait, and a worker in a syscall never reaches a safepoint,
+   so a collection waited on it (#4528). */
+int        sp_sched_wait_io_set(struct pollfd *set, int n, double timeout_s);
 /* A handle is closing: drop any persistent readiness registration for `fd`
    while the descriptor still names the right thing. Safe to call for a
    descriptor that was never registered, and on a build with no event set. */

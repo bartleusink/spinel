@@ -1090,6 +1090,7 @@ static inline const char *sp_File_gets(sp_File *f) {
    each_line loops where the line does not escape the loop body. */
 static inline const char *sp_File_gets_buf(sp_File *f, char *buf, int size) {
   if (!f || !f->fp) return NULL;
+  sp_io_wait_readable(f);
   if (!fgets(buf, size, f->fp)) return NULL;
   return buf;
 }
@@ -1100,6 +1101,7 @@ static inline const char *sp_File_gets_buf(sp_File *f, char *buf, int size) {
    stack buffer whose [-1] byte is arbitrary memory breaks the GC mark. */
 static inline const char *sp_File_gets_into(sp_File *f, char *s, int cap) {
   if (!f || !f->fp) return NULL;
+  sp_io_wait_readable(f);
   if (!fgets(s, cap, f->fp)) return NULL;
   sp_str_set_len(s, strlen(s));
   f->lineno++;

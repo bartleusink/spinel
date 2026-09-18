@@ -65,6 +65,7 @@ sp_File *sp_File_open_perm(const char *path, const char *mode, sp_int perm);
    ...) for #class rendering. (#2922) */
 sp_File *sp_io_fdopen_sock(int fd, const char *kind);
 void sp_io_wait_readable(sp_File *f);
+void sp_io_wait_fd_readable(int fd);
 /* Park until the handle can take bytes (a socket, or an IO.pipe write end). */
 void sp_io_wait_writable(sp_File *f);
 /* Bytes stdio already holds for this stream (readable without a read(2)). */

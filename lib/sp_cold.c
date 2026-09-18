@@ -1186,17 +1186,54 @@ sp_int sp_file_write(const char *path, const char *data) {SP_GC_ROOT_STR(path);S
   return (sp_int)w;
 }
 
-const char *sp_backtick(const char *cmd) {
-  FILE *p = popen(cmd, "r");
-  if (!p) { sp_last_status = -1; return sp_str_empty; }
-  char *buf = sp_str_alloc_raw(4096);
-  size_t n = fread(buf, 1, 4095, p);
-  buf[n] = 0;
-  int st = pclose(p);
-  /* Mirror sp_system_args' $? layout: POSIX pclose returns a wait-status,
-     MSVCRT _pclose returns the plain exit code (shift to match). */
+/* `cmd`: the child's whole standard output, and its wait status in $?. This
+   was one popen + one fread of 4095 bytes, which was two things at once:
+   the output was cut at 4 KB, and the fread and the pclose behind it sat in
+   the kernel on the calling OS worker for as long as the command ran -- a
+   worker in a syscall never reaches a safepoint, so every other thread's
+   next allocation waited on the command too (#4528). The child is forked
+   here with its stdout on a pipe; the read parks on that pipe like any read
+   from a pipe does, and the wait is the scheduler's polling one, as
+   Kernel#system's is. */
+const char *sp_backtick(const char *cmd) {SP_GC_ROOT_STR(cmd);
+  int fds[2];
+  if (pipe(fds) != 0) { sp_last_status = -1; return sp_str_empty; }
+  fflush(NULL);
+  pid_t pid = fork();
+  if (pid < 0) { close(fds[0]); close(fds[1]); sp_last_status = -1; return sp_str_empty; }
+  if (pid == 0) {
+    close(fds[0]);
+    if (fds[1] != 1) { dup2(fds[1], 1); close(fds[1]); }
+    execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  size_t cap = 4096, len = 0;
+  char *buf = (char *)malloc(cap);
+  if (buf) for (;;) {
+    if (len + 1 >= cap) {
+      char *nb = (char *)realloc(buf, cap * 2);
+      if (!nb) break;
+      buf = nb; cap *= 2;
+    }
+    sp_io_wait_fd_readable(fds[0]);
+    ssize_t got = read(fds[0], buf + len, cap - len - 1);
+    if (got < 0 && errno == EINTR) continue;
+    if (got <= 0) break;
+    len += (size_t)got;
+  }
+  close(fds[0]);
+  int st = 0;
+  { extern int sp_sched_wait_child(int pid, int *status);
+    if (sp_sched_wait_child((int)pid, &st) < 0) st = -1; }
+  /* the same wait-status layout sp_system_args leaves in $? */
   sp_last_status = st;
-  return buf;
+  char *r = sp_str_alloc(len);
+  if (len) memcpy(r, buf, len);
+  r[len] = 0;
+  sp_str_set_len(r, len);
+  free(buf);
+  return r;
 }
 
 const char *sp_file_basename(const char *path) {SP_GC_ROOT_STR(path);
@@ -1667,6 +1704,7 @@ const char *sp_File_readline_sep(sp_File *f, const char *sep, sp_int limit, sp_b
 }
 const char *sp_File_getc(sp_File *f) {SP_GC_ROOT(f);
   SP_IO_OPEN(f);
+  sp_io_wait_readable(f);
   int ch = fgetc(f->fp);
   if (ch == EOF) return NULL;
   int extra = ((ch & 0xE0) == 0xC0) ? 1 : ((ch & 0xF0) == 0xE0) ? 2 : ((ch & 0xF8) == 0xF0) ? 3 : 0;
@@ -1689,6 +1727,7 @@ const char *sp_File_readchar(sp_File *f) {SP_GC_ROOT(f);
 }
 sp_int sp_File_getbyte(sp_File *f) {
   SP_IO_OPEN(f);
+  sp_io_wait_readable(f);
   int ch = fgetc(f->fp);
   return ch == EOF ? SP_INT_NIL : (sp_int)ch;
 }
@@ -3414,6 +3453,11 @@ static void sp_io_sel_timeout(double timeout, struct timeval *tv, struct timeval
 static short sp_io_park_events(sp_int kind) {
   return kind == 0 ? POLLIN : kind == 1 ? POLLOUT : kind == 3 ? (POLLIN | POLLOUT) : 0;
 }
+static double sp_io_now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 #endif
 sp_File *sp_io_wait_events(sp_File *f, double timeout, sp_int kind) {SP_GC_ROOT(f);
   SP_IO_OPEN(f);
@@ -3520,6 +3564,28 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
     }
     int ms = timeout < 0.0 ? -1 : (int)(timeout * 1000.0 + 0.5);
     int pn;
+#ifdef SP_THREADS
+    /* Several handles park the same way one does: the thread waits through
+       the scheduler for any of them and its OS worker runs other threads
+       meanwhile. A poll here sat in the kernel on the worker, which capped a
+       server's connections at SPINEL_WORKERS and, since a worker in a syscall
+       never reaches a safepoint, held up every collection for as long as the
+       wait lasted -- forever, on two quiet sockets (#4528). The readiness
+       itself is read back by a zero-timeout poll: what is ready right now. */
+    if (nfd > 1 && ms != 0) {
+      extern int sp_sched_wait_io_set(struct pollfd *set, int n, double timeout_s);
+      double until = timeout < 0.0 ? 0.0 : sp_io_now() + timeout;
+      for (;;) {
+        double left = timeout < 0.0 ? -1.0 : until - sp_io_now();
+        if (timeout >= 0.0 && left < 0.0) left = 0.0;
+        if (!sp_sched_wait_io_set(pfs, (int)nfd, left)) { pn = 0; break; }
+        do { pn = poll(pfs, (nfds_t)nfd, 0); } while (pn < 0 && errno == EINTR);
+        if (pn != 0) break;   /* ready (or an error to report): read back below */
+        if (timeout >= 0.0 && sp_io_now() >= until) break;   /* woken at the deadline */
+      }
+    }
+    else
+#endif
     do { pn = poll(pfs, (nfds_t)nfd, ms); } while (pn < 0 && errno == EINTR);
     if (pn < 0) { free(pfs); sp_raise_cls("IOError", "select failed"); }
     if (pn == 0) { free(pfs); return sp_box_nil(); }
