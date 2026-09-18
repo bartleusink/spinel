@@ -220,6 +220,7 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   int extra_from_cmd = 0;
   int extra_from_args = 0;
 
+  int via_shell = 0;
   if (cmd.tag == SP_TAG_STR) {
     prog = cmd.v.s;
     if (args_box.tag == SP_TAG_OBJ &&
@@ -228,6 +229,12 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
     } else if (args_box.tag != SP_TAG_NIL) {
       sp_process_spawn_fail(owned, "TypeError", "args must be a PolyArray of extra args");
     }
+    /* One string and no arguments is a command LINE, as for Kernel#system:
+       CRuby hands it to the shell when it carries a shell character and
+       splits it into words otherwise, which the shell also does; it was
+       exec'd as a program name, so `spawn("sleep 2")` was ENOENT. */
+    if (!args_arr || args_arr->len == 0)
+      via_shell = strpbrk(prog, " \t\n*?{}[]<>()~&|\\$;'`\"#=%") != NULL;
   } else if (cmd.tag == SP_TAG_OBJ &&
              cmd.cls_id == SP_BUILTIN_POLY_ARRAY) {
     cmd_arr = (sp_PolyArray *)cmd.v.p;
@@ -246,11 +253,13 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   }
   if (args_arr) extra_from_args = (int)args_arr->len;
 
-  int total = 1 + extra_from_cmd + extra_from_args;
+  int total = 1 + extra_from_cmd + extra_from_args + (via_shell ? 2 : 0);
   argv = (char **)malloc(sizeof(char *) * (size_t)(total + 1));
   if (!argv) sp_process_spawn_fail(owned, "NoMemoryError", "out of memory");
-  argv[0] = (char *)prog;
-  int ai = 1;
+  int ai = 0;
+  if (via_shell) { argv[ai++] = (char *)"/bin/sh"; argv[ai++] = (char *)"-c"; }
+  argv[ai++] = (char *)prog;
+  if (via_shell) prog = "/bin/sh";
   if (cmd_arr) {
     for (int i = 1; i < cmd_arr->len; i++) {
       if (cmd_arr->data[i].tag != SP_TAG_STR)
@@ -278,6 +287,9 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
     sp_process_spawn_fail(owned, "SystemCallError", sp_errf_errno("pipe failed", errno));
   }
 
+  /* what the parent has buffered for its streams is written before the
+     child can write to the same descriptors, as CRuby flushes them */
+  fflush(NULL);
   pid_t pid = fork();
   if (pid < 0) {
     free(argv);
