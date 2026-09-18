@@ -19,6 +19,9 @@ beyond the gate's own check.
     {"file":"app.rb","line":11,"col":5,"end_line":11,"end_col":8,
      "kind":"LocalVariableReadNode","name":"pts",
      "type":"poly_array","rbs":"Array[untyped]"},
+    {"file":"app.rb","line":4,"col":2,"end_line":4,"end_col":47,
+     "kind":"DefNode","name":"dist2","type":"symbol","rbs":"Symbol",
+     "owner":"Point","signature":"(untyped) -> Integer","widened":true},
     ...
   ],
   "diagnostics": [
@@ -56,15 +59,22 @@ unknown or void are left out), in node order.
 - `name`: present where the node names something: a call's method, a
   variable, a constant, a def, a parameter.
 - `type`: spinel's internal type tag; `rbs`: the same type as RBS, which
-  is the type language to read.
+  is the type language to read. A `DefNode`'s own type is the def
+  expression's value (a `Symbol`); the method type it declares is its
+  `signature`, `(Integer, Integer) -> Array[Integer]`, the text
+  `--emit-rbs` writes for that method, with `"widened":true` when a slot
+  of it degraded to untyped, `owner` naming the class it is defined in
+  (`Object` at the top level) and `"singleton":true` for a `def self.x`.
+  The signatures are all here, placed: a consumer does not need the
+  `--emit-rbs` pass or a text scan for the defs.
 
 ## `diagnostics`
 
 - `"severity":"warning"`, one per widened slot of a method whose
   signature degraded to untyped: `method` names the def, `slot` is
   `"param"` (with `param`, the parameter's name; the position is the
-  parameter's) or `"return"` (the position is the def's). The RBS in
-  `types` at the def shows the whole signature.
+  parameter's) or `"return"` (the position is the def's). The
+  `signature` in `types` at the def shows the whole method type.
 - `"severity":"error"`, one per refusal, in the order the compile met
   them, at the refused construct: the same lines the compile prints on
   stderr ([limitations.md](limitations.md) says what a refusal is).

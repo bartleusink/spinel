@@ -8369,9 +8369,11 @@ static int ty_is_degraded(TyKind t) {
 
 /* Emit one `  <defprefix>: (params) -> ret` RBS line for scope `s`, with a
    degrade comment when any param/return widened to untyped. */
-static void rbs_method_line(Compiler *c, Buf *b, const char *defprefix, Scope *s) {
+/* A method's type as RBS, `(Integer, Integer) -> Array[Integer]`. Answers
+   whether any slot widened to untyped. */
+static int rbs_method_type_into(Compiler *c, Buf *b, Scope *s) {
   int degraded = 0;
-  buf_printf(b, "  %s: (", defprefix);
+  buf_puts(b, "(");
   int j = 0;
   for (int i = 0; i < s->nparams; i++) {
     LocalVar *p = scope_local(s, s->pnames[i]);
@@ -8389,6 +8391,11 @@ static void rbs_method_line(Compiler *c, Buf *b, const char *defprefix, Scope *s
     ty_to_rbs_into(c, s->ret, b);
     if (ty_is_degraded(s->ret)) degraded = 1;
   }
+  return degraded;
+}
+static void rbs_method_line(Compiler *c, Buf *b, const char *defprefix, Scope *s) {
+  buf_printf(b, "  %s: ", defprefix);
+  int degraded = rbs_method_type_into(c, b, s);
   if (degraded) buf_puts(b, " # spinel: widened to untyped (slow path)");
   buf_puts(b, "\n");
 }
@@ -8539,7 +8546,31 @@ static char *build_types_json(Compiler *c) {
     ty_to_rbs_into(c, t, &rbs);
     json_escape_into(&b, rbs.p ? rbs.p : "");
     free(rbs.p);
-    buf_puts(&b, "\"}");
+    buf_puts(&b, "\"");
+    /* a def's `type` is the def expression's value (a Symbol); the method
+       type it declares is the `signature`, the same text --emit-rbs writes
+       for it, so a consumer needs no second pass for the inferred
+       signatures (rubys/spinel-ide) */
+    { const char *kind = nt_type(nt, id);
+      if (kind && sp_streq(kind, "DefNode")) {
+        for (int si = 1; si < c->nscopes; si++) {
+          Scope *s = &c->scopes[si];
+          if (s->def_node != id) continue;
+          Buf sig; memset(&sig, 0, sizeof sig);
+          int degraded = rbs_method_type_into(c, &sig, s);
+          buf_puts(&b, ",\"owner\":\"");
+          json_escape_into(&b, s->class_id >= 0 ? c->classes[s->class_id].name : "Object");
+          buf_puts(&b, "\"");
+          if (s->is_cmethod) buf_puts(&b, ",\"singleton\":true");
+          buf_puts(&b, ",\"signature\":\"");
+          json_escape_into(&b, sig.p ? sig.p : "");
+          buf_puts(&b, "\"");
+          if (degraded) buf_puts(&b, ",\"widened\":true");
+          free(sig.p);
+          break;
+        }
+      } }
+    buf_puts(&b, "}");
     tn++;
   }
   buf_puts(&b, "\n  ],\n  \"diagnostics\": [\n");
