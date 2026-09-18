@@ -23682,7 +23682,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        builtin stringification; a statically-named receiver falls through to
        the class-method dispatch below. */
     int cls_shadowed = 0;
-    if (nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ConstantReadNode") &&
+    if (nt_type(nt, recv) &&
+        (sp_streq(nt_type(nt, recv), "ConstantReadNode") ||
+         sp_streq(nt_type(nt, recv), "ConstantPathNode")) &&   /* `Outer::Nested.name(x)`: the leaf keys the class (#4526) */
         nt_str(nt, recv, "name")) {
       int sci = comp_class_index(c, nt_str(nt, recv, "name"));
       if (sci >= 0 && comp_cmethod_in_chain(c, sci, name, NULL) >= 0) cls_shadowed = 1;
