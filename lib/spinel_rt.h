@@ -3092,6 +3092,35 @@ static sp_RbVal sp_poly_round_n(sp_RbVal v, sp_int n) {
   }
   sp_raise_poly_nomethod("round", v);
 }
+/* ceil / floor / truncate with a precision on a boxed number: the same
+   answers the typed Float and Integer paths give (sp_float_prec_op for a
+   positive precision, the power-of-ten form for n <= 0). round(n) keeps its
+   own helper above for the half-up tie rule and the Rational arm. */
+static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
+  const char *nm = op == SP_PREC_FLOOR ? "floor" : op == SP_PREC_CEIL ? "ceil" : "truncate";
+  if (v.tag == SP_TAG_FLT) {
+    double x = v.v.f;
+    if (n > 0) return sp_box_float(sp_float_prec_op(x, n, op));
+    sp_poly_flo_domain_ck(x);
+    double f = pow(10, (double)(-n));
+    if (isinf(f)) return sp_box_int(0);
+    double q = x / f;
+    q = op == SP_PREC_FLOOR ? floor(q) : op == SP_PREC_CEIL ? ceil(q) : trunc(q);
+    return sp_box_int((sp_int)(q * f));
+  }
+  if (v.tag == SP_TAG_INT) {
+    if (n >= 0) return v;
+    return sp_box_int(op == SP_PREC_FLOOR ? sp_int_floor(v.v.i, n) : op == SP_PREC_CEIL ? sp_int_ceil(v.v.i, n) : sp_int_truncate(v.v.i, n));
+  }
+  if (v.tag == SP_TAG_BIGINT) return v;
+  if (sp_poly_is_rational(v)) {
+    sp_Rational r = sp_poly_as_rational(v);
+    sp_Rational q = op == SP_PREC_FLOOR ? sp_rational_floor_prec(r, n) : op == SP_PREC_CEIL ? sp_rational_ceil_prec(r, n) : sp_rational_truncate_prec(r, n);
+    if (n > 0) return sp_box_rational(q);
+    return sp_box_int(q.num / q.den);
+  }
+  sp_raise_poly_nomethod(nm, v);
+}
 static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_int((sp_int)trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } sp_raise_poly_nomethod("truncate", v); }
 /* forward: generic array length/element (defined later in this header) and
    the array-kind predicate for cross-kind value equality. */

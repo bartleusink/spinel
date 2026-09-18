@@ -4785,7 +4785,9 @@ else {
       }
       /* Numeric#round(ndigits) on a boxed value: Float when n > 0, Integer
          when n <= 0 -- either way a boxed poly (sp_poly_round_n). */
-      if (argc == 1 && sp_streq(name, "round")) return an_poly_concrete(c, name, TY_POLY);
+      if (argc == 1 && (sp_streq(name, "round") || sp_streq(name, "ceil") ||
+                        sp_streq(name, "floor") || sp_streq(name, "truncate")))
+        return an_poly_concrete(c, name, TY_POLY);
       /* divmod answers a pair, modulo and quo a number whose class follows the
          operands. Without a type here the emitted call was evaluated for
          effect and its value dropped (#3512). */

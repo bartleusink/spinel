@@ -7436,6 +7436,26 @@ else {
                      tr, tv, rb9.p ? rb9.p : "sp_box_nil()");
           free(rb9.p);
         }
+        /* round(n) / ceil(n) / floor(n) / truncate(n): a class defining
+           `round(digits)` took over the name, and the Integer or Float in
+           the same slot fell to the raise below (#4532). The zero-arg forms
+           have their arm in the other dispatch; these answer through the
+           boxed helpers the no-user-class path uses. */
+        else if ((sp_streq(name, "round") || sp_streq(name, "ceil") ||
+                  sp_streq(name, "floor") || sp_streq(name, "truncate")) && argc == 1) {
+          char nd9[64];
+          if (atmp_ty[0] == TY_POLY) snprintf(nd9, sizeof nd9, "sp_poly_to_i(_t%d)", atmp[0]);
+          else snprintf(nd9, sizeof nd9, "(sp_int)_t%d", atmp[0]);
+          Buf nv9; memset(&nv9, 0, sizeof nv9);
+          if (sp_streq(name, "round")) buf_printf(&nv9, "sp_poly_round_n(_t%d, %s)", tv, nd9);
+          else buf_printf(&nv9, "sp_poly_prec_n(_t%d, %s, %s)", tv, nd9,
+                          name[0] == 'c' ? "SP_PREC_CEIL" : name[0] == 'f' ? "SP_PREC_FLOOR" : "SP_PREC_TRUNC");
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) buf_puts(b, nv9.p ? nv9.p : "");
+          else emit_unbox_text(c, ret, nv9.p ? nv9.p : "", b);
+          buf_puts(b, "; break;");
+          free(nv9.p);
+        }
         /* index/rindex also belong to String, whose box carries no cls_id, so
            no case above can claim it. Answer it here, ahead of the raise, or a
            substring search on a boxed String reports a missing method (#3445).
