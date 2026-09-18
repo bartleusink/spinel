@@ -9285,6 +9285,20 @@ typedef struct { const Scope *sc; const char *nm; unsigned bits; } HashKeyUse;
    not such a write or its key class is not settled in the AST. */
 static unsigned hash_key_write_bits(Compiler *c, int id, const Scope **sc, const char **nm) {
   const NodeTable *nt = c->nt;
+  /* `h[:x] ||= v` and `h[:x] &&= v` store under the key too (#4531) */
+  if (nt_kind(nt, id) == NK_IndexOrWriteNode || nt_kind(nt, id) == NK_IndexAndWriteNode ||
+      nt_kind(nt, id) == NK_IndexOperatorWriteNode) {
+    int wr = nt_ref(nt, id, "receiver");
+    if (wr < 0 || nt_kind(nt, wr) != NK_LocalVariableReadNode) return 0;
+    int wa = nt_ref(nt, id, "arguments"); int wc = 0;
+    const int *wv = wa >= 0 ? nt_arr(nt, wa, "arguments", &wc) : NULL;
+    if (!wv || wc != 1) return 0;
+    unsigned b = hash_key_bit(c, wv[0]);
+    if (!b) return 0;
+    *sc = comp_scope_of(c, wr);
+    *nm = nt_str(nt, wr, "name");
+    return (*sc && *nm) ? b : 0;
+  }
   if (nt_kind(nt, id) != NK_CallNode) return 0;
   const char *wn = nt_str(nt, id, "name");
   if (!wn) return 0;
@@ -9363,6 +9377,37 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
     }
     /* more than one key class in play: only the boxed variant holds them all */
     if (mask && (mask & (mask - 1))) c->hash_want[val] = TY_POLY_POLY_HASH;
+  }
+  /* The same through a PARAMETER: `def f(h) = h[:x] = 1` stores into the
+     literal a caller passed, `f({ "x" => 0 })`, and that literal's variant
+     came from its own keys alone, so the Symbol went in as a String or was
+     dropped (#4531). Each use on a parameter reaches the hash literals in
+     that position at every call of a method with that name. */
+  for (int k = 0; k < nu; k++) {
+    const Scope *ps = uses[k].sc;
+    int pidx = -1;
+    for (int p = 0; ps && p < ps->nparams; p++)
+      if (ps->pnames[p] && sp_streq(ps->pnames[p], uses[k].nm)) { pidx = p; break; }
+    if (pidx < 0 || !ps->name) continue;
+    for (int id = 0; id < nt->count; id++) {
+      if (nt_kind(nt, id) != NK_CallNode) continue;
+      const char *cn = nt_str(nt, id, "name");
+      if (!cn || !sp_streq(cn, ps->name)) continue;
+      int ca = nt_ref(nt, id, "arguments"); int cc = 0;
+      const int *cv = ca >= 0 ? nt_arr(nt, ca, "arguments", &cc) : NULL;
+      if (!cv || pidx >= cc) continue;
+      int lit = cv[pidx];
+      if (lit < 0 || lit >= c->node_cap || !nt_type(nt, lit) || !sp_streq(nt_type(nt, lit), "HashNode")) continue;
+      unsigned mask = uses[k].bits;
+      int en = 0; const int *els = nt_arr(nt, lit, "elements", &en);
+      for (int e = 0; e < en; e++) {
+        if (!nt_type(nt, els[e]) || !sp_streq(nt_type(nt, els[e]), "AssocNode")) { mask = 0; break; }
+        unsigned b = hash_key_bit(c, nt_ref(nt, els[e], "key"));
+        if (!b) { mask = 0; break; }
+        mask |= b;
+      }
+      if (mask && (mask & (mask - 1))) c->hash_want[lit] = TY_POLY_POLY_HASH;
+    }
   }
   free(uses);
 }

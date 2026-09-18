@@ -5316,12 +5316,12 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
         TyKind arg_kt = comp_ntype(c, argv[0]);
         TyKind hash_kt = ty_hash_key(rt);
         /* key type mismatch: sym key on str-keyed hash (or vice versa) -- the key
-           can never exist in the hash, so always return the hash's default value.
-           Exception: a symbol key on a string-keyed hash is coerced to its name
-           (the Hash.new{} StrPolyHash model), so it is NOT a mismatch. */
+           can never exist in the hash, so always return the hash's default
+           value. A Symbol on a String-keyed hash was excepted here and
+           coerced to its name; that was an older Hash.new{} model (#4531). */
         if (hash_kt != TY_POLY && hash_kt != TY_UNKNOWN &&
             arg_kt != TY_POLY && arg_kt != TY_UNKNOWN && arg_kt != hash_kt &&
-            !(hash_kt == TY_STRING && arg_kt == TY_SYMBOL)) {
+            !(hash_kt == TY_STRING && arg_kt == TY_STRBUF)) {
           TyKind vt = ty_hash_val(rt);
           int t = ++g_tmp;
           buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b); buf_puts(b, "; ");
@@ -6658,8 +6658,11 @@ else {
           buf_printf(b, "; } _t%d; })", tvv);
           return 1;
         }
+        /* a miss answers nil: the nullable int's SP_INT_NIL, not 0, which
+           read as a deleted value of zero (#4531) */
         buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
-                   c_type_name(vt), tv, hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
+                   c_type_name(vt), tv, hn, th, tk, hn, th, tk,
+                   vt == TY_POLY ? "sp_box_nil()" : vt == TY_INT ? "SP_INT_NIL" : vt == TY_STRING ? "NULL" : default_value(vt));
         buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); _t%d; })", hn, th, tk, tv);
         return 1;
       }

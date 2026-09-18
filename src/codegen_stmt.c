@@ -11979,5 +11979,20 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
     return;
   }
 
+  /* A receiver only known at run time -- a parameter that takes a
+     String-keyed hash from one caller and a Symbol-keyed one from another --
+     goes through the boxed read and store the op-assign form above uses, in
+     place of a refusal (#4531). */
+  if (rt == TY_POLY) {
+    emit_indent(b, indent);
+    buf_printf(b, "{ sp_RbVal _t%d = ", ta); emit_boxed(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", ta, tb); emit_boxed(c, argv[0], b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); if (%ssp_poly_truthy(sp_poly_index_poly(_t%d, _t%d))) sp_poly_set_poly(_t%d, _t%d, ",
+               tb, is_or ? "!" : "", ta, tb, ta, tb);
+    emit_boxed(c, v, b);
+    buf_puts(b, "); }\n");
+    return;
+  }
+
   unsupported(c, id, is_or ? "index-or-write" : "index-and-write");
 }

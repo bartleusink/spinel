@@ -1714,7 +1714,7 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
 int hash_key_misses(Compiler *c, int key, TyKind kt) {
   TyKind actual = comp_ntype(c, key);
   if (kt == TY_POLY || actual == kt || actual == TY_POLY || actual == TY_UNKNOWN) return 0;
-  if (kt == TY_STRING && (actual == TY_STRBUF || actual == TY_SYMBOL)) return 0;
+  if (kt == TY_STRING && actual == TY_STRBUF) return 0;
   return actual == TY_NIL || actual == TY_BOOL || actual == TY_INT ||
          actual == TY_BIGINT || actual == TY_FLOAT || actual == TY_SYMBOL ||
          actual == TY_STRING || actual == TY_STRBUF || actual == TY_RANGE ||
@@ -1734,19 +1734,10 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
     else                      buf_puts(b, "); SP_INT_NIL; })");
     return;
   }
-  /* A symbol key on a string-keyed hash (Hash.new{}'s StrPolyHash models
-     symbol keys by their name) coerces to the symbol's string. A literal
-     :sym becomes the name string directly; a symbol value uses sp_sym_to_s. */
-  if (kt == TY_STRING && actual == TY_SYMBOL) {
-    const char *kty = nt_type(c->nt, key);
-    if (kty && sp_streq(kty, "SymbolNode")) {
-      emit_str_literal(b, nt_str(c->nt, key, "value"));
-    }
-else {
-      buf_puts(b, "sp_sym_to_s("); emit_expr(c, key, b); buf_puts(b, ")");
-    }
-    return;
-  }
+  /* A Symbol key on a String-keyed hash used to coerce to its name, a
+     leftover of an older Hash.new{} model (its hash is PolyPoly now): it
+     made `h[:a]` find "a"'s entry and `h.delete(:a)` remove it (#4531).
+     :a != "a", so it is a miss like any other kind mismatch above. */
   if (actual == TY_POLY && kt != TY_POLY) {
     /* The union member is only valid when the tag agrees. A call site reached
        with a key of another kind -- the same method called with a String and
