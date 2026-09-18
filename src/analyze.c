@@ -2443,19 +2443,19 @@ void rename_shadowing_block_params(Compiler *c) {
       if (o < 0 || nt_str(nt, o, "name") == NULL) continue;
     }
     int pn = blkp_params_node(c, L);
-    if (pn < 0) continue;
-    const char *pty = nt_type(nt, pn);
+    const char *pty = pn >= 0 ? nt_type(nt, pn) : NULL;
     /* Numbered parameters are renamed by scope_numbered_block_params, which
        runs just before this and keys on the NumberedParametersNode; this pass
-       only ever sees an ordinary ParametersNode. */
-    if (!pty || !sp_streq(pty, "ParametersNode")) continue;
-    int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
+       only ever sees an ordinary ParametersNode -- or no parameters at all,
+       for a block whose only names are its body's own locals. */
+    if (pn >= 0 && (!pty || !sp_streq(pty, "ParametersNode"))) continue;
+    int rn = 0; const int *reqs = pn >= 0 ? nt_arr(nt, pn, "requireds", &rn) : NULL;
     /* rest / post parameters shadow-rename the same way as the requireds: a
        rest param sharing an outer local's name shares its C slot, so the
        rest-packing assignment aliases the outer variable (a sole-rest block
        whose name matches the inlined method's own param read garbage). */
     int extras[129]; int ne = 0;
-    {
+    if (pn >= 0) {
       int rref = nt_ref(nt, pn, "rest");
       if (rref >= 0 && nt_type(nt, rref) && sp_streq(nt_type(nt, rref), "RestParameterNode") &&
           nt_str(nt, rref, "name")) extras[ne++] = rref;
@@ -2475,7 +2475,13 @@ void rename_shadowing_block_params(Compiler *c) {
           nt_str(nt, kwr, "name")) extras[ne++] = kwr;
     }
     /* block-locals (`; a, b`) live only in the BlockNode's comma-joined `locals`
-       string; a block may carry them with no required params (`{ |; x| ... }`). */
+       string; a block may carry them with no required params (`{ |; x| ... }`),
+       and the parser lists a body's own locals there too: a name first
+       assigned inside the block, which Ruby scopes to the block even when the
+       enclosing scope assigns the same name further down. A paramless block
+       (`Thread.new do ... end`) was skipped here, so its local shared the
+       enclosing slot with that later assignment -- one cell for every thread
+       (found under #4528). */
     const char *locs = nt_str(nt, L, "locals");
     int have_locals = locs && *locs;
     if (rn == 0 && ne == 0 && !have_locals) continue;
