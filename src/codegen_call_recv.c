@@ -4403,11 +4403,13 @@ else {
         /* poly_array.all?(pat)/one?/any?/none?/count(pat) -- Enumerable's
            pattern form is `pat === element` (Range cover, Regexp match, Class
            is_a, else ==); sp_poly_case_eq folds all of these and NIL (#2366,
-           #2960) */
+           #2960). The receiver and the argument are rooted while the loop
+           runs: a user == or === may allocate, and either temporary may be
+           the only reference to what it holds. */
         int ta = ++g_tmp, tv = ++g_tmp, tc = ++g_tmp, ti = ++g_tmp;
         Buf ra = expr_buf(c, recv);
-        buf_printf(b, "({ sp_PolyArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
-        buf_printf(b, " sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b); buf_puts(b, ";");
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s; SP_GC_ROOT(_t%d);", ta, ra.p ? ra.p : "NULL", ta); free(ra.p);
+        buf_printf(b, " sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b); buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);", tv);
         buf_printf(b, " sp_int _t%d = 0;", tc);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++)", ti, ti, ta, ti);
         /* #count is the exception: it counts elements EQUAL to its argument,
