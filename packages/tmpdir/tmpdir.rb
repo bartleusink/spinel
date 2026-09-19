@@ -9,6 +9,23 @@ module TmpdirPackage
   native_func :Dir_tmpdir,     [],         :string, "sp_Dir_tmpdir"
   native_func :Dir_mktmpdir,   [:string],  :string, "sp_Dir_mktmpdir"
   native_func :Dir_mktmpdir_pps, [:string, :string, :string, :int], :string, "sp_Dir_mktmpdir_pps"
+
+  # The block form removes the directory it made and everything the block
+  # left inside it, as CRuby does through FileUtils.remove_entry: bottom-up,
+  # and a symlink is unlinked rather than followed, so a link left inside
+  # the tree cannot carry the removal outside it.
+  def self.remove_tree(path)
+    if File.symlink?(path) || !File.directory?(path)
+      File.delete(path)
+      return
+    end
+    Dir.entries(path).each do |e|
+      next if e == "." || e == ".."
+      remove_tree("#{path}/#{e}")
+    end
+    Dir.rmdir(path)
+    nil
+  end
 end
 
 # Characters CRuby strips from prefix/suffix to keep paths portable.
@@ -75,7 +92,7 @@ class Dir
           # world-writable (o+w) and NOT sticky (no t-bit) -> reject.
           raise ArgumentError, "parent directory is world writable but not sticky: #{base}"
         end
-        Dir.delete(path) if Dir.exist?(path) && Dir.empty?(path)
+        TmpdirPackage.remove_tree(path) if File.symlink?(path) || File.exist?(path)
       end
     else
       path
