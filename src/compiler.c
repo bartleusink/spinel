@@ -239,7 +239,16 @@ int ty_degraded(TyKind t) {
 }
 
 void why_reset(SlotWhy *w) {
-  w->node = -1; w->other = -1; w->prev = TY_UNKNOWN; w->then = TY_UNKNOWN; w->round = 0;
+  w->node = -1; w->other = -1; w->prev = TY_UNKNOWN; w->then = TY_UNKNOWN; w->round = 0; w->reason = NULL;
+}
+
+void slot_rule(Compiler *c, LocalVar *lv, TyKind t, int node, const char *reason) {
+  (void)c;
+  if (ty_degraded(t) && !ty_degraded(lv->type) && lv->why.node < 0 && !lv->why.reason) {
+    lv->why.node = node; lv->why.other = -1; lv->why.prev = lv->type; lv->why.then = t;
+    lv->why.round = g_infer_round; lv->why.reason = reason;
+  }
+  lv->type = t;
 }
 
 int slot_set(Compiler *c, LocalVar *lv, TyKind merged, TyKind t, int node) {
@@ -254,6 +263,7 @@ int slot_set(Compiler *c, LocalVar *lv, TyKind merged, TyKind t, int node) {
     lv->why.prev = lv->type;
     lv->why.then = t;
     lv->why.round = g_infer_round;
+    lv->why.reason = NULL;   /* a value did this, whatever rule did before a reset */
   }
   else if (!ty_degraded(merged)) {
     /* re-derived concrete (the round's reset, or the re-narrow): the old

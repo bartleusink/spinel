@@ -77,7 +77,7 @@ void collect_def_params(Compiler *c, int def_id, Scope *s) {
         s->pnames[s->nparams++] = strdup(rname);
         LocalVar *lv = scope_local_intern(s, rname);
         lv->is_param = 1;
-        lv->type = TY_POLY_ARRAY;
+        slot_rule(c, lv, TY_POLY_ARRAY, -1, "by construction: a splat parameter holds the extra arguments of every call, untyped");
         s->rest_idx = s->nparams - 1;
       }
     }

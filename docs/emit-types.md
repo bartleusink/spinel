@@ -111,7 +111,8 @@ of hops `{file, line, col, end_line, end_col, role, rbs, note?}` in
 order from the slot outward. `role` is what the first hop is to the
 slot -- `passed` (an argument), `written` (an assigned value),
 `returned` (a returned value) -- then `from` for each expression the
-untyped came in through, and `and` for the other side of a meeting. A
+untyped came in through, `and` for the other side of a meeting, `by`
+for a rule's subject and `rule` for a rule with none. A
 hop through a send on an untyped receiver whose builtin answer is
 concrete (`to_s` is a String on anything) does not follow the receiver:
 it names the user def of that name whose return degraded and continues
@@ -140,9 +141,17 @@ A chain ends one of these ways, said in the last hop's `note`:
 - **a transient** -- the value is not untyped in the end, but was on the
   round the slot took it; the fixpoint kept the slot there. A compiler
   imprecision, and a report worth filing with the program.
-- **never bound** -- no call site gives the parameter a type (on stderr
-  only; the slot is untyped by default).
-- **by construction** -- a `*rest` or `**kwrest` parameter.
+- **a rule's own words** -- a rule rather than a value widened the slot,
+  and the hop is the rule's subject with `role` `by` (the default's
+  expression) or, with no subject, a hop of `role` `rule` with only a
+  `note`: *never bound: no call site gives it a type*; *by construction*
+  (a `*rest` or `**kwrest` parameter); *a `= nil` default and no call
+  site typing it* (the parameter holds nil or a value; a Symbol or Bool
+  one is boxed, having no nil of its own); *an empty literal default*
+  (`h = {}`, no element type); *an empty `[]` argument and no other call
+  site typing it*; *an empty literal argument of one container kind
+  where another call site passed the other*. A chain that reaches a
+  read of such a parameter ends the same way.
 - **untraced** -- a widening this version does not record the source of.
 
 ## `codegen`

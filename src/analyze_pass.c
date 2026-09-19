@@ -3082,7 +3082,7 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
     if (g_final_bind_pass && p->type == TY_UNKNOWN && at == TY_UNKNOWN &&
         apty && sp_streq(apty, "ArrayNode")) {
       int en0 = 0; nt_arr(nt, argv[k], "elements", &en0);
-      if (en0 == 0) { p->type = TY_POLY_ARRAY; changed = 1; continue; }
+      if (en0 == 0) { slot_rule(c, p, TY_POLY_ARRAY, argv[k], "an empty `[]` argument and no other call site typing it: the parameter is the untyped array"); changed = 1; continue; }
     }
     /* An empty `{}` / `[]` literal carries no type of its own, so it is skipped
        by the unification below. When ANOTHER call site typed the parameter as
@@ -3094,7 +3094,7 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
                   (sp_streq(apty, "ArrayNode") && !ty_is_array(p->type));
       if (cross) {
         int en1 = 0; nt_arr(nt, argv[k], "elements", &en1);
-        if (en1 == 0) { p->type = TY_POLY; changed = 1; continue; }
+        if (en1 == 0) { slot_rule(c, p, TY_POLY, argv[k], "an empty literal argument of one container kind where another call site passed the other: only the boxed slot holds both"); changed = 1; continue; }
       }
     }
     /* A void arg (`sink(always_raising_method)`) is nil-ish in value position:
@@ -3351,8 +3351,14 @@ int infer_default_param_types(Compiler *c) {
       if (dt == TY_NIL || dt == TY_UNKNOWN) continue;
       LocalVar *p = scope_local(sc, sc->pnames[i]);
       if (!p || p->rbs_seeded) continue;
+      /* an empty literal default is untyped by the rule above, not by any
+         value: say so; another default's value speaks for itself */
       TyKind merged = ty_unify(p->type, dt);
-      if (merged != p->type) { p->type = merged; changed = 1; }
+      if (merged != p->type && ty_degraded(merged) && !ty_degraded(p->type) && p->why.node < 0 &&
+          (int)infer_type(c, sc->pdefault[i]) == TY_UNKNOWN)
+        { slot_rule(c, p, merged, sc->pdefault[i], "an empty literal default, which has no element type: the parameter is the untyped container"); changed = 1; }
+      else
+        changed |= slot_set(c, p, merged, dt, sc->pdefault[i]);
     }
   }
   return changed;
