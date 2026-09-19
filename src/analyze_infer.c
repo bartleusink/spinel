@@ -1059,6 +1059,15 @@ static TyKind an_poly_concrete(Compiler *c, const char *name, TyKind t) {
      into the boxed slot the user arms need. */
   if (an_builtin_only) return t;
   for (int k = 0; k < c->nclasses; k++) {
+    /* A native class's methods are its declared bindings, and that is the
+       rule the poly dispatch counts candidates by (codegen's iocand loop,
+       #4474): a Ruby-side def on one -- IO::Buffer#read over an IO -- is no
+       dispatch arm, so its return must not widen the builtin answer either.
+       This loop was the one place still counting them after 97589546 changed
+       the codegen half: `[$stdin, nil][0].read(4)` was typed poly here while
+       the poly-IO arm answered its raw const char *, and the C did not
+       build. an_user_read_ty and the dispatch union already skip them. */
+    if (c->classes[k].is_native_class) continue;
     int mi = comp_method_in_chain(c, k, name, NULL);
     if (mi < 0 || mi >= c->nscopes) continue;
     TyKind r = (TyKind)c->scopes[mi].ret;
