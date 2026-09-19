@@ -259,6 +259,17 @@ static char *escape_str(const uint8_t *src, size_t len) {
   return out;
 }
 
+/* `s` as the body of a JSON string: the two escapes JSON requires and the
+   control characters, for the parse-error diagnostics --emit-types writes
+   before codegen (whose own writer) exists. */
+static void json_fputs(const char *s, FILE *f) {
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    if (*p == '"' || *p == '\\') { fputc('\\', f); fputc(*p, f); }
+    else if (*p < 0x20) fprintf(f, "\\u%04x", *p);
+    else fputc(*p, f);
+  }
+}
+
 static char *escape_pm_string(const pm_string_t *s) {
   return escape_str(pm_string_source(s), pm_string_length(s));
 }
@@ -3465,10 +3476,46 @@ else {
   pm_node_t *root = pm_parse(&parser);
 
   if (parser.error_list.size > 0) {
+    /* Each error at its position, `file:line:col: message` (the column
+       1-based on stderr, as an editor reads a compiler's message; 0-based in
+       the JSON, as Prism gives it and --emit-types carries it), through the
+       multi-file map when one was built so an error in a required file
+       names that file. Under --emit-types the JSON is written too, with no
+       types and the errors as its diagnostics: a buffer is unparseable most
+       of the time it is being typed into, and its marker belongs on the
+       token, not on line 1. */
     fprintf(stderr, "Parse errors in '%s':\n", source_file);
+    const char *types_out = getenv("SPINEL_EMIT_TYPES");
+    FILE *jf = (types_out && *types_out) ? fopen(types_out, "w") : NULL;
+    if (types_out && *types_out && !jf) fprintf(stderr, "spinel: cannot write '%s'\n", types_out);
+    if (jf) fputs("{\n  \"types\": [\n\n  ],\n  \"diagnostics\": [\n", jf);
+    int nd = 0;
     pm_diagnostic_t *diag;
     for (diag = (pm_diagnostic_t *)parser.error_list.head; diag; diag = (pm_diagnostic_t *)diag->node.next) {
-      fprintf(stderr, "  %s\n", diag->message);
+      pm_line_column_t lc = pm_newline_list_line_column(&parser.newline_list, diag->location.start, parser.start_line);
+      pm_line_column_t le = pm_newline_list_line_column(&parser.newline_list, diag->location.end, parser.start_line);
+      const char *file = source_file;
+      int line = lc.line, end_line = le.line;
+      if (sp_line_map_n > 0 && lc.line >= 1 && lc.line <= sp_line_map_n && sp_line_orig[lc.line] > 0) {
+        file = sp_file_table[sp_line_file[lc.line]];
+        line = sp_line_orig[lc.line];
+        end_line = (le.line >= 1 && le.line <= sp_line_map_n && sp_line_orig[le.line] > 0) ? sp_line_orig[le.line] : line;
+      }
+      fprintf(stderr, "  %s:%d:%d: %s\n", file, line, lc.column + 1, diag->message);
+      if (jf) {
+        if (nd++) fputs(",\n", jf);
+        fputs("    {\"file\":\"", jf);
+        json_fputs(file, jf);
+        fprintf(jf, "\",\"line\":%d,\"col\":%d,\"end_line\":%d,\"end_col\":%d,\"severity\":\"error\",\"message\":\"",
+                line, lc.column, end_line, le.column);
+        json_fputs(diag->message, jf);
+        fputs("\"}", jf);
+      }
+    }
+    if (jf) {
+      fputs("\n  ],\n  \"codegen\": [\n\n  ]\n}\n", jf);
+      fclose(jf);
+      fprintf(stderr, "Wrote %s\n", types_out);
     }
     /* Issue #764: free the registered include paths on the parse-
        error exit path too. */
