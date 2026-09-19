@@ -37,6 +37,9 @@ struct sp_IOBuffer_s {
   int64_t off;               /* slice: byte offset into source */
   int64_t size;
   uint32_t flags;
+  void *map_base;            /* IO::Buffer.map: the mmap'd region `data` points into
+                                (page-aligned), NULL for a malloc'd allocation */
+  size_t map_len;            /* ...and its length, for munmap */
 };
 
 /* The typed-accessor type enum. Order groups by width; *_BE are the
@@ -133,6 +136,19 @@ sp_IOBuffer *sp_IOBuffer_not_ip(sp_IOBuffer *b);
 /* locked { } support (the Ruby-side `locked` wraps these) */
 sp_IOBuffer *sp_IOBuffer_lock(sp_IOBuffer *b);
 sp_IOBuffer *sp_IOBuffer_unlock(sp_IOBuffer *b);
+
+/* IO integration (#4474): one read(2) / write(2) / pread(2) / pwrite(2)
+   against a boxed IO handle, answering the byte count, 0 at EOF, or
+   -errno as CRuby does. `length` < 0 stands for nil (the rest of the
+   buffer from `offset`). The Ruby side holds the lock around them. */
+sp_int sp_IOBuffer_read_io(sp_IOBuffer *b, sp_RbVal io, sp_int length, sp_int offset);
+sp_int sp_IOBuffer_write_io(sp_IOBuffer *b, sp_RbVal io, sp_int length, sp_int offset);
+sp_int sp_IOBuffer_pread_io(sp_IOBuffer *b, sp_RbVal io, sp_int from, sp_int length, sp_int offset);
+sp_int sp_IOBuffer_pwrite_io(sp_IOBuffer *b, sp_RbVal io, sp_int from, sp_int length, sp_int offset);
+/* IO::Buffer.map(file, size, offset, flags): the receiver (a fresh null
+   buffer) becomes a view of the file's bytes through mmap; `size` < 0
+   stands for nil (the file's size from `offset`). */
+sp_IOBuffer *sp_IOBuffer_become_map(sp_IOBuffer *b, sp_RbVal io, sp_int size, sp_int offset, sp_int flags);
 
 /* IO::Buffer::PAGE_SIZE (the mapped-allocation threshold) */
 sp_int sp_IOBuffer_page_size(void);

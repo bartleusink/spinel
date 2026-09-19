@@ -1,0 +1,51 @@
+5
+"hello"
+6
+"hello world"
+16
+", this is a file"
+10
+0
+37
+5
+"world"
+0
+0
+4
+2
+2
+"BCCDGH!"
+"B"
+4
+"CCDG"
+"H!"
+[10, "pipe bytes", false]
+0
+true
+false
+4
+5
+5
+"sock!"
+"Buffer is not writable!"
+"wrong argument type Integer (expected IO)"
+"Specified offset+length is bigger than the buffer size!"
+"closed stream"
+20
+true
+true
+true
+"mapped"
+"Buffer is not writable!"
+"Cannot resize mapped file buffer!"
+"file"
+"file"
+109
+false
+true
+"MAPPED file contents"
+true
+false
+"private"
+true
+"MAPPED file contents"

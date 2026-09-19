@@ -21397,16 +21397,23 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           emitter at all (#4236/#4237) */
        sp_streq(name, "read_nonblock") || sp_streq(name, "write_nonblock"))) {
     int iocand = 0;
-    for (int k = 0; k < c->nclasses && !iocand; k++)
+    for (int k = 0; k < c->nclasses && !iocand; k++) {
+      /* a native class's methods are its declared bindings, which is the
+         rule the poly dispatch counts candidates by: a Ruby-side def on it
+         (IO::Buffer#write over an IO, #4474) is not a candidate there, so
+         it must not send the call there either, or the dispatch declines
+         and `fds[1].write(s)` on a real IO raises NoMethodError again. The
+         old blanket test disabled this whole arm whenever ANY native class
+         existed -- IO::Buffer's implicit splice made that every program
+         touching it. */
+      if (c->classes[k].is_native_class) {
+        if (comp_native_method_find(c, k, name, argc, 0) >= 0) iocand = 1;
+        continue;
+      }
       if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
-          comp_reader_in_chain(c, k, name, NULL) ||
-          /* a native class's methods are not in scopes: consult its declared
-             bindings. The old blanket test disabled this whole arm whenever
-             ANY native class existed -- IO::Buffer's implicit splice made
-             that every program touching it, and `fds[1].write(s)` answered
-             NoMethodError naming IO, which is what it was. */
-          (c->classes[k].is_native_class && comp_native_method_find(c, k, name, argc, 0) >= 0))
+          comp_reader_in_chain(c, k, name, NULL))
         iocand = 1;
+    }
     if (!iocand) {
       int tio2 = ++g_tmp;
       buf_printf(b, "({ sp_File *_t%d = sp_poly_as_io(", tio2);

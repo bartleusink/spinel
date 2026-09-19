@@ -9,11 +9,16 @@
    range plus Bignums up to the unsigned bound. Messages mirror CRuby's,
    including the "integer ... to" (fixnum) / "bignum ... into" wording. */
 #include "sp_iobuffer.h"
+#include "sp_io.h"       /* the IO integration: sp_File, the readiness parks */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 extern const char *sp_sprintf(const char *fmt, ...);
 extern SP_NORETURN void sp_raise_cls(const char *cls, const char *msg);
@@ -287,10 +292,14 @@ static void iob_scan(void *p) {
   sp_IOBuffer *b = (sp_IOBuffer *)p;
   if (b->source) sp_gc_mark(b->source);
 }
-void sp_IOBuffer_fin(void *p) {
-  sp_IOBuffer *b = (sp_IOBuffer *)p;
-  free(b->data);
+/* Give the allocation back: munmap for a mapped file, free otherwise. */
+static void iob_release(sp_IOBuffer *b) {
+  if (b->map_base) { munmap(b->map_base, b->map_len); b->map_base = NULL; b->map_len = 0; }
+  else free(b->data);
   b->data = NULL;
+}
+void sp_IOBuffer_fin(void *p) {
+  iob_release((sp_IOBuffer *)p);
 }
 
 static sp_IOBuffer *iob_alloc_obj(sp_int cls_id) {
@@ -341,7 +350,7 @@ sp_IOBuffer *sp_IOBuffer_become_for(sp_IOBuffer *b, const char *s) {
   uint8_t *d = (uint8_t *)malloc(n ? n : 1);   /* non-NULL even for "": for("") is not a null buffer */
   if (!d) sp_oom_die();
   memcpy(d, s, n);
-  free(b->data);
+  iob_release(b);
   b->data = d;
   b->source = NULL;
   b->off = 0;
@@ -438,6 +447,9 @@ sp_IOBuffer *sp_IOBuffer_resize(sp_IOBuffer *b, sp_int size) {
   if (b->flags & SP_IOB_LOCKED)
     sp_raise_cls("IO::Buffer::LockedError", "Cannot resize locked buffer!");
   if (b->flags & SP_IOB_EXTERNAL) sp_raise_cls("IO::Buffer::AccessError", "Cannot resize external buffer!");
+  /* a file mapping has the file's length; growing it would detach the
+     view from the file it was made for, so it is refused as EXTERNAL is */
+  if (b->map_base) sp_raise_cls("IO::Buffer::AccessError", "Cannot resize mapped file buffer!");
   if (size < 0) iob_arg("Size can't be negative!");
   if (b->source) {
     /* a slice detaches into its own (internal) allocation */
@@ -540,10 +552,14 @@ sp_IOBuffer *sp_IOBuffer_transfer(sp_IOBuffer *b) {
   t->off = b->off;
   t->size = b->size;
   t->flags = b->flags;
+  t->map_base = b->map_base;
+  t->map_len = b->map_len;
   b->data = NULL;
   b->source = NULL;
   b->off = 0;
   b->size = 0;
+  b->map_base = NULL;
+  b->map_len = 0;
   /* the drained buffer keeps its flags (CRuby inspects as "NULL INTERNAL") */
   return t;
 }
@@ -551,8 +567,7 @@ sp_IOBuffer *sp_IOBuffer_transfer(sp_IOBuffer *b) {
 sp_IOBuffer *sp_IOBuffer_free_m(sp_IOBuffer *b) {
   if (b->flags & SP_IOB_LOCKED)
     sp_raise_cls("IO::Buffer::LockedError", "Buffer is locked!");
-  free(b->data);
-  b->data = NULL;
+  iob_release(b);
   b->source = NULL;
   b->off = 0;
   b->size = 0;
@@ -806,5 +821,131 @@ sp_IOBuffer *sp_IOBuffer_lock(sp_IOBuffer *b) {
 }
 sp_IOBuffer *sp_IOBuffer_unlock(sp_IOBuffer *b) {
   b->flags &= ~SP_IOB_LOCKED;
+  return b;
+}
+
+/* ---- IO integration (#4474) ----
+   Spinel's IO is a stdio FILE* (sp_File), so a raw descriptor read has to
+   stay coherent with the stdio buffer: bytes stdio already holds for the
+   stream are served first (the readpartial / read_nonblock discipline), and
+   a raw write flushes what stdio still holds so the bytes do not reorder.
+   A read that can block parks the green thread on readiness first, as every
+   IO read does, and a write on a pipe or socket parks on writability; the
+   Ruby side holds the buffer's lock across the call so a concurrent resize
+   or free cannot move the bytes a parked syscall is about to touch. One
+   syscall per call, answering its count, 0 at EOF, or -errno, as CRuby. */
+static sp_File *iob_io(sp_RbVal io) {
+  if (io.tag == SP_TAG_OBJ && io.cls_id == SP_BUILTIN_IO && io.v.p) {
+    sp_File *f = (sp_File *)io.v.p;
+    if (!f->fp) sp_raise_cls("IOError", "closed stream");
+    return f;
+  }
+  sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected IO)", iob_val_name(io)));
+}
+/* the span [offset, offset+length) of the buffer, length < 0 meaning nil */
+static uint8_t *iob_io_span(sp_IOBuffer *b, sp_int *length, sp_int offset, int writing) {
+  if (writing) iob_writable(b);
+  if (*length < 0) *length = b->size - offset;
+  iob_range(b, offset, *length);
+  uint8_t *base = iob_ptr(b);
+  if (!base) sp_raise_cls("IO::Buffer::AccessError", "Buffer is not allocated!");
+  return base + offset;
+}
+sp_int sp_IOBuffer_read_io(sp_IOBuffer *b, sp_RbVal io, sp_int length, sp_int offset) {
+  SP_GC_ROOT(b); SP_GC_ROOT_RBVAL(io);
+  sp_File *f = iob_io(io);
+  uint8_t *at = iob_io_span(b, &length, offset, 1);
+  if (length == 0) return 0;
+  /* what stdio already holds is data the stream has delivered: take it
+     first, or a raw read would step over it */
+  size_t pend = sp_io_stdio_buffered(f->fp);
+  if (pend > 0) {
+    size_t want = (size_t)length < pend ? (size_t)length : pend;
+    return (sp_int)fread(at, 1, want, f->fp);
+  }
+  sp_io_wait_readable(f);
+  at = iob_io_span(b, &length, offset, 1);   /* the park can raise, never move a locked buffer */
+  ssize_t n;
+  do { n = read(fileno(f->fp), at, (size_t)length); } while (n < 0 && errno == EINTR);
+  return n < 0 ? -(sp_int)errno : (sp_int)n;
+}
+sp_int sp_IOBuffer_write_io(sp_IOBuffer *b, sp_RbVal io, sp_int length, sp_int offset) {
+  SP_GC_ROOT(b); SP_GC_ROOT_RBVAL(io);
+  sp_File *f = iob_io(io);
+  uint8_t *at = iob_io_span(b, &length, offset, 0);
+  if (length == 0) return 0;
+  /* a buffered write still in stdio would land after this one */
+  if (fflush(f->fp) != 0) return -(sp_int)errno;
+  int fd = fileno(f->fp);
+  for (;;) {
+    ssize_t n = write(fd, at, (size_t)length);
+    if (n >= 0) return (sp_int)n;
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) { sp_io_wait_writable(f); continue; }
+    return -(sp_int)errno;
+  }
+}
+sp_int sp_IOBuffer_pread_io(sp_IOBuffer *b, sp_RbVal io, sp_int from, sp_int length, sp_int offset) {
+  SP_GC_ROOT(b); SP_GC_ROOT_RBVAL(io);
+  sp_File *f = iob_io(io);
+  if (from < 0) iob_arg("Position can't be negative!");
+  uint8_t *at = iob_io_span(b, &length, offset, 1);
+  if (length == 0) return 0;
+  ssize_t n;
+  do { n = pread(fileno(f->fp), at, (size_t)length, (off_t)from); } while (n < 0 && errno == EINTR);
+  return n < 0 ? -(sp_int)errno : (sp_int)n;
+}
+sp_int sp_IOBuffer_pwrite_io(sp_IOBuffer *b, sp_RbVal io, sp_int from, sp_int length, sp_int offset) {
+  SP_GC_ROOT(b); SP_GC_ROOT_RBVAL(io);
+  sp_File *f = iob_io(io);
+  if (from < 0) iob_arg("Position can't be negative!");
+  uint8_t *at = iob_io_span(b, &length, offset, 0);
+  if (length == 0) return 0;
+  if (fflush(f->fp) != 0) return -(sp_int)errno;
+  ssize_t n;
+  do { n = pwrite(fileno(f->fp), at, (size_t)length, (off_t)from); } while (n < 0 && errno == EINTR);
+  return n < 0 ? -(sp_int)errno : (sp_int)n;
+}
+
+/* IO::Buffer.map(file, size = nil, offset = 0, flags = READONLY): a view of
+   the file's bytes through mmap. The mapping is page-aligned below the
+   requested offset and `data` points at the offset within it; PRIVATE maps
+   copy-on-write, SHARED (the default) writes through, READONLY maps
+   PROT_READ. The finalizer munmaps; a slice keeps its source alive as for
+   any buffer; resize is refused (see sp_IOBuffer_resize). */
+sp_IOBuffer *sp_IOBuffer_become_map(sp_IOBuffer *b, sp_RbVal io, sp_int size, sp_int offset, sp_int flags) {
+  SP_GC_ROOT(b); SP_GC_ROOT_RBVAL(io);
+  sp_File *f = iob_io(io);
+  if (offset < 0) iob_arg("Offset can't be negative!");
+  int fd = fileno(f->fp);
+  fflush(f->fp);
+  if (size < 0) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) sp_raise_cls("SystemCallError", sp_sprintf("%s @ IO::Buffer.map", strerror(errno)));
+    size = (sp_int)st.st_size - offset;
+    if (size < 0) size = 0;
+  }
+  uint32_t fl = (uint32_t)flags;
+  int prot = (fl & SP_IOB_READONLY) ? PROT_READ : (PROT_READ | PROT_WRITE);
+  int mflags = (fl & SP_IOB_PRIVATE) ? MAP_PRIVATE : MAP_SHARED;
+  iob_release(b);
+  b->source = NULL; b->off = 0;
+  b->size = size;
+  b->flags = SP_IOB_MAPPED | (fl & (SP_IOB_READONLY | SP_IOB_PRIVATE)) | ((fl & SP_IOB_PRIVATE) ? 0 : SP_IOB_SHARED);
+  if (size == 0) { b->data = NULL; return b; }
+  long ps = sysconf(_SC_PAGESIZE);
+  if (ps <= 0) ps = 4096;
+  off_t page = (off_t)(offset - offset % ps);
+  size_t len = (size_t)(size + (offset - page));
+  void *m = mmap(NULL, len, prot, mflags, fd, page);
+  if (m == MAP_FAILED) {
+    int e = errno;
+    b->size = 0; b->flags = 0;
+    sp_raise_cls(e == EACCES ? "Errno::EACCES" : e == EINVAL ? "Errno::EINVAL" : "SystemCallError",
+                 sp_sprintf("%s @ IO::Buffer.map", strerror(e)));
+  }
+  b->map_base = m;
+  b->map_len = len;
+  b->data = (uint8_t *)m + (offset - page);
   return b;
 }
