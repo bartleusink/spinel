@@ -8660,13 +8660,14 @@ static const SlotWhy *why_return_of(Compiler *c, int id) {
 static int why_pushed_object(Compiler *c, int lit) {
   const NodeTable *nt = c->nt;
   if (nt_kind(nt, lit) != NK_ArrayNode) return -1;
-  const char *nm = NULL; Scope *ws = NULL;
-  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, wid) {
-    if (nt_ref(nt, wid, "value") != lit) continue;
-    nm = nt_str(nt, wid, "name"); ws = comp_scope_of(c, wid); break;
+  const char *nm = NULL; Scope *ws = NULL; int wid = -1;
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+    if (nt_ref(nt, w, "value") != lit) continue;
+    nm = nt_str(nt, w, "name"); ws = comp_scope_of(c, w); wid = w; break;
   }
   if (!nm || !ws) return -1;
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    if (id < wid) continue;   /* a push before the write fills an earlier value of the name */
     const char *cn = nt_str(nt, id, "name");
     if (!cn || !(sp_streq(cn, "<<") || sp_streq(cn, "push"))) continue;
     int recv = nt_ref(nt, id, "receiver");
