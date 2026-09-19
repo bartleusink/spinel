@@ -5195,9 +5195,18 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                        comp_ntype(c, id) == TY_POLY;
     int ncand = 0, ncall_arm = 0;
     for (int k = 0; k < c->nclasses; k++) {
-      int is_call = comp_method_in_chain(c, k, name, NULL) >= 0 ||
-                    (c->classes[k].is_native_class && comp_native_method_find(c, k, name, 0, 0) >= 0);
-      if (is_call || comp_reader_in_chain(c, k, name, NULL)) ncand++;
+      /* comp_poly_arm_defines: a native class counts only through its
+         declared bindings (#4504) -- its Ruby-side defs get no arm in the
+         BLOCKLESS switch below. A block-carrying call is different: the
+         block dispatch reaches Ruby-side defs through their proc form, and
+         poly_block_call_needs_dispatch stands the element-loop emitters
+         down on their account -- so the claim here has to keep counting
+         them, or `arr.each { }` beside a loaded StringIO had no emitter at
+         all and became the terminal raise. */
+      int is_call = comp_poly_arm_defines(c, k, name) ||
+                    (nt_ref(nt, id, "block") >= 0 && c->classes[k].is_native_class &&
+                     comp_method_in_chain(c, k, name, NULL) >= 0);
+      if (is_call || (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL))) ncand++;
       /* The root decision counts only the arms the switch below will carry:
          a class no reachable code constructs gets no arm, so it must not
          decide the root either. A dead FFI wrapper's Vector2 counted as a
@@ -30817,7 +30826,7 @@ else {
     int ncand8 = 0;
     if (!g_poly_builtin_arm)
       for (int k = 0; k < c->nclasses; k++)
-        if (comp_method_in_chain(c, k, name, NULL) >= 0) ncand8++;
+        if (comp_poly_arm_defines_n(c, k, name, argc)) ncand8++;
     if (ncand8 == 0) {
       buf_puts(b, "sp_poly_inject_sym("); emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_expr(c, argv[0], b); buf_puts(b, ")");
@@ -30830,7 +30839,7 @@ else {
       sp_streq(name, "sum")) {
     int ncand9 = 0;
     for (int k = 0; k < c->nclasses; k++)
-      if (comp_method_in_chain(c, k, name, NULL) >= 0) ncand9++;
+      if (comp_poly_arm_defines_n(c, k, name, argc)) ncand9++;
     if (ncand9 == 0) {
       emit_poly_sum_seed(c, recv, argv[0], b);
       return;
@@ -30851,8 +30860,8 @@ else {
       int ncand9 = 0;
       if (!g_poly_builtin_arm)
         for (int k = 0; k < c->nclasses; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
-              comp_reader_in_chain(c, k, name, NULL)) ncand9++;
+          if (comp_poly_arm_defines_n(c, k, name, argc) ||
+              (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL))) ncand9++;
       if (ncand9 == 0) {
         Buf cb9; memset(&cb9, 0, sizeof cb9);
         buf_printf(&cb9, "%s(", pn9);
@@ -30877,7 +30886,7 @@ else {
     int ncand9 = 0;
     if (!g_poly_builtin_arm)
       for (int k = 0; k < c->nclasses; k++)
-        if (comp_method_in_chain(c, k, name, NULL) >= 0) ncand9++;
+        if (comp_poly_arm_defines_n(c, k, name, argc)) ncand9++;
     if (ncand9 == 0) {
       int ti9 = ++g_tmp;
       emit_indent(g_pre, g_indent);
@@ -30943,8 +30952,8 @@ else {
       int ncand = 0;
       if (!g_poly_builtin_arm)
         for (int k = 0; k < c->nclasses; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
-              comp_reader_in_chain(c, k, name, NULL)) ncand++;
+          if (comp_poly_arm_defines_n(c, k, name, argc) ||
+              (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL))) ncand++;
       if (ncand == 0) {
         TyKind want = comp_ntype(c, id);
         int is_alive = sp_streq(name, "alive?");

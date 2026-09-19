@@ -11407,7 +11407,7 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
        the builtin-array append. */
     int has_user = 0;
     for (int k = 0; k < c->nclasses; k++)
-      if (comp_method_in_chain(c, k, name, NULL) >= 0) { has_user = 1; break; }
+      if (comp_poly_arm_defines_n(c, k, name, argc)) { has_user = 1; break; }
     if (!has_user) {
       for (int a = 0; a < argc; a++) {
         emit_indent(b, indent);
