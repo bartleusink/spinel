@@ -112,13 +112,31 @@ order from the slot outward. `role` is what the first hop is to the
 slot -- `passed` (an argument), `written` (an assigned value),
 `returned` (a returned value) -- then `from` for each expression the
 untyped came in through, and `and` for the other side of a meeting. A
-chain ends one of five ways, said in the last hop's `note`:
+hop through a send on an untyped receiver whose builtin answer is
+concrete (`to_s` is a String on anything) does not follow the receiver:
+it names the user def of that name whose return degraded and continues
+from that return, since one such makes every `.to_s` on an untyped
+receiver untyped, program-wide:
+
+```
+spinel: app.rb:10:16: note: returned `v.to_s` is untyped (a candidate of the send, `Bad#to_s`, returns untyped)
+spinel: app.rb:7:14: note: returned `@v` is untyped
+```
+
+A chain ends one of these ways, said in the last hop's `note`:
 
 - **born here: no untyped input** -- the expression produced the untyped
   with no untyped operand (a literal array of objects, a `map` over
   them, `&.`); the rule is the compiler's, and this is where to look.
 - **two kinds meet** -- the slot held one concrete kind and this value
-  brought another; the `and` hop is the earlier kind's site.
+  brought another; the `and` hop is the other kind's site (for a
+  return, the `return` of the other kind).
+- **by representation** -- an empty literal whose slot was filled with
+  objects (`r = []; r << Foo.new`): an Array of objects has no typed
+  form, so the slot is `Array[untyped]` whatever round typed it.
+- **pessimistic** -- an empty literal whose slot nothing had typed on
+  the round it took untyped, and nothing concrete filled later. A
+  fixpoint imprecision when a later write would have typed it.
 - **a transient** -- the value is not untyped in the end, but was on the
   round the slot took it; the fixpoint kept the slot there. A compiler
   imprecision, and a report worth filing with the program.
@@ -152,6 +170,7 @@ A call the compiler never placed (unreachable, or folded into something
 else) has no record. The lens is per site: the one call in a method that
 took a switch or the boxed path is the one to look at.
 
-What the JSON does not say: why a slot widened (which call site or
-assignment unified it to untyped). That is an open question, not a
-field.
+Why a slot widened is the record's `why` (above). Deriving it costs
+the analysis (the origin walk, +10% on optcarrot), so it runs only
+under `--warn-widen` and `--emit-types`; a plain compile's inference
+and C are the same either way.

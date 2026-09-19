@@ -710,7 +710,6 @@ int slot_set(Compiler *c, LocalVar *lv, TyKind merged, TyKind t, int node);
 void why_reset(SlotWhy *w);
 int ty_degraded(TyKind t);   /* poly, or a container of poly */
 extern int g_infer_round;    /* the fixpoint round in progress, for SlotWhy.round */
-int why_wanted(void);        /* a why consumer (--warn-widen / --emit-types) is on: origins are derived */
 LocalVar *scope_local_intern(Scope *s, const char *name);
 
 /* Symbol intern table. comp_sym_intern returns the symbol's id. */

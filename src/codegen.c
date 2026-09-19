@@ -8627,7 +8627,10 @@ static void why_hop(WhyOut *o, int id, const char *role, const char *extra) {
   if (id < c->node_cap && c->ntype[id] == TY_UNKNOWN) snprintf(rbs, sizeof rbs, "untyped (no type of its own)");
   else why_rbs(c, id < c->node_cap ? c->ntype[id] : TY_UNKNOWN, rbs, sizeof rbs);
   if (!o->json) {
-    fprintf(stderr, "spinel: %s:%d:%d: note: %s `%s` is %s%s\n", emit_file_path(c, fid), ln, col + 1, role, text, rbs, extra ? extra : "");
+    /* a synthesized node (an `__enum_to_a` body, a splice) has no source
+       line to point at and nothing to quote */
+    if (ln <= 0) fprintf(stderr, "spinel: note: %s a synthesized node (no source) is %s%s\n", role, rbs, extra ? extra : "");
+    else fprintf(stderr, "spinel: %s:%d:%d: note: %s `%s` is %s%s\n", emit_file_path(c, fid), ln, col + 1, role, text, rbs, extra ? extra : "");
   }
   else {
     Buf *b = o->json;
@@ -8645,34 +8648,72 @@ static void why_hop(WhyOut *o, int id, const char *role, const char *extra) {
   o->n++;
 }
 
-/* The end of a chain at a slot whose widening value is not untyped in the
-   end: two concrete kinds met, or a transient the fixpoint kept. */
-static void why_slot_end(WhyOut *o, const SlotWhy *w, const char *role) {
-  Compiler *c = o->c;
-  TyKind now = c->ntype[w->node];
-  char extra[160], b[64];
-  int other_ok = w->other >= 0 && w->other < c->node_cap && w->other != w->node;
-  /* two concrete kinds met: the slot held one (prev, from `other`) and this
-     value brought another; or, for a return, the tail and a `return` */
-  int meet = !ty_degraded(w->then) && ((w->prev != TY_UNKNOWN && w->prev != now) || other_ok);
-  if (meet) {
-    int is_ret = sp_streq(role, "returned");
-    if (is_ret && other_ok) why_rbs(c, c->ntype[w->other], b, sizeof b); else why_rbs(c, w->prev != TY_UNKNOWN ? w->prev : c->ntype[w->other], b, sizeof b);
-    snprintf(extra, sizeof extra, ", where %s %s (two kinds meet: untyped)", is_ret ? "a `return` gives" : "the slot was", b);
-  }
-  else if (now == TY_UNKNOWN)
-    snprintf(extra, sizeof extra, " (no type of its own: an empty literal, or nothing typed it); on round %d nothing else had typed the slot and it took untyped (pessimistic)", w->round);
-  else snprintf(extra, sizeof extra, "; on round %d of inference it was still untyped and the slot kept that (a transient)", w->round);
-  why_hop(o, w->node, role, extra);
-  if (meet && other_ok) why_hop(o, w->other, "and", NULL);
-}
-
 /* The return whose recorded value is node `id`, if a def's is: the chain
    reached a callee's return that met two kinds. */
 static const SlotWhy *why_return_of(Compiler *c, int id) {
   for (int si = 1; si < c->nscopes; si++)
     if (c->scopes[si].ret_why.node == id && ty_degraded(c->scopes[si].ret)) return &c->scopes[si].ret_why;
   return NULL;
+}
+
+/* For an empty literal written to a local: the class of an object later
+   pushed into that local in the same scope (`r = []; ... r << Foo.new`),
+   -1 when none is. */
+static int why_pushed_object(Compiler *c, int lit) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, lit) != NK_ArrayNode) return -1;
+  const char *nm = NULL; Scope *ws = NULL; int wid = -1;
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+    if (nt_ref(nt, w, "value") != lit) continue;
+    nm = nt_str(nt, w, "name"); ws = comp_scope_of(c, w); wid = w; break;
+  }
+  if (!nm || !ws) return -1;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    if (id < wid) continue;   /* a push before the write fills an earlier value of the name */
+    const char *cn = nt_str(nt, id, "name");
+    if (!cn || !(sp_streq(cn, "<<") || sp_streq(cn, "push"))) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) continue;
+    const char *rn = nt_str(nt, recv, "name");
+    if (!rn || !sp_streq(rn, nm) || comp_scope_of(c, recv) != ws) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int n = 0; const int *a = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    if (a && n >= 1 && a[0] < c->node_cap && ty_is_object(c->ntype[a[0]])) return ty_object_class(c->ntype[a[0]]);
+  }
+  return -1;
+}
+
+/* The end of a chain at a slot whose widening value is not untyped in the
+   end: two concrete kinds met, or a transient the fixpoint kept. */
+static void why_slot_end(WhyOut *o, const SlotWhy *w, const char *role) {
+  Compiler *c = o->c;
+  TyKind now = c->ntype[w->node];
+  char extra[224], b[64];
+  int other_ok = w->other >= 0 && w->other < c->node_cap && w->other != w->node;
+  /* two concrete kinds met: the slot held one (prev, from `other`) and this
+     value brought another; or, for a return, the tail and a `return`. The
+     kind that met is `other`'s when there is one -- `prev` is what the slot
+     held, which a return's tail and `return` can both already have given it
+     (a String tail, a `return nil`: "String, where the slot was String"). */
+  int is_ret = sp_streq(role, "returned") || why_return_of(c, w->node) == w;
+  int meet = !ty_degraded(w->then) && ((w->prev != TY_UNKNOWN && w->prev != now) || other_ok);
+  if (meet) {
+    if (other_ok) why_rbs(c, c->ntype[w->other], b, sizeof b); else why_rbs(c, w->prev, b, sizeof b);
+    snprintf(extra, sizeof extra, ", where %s %s (two kinds meet: untyped)", is_ret ? "a `return` gives" : "the slot was", b);
+  }
+  else if (now == TY_UNKNOWN) {
+    /* an empty literal's slot is untyped either because the round guessed
+       before a write typed it (pessimistic: a fixpoint imprecision) or
+       because what fills it later has no typed form anyway -- an Array of
+       objects is Array[untyped] by representation, and the round is not
+       to blame. Tell them apart by what is pushed. */
+    int pcls = why_pushed_object(c, w->node);
+    if (pcls >= 0) snprintf(extra, sizeof extra, " (no type of its own: an empty literal); the %s pushed into it makes an Array of objects, which has no typed form: Array[untyped] by representation", class_ruby_name(c, pcls));
+    else snprintf(extra, sizeof extra, " (no type of its own: an empty literal, or nothing typed it); on round %d nothing else had typed the slot and it took untyped (pessimistic)", w->round);
+  }
+  else snprintf(extra, sizeof extra, "; on round %d of inference it was still untyped and the slot kept that (a transient)", w->round);
+  why_hop(o, w->node, role, extra);
+  if (meet && other_ok) why_hop(o, w->other, "and", NULL);
 }
 
 /* The slot a read names, if the read's type came from one with a why. */
@@ -8715,6 +8756,24 @@ static int why_block_recv(Compiler *c, int read_id, const char *pname) {
   return best >= 0 ? nt_ref(nt, best, "receiver") : -1;
 }
 
+/* For a send on a poly receiver whose builtin answer is concrete: the scope
+   of a user instance method of the name whose return degraded and has a why,
+   -1 when none (the receiver hop stands: the builtin answer is untyped too,
+   or no candidate's return is). */
+static int why_poly_candidate(Compiler *c, int id) {
+  const char *name = nt_str(c->nt, id, "name");
+  if (!name) return -1;
+  int any = -1;
+  for (int si = 1; si < c->nscopes; si++) {
+    Scope *m = &c->scopes[si];
+    if (!m->name || m->def_node < 0 || m->is_cmethod || m->class_id < 0 || !sp_streq(m->name, name)) continue;
+    if (!ty_degraded(m->ret) || m->ret_why.node < 0 || m->ret_why.node >= c->node_cap || m->ret_why.node == id) continue;
+    any = si; break;
+  }
+  if (any < 0) return -1;
+  return ty_degraded(an_builtin_answer(c, id)) ? -1 : any;
+}
+
 /* Follow a slot's why to the expression the poly was born at. `first` is
    what the slot's node is to the slot: passed, written, returned. */
 static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
@@ -8739,7 +8798,10 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
        parentheses), or a node whose origin starts at the same place */
     NodeKind k = nt_kind(nt, id);
     int wrapper = k == NK_StatementsNode || k == NK_ElseNode || k == NK_ParenthesesNode || k == NK_BeginNode;
-    int silent = ln <= 0 || (ln == last_ln && col == last_col) || (wrapper && !born && !lost && depth > 0);
+    /* a head wrapper whose tail starts where it does is not a hop either:
+       the tail is the hop, and carries what there is to say about it */
+    int same_next = !born && !lost && ln == (int)nt_int(nt, next, "node_line", 0) && col == (int)nt_int(nt, next, "node_col", 0);
+    int silent = ln <= 0 || (ln == last_ln && col == last_col) || (wrapper && !born && !lost && (depth > 0 || same_next));
     /* a read whose slot's widening value is concrete in the end: the
        slot's own story ends the chain */
     const LocalVar *rl = why_read_slot(c, id);
@@ -8765,6 +8827,26 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
     }
     if (born && k == NK_InstanceVariableReadNode) { why_hop(o, id, role, " — untraced from here: no write of it in this class is untyped (its kind is the writes' meeting, or a rule's)"); return; }
     if (born) { why_hop(o, id, role, " — born here: no untyped input"); return; }
+    if (k == NK_CallNode && !lost && next == nt_ref(nt, id, "receiver")) {
+      /* a send on a poly receiver: its result is the meeting of every user
+         def of the name with the builtin answer. When the builtin answer is
+         concrete (`to_s` is a String on anything), the receiver being
+         untyped is not why the result is -- a user candidate whose return
+         degraded is, and one such makes every `.to_s` on a poly receiver
+         untyped, program-wide. Follow that candidate's return. */
+      int cand = why_poly_candidate(c, id);
+      if (cand >= 0) {
+        char cx[160];
+        snprintf(cx, sizeof cx, " (a candidate of the send, `%s#%s`, returns untyped)", class_ruby_name(c, c->scopes[cand].class_id), c->scopes[cand].name);
+        /* printed even where a wrapper already named this position: the
+           candidate is the news */
+        why_hop(o, id, role, cx);
+        const SlotWhy *rw = &c->scopes[cand].ret_why;
+        if (!ty_degraded(c->ntype[rw->node])) { why_slot_end(o, rw, "returned"); return; }
+        role = "returned"; id = rw->node; last_ln = -1; depth++;
+        continue;
+      }
+    }
     if (lost && !ty_degraded(c->ntype[id])) {
       /* a concrete value the chain arrived at: a callee's return that met
          two kinds, else a value the fixpoint saw untyped for a while */

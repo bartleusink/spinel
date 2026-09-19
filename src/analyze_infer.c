@@ -113,6 +113,18 @@ static int an_nonblock_no_exception(Compiler *c, int id) {
    one, and codegen needs to know the builtin shape to emit its arm (#3459). */
 static int an_builtin_only = 0;
 int an_builtin_only_p(void) { return an_builtin_only; }
+/* What call `id` would be typed if no user class owned the name: the
+   builtin answer alone. Nothing is cached and no node's type is written
+   under the flag (see infer_type), so this is safe to ask after analysis --
+   the why-chain asks it of a send on a poly receiver, to tell a result the
+   builtin already makes untyped from one a user candidate's return made so. */
+TyKind an_builtin_answer(Compiler *c, int id) {
+  int was = an_builtin_only;
+  an_builtin_only = 1;
+  TyKind t = infer_call(c, id);
+  an_builtin_only = was;
+  return t;
+}
 
 /* Name-keyed answer memo, the same shape (and the same staleness argument) as
    udm_ in an_user_defines_method: the question below crosses every class with
@@ -7134,6 +7146,18 @@ TyKind infer_uncached(Compiler *c, int id) {
    the poly was born here. -1 when `t` is not degraded. One rule at the one
    place every node's type lands, rather than a note at each of the rules
    that answer poly (#4509: node-origin, not slot-based). */
+/* The value of ivar write `wid` when it writes `nm` in class `cid` and that
+   value's type is degraded; -1 otherwise. */
+static int why_ivar_write_of(Compiler *c, int wid, const char *nm, int cid) {
+  const NodeTable *nt = c->nt;
+  const char *wn = nt_str(nt, wid, "name");
+  if (!wn || !sp_streq(wn, nm)) return -1;
+  Scope *ws = comp_scope_of(c, wid);
+  if (!ws || ws->class_id != cid) return -1;
+  int v = nt_ref(nt, wid, "value");
+  return (v >= 0 && v < c->node_cap && ty_degraded(c->ntype[v])) ? v : -1;
+}
+
 static int why_node_origin(Compiler *c, int id, TyKind t) {
   if (!ty_degraded(t)) return -1;
   const NodeTable *nt = c->nt;
@@ -7180,27 +7204,47 @@ static int why_node_origin(Compiler *c, int id, TyKind t) {
     Scope *rs = comp_scope_of(c, id);
     int cid = rs ? rs->class_id : -1;
     if (nm) {
-      NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, wid) {
-        const char *wn = nt_str(nt, wid, "name");
-        if (!wn || !sp_streq(wn, nm)) continue;
-        Scope *ws = comp_scope_of(c, wid);
-        if (!ws || ws->class_id != cid) continue;
-        int v = nt_ref(nt, wid, "value");
-        if (v >= 0 && v < c->node_cap && ty_degraded(c->ntype[v])) return v;
+      /* the writes of the name: through the shared index (a hash bucket,
+         so the name is still checked) while the scope index is frozen --
+         the passes that own the fixpoint -- and by the scan elsewhere,
+         where the index would rebuild on every ask */
+      if (comp_scope_index_is_frozen()) {
+        int best = -1, best_w = -1;   /* the bucket is not in table order: the first write is the lowest id */
+        for (int r = ivw_shared_first(c, nm); r >= 0; r = ivw_shared_next(r)) {
+          int wid = ivw_shared_node(r);
+          if (nt_kind(nt, wid) != NK_InstanceVariableWriteNode) continue;
+          if (best_w >= 0 && wid > best_w) continue;
+          int v = why_ivar_write_of(c, wid, nm, cid);
+          if (v >= 0) { best = v; best_w = wid; }
+        }
+        if (best >= 0) return best;
+      }
+      else {
+        NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, wid) {
+          int v = why_ivar_write_of(c, wid, nm, cid);
+          if (v >= 0) return v;
+        }
       }
     }
     return id;
   }
+  /* the first child carrying a degraded type -- among the children the
+     node's own type is derived from: an `if`'s, `while`'s or `case`'s
+     predicate and a `when`'s conditions decide which arm, not what the
+     arm is worth, and a poly there is not where this poly came from */
   const SpNode *n = &nt->nodes[id];
   for (int i = 0; i < n->nr; i++) {
     int ch = n->r[i].ref;
+    if (n->r[i].key && sp_streq(n->r[i].key, "predicate")) continue;
     if (ch >= 0 && ch < c->node_cap && ch != id && ty_degraded(c->ntype[ch])) return ch;
   }
-  for (int i = 0; i < n->na; i++)
+  for (int i = 0; i < n->na; i++) {
+    if (n->a[i].key && sp_streq(n->a[i].key, "conditions")) continue;
     for (int k = 0; k < n->a[i].n; k++) {
       int ch = n->a[i].ids[k];
       if (ch >= 0 && ch < c->node_cap && ch != id && ty_degraded(c->ntype[ch])) return ch;
     }
+  }
   return id;
 }
 
@@ -7256,11 +7300,13 @@ TyKind infer_type(Compiler *c, int id) {
   }
   if (!an_builtin_only) {
     c->ntype[id] = t;
-    /* Only when a consumer asked (--warn-widen, --emit-types): the ivar arm
-       walks every write of the name and the call arm every scope, once per
-       node per round, which cost a plain optcarrot compile 10% of its
-       analysis for a chain nothing would print. */
-    if (id < c->node_cap) c->norigin[id] = why_wanted() ? why_node_origin(c, id, t) : -1;
+    /* the origin only when a consumer asked (--warn-widen, --emit-types):
+       its ivar arm walks the program's ivar writes per read and its call
+       arm scans the scopes by name, +10% analysis on optcarrot and +23% on
+       a 2000-ivar class when it ran on every plain compile */
+    static int want = -1;
+    if (want < 0) { const char *ww = getenv("SPINEL_WARN_WIDEN"), *et = getenv("SPINEL_EMIT_TYPES"); want = ((ww && *ww) || (et && *et)) ? 1 : 0; }
+    if (want && id < c->node_cap) c->norigin[id] = why_node_origin(c, id, t);
   }
   /* memo_ok still holds here: every mode section inside infer_uncached
      restores its flag before returning, so t is the mode-free answer. */
