@@ -128,8 +128,9 @@ types, emits C, invokes `cc` to link it, and can run the result — no shell
 wrapper or chained helper binaries, no network, no manifest knowledge
 (that separation is what keeps builds hermetic; `spin` owns the stateful
 side). It supports the full option set, including `--rbs DIR` (RBS-seeded
-inference) and the `--emit-rbs` / `--emit-types` / `--emit-symbol-map`
-analysis modes.
+inference), the `--emit-rbs` / `--emit-types` / `--emit-symbol-map`
+analysis modes, and `--warn-widen` (a warning at each parameter or
+return that widened to untyped, the boxed slow path).
 
 #### Integer overflow
 
