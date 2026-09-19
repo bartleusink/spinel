@@ -1005,6 +1005,14 @@ static void sp_ev_drop(sp_thread *t) {   /* PRE: sched lock held */
 void sp_sched_ev_forget(int fd) {
   if (fd < 0) return;
   SCHED_LOCK();
+  /* Wake whoever is parked on the descriptor first: a thread blocked in a
+     read has no deadline, so with its registration gone and its entry
+     dropped nothing would ever ready it -- `sock.close` from another thread
+     left the reader waiting forever, where CRuby raises IOError in it
+     (#4546). Readied here as for any readiness event, from whatever worker
+     it is pinned to; the read it retries finds the handle closed and raises.
+     Then the registrations go, while the number still names this descriptor. */
+  if (fd < g_ev_cap && g_ev_tab[fd].waiters) sp_ev_dispatch(fd, POLLIN | POLLOUT, -1);
   for (int wid = 0; wid < SP_MAX_WORKERS; wid++)
     if (g_wslot[wid].evfd > 0) sp_ev_backend_del(g_wslot[wid].evfd, fd);
   if (fd < g_ev_cap) {

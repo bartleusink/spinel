@@ -1089,7 +1089,7 @@ static inline const char *sp_File_gets(sp_File *f) {
    pointer is `buf` (or NULL at EOF); valid only until the next call. Used by
    each_line loops where the line does not escape the loop body. */
 static inline const char *sp_File_gets_buf(sp_File *f, char *buf, int size) {
-  if (!f || !f->fp) return NULL;
+  if (!f || !f->fp || f->closed) return NULL;
   sp_io_wait_readable(f);
   if (!fgets(buf, size, f->fp)) return NULL;
   return buf;
@@ -1100,7 +1100,7 @@ static inline const char *sp_File_gets_buf(sp_File *f, char *buf, int size) {
    crossing the runtime API must be spinel-marked (or a 0xff literal); a raw
    stack buffer whose [-1] byte is arbitrary memory breaks the GC mark. */
 static inline const char *sp_File_gets_into(sp_File *f, char *s, int cap) {
-  if (!f || !f->fp) return NULL;
+  if (!f || !f->fp || f->closed) return NULL;
   sp_io_wait_readable(f);
   if (!fgets(s, cap, f->fp)) return NULL;
   sp_str_set_len(s, strlen(s));
@@ -10189,6 +10189,15 @@ typedef struct {
   void *pcause;                      /* sp_pending_cause */
   sp_poly_recur_frame *rrf; int rrn, rrcap;  /* sp_poly_recur_stack prefix [0..sp_poly_recur_top) */
   int *rrem, *rrcm, *rrbm;           /* the walk-path marks of the exception, catch and break arms */
+  int *erm, *ersm, *crm;             /* the GC-root and rescue-stack watermarks of the exception
+                                        arms and the GC-root watermark of the catch arms: what a
+                                        handler restores sp_gc_nroots / sp_rescue_sp to. They are
+                                        per worker like the arms, so without travelling with the
+                                        context a green thread that parked inside a begin and
+                                        resumed after another fiber's arm sat at the same index
+                                        restored the OTHER fiber's watermark: a raise's dead root
+                                        stayed on the list and the next collection read a stack
+                                        slot that was no longer a string (#4546) */
 } sp_exc_ctx_t;
 
 #ifdef SPINEL_EXT_HOST
@@ -10205,7 +10214,8 @@ void sp_exc_ctx_free(void *p) {
   free(x->es); free(x->em); free(x->ec); free(x->eo);
   free(x->cs); free(x->ct); free(x->ctk); free(x->cv); free(x->cet);
   free(x->bs); free(x->bv); free(x->bser); free(x->bet); free(x->shand);
-  free(x->rrf); free(x->rrem); free(x->rrcm); free(x->rrbm); free(x);
+  free(x->rrf); free(x->rrem); free(x->rrcm); free(x->rrbm);
+  free(x->erm); free(x->ersm); free(x->crm); free(x);
 }
 #endif
 #ifdef SPINEL_EXT_HOST
@@ -10219,9 +10229,12 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     x->em = (const char **)realloc(x->em, sizeof(char *) * n);
     x->ec = (const char **)realloc(x->ec, sizeof(char *) * n);
     x->eo = (void **)realloc(x->eo, sizeof(void *) * n);
-    x->rrem = (int *)realloc(x->rrem, sizeof(int) * n); }
+    x->rrem = (int *)realloc(x->rrem, sizeof(int) * n);
+    x->erm = (int *)realloc(x->erm, sizeof(int) * n);
+    x->ersm = (int *)realloc(x->ersm, sizeof(int) * n); }
   for (int i = 0; i < n; i++) { memcpy(x->es[i], sp_exc_stack[i], sizeof(jmp_buf));
     x->em[i] = sp_exc_msg[i]; x->ec[i] = sp_exc_cls[i]; x->eo[i] = sp_exc_obj[i];
+    x->erm[i] = sp_exc_rootmark[i]; x->ersm[i] = sp_rescue_mark[i];
     /* the arm's walk-path depth travels with the arm: two green threads whose
        handlers sit at the same index would otherwise share one slot, and a
        raise in one would restore the other's depth -- a HIGHER one resurrects
@@ -10235,11 +10248,12 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     x->ctk = (unsigned char *)realloc(x->ctk, sizeof(unsigned char) * m);
     x->cv = (sp_RbVal *)realloc(x->cv, sizeof(sp_RbVal) * m);
     x->cet = (int *)realloc(x->cet, sizeof(int) * m);
-    x->rrcm = (int *)realloc(x->rrcm, sizeof(int) * m); }
+    x->rrcm = (int *)realloc(x->rrcm, sizeof(int) * m);
+    x->crm = (int *)realloc(x->crm, sizeof(int) * m); }
   for (int i = 0; i < m; i++) { memcpy(x->cs[i], sp_catch_stack[i], sizeof(jmp_buf));
     x->ct[i] = sp_catch_tag[i]; x->ctk[i] = sp_catch_tag_kind[i];
     x->cv[i] = sp_catch_val[i]; x->cet[i] = sp_catch_exc_top[i];
-    x->rrcm[i] = sp_catch_recur_mark[i]; }
+    x->rrcm[i] = sp_catch_recur_mark[i]; x->crm[i] = sp_catch_rootmark[i]; }
   x->cn = m;
   int bn = sp_brk_top;
   if (bn > x->bcap) { x->bcap = bn;
@@ -10281,7 +10295,8 @@ void sp_exc_ctx_load(void *p) {            /* ctx -> current globals */
   sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
   for (int i = 0; i < x->en; i++) { memcpy(sp_exc_stack[i], x->es[i], sizeof(jmp_buf));
     sp_exc_msg[i] = x->em[i]; sp_exc_cls[i] = x->ec[i]; sp_exc_obj[i] = x->eo[i];
-    sp_poly_recur_mark[i] = x->rrem[i]; }
+    sp_poly_recur_mark[i] = x->rrem[i];
+    sp_exc_rootmark[i] = x->erm[i]; sp_rescue_mark[i] = x->ersm[i]; }
   sp_exc_top = x->en;
   /* the marker covers one slot past top (handler consumption window); zero
      it so a stale entry from another fiber's context is never chased */
@@ -10289,7 +10304,7 @@ void sp_exc_ctx_load(void *p) {            /* ctx -> current globals */
   for (int i = 0; i < x->cn; i++) { memcpy(sp_catch_stack[i], x->cs[i], sizeof(jmp_buf));
     sp_catch_tag[i] = x->ct[i]; sp_catch_tag_kind[i] = x->ctk[i];
     sp_catch_val[i] = x->cv[i]; sp_catch_exc_top[i] = x->cet[i];
-    sp_catch_recur_mark[i] = x->rrcm[i]; }
+    sp_catch_recur_mark[i] = x->rrcm[i]; sp_catch_rootmark[i] = x->crm[i]; }
   sp_catch_top = x->cn;
   for (int i = 0; i < x->bn; i++) { memcpy(sp_brk_stack[i], x->bs[i], sizeof(jmp_buf));
     sp_brk_val[i] = x->bv[i]; sp_brk_serial[i] = x->bser[i]; sp_brk_exc_top[i] = x->bet[i];

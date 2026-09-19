@@ -837,7 +837,7 @@ sp_IOBuffer *sp_IOBuffer_unlock(sp_IOBuffer *b) {
 static sp_File *iob_io(sp_RbVal io) {
   if (io.tag == SP_TAG_OBJ && io.cls_id == SP_BUILTIN_IO && io.v.p) {
     sp_File *f = (sp_File *)io.v.p;
-    if (!f->fp) sp_raise_cls("IOError", "closed stream");
+    if (!f->fp || f->closed) sp_raise_cls("IOError", "closed stream");
     return f;
   }
   sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected IO)", iob_val_name(io)));

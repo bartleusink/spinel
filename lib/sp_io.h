@@ -34,6 +34,14 @@ typedef struct {
                                   read: 0 not yet asked, 1 never (a regular
                                   file is always ready), 2 park before a read
                                   that could block (#4307) */
+  unsigned char closed;        /* #close ran. The FILE the handle then carries
+                                  is the shared /dev/null sentinel, never the
+                                  freed one: a thread mid-read when another
+                                  closes the handle reads EOF from it instead
+                                  of dereferencing NULL or the next accept's
+                                  descriptor; every entry point tests this
+                                  flag (SP_IO_OPEN) and the parks re-test it
+                                  on the way back (#4546) */
   int fno_plus1;               /* IO.for_fd(fd, autoclose: false) wraps a dup(2)
                                   of fd so close/fin never touch the caller's
                                   descriptor; this carries the ORIGINAL fd (+1,
@@ -90,7 +98,9 @@ sp_int sp_File_close(sp_File *f);
    answers here where CRuby raises: a File::Stat rides this same struct with
    no descriptor, so that check cannot be this one. */
 SP_NORETURN SP_COLD void sp_io_raise_closed(void);
-#define SP_IO_OPEN(f) do { if (!(f) || !(f)->fp) sp_io_raise_closed(); } while (0)
+#define SP_IO_OPEN(f) do { if (!(f) || !(f)->fp || (f)->closed) sp_io_raise_closed(); } while (0)
+/* The FILE a closed handle carries (see sp_File.closed): /dev/null, opened once. */
+FILE *sp_io_closed_sentinel(void);
 sp_bool sp_File_closed_p(sp_File *f);
 /* The handle flags codegen read straight off the struct (#lineno, #sync,
    #autoclose? and their setters): through here so a closed handle answers

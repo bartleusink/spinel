@@ -3555,7 +3555,7 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
       sp_int n = src[g] ? src[g]->len : 0;
       for (sp_int i = 0; i < n; i++) {
         sp_File *f = sp_select_io_of(src[g]->data[i]);
-        if (!f || !f->fp) { free(pfs); sp_io_raise_closed(); }
+        if (!f || !f->fp || f->closed) { free(pfs); sp_io_raise_closed(); }
         pfs[k].fd = fileno(f->fp);
         pfs[k].events = (short)(g == 0 ? POLLIN : POLLOUT);
         pfs[k].revents = 0;

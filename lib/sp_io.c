@@ -38,7 +38,7 @@ extern const char *sp_sprintf(const char *fmt, ...);
    autoclose:false path wraps a dup(2) instead and never pays it (#4208). */
 static void sp_File_fin(void *p) {
   sp_File *f = (sp_File *)p;
-  if (!f->fp) return;
+  if (!f->fp || f->closed) return;   /* closed: the FILE is the shared sentinel */
   if (f->no_autoclose && !f->fno_plus1) { fflush(f->fp); f->fp = NULL; return; }
   fclose(f->fp); f->fp = NULL;
 }
@@ -156,6 +156,7 @@ void sp_io_wait_writable(sp_File *f) {SP_GC_ROOT(f);
   {
     extern int sp_sched_wait_io(int fd, short events);
     sp_sched_wait_io(wfd, POLLOUT);
+    if (f->closed) sp_raise_cls("IOError", "stream closed in another thread");   /* see sp_io_wait_readable */
   }
 #else
   {
@@ -211,6 +212,9 @@ void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
   if (!sp_io_parkable(f)) return;
   if (sp_io_stdio_buffered(f->fp) > 0) return;
   sp_io_wait_fd_readable(fileno(f->fp));
+  /* woken by a close from another thread: the handle is gone, and a read
+     would touch a descriptor that is closed or already someone else's */
+  if (f->closed) sp_raise_cls("IOError", "stream closed in another thread");
 }
 
 /* The socket write path: straight to the descriptor, looping over short
@@ -406,19 +410,41 @@ sp_int sp_File_close(sp_File *f) {
      handle's fd dies where we can be exact; everything else that could strand
      one -- a raw close behind our back, exec, a dup we did not make -- is left
      to the self-healing arm, which re-adds on ENOENT (#4306). */
-  if (f && f->fp) sp_sched_ev_forget(fileno(f->fp));
-  if (f && f->fp && f->fp != stdout && f->fp != stderr && f->fp != stdin) {
+  /* The handle reads as closed BEFORE the parked readers are woken and the
+     descriptor is closed, and what it carries from then on is the /dev/null
+     sentinel, not the freed FILE: a reader readied by the forget below
+     retries on another worker and raises on the flag; one already past its
+     check reads EOF from the sentinel instead of dereferencing NULL or the
+     connection the next accept gave that number (#4546). */
+  if (f && f->fp && !f->closed && f->fp != stdout && f->fp != stderr && f->fp != stdin) {
+    FILE *fp = f->fp;
+    int fd = fileno(fp);
+    f->closed = 1;
+    f->fp = sp_io_closed_sentinel();
+    sp_sched_ev_forget(fd);
     /* autoclose=false on an IO that wraps the fd itself: flush and abandon
        the FILE (see sp_File_fin); a for_fd wrapper holds a dup, so its
        fclose never reaches the caller's descriptor (#4208) */
-    if (f->no_autoclose && !f->fno_plus1) { fflush(f->fp); f->fp = NULL; return 0; }
-    fclose(f->fp); f->fp = NULL;
+    if (f->no_autoclose && !f->fno_plus1) { fflush(fp); return 0; }
+    fclose(fp);
+    return 0;
   }
+  if (f && f->fp && !f->closed) sp_sched_ev_forget(fileno(f->fp));
   return 0;
 }
 
 sp_bool sp_File_closed_p(sp_File *f) {
-  return !f || !f->fp;
+  return !f || !f->fp || f->closed;
+}
+FILE *sp_io_closed_sentinel(void) {
+  static FILE *sentinel = NULL;
+  if (!sentinel) {
+    FILE *s = fopen("/dev/null", "r+");
+    if (!s) s = fopen("/dev/null", "r");
+    if (!s) sp_raise_cls("IOError", "cannot open /dev/null");
+    if (!__atomic_compare_exchange_n(&sentinel, &(FILE *){NULL}, s, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) fclose(s);
+  }
+  return sentinel;
 }
 
 /* The Ruby class a handle presents as, for the NoMethodError texts and #inspect.
@@ -1061,7 +1087,7 @@ const char *sp_File_inspect(sp_File *f) {SP_GC_ROOT(f);
   if (!f) return SPL("nil");
   const char *p = f->path ? f->path : "";
   const char *cls = (p[0] && p[0] != '<') ? "File" : "IO";
-  if (!f->fp) return p[0] ? sp_sprintf("#<%s:%s (closed)>", cls, p)
+  if (!f->fp || f->closed) return p[0] ? sp_sprintf("#<%s:%s (closed)>", cls, p)
                           : sp_sprintf("#<IO:(closed)>");
   /* a pipe end or a wrapped descriptor has no path: CRuby names the fd */
   if (!p[0]) return sp_sprintf("#<IO:fd %d>", fileno(f->fp));
@@ -1301,7 +1327,7 @@ sp_bool sp_File_autoclose_p(sp_File *f) { SP_IO_OPEN(f); return !f->no_autoclose
 void sp_File_set_autoclose(sp_File *f, sp_bool on) { SP_IO_OPEN(f); f->no_autoclose = !on; }
 /* IO#reopen(io): rebind this handle's descriptor onto the other stream. */
 sp_File *sp_File_reopen_io(sp_File *f, sp_File *other) {SP_GC_ROOT(f);SP_GC_ROOT(other); sp_gc_wb((void*)f);
-  if (!f || !f->fp || !other || !other->fp) return f;
+  if (!f || !f->fp || f->closed || !other || !other->fp || other->closed) return f;
   fflush(f->fp);
   fflush(other->fp);
   if (dup2(fileno(other->fp), fileno(f->fp)) < 0)
@@ -1371,14 +1397,18 @@ void sp_File_close_half(sp_File *f, sp_bool reading) {SP_GC_ROOT(f);
   if (reading ? writable : readable)
     sp_raise_cls("IOError", reading ? "closing non-duplex IO for reading"
                                     : "closing non-duplex IO for writing");
-  if (f && f->fp) { fclose(f->fp); f->fp = NULL; }
+  if (f && f->fp && !f->closed) { FILE *fp = f->fp; f->closed = 1; f->fp = sp_io_closed_sentinel(); fclose(fp); }
 }
 /* IO#reopen(path, mode): rebind the handle to another file. */
 sp_File *sp_File_reopen(sp_File *f, const char *path, const char *mode) {SP_GC_ROOT(f);SP_GC_ROOT_STR(path);SP_GC_ROOT_STR(mode); sp_gc_wb((void*)f);
   if (!f) return f;
-  FILE *nf = freopen(path ? path : "", mode && mode[0] ? mode : "r", f->fp);
+  /* a closed handle carries the shared sentinel, which must not be
+     reopened: it gets a fresh stream */
+  FILE *nf = (f->closed || !f->fp) ? fopen(path ? path : "", mode && mode[0] ? mode : "r")
+                                   : freopen(path ? path : "", mode && mode[0] ? mode : "r", f->fp);
   if (!nf) sp_file_raise_errno("reopen", path ? path : "");
   f->fp = nf;
+  f->closed = 0;
   f->path = path;
   f->mode = mode && mode[0] ? mode : "r";
   f->lineno = 0;
