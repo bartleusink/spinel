@@ -263,6 +263,7 @@ int slot_set(Compiler *c, LocalVar *lv, TyKind merged, TyKind t, int node) {
     lv->why.prev = lv->type;
     lv->why.then = t;
     lv->why.round = g_infer_round;
+    lv->why.reason = NULL;   /* a value did this, whatever rule did before a reset */
   }
   else if (!ty_degraded(merged)) {
     /* re-derived concrete (the round's reset, or the re-narrow): the old

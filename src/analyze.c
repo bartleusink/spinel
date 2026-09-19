@@ -14281,7 +14281,7 @@ void analyze_program(Compiler *c) {
       Scope *sc = &c->scopes[s];
       for (int i = 0; i < sc->nparams; i++) {
         LocalVar *p = scope_local(sc, sc->pnames[i]);
-        if (p && p->type == TY_POLY && !p->is_block_param && !p->poly_dispatch_widened) { p->type = TY_UNKNOWN; any = 1; }
+        if (p && p->type == TY_POLY && !p->is_block_param && !p->poly_dispatch_widened) { p->type = TY_UNKNOWN; why_reset(&p->why); any = 1; }
       }
     }
     /* Plain locals ratchet through the same monotonic unify, so a local read
@@ -14295,7 +14295,7 @@ void analyze_program(Compiler *c) {
       for (int i = 0; i < sc->nlocals; i++) {
         LocalVar *lv = &sc->locals[i];
         if (lv->type != TY_POLY || lv->is_param || lv->is_block_param) continue;
-        lv->type = TY_UNKNOWN; any = 1;
+        lv->type = TY_UNKNOWN; why_reset(&lv->why); any = 1;
         if (nlrec >= lcap) { lcap *= 2; recLs = realloc(recLs, sizeof(int) * lcap); recLi = realloc(recLi, sizeof(int) * lcap); }
         recLs[nlrec] = s; recLi[nlrec] = i; nlrec++;
       }
