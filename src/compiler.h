@@ -54,6 +54,11 @@ typedef struct {
   int is_cell;      /* captured by an escaping proc: lives in a heap cell
                        (sp_int *_cell_<name>) so the closure and the enclosing
                        scope share mutable storage */
+  int cell_outlives; /* the cell was made for a proc that can OUTLIVE the call
+                       (a proc/lambda, a Fiber/Thread body, a handler, a block
+                       forwarded into a poly callee). A cell only lifted
+                       iteration blocks made is consumed while the call runs,
+                       so a byref parameter may still lend its slot (#4568). */
   int cell_shadow;  /* the cell belongs to a param of an INLINED iteration
                        block, which the loop emitters bind by writing the plain
                        C slot. Keep that slot alongside the cell and copy it in

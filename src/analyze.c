@@ -1031,6 +1031,10 @@ void mark_proc_captures(Compiler *c) {
        enclosing scope -- and the cell machinery does not handle some of those
        types (e.g. a mutable-string buffer), so leave them by value. */
     int fib_create = a_is_fiber_or_gen_create(c, id);
+    /* a lifted iteration block is consumed while its call runs; everything
+       else here may hold its cells past the call (see LocalVar.cell_outlives) */
+    int outlives = !(a_block_is_lifted(c, id) && !is_proc_create(c, id) && !fib_create &&
+                     !is_handler_proc_block(c, id) && !a_block_forwarded_into_poly(c, id));
     int body = a_proc_body(c, id);
     if (body < 0) continue;
     int encl = c->nscope[id];
@@ -1187,6 +1191,7 @@ void mark_proc_captures(Compiler *c) {
             lv->type != TY_FLOAT && lv->type != TY_POLY && !heap_ptr)
           continue;   /* capture type without a usable cell: leave by value */
         lv->is_cell = 1;
+        if (outlives) lv->cell_outlives = 1;
         if (shadow) lv->cell_shadow = 1;
       }
     }
@@ -10025,9 +10030,14 @@ static int an_byref_promote_group(Compiler *c, const char *nm, int pi,
     if (blocked[k] & (1u << pi)) return 0;
     LocalVar *q = scope_local(m, m->pnames[pi]);
     if (!q || !q->is_param || q->is_block_param || q->type != TY_STRING) return 0;
-    /* celled for another reason (a closure capture) is not a slot the caller
-       can lend; celled because it is already byref is this group, mid-fixpoint */
-    if (q->is_cell && !q->byref_out) return 0;
+    /* celled for a proc that can outlive the call (a stored proc, a Thread
+       body) is not a slot the caller can lend; celled because it is already
+       byref is this group, mid-fixpoint. A cell only lifted iteration blocks
+       made is consumed while the call runs, and the block reads the caller's
+       slot through it exactly as when byref promoted first -- refusing it
+       made the ABI depend on which of the two passes ran first, and the
+       caller's buffer came back empty (#4568). */
+    if (q->is_cell && !q->byref_out && q->cell_outlives) return 0;
   }
   int did = 0;
   for (int k = 1; k < n; k++) {

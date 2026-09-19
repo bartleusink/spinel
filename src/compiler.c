@@ -1448,6 +1448,7 @@ LocalVar *scope_local_intern(Scope *s, const char *name) {
   lv->proc_ret = TY_UNKNOWN;
   lv->is_cell = 0;
   lv->cell_shadow = 0;
+  lv->cell_outlives = 0;
   lv->byref_out = 0;
   lv->inline_alias = 0;
   lv->init_guarded = 0;
