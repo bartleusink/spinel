@@ -1256,6 +1256,126 @@ int comp_lvw_next(const Compiler *c, int w) {
   return (w >= 0 && w < c->lvw_count) ? c->lvw_next[w] : -1;
 }
 
+/* The (scope, name)-keyed sibling of the index above. Machine-generated
+   programs reuse a handful of local names across thousands of scopes, so the
+   name-keyed chain degenerates to a near-full walk for the common names; the
+   scope-salted bucket keeps each chain the handful of writes the caller is
+   actually after. Chains still carry hash collisions: callers keep their
+   name/scope filters. */
+static void lvws_build(Compiler *c) {
+  free(c->lvws_head); free(c->lvws_next);
+  int n = c->nt->count;
+  int nb = 16;
+  while (nb < n && nb < (1 << 22)) nb <<= 1;
+  c->lvws_head = malloc((size_t)nb * sizeof(int));
+  c->lvws_next = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+  if (!c->lvws_head || !c->lvws_next) {
+    free(c->lvws_head); free(c->lvws_next);
+    c->lvws_head = c->lvws_next = NULL;
+    c->lvws_built = 0;
+    return;
+  }
+  c->lvws_nbuckets = nb;
+  c->lvws_count = n;
+  for (int b = 0; b < nb; b++) c->lvws_head[b] = -1;
+  for (int w = 0; w < n; w++) {
+    c->lvws_next[w] = -1;
+    if (nt_kind(c->nt, w) != NK_LocalVariableWriteNode) continue;
+    const char *wn = nt_str(c->nt, w, "name");
+    if (!wn) continue;
+    int si = (w < c->nt->count && c->nscope) ? c->nscope[w] : 0;
+    unsigned b = (lvw_hash(wn) ^ ((unsigned)si * 2654435761u)) & (unsigned)(nb - 1);
+    c->lvws_next[w] = c->lvws_head[b];
+    c->lvws_head[b] = w;
+  }
+  c->lvws_version = c->nt->version;
+  c->lvws_built = 1;
+}
+int comp_lvw_first_sc(Compiler *c, int scope_idx, const char *name) {
+  if (!c->lvws_built || c->lvws_version != c->nt->version) lvws_build(c);
+  if (!c->lvws_built) return -1;
+  unsigned b = (lvw_hash(name) ^ ((unsigned)scope_idx * 2654435761u)) & (unsigned)(c->lvws_nbuckets - 1);
+  return c->lvws_head[b];
+}
+int comp_lvw_next_sc(const Compiler *c, int w) {
+  return (w >= 0 && w < c->lvws_count) ? c->lvws_next[w] : -1;
+}
+
+/* Every CallNode in a scope, chained. The strbuf shape checks walked the
+   whole node table per candidate local to find the calls of one scope; this
+   walks them once. */
+static void scall_build(Compiler *c) {
+  free(c->scall_head); free(c->scall_next);
+  int n = c->nt->count;
+  int ns = c->nscopes > 0 ? c->nscopes : 1;
+  c->scall_head = malloc((size_t)ns * sizeof(int));
+  c->scall_next = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+  if (!c->scall_head || !c->scall_next) {
+    free(c->scall_head); free(c->scall_next);
+    c->scall_head = c->scall_next = NULL;
+    c->scall_built = 0;
+    return;
+  }
+  c->scall_nscopes = ns;
+  c->scall_count = n;
+  for (int s = 0; s < ns; s++) c->scall_head[s] = -1;
+  for (int u = n - 1; u >= 0; u--) {   /* reverse: chains run in node order */
+    c->scall_next[u] = -1;
+    if (nt_kind(c->nt, u) != NK_CallNode) continue;
+    int si = c->nscope ? c->nscope[u] : 0;
+    if (si < 0 || si >= ns) si = 0;
+    c->scall_next[u] = c->scall_head[si];
+    c->scall_head[si] = u;
+  }
+  c->scall_version = c->nt->version;
+  c->scall_built = 1;
+}
+int comp_scall_first(Compiler *c, int scope_idx) {
+  if (!c->scall_built || c->scall_version != c->nt->version ||
+      c->scall_nscopes < c->nscopes) scall_build(c);
+  if (!c->scall_built || scope_idx < 0 || scope_idx >= c->scall_nscopes) return -1;
+  return c->scall_head[scope_idx];
+}
+int comp_scall_next(const Compiler *c, int u) {
+  return (u >= 0 && u < c->scall_count) ? c->scall_next[u] : -1;
+}
+
+/* Every node of one kind, chained in node order. The string-promotion passes
+   walked the whole table per fixpoint round with a kind filter as the first
+   test; these chains hand them just the matching nodes. */
+static void kind_build(Compiler *c) {
+  free(c->kind_head); free(c->kind_next);
+  int n = c->nt->count;
+  int nk = 0;
+  for (int i = 0; i < n; i++) if ((int)nt_kind(c->nt, i) >= nk) nk = (int)nt_kind(c->nt, i) + 1;
+  if (nk < 1) nk = 1;
+  c->kind_head = malloc((size_t)nk * sizeof(int));
+  c->kind_next = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+  if (!c->kind_head || !c->kind_next) {
+    free(c->kind_head); free(c->kind_next);
+    c->kind_head = c->kind_next = NULL;
+    c->kind_built = 0;
+    return;
+  }
+  c->kind_nkinds = nk;
+  c->kind_count = n;
+  for (int k = 0; k < nk; k++) c->kind_head[k] = -1;
+  for (int i = n - 1; i >= 0; i--) {   /* reverse: chains run in node order */
+    c->kind_next[i] = c->kind_head[(int)nt_kind(c->nt, i)];
+    c->kind_head[(int)nt_kind(c->nt, i)] = i;
+  }
+  c->kind_version = c->nt->version;
+  c->kind_built = 1;
+}
+int comp_kind_first(Compiler *c, int kind) {
+  if (!c->kind_built || c->kind_version != c->nt->version) kind_build(c);
+  if (!c->kind_built || kind < 0 || kind >= c->kind_nkinds) return -1;
+  return c->kind_head[kind];
+}
+int comp_kind_next(const Compiler *c, int id) {
+  return (id >= 0 && id < c->kind_count) ? c->kind_next[id] : -1;
+}
+
 static int comp_method_index_direct(Compiler *c, const char *name);
 int comp_method_index(Compiler *c, const char *name) {
   int mi = comp_method_index_direct(c, name);

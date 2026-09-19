@@ -378,7 +378,9 @@ int class_var_static_ci(Compiler *c, int node) {
   if (!vn) return -1;
   Scope *sc = comp_scope_of(c, node);
   int found = -1;
-  for (int w = comp_lvw_first(c, vn); w >= 0; w = comp_lvw_next(c, w)) {
+  /* the (scope, name) chain: the name-keyed one degenerates on machine-
+     generated programs, where one local name recurs in thousands of scopes */
+  for (int w = comp_lvw_first_sc(c, (int)(sc - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
     const char *wn = nt_str(nt, w, "name");
     if (!wn || !sp_streq(wn, vn) || comp_scope_of(c, w) != sc) continue;
     int val = nt_ref(nt, w, "value");
