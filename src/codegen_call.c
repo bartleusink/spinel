@@ -4011,7 +4011,8 @@ static int emit_poly_pred_value(Compiler *c, int id, const char *tvref,
   int is_iof = argc == 1 && sp_streq(name, "instance_of?");
   if (is_isa || is_iof) {
     int arg = argv[0];
-    const char *cn = isa_const_name(nt, arg);
+    char qbuf[192];
+    const char *cn = isa_match_name(nt, arg, qbuf, sizeof qbuf);
     if (cn) {
       if (is_iof) {   /* exact class match by name (builtin or user class) */
         buf_printf(b, "(strcmp(sp_poly_class_name(%s), \"%s\") == 0)", tvref, cn);
@@ -20776,7 +20777,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        on a static class id. */
     if (argc == 1 && (sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") ||
                       sp_streq(name, "instance_of?"))) {
-      const char *icn = isa_const_name(nt, argv[0]);
+      char icq[192];
+      const char *icn = isa_match_name(nt, argv[0], icq, sizeof icq);
       if (icn) {
         buf_printf(b, "%s(%s, \"%s\")",
                    sp_streq(name, "instance_of?") ? "sp_io_instance_of" : "sp_io_is_a", r, icn);
@@ -30282,7 +30284,8 @@ else {
   if (recv >= 0 && rt == TY_POLY && argc == 1 &&
       (sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") || sp_streq(name, "instance_of?"))) {
     const char *cty = nt_type(nt, argv[0]);
-    const char *cn = isa_const_name(nt, argv[0]);
+    char cnq[192];
+    const char *cn = isa_match_name(nt, argv[0], cnq, sizeof cnq);
     if (cn) {
       int t = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_expr(c, recv, b); buf_printf(b, "; ");
@@ -30821,8 +30824,19 @@ else {
      ConstantPathNode with no parent), both naming the class in "name". (#2889) */
   if (recv >= 0 && argc == 1 && sp_streq(name, "===") && nt_type(nt, recv) &&
       (sp_streq(nt_type(nt, recv), "ConstantReadNode") ||
-       (sp_streq(nt_type(nt, recv), "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0))) {
-    const char *cn = nt_str(nt, recv, "name");
+       (sp_streq(nt_type(nt, recv), "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0) ||
+       /* a parented path is this same static dispatch only when its FULL
+          qualified name is a known builtin (exception) class -- Errno::ENOENT
+          === e. Typing alone is not enough: the leaf fallback types
+          Math::String as a class by its leaf, and claiming it here would
+          answer String === instead of the NameError the qualified constant
+          deserves. */
+       (sp_streq(nt_type(nt, recv), "ConstantPathNode") && ({
+          char _prq[192];
+          const char *_prn = isa_const_qualname(nt, recv, _prq, sizeof _prq);
+          _prn && (builtin_class_id(_prn) != 0 || is_builtin_exception_name(_prn)); })))) {
+    char rq[192];
+    const char *cn = isa_match_name(nt, recv, rq, sizeof rq);
     if (cn) {
       TyKind at2 = comp_ntype(c, argv[0]);
       /* TrueClass/FalseClass/NilClass === <literal/typed value>: decide

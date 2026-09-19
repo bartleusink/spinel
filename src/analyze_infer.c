@@ -6400,6 +6400,9 @@ TyKind infer_uncached(Compiler *c, int id) {
                sp_streq(nm, "STDIN"))) return TY_IO;
     if (nm && comp_class_index(c, nm) >= 0) return TY_CLASS;
     if (nm && is_builtin_class_name(nm)) return TY_CLASS;
+    /* an exception class with no cls_id of its own (SystemCallError,
+       LoadError) is still a first-class Class value, carried by name */
+    if (nm && is_builtin_exception_name(nm)) return TY_CLASS;
     /* `OpenStruct` as a value (o.class == OpenStruct) resolves only under
        require "ostruct" (#3155). */
     if (nm && sp_streq(nm, "OpenStruct") && sp_feature_required("ostruct")) return TY_CLASS;
@@ -6483,7 +6486,8 @@ TyKind infer_uncached(Compiler *c, int id) {
        the bare constant `Name`; resolve it as a class when it is one so is_a?,
        case/when, etc. treat `::Integer` exactly like `Integer` (#2683). */
     if (nm && nt_ref(nt, id, "parent") < 0 &&
-        (comp_class_index(c, nm) >= 0 || is_builtin_class_name(nm)))
+        (comp_class_index(c, nm) >= 0 || is_builtin_class_name(nm) ||
+         is_builtin_exception_name(nm)))
       return TY_CLASS;
     if (nm && sp_streq(nm, "ARGV")) return TY_STR_ARRAY;
     if (nm && sp_streq(nm, "ARGF")) return TY_ARGF;
@@ -6500,7 +6504,9 @@ TyKind infer_uncached(Compiler *c, int id) {
       if (qpnm && nm) {
         char qbuf[160];
         snprintf(qbuf, sizeof qbuf, "%s::%s", qpnm, nm);
-        if (builtin_class_id(qbuf) != 0) return TY_CLASS;
+        /* id-backed (Math::DomainError) or name-backed: the Errno:: family
+           is open, so any Errno::X is an exception Class value */
+        if (builtin_class_id(qbuf) != 0 || is_builtin_exception_name(qbuf)) return TY_CLASS;
       }
       /* Errno::ENOENT::Errno: the number of the class, read at run time
          since the numbers differ by platform (#4560) */
@@ -6575,6 +6581,9 @@ TyKind infer_uncached(Compiler *c, int id) {
       return TY_INT;
     if (nm && comp_class_index(c, nm) >= 0) return TY_CLASS;
     if (nm && is_builtin_class_name(nm)) return TY_CLASS;
+    /* an exception class with no cls_id of its own (SystemCallError,
+       LoadError) is still a first-class Class value, carried by name */
+    if (nm && is_builtin_exception_name(nm)) return TY_CLASS;
     /* FFI const: Module::NAME -> int */
     if (par_nm && nm) {
       for (int fci = 0; fci < c->n_ffi_consts; fci++) {

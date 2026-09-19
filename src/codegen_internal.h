@@ -607,6 +607,18 @@ int builtin_class_id(const char *name);
 int is_builtin_class_name(const char *n);
 int is_builtin_module_name(const char *n);
 int is_builtin_exception_name(const char *n);
+/* The class name a runtime match (is_a?/===/when) should test against: the
+   QUALIFIED path name when it names a known builtin (exception) class --
+   raised exceptions carry their qualified name, so "Errno::ENOENT" must not
+   shrink to "ENOENT" -- and the leaf otherwise (user classes register by
+   leaf). */
+static inline const char *isa_match_name(const NodeTable *nt, int arg, char *buf, size_t bufsz) {
+  const char *l = isa_const_name(nt, arg);
+  const char *q = isa_const_qualname(nt, arg, buf, bufsz);
+  if (q && l && !sp_streq(q, l) &&
+      (is_builtin_exception_name(q) || builtin_class_id(q) != 0)) return q;
+  return l;
+}
 const char *c_type_name(TyKind t);
 int is_scalar_ret(TyKind t);
 const char *ffi_c_type(const char *spec);
