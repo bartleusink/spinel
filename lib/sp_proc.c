@@ -143,6 +143,114 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      no callable address; dereferencing the NULL fn here segfaulted. Decline
      with the same NoMethodError a resolved-but-incompatible target gets. */
   if (!m || !m->fn) sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
+  /* A poly-ABI target (every slot an sp_RbVal; stamped at bind time) takes
+     the boxed side-channel values directly -- the same values the scalar
+     checks below read -- and publishes its boxed result. The raw sp_int
+     `args` are the laundered copies and carry no class, so the boxed
+     channel is the argument source here, exactly as in the legacy scalar
+     gate. Beyond eight slots there is no cast spelled below; decline. */
+  if (m->poly_abi) {
+    if (m->unbound || argc != m->poly_fixed || argc > 8)
+      sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
+    /* The poly ABI shares the legacy stamp's ret kinds: a poly return takes
+       the sp_RbVal cast, a void body the void cast (wasm checks the callee
+       signature at the call), and every register kind the sp_int cast boxed
+       by the stamp -- over BOXED argument slots read from the side-channel
+       every caller publishes (the raw sp_int `args` are the laundered
+       copies and carry no class). */
+    #define PB(i) _sp_proc_poly_args[i]
+    sp_RbVal _pr;
+    if (m->legacy_ret == SP_BM_RET_POLY) {
+      if (m->recv_bound) {
+        switch (argc) {
+          case 0: _pr = ((sp_RbVal (*)(void *))(uintptr_t)m->fn)(m->self); break;
+          case 1: _pr = ((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0)); break;
+          case 2: _pr = ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1)); break;
+          case 3: _pr = ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2)); break;
+          case 4: _pr = ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3)); break;
+          case 5: _pr = ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4)); break;
+          case 6: _pr = ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5)); break;
+          case 7: _pr = ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6)); break;
+          default: _pr = ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6), PB(7)); break;
+        }
+      }
+      else {
+        switch (argc) {
+          case 0: _pr = ((sp_RbVal (*)(void))(uintptr_t)m->fn)(); break;
+          case 1: _pr = ((sp_RbVal (*)(sp_RbVal))(uintptr_t)m->fn)(PB(0)); break;
+          case 2: _pr = ((sp_RbVal (*)(sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1)); break;
+          case 3: _pr = ((sp_RbVal (*)(sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2)); break;
+          case 4: _pr = ((sp_RbVal (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3)); break;
+          case 5: _pr = ((sp_RbVal (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4)); break;
+          case 6: _pr = ((sp_RbVal (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5)); break;
+          case 7: _pr = ((sp_RbVal (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6)); break;
+          default: _pr = ((sp_RbVal (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6), PB(7)); break;
+        }
+      }
+    }
+    else if (m->legacy_ret == SP_BM_RET_NIL) {
+      if (m->recv_bound) {
+        switch (argc) {
+          case 0: ((void (*)(void *))(uintptr_t)m->fn)(m->self); break;
+          case 1: ((void (*)(void *, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0)); break;
+          case 2: ((void (*)(void *, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1)); break;
+          case 3: ((void (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2)); break;
+          case 4: ((void (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3)); break;
+          case 5: ((void (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4)); break;
+          case 6: ((void (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5)); break;
+          case 7: ((void (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6)); break;
+          default: ((void (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6), PB(7)); break;
+        }
+      }
+      else {
+        switch (argc) {
+          case 0: ((void (*)(void))(uintptr_t)m->fn)(); break;
+          case 1: ((void (*)(sp_RbVal))(uintptr_t)m->fn)(PB(0)); break;
+          case 2: ((void (*)(sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1)); break;
+          case 3: ((void (*)(sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2)); break;
+          case 4: ((void (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3)); break;
+          case 5: ((void (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4)); break;
+          case 6: ((void (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5)); break;
+          case 7: ((void (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6)); break;
+          default: ((void (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6), PB(7)); break;
+        }
+      }
+      _pr = sp_box_nil();
+    }
+    else {
+      sp_int _ri;
+      if (m->recv_bound) {
+        switch (argc) {
+          case 0: _ri = ((sp_int (*)(void *))(uintptr_t)m->fn)(m->self); break;
+          case 1: _ri = ((sp_int (*)(void *, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0)); break;
+          case 2: _ri = ((sp_int (*)(void *, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1)); break;
+          case 3: _ri = ((sp_int (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2)); break;
+          case 4: _ri = ((sp_int (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3)); break;
+          case 5: _ri = ((sp_int (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4)); break;
+          case 6: _ri = ((sp_int (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5)); break;
+          case 7: _ri = ((sp_int (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6)); break;
+          default: _ri = ((sp_int (*)(void *, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(m->self, PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6), PB(7)); break;
+        }
+      }
+      else {
+        switch (argc) {
+          case 0: _ri = ((sp_int (*)(void))(uintptr_t)m->fn)(); break;
+          case 1: _ri = ((sp_int (*)(sp_RbVal))(uintptr_t)m->fn)(PB(0)); break;
+          case 2: _ri = ((sp_int (*)(sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1)); break;
+          case 3: _ri = ((sp_int (*)(sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2)); break;
+          case 4: _ri = ((sp_int (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3)); break;
+          case 5: _ri = ((sp_int (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4)); break;
+          case 6: _ri = ((sp_int (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5)); break;
+          case 7: _ri = ((sp_int (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6)); break;
+          default: _ri = ((sp_int (*)(sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(PB(0), PB(1), PB(2), PB(3), PB(4), PB(5), PB(6), PB(7)); break;
+        }
+      }
+      _pr = sp_bm_box_ret(m, sp_bm_norm_ret(m, _ri));
+    }
+    #undef PB
+    _sp_proc_poly_ret = _pr;
+    return 0;
+  }
   /* A Method read out of a poly slot carries no call-site types, so this
      generic trampoline may only forward to a target whose stamped legacy ABI
      is callable at the exact fixed arity the C signature reads, and whose

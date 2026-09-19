@@ -641,12 +641,15 @@ endif
 # Mode-incompatible: int_overflow_raises pins raise-mode semantics; under
 # --int-overflow=promote the same code auto-promotes and output diverges.
 # poly_call_legacy_abi_gate / poly_call_fast_abi_gate pin the raise/wrap legacy
-# sp_int Method ABI classification; promote boxes int parameters (and does not
-# consult that classification), so the same dynamic calls take a different
-# path there. poly_method_return_kinds boxes a String argument for a poly
-# Method `.call`, and the promote poly-call fallback's sp_int[16] argument list
-# then initializes an int slot from the String pointer, so the fixture does not
-# compile in that mode.
+# sp_int Method ABI classification; under promote the poly-ABI stamp gates the
+# same dynamic calls instead, and the two classifications legitimately diverge
+# in both directions: a target promote leaves mixed-signatured (a String or
+# pointer PARAMETER beside boxed ones) declines there where legacy accepts it,
+# while a pointer argument into an untyped parameter is callable there (both
+# slots boxed) where legacy declines. The poly-slot promote behavior is pinned
+# by promote_poly_slot_method_call instead. poly_method_return_kinds
+# additionally trips a typed `.to_proc`-with-defaults promote gap (an IntArray
+# default in a poly-widened callee), unrelated to the dispatch these pin.
 ifeq ($(SPINEL_INT_OVERFLOW),promote)
 TESTS := $(filter-out test/int_overflow_raises.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb,$(TESTS))
 # Drive the spinel front-end and the C compile in promote mode so the test

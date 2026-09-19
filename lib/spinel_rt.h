@@ -4417,6 +4417,26 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
      NoMethodError instead of crashing (#4395). */
   if (a.cls_id == SP_BUILTIN_METHOD) {
     sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
+    /* A poly-ABI target (stamped at bind time; the promote signature) takes
+       the two operands boxed and answers boxed. Checked ahead of the legacy
+       gate: under promote the legacy stamp is 0, and elsewhere the two are
+       mutually exclusive by construction. */
+    if (m->fn && sp_bm_poly_abi_ok(m, 2)) {
+      sp_RbVal _a = sp_box_int(start), _b = sp_box_int(len);
+      if (m->legacy_ret == SP_BM_RET_POLY) {
+        if (m->recv_bound)
+          return ((sp_RbVal (*)(void *, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a, _b);
+        return ((sp_RbVal (*)(sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(_a, _b);
+      }
+      if (m->legacy_ret == SP_BM_RET_NIL) {   /* a C void function: wasm checks the signature */
+        if (m->recv_bound) ((void (*)(void *, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a, _b);
+        else ((void (*)(sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(_a, _b);
+        return sp_box_nil();
+      }
+      if (m->recv_bound)
+        return sp_bm_box_ret(m, sp_bm_norm_ret(m, ((sp_int (*)(void *, sp_RbVal, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a, _b)));
+      return sp_bm_box_ret(m, sp_bm_norm_ret(m, ((sp_int (*)(sp_RbVal, sp_RbVal))(uintptr_t)m->fn)(_a, _b)));
+    }
     /* The two operands are sp_int, so the target's fixed positions must be the
        int token (or the TY_UNKNOWN wildcard), not some other scalar kind. */
     if (sp_bm_legacy_abi_ok(m, 2, "0000000100000001")) {
@@ -4439,6 +4459,8 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
         return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len));
       return sp_bm_box_ret(m, ((sp_int (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len));
     }
+    _sp_proc_poly_args[0] = sp_box_int(start);
+    _sp_proc_poly_args[1] = sp_box_int(len);
     sp_int slots[2]; slots[0] = start; slots[1] = len;
     return sp_poly_callable_call(a, 2, slots);
   }
@@ -7323,6 +7345,25 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
      (#4395). */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_METHOD) {
     sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
+    /* a poly-ABI target (the promote signature, stamped at bind time) takes
+       the operand boxed and answers boxed; checked ahead of the legacy gate,
+       which its stamp is mutually exclusive with */
+    if (m && m->fn && sp_bm_poly_abi_ok(m, 1)) {
+      sp_RbVal _a = sp_box_int(i);
+      if (m->legacy_ret == SP_BM_RET_POLY) {
+        if (m->recv_bound)
+          return ((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a);
+        return ((sp_RbVal (*)(sp_RbVal))(uintptr_t)m->fn)(_a);
+      }
+      if (m->legacy_ret == SP_BM_RET_NIL) {   /* a C void function: wasm checks the signature */
+        if (m->recv_bound) ((void (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a);
+        else ((void (*)(sp_RbVal))(uintptr_t)m->fn)(_a);
+        return sp_box_nil();
+      }
+      if (m->recv_bound)
+        return sp_bm_box_ret(m, sp_bm_norm_ret(m, ((sp_int (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a)));
+      return sp_bm_box_ret(m, sp_bm_norm_ret(m, ((sp_int (*)(sp_RbVal))(uintptr_t)m->fn)(_a)));
+    }
     if (sp_bm_legacy_abi_ok(m, 1, "00000001")) {
       if (m->legacy_ret == SP_BM_RET_POLY) {   /* an sp_RbVal return needs its own cast */
         if (m->recv_bound)
@@ -7338,6 +7379,7 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
         return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i));
       return sp_bm_box_ret(m, ((sp_int (*)(sp_int))(uintptr_t)m->fn)(i));
     }
+    _sp_proc_poly_args[0] = sp_box_int(i);
     sp_int slots[1]; slots[0] = i;
     return sp_poly_callable_call(a, 1, slots);
   }
@@ -7862,25 +7904,37 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
   if (a.tag == SP_TAG_OBJ) {
     if (a.cls_id == SP_BUILTIN_METHOD) {
       sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
-#ifdef SP_INT_OVERFLOW_MODE_PROMOTE
-      /* promote: methods are poly-signatured, so invoke through the poly ABI
-         and unbox the result rather than the legacy sp_int ABI. A NULL-fn
-         Method (an unresolved class value) has no callable address; route it
-         through the callable helper's NoMethodError instead of NULL. */
-      if (!m->fn) {
-        sp_int slots[1]; slots[0] = i;
-        return sp_poly_to_i(sp_poly_callable_call(a, 1, slots));
+      /* A poly-ABI target (the promote signature, stamped at bind time)
+         takes the operand boxed and answers boxed. This replaces the old
+         promote-only cast that ASSUMED every Method here was poly-signatured
+         and receiver-bound: a self-less target had its argument shifted into
+         the self slot, and a non-poly target read the sp_RbVal registers as
+         garbage. A target with neither stamp falls to the callable helper's
+         NoMethodError. */
+      if (m->fn && sp_bm_poly_abi_ok(m, 1)) {
+        sp_RbVal _a = sp_box_int(i);
+        if (m->legacy_ret == SP_BM_RET_POLY) {
+          if (m->recv_bound)
+            return sp_poly_to_i(((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a));
+          return sp_poly_to_i(((sp_RbVal (*)(sp_RbVal))(uintptr_t)m->fn)(_a));
+        }
+        if (m->legacy_ret == SP_BM_RET_NIL) {   /* a C void function: wasm checks the signature */
+          if (m->recv_bound) ((void (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a);
+          else ((void (*)(sp_RbVal))(uintptr_t)m->fn)(_a);
+          return SP_INT_NIL;
+        }
+        if (m->recv_bound)
+          return sp_poly_to_i(sp_bm_box_ret(m, sp_bm_norm_ret(m, ((sp_int (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, _a))));
+        return sp_poly_to_i(sp_bm_box_ret(m, sp_bm_norm_ret(m, ((sp_int (*)(sp_RbVal))(uintptr_t)m->fn)(_a))));
       }
-      return sp_poly_to_i(((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, sp_box_int(i)));
-#else
       if (sp_bm_legacy_abi_ok(m, 1, "00000001") && m->legacy_ret != SP_BM_RET_NIL) {
         if (m->recv_bound)
           return ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
         return ((sp_int (*)(sp_int))(uintptr_t)m->fn)(i);
       }
+      _sp_proc_poly_args[0] = sp_box_int(i);
       sp_int slots[1]; slots[0] = i;
       return sp_poly_to_i(sp_poly_callable_call(a, 1, slots));
-#endif
     }
     if (a.cls_id == SP_BUILTIN_INT_ARRAY) return sp_IntArray_get((sp_IntArray *)a.v.p, i);
   }
@@ -12310,6 +12364,19 @@ static sp_Proc *sp_curry_to_proc(sp_Curry *cy) {
 static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_CURRY)
     return sp_curry_call_poly((sp_Curry *)v.v.p, n < 16 ? n : 16, _sp_proc_poly_args);
+  /* A bound Method that fell through a call arm's own gate still has the
+     generic trampoline, whose poly-ABI and legacy gates read the published
+     boxed side-channel -- a typed-array adapter or an int-parameter target
+     promote left un-widened rides its stamped legacy ABI here, where the
+     call site's static classification could only see boxed operands. The
+     trampoline raises the NoMethodError itself for a target neither stamp
+     accepts. */
+  if (v.tag == SP_TAG_OBJ && v.v.p && v.cls_id == SP_BUILTIN_METHOD) {
+    sp_int slots[16];
+    for (sp_int i = 0; i < n && i < 16; i++) slots[i] = args[i];
+    sp_method_proc_tramp((void *)v.v.p, n < 16 ? n : 16, slots);
+    return _sp_proc_poly_ret;
+  }
   /* anything else that is not a Proc is CRuby's NoMethodError -- the raw
      cast below read a boxed Integer as a proc pointer and crashed (a
      realized curry applied once more used to reach it) */

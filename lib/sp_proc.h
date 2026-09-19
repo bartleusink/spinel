@@ -134,6 +134,20 @@ typedef struct sp_BoundMethod { void *self; sp_int fn; const char *name; sp_int 
                            static cast), but the runtime gate keeps the rest-form
                            check for any future caller that stamps it */
   sp_int legacy_ret;    /* SP_BM_RET_*: how to box the sp_int C return */
+  sp_int poly_abi;      /* whether the target's C signature is the promote poly
+                           ABI -- `sp_RbVal fn([void *self,] sp_RbVal...)`:
+                           every fixed parameter slot and the return are
+                           TY_POLY, with the same structural declines as the
+                           legacy classifier (rest/keyword/post-rest, an
+                           explicit &blk, a leading _sp_cls). Stamped at bind
+                           time by method_poly_abi (codegen_call.c); the
+                           promote poly-call arms gate on it instead of
+                           assuming every target is poly-signatured -- a
+                           Float-parameter or String-returning target read the
+                           sp_RbVal registers as garbage (and wasm, whose
+                           indirect calls check the callee signature, traps). */
+  sp_int poly_fixed;    /* number of fixed sp_RbVal slots the poly signature
+                           reads; a call must pass exactly this count */
 } sp_BoundMethod;
 void sp_bm_cap_scan(void *p);
 sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args);
@@ -157,13 +171,13 @@ static inline sp_int sp_bm_fn_opaque(sp_int fn) {
   return fn;
 #endif
 }
-static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = sp_bm_fn_opaque(fn); m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; m->recv_bound = 0; m->legacy_int_abi = 0; m->legacy_sig = NULL; m->legacy_fixed = 0; m->legacy_rest = 0; m->legacy_ret = SP_BM_RET_INT; return m; }
+static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = sp_bm_fn_opaque(fn); m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; m->recv_bound = 0; m->legacy_int_abi = 0; m->legacy_sig = NULL; m->legacy_fixed = 0; m->legacy_rest = 0; m->legacy_ret = SP_BM_RET_INT; m->poly_abi = 0; m->poly_fixed = 0; return m; }
 /* Tag a freshly-built Method with whether its target has the legacy sp_int C
    ABI, the per-position type signature, the fixed/rest slot counts, and how
    its sp_int C return boxes. The constructors default to 0 (unsafe), so every
    statically-known binding sets this before the Method can reach a poly slot
    (#4395). */
-static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound, sp_int legacy_int_abi, const char *legacy_sig, sp_int legacy_fixed, sp_int legacy_rest, sp_int legacy_ret) { m->recv_bound = recv_bound; m->legacy_int_abi = legacy_int_abi; m->legacy_sig = legacy_sig; m->legacy_fixed = legacy_fixed; m->legacy_rest = legacy_rest; m->legacy_ret = legacy_ret; return m; }
+static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound, sp_int legacy_int_abi, const char *legacy_sig, sp_int legacy_fixed, sp_int legacy_rest, sp_int legacy_ret, sp_int poly_abi, sp_int poly_fixed) { m->recv_bound = recv_bound; m->legacy_int_abi = legacy_int_abi; m->legacy_sig = legacy_sig; m->legacy_fixed = legacy_fixed; m->legacy_rest = legacy_rest; m->legacy_ret = legacy_ret; m->poly_abi = poly_abi; m->poly_fixed = poly_fixed; return m; }
 /* Box the raw sp_int a legacy-ABI Method returned according to the Ruby return
    the bind site recorded. A plain Integer return is SP_BM_RET_INT; a String or
    Bigint return, an array-returning method, and a void/bool/Symbol return each
@@ -246,6 +260,12 @@ static inline sp_bool sp_bm_sig_pos_match(const char *a, const char *b) {
   if (vb == 0) return va < 100000;
   return FALSE;
 }
+/* Whether a call passing `argc` arguments can ride the target's promote poly
+   ABI (every slot an sp_RbVal): the stamp must be set, the Method bound, and
+   the count exactly the fixed slot count the C signature reads. */
+static inline sp_bool sp_bm_poly_abi_ok(sp_BoundMethod *m, sp_int argc) {
+  return m && !m->unbound && m->poly_abi && argc == m->poly_fixed;
+}
 static inline sp_bool sp_bm_legacy_abi_ok(sp_BoundMethod *m, sp_int argc, const char *arg_sig) {
   if (!m || m->unbound || !m->legacy_int_abi || !m->legacy_sig || !arg_sig) return FALSE;
   if (m->legacy_rest) { if (argc < m->legacy_fixed) return FALSE; }
@@ -269,6 +289,8 @@ static inline sp_BoundMethod *sp_bm_unbind(sp_BoundMethod *m) {
   u->legacy_fixed = m->legacy_fixed;
   u->legacy_rest = m->legacy_rest;
   u->legacy_ret = m->legacy_ret;
+  u->poly_abi = m->poly_abi;
+  u->poly_fixed = m->poly_fixed;
   return u;
 }
 
