@@ -21652,6 +21652,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        sp_streq(name, "tty?") || sp_streq(name, "isatty") ||
        (sp_streq(name, "winsize") && sp_feature_enabled("io/console")) ||
        sp_streq(name, "readlines") || sp_streq(name, "rewind") ||
+       sp_streq(name, "readpartial") ||
        sp_streq(name, "sync") || sp_streq(name, "sync=") ||
        /* the non-blocking pair: a Socket destructured out of Socket.pair, or
           read back out of a container, is a poly value like any other, and
@@ -21785,6 +21786,26 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "read")) buf_printf(b, "sp_File_read(_t%d); })", tio2);
       else if (sp_streq(name, "gets")) buf_printf(b, "sp_File_gets(_t%d); })", tio2);
       else if (sp_streq(name, "readline")) buf_printf(b, "sp_File_readline_sep(_t%d, \"\\n\", 0, 0); })", tio2);
+      /* the same (len, outbuf) rebind the typed arm makes (#3336) */
+      else if (sp_streq(name, "readpartial") && argc >= 1) {
+        const char *sbp = NULL;
+        if (argc >= 2 && nt_type(nt, argv[1]) &&
+            sp_streq(nt_type(nt, argv[1]), "LocalVariableReadNode"))
+          sbp = nt_str(nt, argv[1], "name");
+        int tsp = ++g_tmp;
+        if (argc >= 2) {
+          buf_puts(b, "sp_str_check_mutable("); emit_expr(c, argv[1], b); buf_puts(b, "); ");
+          buf_printf(b, "const char *_t%d = ", tsp);
+        }
+        buf_printf(b, "sp_File_readpartial(_t%d, ", tio2);
+        emit_int_expr(c, argv[0], b);
+        buf_puts(b, ")");
+        if (argc >= 2) {
+          if (sbp) buf_printf(b, "; lv_%s = _t%d", rename_local(sbp), tsp);
+          buf_printf(b, "; _t%d", tsp);
+        }
+        buf_puts(b, "; })");
+      }
       else if (sp_streq(name, "close")) buf_printf(b, "sp_File_close(_t%d); })", tio2);
       else if (sp_streq(name, "flush")) buf_printf(b, "sp_File_flush(_t%d); })", tio2);
       else buf_printf(b, "sp_File_fileno(_t%d); })", tio2);
