@@ -29846,14 +29846,16 @@ else {
 
   /* any?/all?/none?/one?(Class) over an array: Class === element membership
      (the value-argument arms compare ==). Walks the boxed elements so every
-     array kind is covered. */
+     array kind is covered. The receiver is rooted for the walk: a method's
+     return or a chain is held by nothing else, and a collection during the
+     loop handed its slot on, so the elements it read were another object's. */
   if (recv >= 0 && argc == 1 && nt_ref(nt, id, "block") < 0 &&
       ty_is_array(rt) && comp_ntype(c, argv[0]) == TY_CLASS &&
       (sp_streq(name, "any?") || sp_streq(name, "all?") ||
        sp_streq(name, "none?") || sp_streq(name, "one?"))) {
     int ta = ++g_tmp, tc2 = ++g_tmp, tn = ++g_tmp, tcnt = ++g_tmp, ti = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, recv, b);
-    buf_printf(b, "; sp_Class _t%d = ", tc2); emit_expr(c, argv[0], b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_Class _t%d = ", ta, tc2); emit_expr(c, argv[0], b);
     buf_puts(b, "; "); emit_poly_iter_obj_normalize(c, ta, b);
     buf_printf(b, "sp_poly_iter_check(_t%d, \"%s\"); ", ta, name);
     buf_printf(b, "sp_int _t%d = sp_poly_arr_len_ex(_t%d); sp_int _t%d = 0;"
