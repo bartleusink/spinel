@@ -1809,8 +1809,11 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       const char *dk = (rt == TY_POLY_ARRAY) ? "Poly" : k;
       if (dk) {
         int t = ++g_tmp, tn = ++g_tmp;
+        /* The receiver is rooted across the count: a method's return or a
+           chain is held by nothing else, and a count that allocates let a
+           collection hand the array's slot on before the slice was cut. */
         buf_printf(b, "({ sp_%sArray *_t%d = ", dk, t); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d); sp_int _t%d = ", t, tn); emit_int_expr(c, argv[0], b);
         /* a negative count raises ArgumentError; the no-block take/drop otherwise
            silently returns a slice (a tail slice for drop). */
         buf_printf(b, "; if (_t%d < 0) sp_raise_cls(\"ArgumentError\", \"attempt to %s negative size\");",
@@ -2473,7 +2476,8 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
          NULL): the inserted value boxes into the sp_RbVal slot */
       int t = ++g_tmp;
       buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_PolyArray_insert(_t%d, ", t); emit_int_expr(c, argv[0], b);
+      /* rooted across the index and the value, as the typed arm is */
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray_insert(_t%d, ", t, t); emit_int_expr(c, argv[0], b);
       buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_printf(b, "); _t%d; })", t);
       return 1;
     }
@@ -3338,7 +3342,8 @@ else {
       if (sp_streq(name, "insert") && argc == 1) {
         int t0 = ++g_tmp;
         buf_printf(b, "({ sp_%sArray *_t%d = ", k, t0); emit_expr(c, recv, b);
-        buf_puts(b, "; (void)("); emit_int_expr(c, argv[0], b);
+        /* rooted across the index it evaluates and discards */
+        buf_printf(b, "; SP_GC_ROOT(_t%d); (void)(", t0); emit_int_expr(c, argv[0], b);
         buf_printf(b, "); _t%d; })", t0);
         return 1;
       }
@@ -3348,7 +3353,8 @@ else {
            array grows), then insert consecutively. */
         int t = ++g_tmp, ti2 = ++g_tmp, to2 = ++g_tmp;
         buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
+        /* rooted across the index, as the poly arm and take/drop are */
+        buf_printf(b, "; SP_GC_ROOT(_t%d); sp_int _t%d = ", t, ti2); emit_int_expr(c, argv[0], b);
         /* normalize ONCE, keeping the too-negative IndexError the runtime
            helper would have raised (it must not see a pre-added index) */
         buf_printf(b, "; sp_int _t%d = _t%d; if (_t%d < 0) { _t%d += (_t%d ? _t%d->len : 0) + 1;"
@@ -4489,7 +4495,8 @@ else {
       if (sp_streq(name, "insert") && argc == 1) {
         int t0 = ++g_tmp;
         buf_printf(b, "({ sp_PolyArray *_t%d = ", t0); emit_expr(c, recv, b);
-        buf_puts(b, "; (void)("); emit_int_expr(c, argv[0], b);
+        /* rooted across the index it evaluates and discards */
+        buf_printf(b, "; SP_GC_ROOT(_t%d); (void)(", t0); emit_int_expr(c, argv[0], b);
         buf_printf(b, "); _t%d; })", t0);
         return 1;
       }
@@ -6522,7 +6529,9 @@ else {
         int tp = ++g_tmp, tn = ++g_tmp;
         buf_printf(b, "({ sp_PolyArray *_t%d = ", tp);
         emit_hash_pairs_expr(c, recv, rt, hn, b);
-        buf_printf(b, "; sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b);
+        /* the fresh pairs array is rooted across the count, as the array
+           take/drop arm roots its receiver */
+        buf_printf(b, "; SP_GC_ROOT(_t%d); sp_int _t%d = ", tp, tn); emit_int_expr(c, argv[0], b);
         buf_printf(b, "; if (_t%d < 0) sp_raise_cls(\"ArgumentError\", \"attempt to drop negative size\"); sp_PolyArray_slice(_t%d, _t%d, _t%d->len - _t%d); })", tn, tp, tn, tp, tn);
         return 1;
       }
