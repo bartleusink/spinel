@@ -8519,6 +8519,96 @@ static int scope_sig_degraded(Compiler *c, Scope *s) {
   return 0;
 }
 
+/* One widened slot of a method whose signature degraded: the parameter (or
+   the return, `param` NULL) and where its marker sits -- the parameter's own
+   node, found by name under the def, or the def for a return. */
+typedef struct {
+  Scope *s;
+  const char *param;   /* the parameter's name, NULL for the return */
+  int fid, line, col, end_line, end_col;   /* end_line 0 when the parser stamped no end */
+} WidenedSlot;
+
+/* Walk every widened slot, in scope order then parameter order, calling
+   `fn` on each. The two readers -- the --emit-types JSON and --warn-widen's
+   stderr lines -- see the same slots at the same positions (#4522). */
+static void each_widened_slot(Compiler *c, void (*fn)(Compiler *, const WidenedSlot *, void *), void *ud) {
+  const NodeTable *nt = c->nt;
+  for (int si = 1; si < c->nscopes; si++) {
+    Scope *s = &c->scopes[si];
+    if (!s->name || !*s->name || s->def_node < 0) continue;
+    if (!scope_sig_degraded(c, s)) continue;
+    int dln = (int)nt_int(nt, s->def_node, "node_line", 0);
+    if (dln <= 0) continue;
+    int dcol = (int)nt_int(nt, s->def_node, "node_col", 0);
+    int fid = (int)nt_int(nt, s->def_node, "node_file", 0);
+    for (int i = 0; i <= s->nparams; i++) {
+      WidenedSlot w; memset(&w, 0, sizeof w);
+      w.s = s; w.fid = fid;
+      int at = s->def_node;
+      if (i < s->nparams) {
+        LocalVar *p = scope_local(s, s->pnames[i]);
+        TyKind pt = (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY;
+        if (!ty_is_degraded(pt) || !s->pnames[i]) continue;
+        w.param = s->pnames[i];
+        /* the parameter's own node: the one *ParameterNode of this scope
+           that carries the name */
+        for (int pid = 0; pid < nt->count && pid < c->node_cap; pid++) {
+          if (c->nscope[pid] != si) continue;
+          const char *pty = nt_type(nt, pid);
+          if (!pty || !strstr(pty, "ParameterNode")) continue;
+          const char *pn = nt_str(nt, pid, "name");
+          if (pn && sp_streq(pn, w.param) && nt_int(nt, pid, "node_line", 0) > 0) { at = pid; break; }
+        }
+      }
+      else if (!ty_is_degraded(s->ret)) continue;
+      w.line = (int)nt_int(nt, at, "node_line", 0); w.col = (int)nt_int(nt, at, "node_col", 0);
+      if (w.line <= 0) { w.line = dln; w.col = dcol; }
+      w.end_line = (int)nt_int(nt, at, "node_end_line", 0);
+      w.end_col = (int)nt_int(nt, at, "node_end_col", 0);
+      fn(c, &w, ud);
+    }
+  }
+}
+
+/* --warn-widen: the widened slots on stderr as `spinel: file:line:col:
+   warning: ...` (the other warnings' form, with the column added, 1-based as
+   a compiler's warning is read by an editor), one per slot, at the slot. A
+   plain compile said nothing about a signature that degraded to untyped; the
+   fact lived only in --emit-types and as a comment in --emit-rbs. */
+static void warn_widened_slot(Compiler *c, const WidenedSlot *w, void *ud) {
+  (void)ud;
+  if (w->param)
+    fprintf(stderr, "spinel: %s:%d:%d: warning: parameter `%s` of `%s` widened to untyped (boxed poly slow path)\n",
+            emit_file_path(c, w->fid), w->line, w->col + 1, w->param, w->s->name);
+  else
+    fprintf(stderr, "spinel: %s:%d:%d: warning: the return of `%s` widened to untyped (boxed poly slow path)\n",
+            emit_file_path(c, w->fid), w->line, w->col + 1, w->s->name);
+}
+
+/* The --emit-types record of one widened slot. */
+typedef struct { Buf *b; int n; } WidenJson;
+static void json_widened_slot(Compiler *c, const WidenedSlot *w, void *ud) {
+  WidenJson *j = (WidenJson *)ud;
+  Buf *b = j->b;
+  if (j->n > 0) buf_puts(b, ",\n");
+  buf_puts(b, "    {\"file\":\"");
+  json_escape_into(b, emit_file_path(c, w->fid));
+  buf_printf(b, "\",\"line\":%d,\"col\":%d", w->line, w->col);
+  if (w->end_line > 0) buf_printf(b, ",\"end_line\":%d,\"end_col\":%d", w->end_line, w->end_col);
+  buf_puts(b, ",\"severity\":\"warning\",\"method\":\"");
+  json_escape_into(b, w->s->name);
+  if (w->param) { buf_puts(b, "\",\"slot\":\"param\",\"param\":\""); json_escape_into(b, w->param); buf_puts(b, "\""); }
+  else buf_puts(b, "\",\"slot\":\"return\"");
+  buf_puts(b, ",\"message\":\"");
+  Buf msg; memset(&msg, 0, sizeof msg);
+  if (w->param) buf_printf(&msg, "Spinel: parameter `%s` of `%s` widened to untyped (boxed poly slow path)", w->param, w->s->name);
+  else buf_printf(&msg, "Spinel: the return of `%s` widened to untyped (boxed poly slow path)", w->s->name);
+  json_escape_into(b, msg.p ? msg.p : "");
+  free(msg.p);
+  buf_puts(b, "\"}");
+  j->n++;
+}
+
 /* Build the position-keyed type + diagnostics JSON for the ruby-lsp addon:
    every node with a concrete inferred type keyed by {file,line,col}, plus one
    warning per method whose signature degraded to untyped. Positions come from
@@ -8615,54 +8705,9 @@ static char *build_types_json(Compiler *c) {
      the parameter (its node, found by name under the def), a return's on the
      def. The marker used to sit on the def and say "a parameter or return",
      and the reader worked out which from the RBS (#4522). */
-  for (int si = 1; si < c->nscopes; si++) {
-    Scope *s = &c->scopes[si];
-    if (!s->name || !*s->name || s->def_node < 0) continue;
-    if (!scope_sig_degraded(c, s)) continue;
-    int dln = (int)nt_int(nt, s->def_node, "node_line", 0);
-    if (dln <= 0) continue;
-    int dcol = (int)nt_int(nt, s->def_node, "node_col", 0);
-    int fid = (int)nt_int(nt, s->def_node, "node_file", 0);
-    for (int i = 0; i <= s->nparams; i++) {
-      const char *slot = NULL; int at = s->def_node;
-      if (i < s->nparams) {
-        LocalVar *p = scope_local(s, s->pnames[i]);
-        TyKind pt = (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY;
-        if (!ty_is_degraded(pt) || !s->pnames[i]) continue;
-        slot = s->pnames[i];
-        /* the parameter's own node: the one *ParameterNode of this scope
-           that carries the name */
-        for (int pid = 0; pid < nt->count && pid < c->node_cap; pid++) {
-          if (c->nscope[pid] != si) continue;
-          const char *pty = nt_type(nt, pid);
-          if (!pty || !strstr(pty, "ParameterNode")) continue;
-          const char *pn = nt_str(nt, pid, "name");
-          if (pn && sp_streq(pn, slot) && nt_int(nt, pid, "node_line", 0) > 0) { at = pid; break; }
-        }
-      }
-      else if (!ty_is_degraded(s->ret)) continue;
-      int ln = (int)nt_int(nt, at, "node_line", 0), col = (int)nt_int(nt, at, "node_col", 0);
-      if (ln <= 0) { ln = dln; col = dcol; }
-      if (dn > 0) buf_puts(&b, ",\n");
-      buf_puts(&b, "    {\"file\":\"");
-      json_escape_into(&b, emit_file_path(c, fid));
-      buf_printf(&b, "\",\"line\":%d,\"col\":%d", ln, col);
-      { int eln = (int)nt_int(nt, at, "node_end_line", 0);
-        if (eln > 0) buf_printf(&b, ",\"end_line\":%d,\"end_col\":%d", eln, (int)nt_int(nt, at, "node_end_col", 0)); }
-      buf_puts(&b, ",\"severity\":\"warning\",\"method\":\"");
-      json_escape_into(&b, s->name);
-      if (slot) { buf_puts(&b, "\",\"slot\":\"param\",\"param\":\""); json_escape_into(&b, slot); buf_puts(&b, "\""); }
-      else buf_puts(&b, "\",\"slot\":\"return\"");
-      buf_puts(&b, ",\"message\":\"");
-      Buf msg; memset(&msg, 0, sizeof msg);
-      if (slot) buf_printf(&msg, "Spinel: parameter `%s` of `%s` widened to untyped (boxed poly slow path)", slot, s->name);
-      else buf_printf(&msg, "Spinel: the return of `%s` widened to untyped (boxed poly slow path)", s->name);
-      json_escape_into(&b, msg.p ? msg.p : "");
-      free(msg.p);
-      buf_puts(&b, "\"}");
-      dn++;
-    }
-  }
+  { WidenJson j = { &b, dn };
+    each_widened_slot(c, json_widened_slot, &j);
+    dn = j.n; }
   /* What codegen decided, per node it decided for (#4522): every emitted
      CallNode's dispatch, every BlockNode's fate. A block nothing lowered to a
      function of its own was spliced in place. */
@@ -9531,6 +9576,11 @@ char *codegen_program(const NodeTable *nt) {
     emit_write_file(psym_out, json);
     free(json);
   }
+  /* --warn-widen, once, before the analysis-only modes return: the slots
+     are settled here (the RBS below reads them), and emission below changes
+     none of them (checked over the corpus). */
+  { const char *ww = getenv("SPINEL_WARN_WIDEN");
+    if (ww && *ww) each_widened_slot(c, warn_widened_slot, NULL); }
   const char *sym_out = getenv("SPINEL_EMIT_SYMBOL_MAP");
   if (sym_out && *sym_out) {
     char *json = build_symbol_map_json(c);

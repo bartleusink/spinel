@@ -278,6 +278,8 @@ static void usage(void) {
     "  --require-gate  Refuse an unresolvable require instead of warning\n"
     "  --emit-rbs  Dump inferred type signatures as RBS (-> app.rbs), no binary\n"
     "  --emit-types Dump per-position inferred types + diagnostics as JSON\n"
+    "  --warn-widen  Warn, at the slot, for each parameter or return that\n"
+    "              widened to untyped (the boxed slow path)\n"
     "  --emit-symbol-map  Dump emitted-symbol -> Ruby-name map as JSON, no binary\n"
     "  -S          Print C to stdout\n"
     "  -E          Run the compiled binary; leftover args become its ARGV\n"
@@ -318,7 +320,7 @@ int main(int argc, char **argv) {
   int c_only = 0, stdout_mode = 0, run_mode = 0, dump_ast = 0;
   int print_build = 0;   /* --print-build: emit the build ingredients, run nothing */
   int emit_rbs = 0, emit_types = 0, emit_symbol_map = 0;
-  int debug = 0, line_map = 1, want_g = 0, profile = 0;
+  int debug = 0, line_map = 1, want_g = 0, profile = 0, warn_widen = 0;
   /* Accumulated -e source and the program ARGV after the -E boundary. */
   Str eval_src = {0};
   int eval_used = 0;
@@ -358,6 +360,7 @@ int main(int argc, char **argv) {
     else if (sp_streq(a, "--profile"))     { profile = 1; want_g = 1; i++; }
     else if (sp_streq(a, "--line-map"))    { line_map = 1; i++; }
     else if (sp_streq(a, "--no-line-map")) { line_map = 0; i++; }
+    else if (sp_streq(a, "--warn-widen"))  { warn_widen = 1; i++; }
     /* keep every GC root, so a suspected miscompile can be bisected against
        the same binary rather than against a different build. */
     else if (sp_streq(a, "--no-root-elision")) { g_no_root_elision = 1; i++; }
@@ -568,6 +571,9 @@ int main(int argc, char **argv) {
      modes that need positions force SPINEL_DEBUG below. */
   if (debug) set_env("SPINEL_DEBUG", "1");
   else if (line_map) set_env("SPINEL_LINE_MAP", "1");
+  /* --warn-widen places each warning at its slot, which needs the parser's
+     positions: forced past --no-line-map, as --emit-types forces them. */
+  if (warn_widen) { set_env("SPINEL_LINE_MAP", "1"); set_env("SPINEL_WARN_WIDEN", "1"); }
 
   /* Analyze-only emit modes write their artifact from inside codegen_program
      and produce an empty translation unit; route the output path via env. */
