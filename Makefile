@@ -1996,7 +1996,7 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	$(SPINEL) test/infer/emit_types_fields.rb --no-line-map --emit-types -o "$$tmp/et4.json" >/dev/null 2>&1 && cmp -s "$$tmp/et.json" "$$tmp/et4.json" || { echo "infer-test: FAIL (--emit-types: positions survive --no-line-map)"; ok=0; }; \
 	printf 'def helper(x)\n  x +\nend\n' > "$$tmp/pe_lib.rb"; printf 'require_relative "pe_lib"\nputs helper(1)\n' > "$$tmp/pe.rb"; \
 	(cd "$$tmp" && $(CURDIR)/$(SPINEL) pe.rb --emit-types -o pe.json 2> pe.err; test $$? -eq 1) || { echo "infer-test: FAIL (a parse error still exits 1)"; ok=0; }; \
-	grep -q '^  pe_lib.rb:3:0: unexpected' "$$tmp/pe.err" || { echo "infer-test: FAIL (a parse error is placed, file:line:col, through the require map)"; cat "$$tmp/pe.err"; ok=0; }; \
+	grep -q '^  pe_lib.rb:3:1: unexpected' "$$tmp/pe.err" || { echo "infer-test: FAIL (a parse error is placed, file:line:col, through the require map)"; cat "$$tmp/pe.err"; ok=0; }; \
 	grep -q '"types": \[' "$$tmp/pe.json" && grep -q '{"file":"pe_lib.rb","line":3,"col":0,"end_line":3,"end_col":3,"severity":"error","message":"unexpected' "$$tmp/pe.json" || { echo "infer-test: FAIL (--emit-types on a parse error writes the errors as diagnostics)"; ok=0; }; \
 	$(SPINEL) test/infer/unsettled_index_write.rb -c --no-line-map -o "$$tmp/u.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile unsettled_index_write)"; exit 1; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_M_s_mul\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/u.c" || { echo "infer-test: FAIL (an int-keyed []= on an unsettled slot poisoned the call graph)"; grep -E 'sp_M_s_mul\(' "$$tmp/u.c" | head -1; ok=0; }; \

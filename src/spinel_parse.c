@@ -3477,7 +3477,8 @@ else {
 
   if (parser.error_list.size > 0) {
     /* Each error at its position, `file:line:col: message` (the column
-       0-based, as Prism gives it and --emit-types carries it), through the
+       1-based on stderr, as an editor reads a compiler's message; 0-based in
+       the JSON, as Prism gives it and --emit-types carries it), through the
        multi-file map when one was built so an error in a required file
        names that file. Under --emit-types the JSON is written too, with no
        types and the errors as its diagnostics: a buffer is unparseable most
@@ -3499,7 +3500,7 @@ else {
         line = sp_line_orig[lc.line];
         end_line = (le.line >= 1 && le.line <= sp_line_map_n && sp_line_orig[le.line] > 0) ? sp_line_orig[le.line] : line;
       }
-      fprintf(stderr, "  %s:%d:%d: %s\n", file, line, lc.column, diag->message);
+      fprintf(stderr, "  %s:%d:%d: %s\n", file, line, lc.column + 1, diag->message);
       if (jf) {
         if (nd++) fputs(",\n", jf);
         fputs("    {\"file\":\"", jf);
