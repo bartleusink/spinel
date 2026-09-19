@@ -10592,9 +10592,11 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
          (negative base, fractional exponent) instead of returning NaN */
       buf_puts(b, "sp_float_pow(");
       if (rt == TY_INT) { buf_puts(b, "(double)("); emit_expr(c, recv, b); buf_puts(b, ")"); }
+      else if (rt == TY_BIGINT) { buf_puts(b, "sp_bigint_to_double("); emit_expr(c, recv, b); buf_puts(b, ")"); }
       else emit_expr(c, recv, b);
       buf_puts(b, ", ");
       if (at0 == TY_INT) { buf_puts(b, "(double)("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (at0 == TY_BIGINT) { buf_puts(b, "sp_bigint_to_double("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else emit_expr(c, argv[0], b);
       buf_puts(b, ")");
       return 1;
@@ -10605,9 +10607,11 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
          route the int-divisor form through the checking helper. */
       buf_puts(b, at0 == TY_INT ? "sp_fmod_intdiv(" : "sp_fmod(");
       if (rt == TY_INT) { buf_puts(b, "(double)("); emit_expr(c, recv, b); buf_puts(b, ")"); }
+      else if (rt == TY_BIGINT) { buf_puts(b, "sp_bigint_to_double("); emit_expr(c, recv, b); buf_puts(b, ")"); }
       else emit_expr(c, recv, b);
       buf_puts(b, ", ");
-      emit_expr(c, argv[0], b);
+      if (at0 == TY_BIGINT) { buf_puts(b, "sp_bigint_to_double("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else emit_expr(c, argv[0], b);
       buf_puts(b, ")");
       return 1;
     }
@@ -10617,15 +10621,21 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
          integer constant, `1.0 / 0` folds to gcc's -Wdiv-by-zero and the build
          stopped, where Ruby (and the same expression written `1.0 / 0.0`, or
          with a variable divisor) answers Infinity. */
+      /* A BIGNUM operand converts to double, the same reading the comparison
+         path (emit_float_bigint_cmp) and the runtime's sp_poly_cmp give the
+         pair; left raw it was a C pointer in a float expression and the
+         build stopped (a promoted accumulator meeting `+ 1.0`). */
       TyKind lft9 = comp_ntype(c, recv), rgt9 = comp_ntype(c, argv[0]);
       buf_puts(b, "(");
       if (lft9 == TY_INT) buf_puts(b, "(double)(");
+      else if (lft9 == TY_BIGINT) buf_puts(b, "sp_bigint_to_double(");
       emit_scalar_operand(c, recv, "0.0", b);
-      if (lft9 == TY_INT) buf_puts(b, ")");
+      if (lft9 == TY_INT || lft9 == TY_BIGINT) buf_puts(b, ")");
       buf_printf(b, " %s ", name);
       if (rgt9 == TY_INT) buf_puts(b, "(double)(");
+      else if (rgt9 == TY_BIGINT) buf_puts(b, "sp_bigint_to_double(");
       emit_scalar_operand(c, argv[0], "0.0", b);
-      if (rgt9 == TY_INT) buf_puts(b, ")");
+      if (rgt9 == TY_INT || rgt9 == TY_BIGINT) buf_puts(b, ")");
       buf_puts(b, ")");
       return 1;
     }
