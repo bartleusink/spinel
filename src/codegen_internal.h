@@ -569,6 +569,12 @@ extern unsigned char *g_ndecide;
 extern int g_ndecide_cap;
 extern int g_nd_call_id;    /* the CallNode being emitted, for emitters without the id */
 void nd_stamp(int id, int kind);
+/* The def a call bound to (--emit-types, #4557): `mi` the callee scope,
+   `owner_ci` its class or -1 for a top-level def; `add` appends a switch arm
+   (deduplicated) where 0 records the one direct target. */
+extern char **g_ndtarget;
+extern int g_ndtarget_cap;
+void nd_callee(Compiler *c, int id, int mi, int owner_ci, int add);
 /* One refusal: where and what. Recorded in order for --emit-types. */
 typedef struct { const char *file; int line; const char *msg; } SpDiag;
 extern SpDiag *g_diags;

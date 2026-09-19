@@ -8531,7 +8531,18 @@ static char *build_types_json(Compiler *c) {
   int tn = 0;
   for (int id = 0; id < nt->count && id < c->node_cap; id++) {
     TyKind t = c->ntype[id];
-    if (t == TY_UNKNOWN || t == TY_VOID) continue;
+    /* A parameter is not an expression the typer stamps, so it had no record
+       and a consumer found no declaration to go to, and hover on it answered
+       the def's signature. Its type is the slot's, the one the signature
+       prints for it: untyped for a widened slot, so the parameter's own
+       record says what the warning on it says (#4557). */
+    { const char *pk = nt_type(nt, id);
+      const char *pn = pk && strstr(pk, "ParameterNode") ? nt_str(nt, id, "name") : NULL;
+      if (pn && *pn && c->nscope && c->nscope[id] >= 0 && c->nscope[id] < c->nscopes) {
+        LocalVar *pl = scope_local(&c->scopes[c->nscope[id]], pn);
+        t = (pl && pl->type != TY_UNKNOWN) ? pl->type : TY_POLY;
+      }
+      else if (t == TY_UNKNOWN || t == TY_VOID) continue; }
     int ln = (int)nt_int(nt, id, "node_line", 0);
     if (ln <= 0) continue;
     int col = (int)nt_int(nt, id, "node_col", 0);
@@ -8679,6 +8690,28 @@ static char *build_types_json(Compiler *c) {
       const char *nm = nt_str(nt, id, "name");
       if (nm && *nm) { buf_puts(&b, ",\"name\":\""); json_escape_into(&b, nm); buf_puts(&b, "\""); }
       buf_printf(&b, ",\"dispatch\":\"%s\"", d == ND_SWITCH ? "switch" : d == ND_BOXED ? "boxed" : "direct");
+      /* the def a direct call bound to, the arms of a switch (#4557): what
+         go-to-definition needs, since the first DefNode of the name is wrong
+         whenever two classes define it. A builtin emitted in place and a
+         boxed send carry neither. */
+      const char *tg = (g_ndtarget && id < g_ndtarget_cap) ? g_ndtarget[id] : NULL;
+      if (tg && *tg && d == ND_SWITCH) {
+        buf_puts(&b, ",\"candidates\":[");
+        for (const char *p = tg; p; ) {
+          const char *q = strchr(p, ',');
+          if (p != tg) buf_puts(&b, ",");
+          buf_puts(&b, "\"");
+          { Buf one; memset(&one, 0, sizeof one);
+            buf_printf(&one, "%.*s", (int)(q ? (size_t)(q - p) : strlen(p)), p);
+            json_escape_into(&b, one.p ? one.p : ""); free(one.p); }
+          buf_puts(&b, "\"");
+          p = q ? q + 1 : NULL;
+        }
+        buf_puts(&b, "]");
+      }
+      else if (tg && *tg && d == ND_DIRECT && !strchr(tg, ',')) {
+        buf_puts(&b, ",\"callee\":\""); json_escape_into(&b, tg); buf_puts(&b, "\"");
+      }
     }
     else buf_printf(&b, ",\"inlined\":%s", d == ND_BLOCK_PROC ? "false" : "true");
     buf_puts(&b, "}");

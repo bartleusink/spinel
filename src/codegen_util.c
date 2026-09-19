@@ -47,6 +47,50 @@ void nd_stamp(int id, int kind) {
   }
   g_ndecide[id] = (unsigned char)kind;
 }
+/* The def a call was bound to, per node: "Owner#name" / "Owner.name" for a
+   method in a class, the bare name for a top-level def; a switch's arms
+   accumulate in arm order, comma-separated (a class name carries no comma).
+   A consumer resolving go-to-definition took the first DefNode of that name,
+   wrong whenever two classes define it (#4557). Same gate as nd_stamp. */
+char **g_ndtarget = NULL;
+int g_ndtarget_cap = 0;
+void nd_callee(Compiler *c, int id, int mi, int owner_ci, int add) {
+  static int on = -1;
+  if (on < 0) { const char *et = getenv("SPINEL_EMIT_TYPES"); on = (et && *et) ? 1 : 0; }
+  if (!on || id < 0 || mi < 0 || mi >= c->nscopes) return;
+  Scope *m = &c->scopes[mi];
+  if (!m->name || !*m->name) return;
+  char ent[256];
+  if (owner_ci >= 0 && owner_ci < c->nclasses)
+    snprintf(ent, sizeof ent, "%s%s%s", c->classes[owner_ci].name, m->is_cmethod ? "." : "#", m->name);
+  else snprintf(ent, sizeof ent, "%s", m->name);
+  if (id >= g_ndtarget_cap) {
+    int ncap = g_ndtarget_cap ? g_ndtarget_cap : 1024;
+    while (ncap <= id) ncap *= 2;
+    g_ndtarget = realloc(g_ndtarget, (size_t)ncap * sizeof *g_ndtarget);
+    memset(g_ndtarget + g_ndtarget_cap, 0, (size_t)(ncap - g_ndtarget_cap) * sizeof *g_ndtarget);
+    g_ndtarget_cap = ncap;
+  }
+  char *cur = g_ndtarget[id];
+  if (add && cur) {
+    /* a body emitted once per specialization stamps its calls again: one
+       entry per arm */
+    size_t el = strlen(ent);
+    for (const char *p = cur; p; ) {
+      const char *q = strchr(p, ',');
+      size_t l = q ? (size_t)(q - p) : strlen(p);
+      if (l == el && !strncmp(p, ent, el)) return;
+      p = q ? q + 1 : NULL;
+    }
+    size_t cl = strlen(cur);
+    cur = realloc(cur, cl + 1 + el + 1);
+    cur[cl] = ','; memcpy(cur + cl + 1, ent, el + 1);
+    g_ndtarget[id] = cur;
+    return;
+  }
+  free(cur);
+  g_ndtarget[id] = strdup(ent);
+}
 /* Every refusal of this run, for --emit-types and the count at the end. */
 SpDiag *g_diags = NULL;
 int g_ndiags = 0;

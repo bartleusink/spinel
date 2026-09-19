@@ -70,6 +70,7 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
   }
   /* a top-level alias resolves to the target's scope: emit ITS symbol, since
      the alias has no function of its own (#3730) */
+  if (m) nd_callee(c, id, mi, -1, 0);
   buf_printf(b, "sp_%s(", mc_top(c, m && m->name ? m->name : name));
   emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", b);
   /* pass &block as sp_Proc * when the callee has a blk_param and isn't inlined */
@@ -8165,6 +8166,7 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
   TyKind disp_ret = ret_is_void ? TY_INT : ret;
   int virtual = (is_scalar_ret(ret) || ret_is_void) && (impl_n > 1 || (!m && impl_n >= 1));
   nd_stamp(g_nd_call_id, virtual ? ND_SWITCH : ND_DIRECT);
+  if (!virtual && m) nd_callee(c, g_nd_call_id, mi, defcls, 0);
 
   /* Arity check, the same one the free-function path already made: an over- or
      under-supplied instance call went through with the extra arguments simply
@@ -8622,6 +8624,7 @@ else {
        class can't be the receiver here anyway. Same guard as the poly-dispatch
        loops in codegen_call.c (issue #1583). */
     if (!scope_has_callable_symbol(c, kmi)) continue;
+    nd_callee(c, g_nd_call_id, kmi, kd, 1);
     /* The count is judged again per arm, because the switch knows the receiver
        the check above could only guess at: with arms that disagree -- an
        override with a default where the base has a required parameter -- the

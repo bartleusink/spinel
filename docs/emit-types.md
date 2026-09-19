@@ -60,6 +60,12 @@ unknown or void are left out), in node order.
   `DefNode`, ...).
 - `name`: present where the node names something: a call's method, a
   variable, a constant, a def, a parameter.
+- A parameter has a record of its own (`RequiredParameterNode`,
+  `OptionalParameterNode`, `RestParameterNode`, the keyword and block
+  kinds, as Prism names them) at the parameter's span, whose `type` and
+  `rbs` are the slot's: `untyped` for a widened one, so hover on the
+  parameter says what the warning on it says, and go-to-definition on a
+  read of it has a declaration to land on.
 - `type`: spinel's internal type tag; `rbs`: the same type as RBS, which
   is the type language to read. A `DefNode`'s own type is the def
   expression's value (a `Symbol`); the method type it declares is its
@@ -90,6 +96,13 @@ What codegen decided, one record per call it placed and per block:
   switch over the classes or tags the receiver can hold, each arm a
   direct call), or `"boxed"` (the receiver is a boxed value and a runtime
   helper answers over its tag; an unresolved call is here too).
+- a `"direct"` call to a user def carries `callee`, the def it bound to:
+  `Point#dist2` for an instance method, `Point.make` for a singleton, the
+  bare name for a top-level def (the spelling a `DefNode`'s `owner`,
+  `singleton` and `name` compose to). A `"switch"` carries `candidates`,
+  the arms' defs in arm order (`["A#f","B#f"]`); an inherited def appears
+  once, under the class that defines it. A builtin emitted in place and a
+  boxed send carry neither.
 - a `BlockNode` carries `inlined`: `true` when the block was spliced into
   its caller (an iterator's body, a yielding method's block), `false`
   when it became a function of its own (a proc or lambda, a `Fiber.new`

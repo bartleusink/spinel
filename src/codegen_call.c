@@ -5623,6 +5623,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            dispatch (#3399); it is as callable as any other symbol here. */
         if (mi >= 0 && c->scopes[mi].nrequired == 0 &&
             (scope_has_callable_symbol(c, mi) || scope_needs_proc_form(c, mi))) {
+          nd_callee(c, id, mi, defcls, 1);   /* one switch arm (#4557) */
           /* Build the call; append default values for any optional params
              not provided by the (zero-arg) call site. */
           Buf cb; memset(&cb, 0, sizeof cb);
@@ -6697,6 +6698,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            this poly value's receiver anyway -- that is why it was pruned, and a
            yielding method's value-position dispatch is moot here (issue #1583). */
         if (!scope_has_callable_symbol(c, mi) && !scope_needs_proc_form(c, mi)) continue;
+        nd_callee(c, id, mi, defcls, 1);   /* one switch arm (#4557) */
         /* A candidate whose concrete key parameter type is incompatible with the
            concrete call-site key cannot be this poly value's receiver for that
            key -- e.g. a Symbol-keyed user `[]` reached by a String key, where the
@@ -14727,7 +14729,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               hoisted_n++;
             } }
           buf_printf(b, "({ (_t%d.tag == SP_TAG_CLASS) ? (", tv);
+          nd_stamp(id, ND_SWITCH);
           for (int k = 0; k < nc; k++) {
+            nd_callee(c, id, cmi[k], cdef[k], 1);
             buf_printf(b, "_t%d.cls_id == %d ? ", tv, ccls[k]);
             Buf cb; memset(&cb, 0, sizeof cb);
             buf_printf(&cb, "sp_%s_s_%s(", c->classes[cdef[k]].c_name, mc(c->scopes[cmi[k]].name));
@@ -27942,6 +27946,7 @@ else {
       int defcls = -1;
       int mi = comp_cmethod_in_chain(c, fold_ci, name, &defcls);
       if (mi >= 0) {
+        nd_callee(c, id, mi, defcls, 0);
         buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].c_name, mc(c->scopes[mi].name));
         const char *lead0 = emit_cmethod_self_cls_arg(c, mi, fold_ci, b);
         emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), lead0, b);
@@ -27984,6 +27989,12 @@ else {
         }
         int tcid = ++g_tmp;
         buf_printf(b, "({ int _t%d = (", tcid); emit_expr(c, recv, b); buf_puts(b, ").cls_id; ");
+        nd_stamp(id, ND_SWITCH);
+        for (int k = 0; k < ncand; k++) {
+          int defcls = -1;
+          int mi = comp_cmethod_in_chain(c, cand[k], name, &defcls);
+          if (mi >= 0) nd_callee(c, id, mi, defcls, 1);
+        }
         if (void_res) {
           for (int k = 0; k < ncand; k++) {
             int defcls = -1;
@@ -28037,6 +28048,7 @@ else {
       int defcls = -1;
       int mi = ci >= 0 ? comp_cmethod_in_chain(c, ci, name, &defcls) : -1;
       if (mi >= 0) {
+        nd_callee(c, id, mi, defcls, 0);
         buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].c_name, mc(c->scopes[mi].name));
         const char *lead1 = emit_cmethod_self_cls_arg(c, mi, ci, b);
         emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), lead1, b);
