@@ -5,9 +5,11 @@
 # compile), and its Method arm re-read them unhoisted with no side-channel
 # publish. The arguments now hoist once, publish boxed, and the Method arm
 # is gated on the bind-time poly-ABI stamp: a target whose C signature is
-# not `sp_RbVal fn([self,] sp_RbVal...)` -- a Float parameter, a rest, a
-# keyword -- raises NoMethodError (as the legacy sp_int gate does in raise
-# mode) instead of reading the registers as garbage.
+# not `sp_RbVal fn([self,] sp_RbVal...)` never has the registers read as
+# garbage. Since #4542 such a target -- a Float parameter, a rest, a count
+# below full arity -- rides the per-target thunk its bind site stamped and
+# answers as CRuby does; a count the thunk cannot bind is CRuby's
+# ArgumentError.
 class K
   def add2(a, b) = a + b
   def sub1(x) = x - 1
@@ -51,20 +53,18 @@ p ft.call(1, 2, 3)
 pslots = [[1, ->(a, b) { a * b }]]
 p call2(pslots, 0, 6, 7)
 
-def expect_nome(label)
-  yield
-  puts "#{label}: no raise"
-rescue NoMethodError
-  puts "#{label}: NoMethodError"
-end
 
-# targets whose signature is NOT the poly ABI decline loudly
+# targets whose signature is NOT the poly ABI take the thunk (#4542)
 fm = [k.method(:fmul)]
-expect_nome("float_param") { fm[0].call(2) }
+p fm[0].call(2)
 rs = [k.method(:rest_t)]
-expect_nome("rest") { rs[0].call(1, 2) }
-# arity mismatch against the stamped fixed count
-expect_nome("arity") { slots[0][1].call(1) }
+p rs[0].call(1, 2)
+# a count the signature cannot bind is CRuby's ArgumentError
+begin
+  slots[0][1].call(1)
+rescue ArgumentError => e
+  puts e.message
+end
 
 # bm[i] and bm[a, b] (Proc#[]-style call on a boxed Method) ride the same
 # stamp -- including a self-less target, whose argument used to shift into

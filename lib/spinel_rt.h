@@ -2656,6 +2656,47 @@ static SP_NOINLINE sp_int sp_poly_arg_int_chk_slow(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) return sp_poly_arg_int_obj(v);
   return sp_poly_to_i(v);
 }
+/* The arguments of a bound-Method THUNK (#4542): a Method called out of a
+   poly slot carries boxed arguments and no static types, so its thunk
+   converts each to the target parameter's C type here -- of that kind, or
+   CRuby's TypeError. A Float parameter takes an Integer (the arithmetic
+   would have); nothing else converts. */
+static SP_NOINLINE SP_NORETURN void sp_bm_arg_mismatch(sp_RbVal v, const char *want) {
+  sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected %s)", sp_poly_class_name(v), want));
+}
+static SP_INLINE sp_int sp_bm_arg_int(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT && v.v.i != SP_INT_NIL) return v.v.i;
+  sp_bm_arg_mismatch(v, "Integer");
+}
+static SP_INLINE double sp_bm_arg_float(sp_RbVal v) {
+  if (v.tag == SP_TAG_FLT) return v.v.f;
+  if (v.tag == SP_TAG_INT && v.v.i != SP_INT_NIL) return (double)v.v.i;
+  sp_bm_arg_mismatch(v, "Float");
+}
+static SP_INLINE const char *sp_bm_arg_str(sp_RbVal v) {
+  if (v.tag == SP_TAG_STR) return v.v.s;
+  if (v.tag == SP_TAG_NIL) return NULL;
+  if (sp_poly_is_strbuf(v)) return sp_poly_strbuf_deref(v).v.s;
+  sp_bm_arg_mismatch(v, "String");
+}
+static SP_INLINE sp_sym sp_bm_arg_sym(sp_RbVal v) {
+  if (v.tag == SP_TAG_SYM) return (sp_sym)v.v.i;
+  sp_bm_arg_mismatch(v, "Symbol");
+}
+static SP_INLINE sp_Bigint *sp_bm_arg_bigint(sp_RbVal v) {
+  if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return sp_poly_as_bigint(v);
+  if (v.tag == SP_TAG_NIL) return NULL;
+  sp_bm_arg_mismatch(v, "Integer");
+}
+static SP_INLINE void *sp_bm_arg_ptr(void *p, sp_RbVal v, const char *want) {
+  if (p || v.tag == SP_TAG_NIL) return p;
+  sp_bm_arg_mismatch(v, want);
+}
+static SP_INLINE sp_Proc *sp_bm_arg_proc(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_PROC) return (sp_Proc *)v.v.p;
+  if (v.tag == SP_TAG_NIL) return NULL;
+  sp_bm_arg_mismatch(v, "Proc");
+}
 static SP_INLINE sp_int sp_poly_arg_int_chk(sp_RbVal v) {
   if (v.tag == SP_TAG_INT && v.v.i != SP_INT_NIL) return v.v.i;
   return sp_poly_arg_int_chk_slow(v);

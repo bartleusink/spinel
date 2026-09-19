@@ -1,10 +1,10 @@
 3
 5
-arity: NoMethodError
-rest_unused: NoMethodError
-rest_anon: NoMethodError
-rest_aref: NoMethodError
-rest_slice: NoMethodError
+arity: ArgumentError: wrong number of arguments (given 1, expected 2)
+rest_unused: no raise
+rest_anon: no raise
+rest_aref: no raise
+rest_slice: no raise
 cmethod: NoMethodError
 5
 7
@@ -20,15 +20,15 @@ cmethod: NoMethodError
 [1, 2, 3]
 x
 nil
-slice_arity: NoMethodError
-index_arity: NoMethodError
-ptr_mismatch: NoMethodError
-ptr_mismatch2: NoMethodError
+slice_arity: ArgumentError: wrong number of arguments (given 2, expected 3)
+index_arity: ArgumentError: wrong number of arguments (given 1, expected 2)
+ptr_mismatch: TypeError: wrong argument type Array (expected String)
+ptr_mismatch2: TypeError: wrong argument type String (expected Array)
 unbound_call: NoMethodError
 unbound_aref: NoMethodError
 3
 7
-optional_short: NoMethodError
+optional_short: no raise
 adapter_arity: -1
 3
 6
@@ -36,8 +36,8 @@ adapter_arity: -1
 splat_over: NoMethodError
 toproc_splat_over: NoMethodError
 6
-ptr_arg: NoMethodError
-ptr_splat: NoMethodError
+ptr_arg: TypeError: wrong argument type String (expected Integer)
+ptr_splat: TypeError: wrong argument type String (expected Integer)
 rest_splat_static: NoMethodError
 static_splat_short: ArgumentError
 static_splat_long: ArgumentError
@@ -51,12 +51,12 @@ adapter_set_empty: ArgumentError
 sadapter_set_short: ArgumentError
 rest_opt_short: NoMethodError
 10
-iarr_push_str: TypeError
-iarr_push_float: TypeError
-iarr_set_str: TypeError
+iarr_push_str: TypeError: cannot store String into an Array[Integer]: a typed array holds one kind of element
+iarr_push_float: TypeError: cannot store Float into an Array[Integer]: a typed array holds one kind of element
+iarr_set_str: TypeError: cannot store String into an Array[Integer]: a typed array holds one kind of element
 iarr_poly_push: NoMethodError
 iarr_poly_set: NoMethodError
-iarr_set_splat_after_idx: TypeError
+iarr_set_splat_after_idx: TypeError: cannot store String into an Array[Integer]: a typed array holds one kind of element
 7
 [7, 2]
 iarr_get_str: TypeError
@@ -85,8 +85,8 @@ kwrest_positional_name: ArgumentError
 kwrest_gap_call: ArgumentError
 kwrest_gap_opt_call: NoMethodError
 kwrest_gap2_call: ArgumentError
-bool_arg_call: NoMethodError
-bool_arg_proc: NoMethodError
+bool_arg_call: TypeError: wrong argument type FalseClass (expected Integer)
+bool_arg_proc: TypeError: wrong argument type FalseClass (expected Integer)
 toproc_many_params: NoMethodError
 toproc_many_params_fixed: NoMethodError
 toproc_rest_over: NoMethodError

@@ -4,9 +4,9 @@
 41
 123
 42
-float_param: NoMethodError
-rest: NoMethodError
-arity: NoMethodError
+3.0
+2
+wrong number of arguments (given 1, expected 2)
 7
 -1
 21

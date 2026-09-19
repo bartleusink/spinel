@@ -143,6 +143,17 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      no callable address; dereferencing the NULL fn here segfaulted. Decline
      with the same NoMethodError a resolved-but-incompatible target gets. */
   if (!m || !m->fn) sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
+  /* The bind site's thunk, when there is one, takes any count it binds: it
+     reads the boxed side-channel every caller publishes, converts each
+     argument to the parameter's real C type, fills defaults and packs a
+     rest, calls the target with its own signature and publishes the boxed
+     result -- every shape the stamped lanes below accept and the ones they
+     decline (#4542). A count outside its range is CRuby's ArgumentError,
+     raised by the thunk in CRuby's words. The generated call arms try their
+     stamped casts first and reach this trampoline only when those decline,
+     so the thunk is the general lane, not the hot one. */
+  if (m->thunk && !m->unbound && argc <= 16)
+    return ((sp_int (*)(void *, sp_int, sp_int *))(uintptr_t)m->thunk)(cap, argc, args);
   /* A poly-ABI target (every slot an sp_RbVal; stamped at bind time) takes
      the boxed side-channel values directly -- the same values the scalar
      checks below read -- and publishes its boxed result. The raw sp_int

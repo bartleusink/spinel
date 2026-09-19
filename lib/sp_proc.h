@@ -148,6 +148,18 @@ typedef struct sp_BoundMethod { void *self; sp_int fn; const char *name; sp_int 
                            indirect calls check the callee signature, traps). */
   sp_int poly_fixed;    /* number of fixed sp_RbVal slots the poly signature
                            reads; a call must pass exactly this count */
+  sp_int thunk;         /* the per-target THUNK the bind site synthesized (#4542):
+                           `sp_int fn(void *cap, sp_int argc, sp_int *args)`, the
+                           proc-ABI shape of sp_method_proc_tramp itself, reading
+                           every argument from the boxed side-channel, converting
+                           each to the parameter's C type (TypeError otherwise),
+                           filling omitted optionals from their defaults, packing
+                           a rest, and publishing the boxed result. It covers the
+                           signatures neither ABI stamp accepts (a Float, a
+                           default below full arity, a rest, a mixed promote
+                           signature); 0 when the bind site had no static target
+                           or the target's shape declines (keywords). */
+  sp_int thunk_min, thunk_max;   /* the argument counts it binds (max 16 for a rest) */
 } sp_BoundMethod;
 void sp_bm_cap_scan(void *p);
 sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args);
@@ -171,13 +183,22 @@ static inline sp_int sp_bm_fn_opaque(sp_int fn) {
   return fn;
 #endif
 }
-static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = sp_bm_fn_opaque(fn); m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; m->recv_bound = 0; m->legacy_int_abi = 0; m->legacy_sig = NULL; m->legacy_fixed = 0; m->legacy_rest = 0; m->legacy_ret = SP_BM_RET_INT; m->poly_abi = 0; m->poly_fixed = 0; return m; }
+static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = sp_bm_fn_opaque(fn); m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; m->recv_bound = 0; m->legacy_int_abi = 0; m->legacy_sig = NULL; m->legacy_fixed = 0; m->legacy_rest = 0; m->legacy_ret = SP_BM_RET_INT; m->poly_abi = 0; m->poly_fixed = 0; m->thunk = 0; m->thunk_min = 0; m->thunk_max = 0; return m; }
 /* Tag a freshly-built Method with whether its target has the legacy sp_int C
    ABI, the per-position type signature, the fixed/rest slot counts, and how
    its sp_int C return boxes. The constructors default to 0 (unsafe), so every
    statically-known binding sets this before the Method can reach a poly slot
    (#4395). */
 static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound, sp_int legacy_int_abi, const char *legacy_sig, sp_int legacy_fixed, sp_int legacy_rest, sp_int legacy_ret, sp_int poly_abi, sp_int poly_fixed) { m->recv_bound = recv_bound; m->legacy_int_abi = legacy_int_abi; m->legacy_sig = legacy_sig; m->legacy_fixed = legacy_fixed; m->legacy_rest = legacy_rest; m->legacy_ret = legacy_ret; m->poly_abi = poly_abi; m->poly_fixed = poly_fixed; return m; }
+/* Stamp the bind site's thunk (0 for none) and the counts it binds. */
+static inline sp_BoundMethod *sp_bm_set_thunk(sp_BoundMethod *m, sp_int thunk, sp_int tmin, sp_int tmax) { m->thunk = sp_bm_fn_opaque(thunk); m->thunk_min = tmin; m->thunk_max = tmax; return m; }
+/* Whether a call passing `argc` arguments takes the thunk: a bound Method
+   with one, the count within the side-channel's 16 slots. A count the
+   signature cannot bind is the thunk's own ArgumentError, in CRuby's words,
+   so the range is not tested here. */
+static inline sp_bool sp_bm_thunk_ok(sp_BoundMethod *m, sp_int argc) {
+  return m && !m->unbound && m->thunk && argc <= 16;
+}
 /* Box the raw sp_int a legacy-ABI Method returned according to the Ruby return
    the bind site recorded. A plain Integer return is SP_BM_RET_INT; a String or
    Bigint return, an array-returning method, and a void/bool/Symbol return each
@@ -291,6 +312,9 @@ static inline sp_BoundMethod *sp_bm_unbind(sp_BoundMethod *m) {
   u->legacy_ret = m->legacy_ret;
   u->poly_abi = m->poly_abi;
   u->poly_fixed = m->poly_fixed;
+  u->thunk = m->thunk;
+  u->thunk_min = m->thunk_min;
+  u->thunk_max = m->thunk_max;
   return u;
 }
 

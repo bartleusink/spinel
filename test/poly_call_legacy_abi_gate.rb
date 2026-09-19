@@ -27,8 +27,12 @@
 # pre-arm serves the `.call` cases; poly_call_fast_abi_gate.rb covers the
 # no-user-`call` fast path.
 #
-# The snapshot is hand-written: the declining cases diverge from CRuby only by
-# raising (a documented limitation), so it cannot come from reference Ruby.
+# The snapshot is hand-written. Since #4542 a target the stamped ABI cannot
+# take rides the per-target thunk its bind site stamped, so most of the
+# former declines answer as CRuby does; what still diverges is the thunk's
+# boundary check (an argument of another kind than the compiled parameter is
+# a TypeError here, where CRuby runs the body with it), a class method that
+# takes its class, a bound builtin's wrapper, and the 16-slot cap.
 
 class Handler
   def call(x) = x
@@ -39,6 +43,14 @@ def expect_nome(label)
   puts "#{label}: no raise"
 rescue NoMethodError
   puts "#{label}: NoMethodError"
+rescue TypeError => e
+  # the thunk's boundary check: an argument of another kind than the
+  # compiled parameter (#4542)
+  puts "#{label}: TypeError: #{e.message}"
+rescue ArgumentError => e
+  # a count the target's signature cannot bind: the thunk's ArgumentError,
+  # in CRuby's words (#4542)
+  puts "#{label}: ArgumentError: #{e.message}"
 end
 
 class Base

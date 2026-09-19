@@ -121,28 +121,35 @@ Limited today, but additively fixable; listed roughly easiest-first.
 A callable boxed into a poly container (`[obj.method(:m)][0].call(x)`) is
 dispatched at run time, so the call site cannot see the target's C signature.
 Spinel stamps that signature on the `Method` at its statically known bind site
-and the poly path calls it through a legacy `sp_int` register ABI. The return
-kinds it boxes are Integer, String, Bigint, nil, `true`/`false`, Symbol, a typed
-array, and a user object. The parameters must fit the same register, so a few
-argument lists still decline with `NoMethodError` where CRuby answers:
+(a legacy `sp_int` register ABI, or under `--int-overflow=promote` the boxed
+poly ABI) and the poly path calls it through that stamp when the call fits
+it. When it does not, the call takes the **thunk** the bind site synthesized
+for the target: a per-target C function that reads the boxed arguments,
+converts each to the parameter's C type, fills an omitted optional from its
+default, packs a rest, calls the target with its real signature and boxes the
+result. So a Float parameter or return, a call below full arity, a rest
+parameter and a mixed promote signature all answer as CRuby does; a count the
+signature cannot bind is CRuby's `ArgumentError`. What is left:
 
-- A pointer argument (a String, an Array, a user object) reaches the target
-  only when the target's parameter is statically that same pointer kind. A
-  pointer argument to an untyped parameter -- one the analyzer seeded as
-  `Integer` because every visible call passed a number -- or a pointer of the
-  wrong kind (`[k.method(:str)][0].call([1, 2, 3])`) declines.
-- A method with a rest parameter always declines: its trailing `sp_PolyArray *`
-  has no slot in the static cast, and the prologue would root the garbage
-  register the cast left there.
-- A splatted call with more than 16 arguments declines; the callable ABI packs
-  at most 16 positional slots. (CRuby raises `ArgumentError` for a fixed-arity
-  target called with the same count, so the answer is still an exception, just
-  a different one.) The same 16-slot cap is why `Method#to_proc` declines a
-  target with more than 16 positional parameters (its per-site trampoline reads
-  one C argument per parameter) and a rest target given more than 16 arguments
-  (the rest loop would drop the surplus): no call could ever supply the missing
-  slots, so both raise `NoMethodError` rather than reading past the argument
-  array.
+- The thunk converts at the boundary, by the parameter's compiled type. An
+  argument of another kind -- a Float into a parameter the analyzer typed
+  `Integer` because every visible call passed one, a String into a Float
+  parameter -- raises `TypeError` (`wrong argument type Float (expected
+  Integer)`) there, where CRuby would run the body with it (and usually fail
+  inside it). A parameter whose type the analyzer could not see at all is
+  `Integer` by default, so a method called ONLY through a Method object takes
+  Integer arguments; give it one visible call with the intended kinds.
+- A target with a keyword parameter the call would have to supply (a required
+  keyword, `**kwrest`), a class method that takes its class as a leading
+  parameter, a bound builtin's `__bam_` wrapper, and a target with more than
+  16 positional parameters have no thunk; those keep the stamped ABIs and
+  decline with `NoMethodError` outside them. A splatted call with more than
+  16 arguments declines the same way; the callable ABI packs at most 16
+  positional slots. (CRuby raises `ArgumentError` for a fixed-arity target
+  called with the same count, so the answer is still an exception, just a
+  different one.) The same cap is why `Method#to_proc` declines a target with
+  more than 16 positional parameters and a rest target given more than 16
+  arguments.
 - A typed-array adapter value the typed array cannot hold (`arr.method(:push)`
   given a String, `arr.method(:[]=)` given a String value) raises the same
   `TypeError` every typed-array store raises for such a value (see "A typed

@@ -8,15 +8,11 @@ p h[:sq].call(6)
 def g(a, *b) = a
 gm = [method(:g)][0]
 p gm.arity
-# A rest parameter cannot ride the legacy sp_int poly-call cast: the callee's
-# trailing rest array has no slot in the cast, and the prologue roots the
-# garbage register it would receive. The poly path therefore declines with
-# NoMethodError (see poly_call_legacy_abi_gate.rb) instead of returning a.
-begin
-  p gm.call(1, 2, 3)
-rescue NoMethodError
-  puts "rest Method call declined"
-end
+# A rest parameter cannot ride the legacy sp_int poly-call cast (the callee's
+# trailing rest array has no slot in it); the call takes the per-target thunk
+# the bind site stamped instead, which packs the surplus into the rest
+# (#4542).
+p gm.call(1, 2, 3)
 class C
   def dbl(x) = x + x
 end
