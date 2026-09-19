@@ -39,6 +39,9 @@ typedef struct {
   TyKind prev;   /* the slot's type just before it degraded (TY_UNKNOWN: it degraded from nothing) */
   TyKind then;   /* `node`'s type at that moment (its final type may differ: a transient) */
   int round;     /* the fixpoint round it happened on */
+  const char *reason;  /* a rule's own words, when a rule rather than a value degraded the
+                          slot (a `= nil` default, no call site, a splat); NULL otherwise.
+                          `node` is then the rule's subject (the default) or -1 */
 } SlotWhy;
 
 typedef struct {
@@ -707,6 +710,11 @@ LocalVar *scope_local(Scope *s, const char *name);
    degrades. slot_set is the same with the merged type already decided. */
 int slot_take(Compiler *c, LocalVar *lv, TyKind t, int node);
 int slot_set(Compiler *c, LocalVar *lv, TyKind merged, TyKind t, int node);
+/* A rule sets the slot to `t` and says why in its own words, with `node`
+   its subject (a default's expression, an argument) or -1. The why is
+   recorded when the slot degrades by it and has no why yet; the words are
+   a string literal, kept by pointer. */
+void slot_rule(Compiler *c, LocalVar *lv, TyKind t, int node, const char *reason);
 void why_reset(SlotWhy *w);
 int ty_degraded(TyKind t);   /* poly, or a container of poly */
 extern int g_infer_round;    /* the fixpoint round in progress, for SlotWhy.round */

@@ -14398,8 +14398,10 @@ void analyze_program(Compiler *c) {
       if (!dty || !sp_streq(dty, "NilNode")) continue;
       LocalVar *p = scope_local(sc, sc->pnames[i]);
       if (!p || p->rbs_seeded) continue;
-      if (p->type == TY_UNKNOWN || p->type == TY_SYMBOL || p->type == TY_BOOL)
-        p->type = TY_POLY;
+      if (p->type == TY_UNKNOWN)
+        slot_rule(c, p, TY_POLY, sc->pdefault[i], "a `= nil` default and no call site typing it: the parameter holds nil or a value, untyped");
+      else if (p->type == TY_SYMBOL || p->type == TY_BOOL)
+        slot_rule(c, p, TY_POLY, sc->pdefault[i], "a `= nil` default on a Symbol or Bool parameter, which has no nil of its own: boxed, untyped");
     }
   }
 
@@ -15215,7 +15217,7 @@ void analyze_program(Compiler *c) {
     if (!sc->reachable || sc->nparams == 0) continue;
     for (int i = 0; i < sc->nparams; i++) {
       LocalVar *p = sc->pnames[i] ? scope_local(sc, sc->pnames[i]) : NULL;
-      if (p && p->type == TY_UNKNOWN) p->type = TY_POLY;
+      if (p && p->type == TY_UNKNOWN) slot_rule(c, p, TY_POLY, -1, "never bound: no call site gives it a type");
     }
   }
 

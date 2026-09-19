@@ -8722,7 +8722,7 @@ static const LocalVar *why_read_slot(Compiler *c, int id) {
   const char *nm = nt_str(c->nt, id, "name");
   Scope *s = comp_scope_of(c, id);
   LocalVar *lv = (nm && s) ? scope_local(s, nm) : NULL;
-  return (lv && lv->why.node >= 0) ? lv : NULL;
+  return (lv && (lv->why.node >= 0 || lv->why.reason)) ? lv : NULL;
 }
 
 /* For a read of a block parameter: the call whose block declares it (the
@@ -8776,11 +8776,33 @@ static int why_poly_candidate(Compiler *c, int id) {
 
 /* Follow a slot's why to the expression the poly was born at. `first` is
    what the slot's node is to the slot: passed, written, returned. */
+/* A note with no position of its own: a rule's words about the slot. */
+static void why_plain(WhyOut *o, const char *text) {
+  if (!o->json) { fprintf(stderr, "spinel: note: %s\n", text); return; }
+  Buf *b = o->json;
+  if (o->n > 0) buf_puts(b, ",");
+  buf_puts(b, "{\"role\":\"rule\",\"note\":\""); json_escape_into(b, text); buf_puts(b, "\"}");
+  o->n++;
+}
+
 static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
   Compiler *c = o->c;
   const NodeTable *nt = c->nt;
+  if (w->reason) {
+    /* a rule degraded the slot: its words, at its subject when it has one.
+       A subject that is itself untyped (a default that is an untyped
+       expression) leads on as any value would. */
+    int subj = (w->node >= 0 && w->node < c->node_cap) ? w->node : -1;
+    if (subj < 0) { why_plain(o, w->reason); return; }
+    char extra[256]; snprintf(extra, sizeof extra, " — %s", w->reason);
+    if (!ty_degraded(c->ntype[subj]) || c->norigin[subj] == subj || c->norigin[subj] < 0) { why_hop(o, subj, "by", extra); return; }
+    why_hop(o, subj, "by", extra);
+    SlotWhy on = *w; on.reason = NULL;
+    why_chain(o, &on, "from");
+    return;
+  }
   if (w->node < 0 || w->node >= c->node_cap) {
-    if (!o->json) fprintf(stderr, "spinel: note: why: untraced (no record of what widened it)\n");
+    why_plain(o, "untraced: no record of what widened it");
     return;
   }
   if (!ty_degraded(c->ntype[w->node])) { why_slot_end(o, w, first); return; }
@@ -8806,6 +8828,12 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
        slot's own story ends the chain */
     const LocalVar *rl = why_read_slot(c, id);
     const SlotWhy *rs = rl ? &rl->why : NULL;
+    if (rs && rs->reason) {
+      /* a slot a rule degraded: the rule's words end the chain */
+      if (!silent) why_hop(o, id, role, NULL);
+      why_chain(o, rs, "by");
+      return;
+    }
     if (rs && !ty_degraded(c->ntype[rs->node])) {
       if (!silent) why_hop(o, id, role, NULL);
       why_slot_end(o, rs, rl->is_param ? "passed" : "written");
@@ -8872,10 +8900,9 @@ static void warn_widened_slot(Compiler *c, const WidenedSlot *w, void *ud) {
     fprintf(stderr, "spinel: %s:%d:%d: warning: parameter `%s` of `%s` widened to untyped (boxed poly slow path)\n",
             emit_file_path(c, w->fid), w->line, w->col + 1, w->param, w->s->name);
     LocalVar *p = scope_local(w->s, w->param);
-    int rest = (w->s->rest_idx >= 0 && w->s->pnames[w->s->rest_idx] && sp_streq(w->s->pnames[w->s->rest_idx], w->param)) ||
-               (w->s->kwrest_idx >= 0 && w->s->pnames[w->s->kwrest_idx] && sp_streq(w->s->pnames[w->s->kwrest_idx], w->param));
-    if (rest) fprintf(stderr, "spinel: note: by construction: a splat parameter holds the extra arguments of every call, untyped\n");
-    else if (p && p->type == TY_UNKNOWN) fprintf(stderr, "spinel: note: never bound: no call site gives `%s` a type\n", w->param);
+    int kwrest = w->s->kwrest_idx >= 0 && w->s->pnames[w->s->kwrest_idx] && sp_streq(w->s->pnames[w->s->kwrest_idx], w->param);
+    if (kwrest) why_plain(&o, "by construction: a splat parameter holds the extra keywords of every call, untyped");
+    else if (p && p->type == TY_UNKNOWN) why_plain(&o, "never bound: no call site gives it a type");
     else if (p) why_chain(&o, &p->why, "passed");
   }
   else {
@@ -8907,7 +8934,13 @@ static void json_widened_slot(Compiler *c, const WidenedSlot *w, void *ud) {
   free(msg.p);
   buf_puts(b, "\",\"why\":[");
   { WhyOut o = { c, b, 0 };
-    if (w->param) { LocalVar *p = scope_local(w->s, w->param); if (p) why_chain(&o, &p->why, "passed"); }
+    if (w->param) {
+      LocalVar *p = scope_local(w->s, w->param);
+      int kwrest = w->s->kwrest_idx >= 0 && w->s->pnames[w->s->kwrest_idx] && sp_streq(w->s->pnames[w->s->kwrest_idx], w->param);
+      if (kwrest) why_plain(&o, "by construction: a splat parameter holds the extra keywords of every call, untyped");
+      else if (p && p->type == TY_UNKNOWN) why_plain(&o, "never bound: no call site gives it a type");
+      else if (p) why_chain(&o, &p->why, "passed");
+    }
     else why_chain(&o, &w->s->ret_why, "returned"); }
   buf_puts(b, "]}");
   j->n++;
