@@ -7256,7 +7256,11 @@ TyKind infer_type(Compiler *c, int id) {
   }
   if (!an_builtin_only) {
     c->ntype[id] = t;
-    if (id < c->node_cap) c->norigin[id] = why_node_origin(c, id, t);
+    /* Only when a consumer asked (--warn-widen, --emit-types): the ivar arm
+       walks every write of the name and the call arm every scope, once per
+       node per round, which cost a plain optcarrot compile 10% of its
+       analysis for a chain nothing would print. */
+    if (id < c->node_cap) c->norigin[id] = why_wanted() ? why_node_origin(c, id, t) : -1;
   }
   /* memo_ok still holds here: every mode section inside infer_uncached
      restores its flag before returning, so t is the mode-free answer. */

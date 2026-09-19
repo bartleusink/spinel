@@ -233,6 +233,17 @@ Scope *comp_scope_new(Compiler *c, const char *name, int def_node) {
 
 int g_infer_round = 0;
 
+/* Is anyone going to read the why chains? --warn-widen and --emit-types set
+   their environment before analysis; a plain build derives no origins. */
+int why_wanted(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *ww = getenv("SPINEL_WARN_WIDEN"), *et = getenv("SPINEL_EMIT_TYPES");
+    on = ((ww && *ww) || (et && *et)) ? 1 : 0;
+  }
+  return on;
+}
+
 int ty_degraded(TyKind t) {
   return t == TY_POLY || t == TY_POLY_ARRAY || t == TY_POLY_POLY_HASH ||
          t == TY_SYM_POLY_HASH || t == TY_STR_POLY_HASH;
