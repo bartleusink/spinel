@@ -1518,16 +1518,26 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
       return;
     }
   }
-  /* Poly local bitwise op-assign (`x &= v`, `x >>= v`, ...): the result is an
-     int, re-boxed into the poly slot. The poly value is coerced via to_i, like
-     the binary poly-bitwise path. */
+  /* Poly local bitwise op-assign (`x &= v`, `x <<= v`, ...): the same helpers
+     the binary `x & v` path uses, so the semantics cannot drift. The old raw
+     C form (`sp_box_int(sp_poly_to_i(x) << to_i(v))`) truncated a Bignum on
+     either side to int64 -- `acc |= (1 << 63)` lost the promoted bit for good
+     -- and a 63-bit `<<=` shifted into the sign bit and boxed SP_INT_NIL,
+     which read back as nil. sp_poly_shl carries the per-mode overflow
+     contract (promote to Bignum / raise / wrap) exactly as the binary form
+     does; sp_poly_bitop keeps a Bignum operand's width. */
   if (t == TY_POLY && (sp_streq(op, "<<") || sp_streq(op, ">>") ||
                        sp_streq(op, "|") || sp_streq(op, "&") || sp_streq(op, "^"))) {
-    TyKind vt = comp_ntype(c, v);
-    buf_printf(b, "%s = sp_box_int((sp_poly_to_i(%s) %s (", lval, lval, op);
-    if (vt == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, v, b); buf_puts(b, ")"); }
-    else emit_expr(c, v, b);
-    buf_puts(b, ")));\n");
+    if (sp_streq(op, "<<") || sp_streq(op, ">>")) {
+      buf_printf(b, "%s = sp_poly_%s(%s, ", lval, sp_streq(op, "<<") ? "shl" : "shr", lval);
+      emit_boxed(c, v, b);
+      buf_puts(b, ");\n");
+    }
+    else {
+      buf_printf(b, "%s = sp_poly_bitop(%s, ", lval, lval);
+      emit_boxed(c, v, b);
+      buf_printf(b, ", %d);\n", sp_streq(op, "&") ? 0 : sp_streq(op, "|") ? 1 : 2);
+    }
     return;
   }
   /* Array set-operation op-assign (`a |= b`, `a &= b`, `a -= b`): desugar to
