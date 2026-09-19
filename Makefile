@@ -1992,6 +1992,8 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -q '"kind":"DefNode","name":"x",.*"signature":"() -> Integer"}' "$$tmp/et.json" || { echo "infer-test: FAIL (--emit-types: an unwidened def carries no widened flag)"; ok=0; }; \
 	$(SPINEL) test/infer/emit_types_fields.rb --emit-types -o "$$tmp/et2.json" -S > "$$tmp/et2.c" 2>/dev/null || { echo "infer-test: FAIL (--emit-types -S)"; ok=0; }; \
 	cmp -s "$$tmp/et.json" "$$tmp/et2.json" && grep -q 'sp_Point_dist2' "$$tmp/et2.c" || { echo "infer-test: FAIL (--emit-types -S: the same JSON and the C in one run)"; ok=0; }; \
+	$(SPINEL) test/infer/emit_types_fields.rb -S > "$$tmp/et3.c" 2>/dev/null && cmp -s "$$tmp/et2.c" "$$tmp/et3.c" || { echo "infer-test: FAIL (--emit-types -S: the C is the one -S alone emits, not the debug compile's)"; ok=0; }; \
+	$(SPINEL) test/infer/emit_types_fields.rb --no-line-map --emit-types -o "$$tmp/et4.json" >/dev/null 2>&1 && cmp -s "$$tmp/et.json" "$$tmp/et4.json" || { echo "infer-test: FAIL (--emit-types: positions survive --no-line-map)"; ok=0; }; \
 	$(SPINEL) test/infer/unsettled_index_write.rb -c --no-line-map -o "$$tmp/u.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile unsettled_index_write)"; exit 1; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_M_s_mul\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/u.c" || { echo "infer-test: FAIL (an int-keyed []= on an unsettled slot poisoned the call graph)"; grep -E 'sp_M_s_mul\(' "$$tmp/u.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_IntArray \* *lv_xs' "$$tmp/u.c" || { echo "infer-test: FAIL (the mapped array did not settle to an int array)"; ok=0; }; \

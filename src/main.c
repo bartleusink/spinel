@@ -580,7 +580,13 @@ int main(int argc, char **argv) {
   else if (emit_types) {
     snprintf(emit_out, sizeof emit_out, "%s", output ? output : basename);
     if (!output) { strncat(emit_out, ".types.json", sizeof emit_out - strlen(emit_out) - 1); }
-    set_env("SPINEL_DEBUG", "1");
+    /* The positions the JSON carries need the parser's line map, not the
+       debug build: SPINEL_DEBUG also turns codegen's g_debug on, which drops
+       `static`/always_inline from every method and switches the backtrace
+       substrate on, so the C of `--emit-types -S` was the debug compile's,
+       not what -S alone emits. Forced past --no-line-map, since the JSON
+       is nothing without positions. */
+    set_env("SPINEL_LINE_MAP", "1");
     set_env("SPINEL_EMIT_TYPES", emit_out);
     /* `--emit-types -o x.json -S`: the JSON and the C of the same compile,
        in one run rather than two (a consumer showing both, rubys/spinel-ide) */
