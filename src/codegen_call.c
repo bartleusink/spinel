@@ -29707,6 +29707,23 @@ else {
                  sp_streq(name, "|") ? "or" : sp_streq(name, "^") ? "xor" : "and", tpl, tpr);
       return;
     }
+    /* --int-overflow=promote: an int `<<` the inference could not prove exact
+       (either operand a runtime value) is typed TY_POLY -- the result can
+       escape the word and must carry a Bignum. sp_poly_shl promotes exactly
+       there and boxes the small results; sp_int_shl / sp_int_shl_ck below
+       carry the raise/wrap contracts and must not serve this call (the _ck
+       helper raised "use --int-overflow=promote" in promote mode itself, and
+       an in-word count wrapped silently). Keyed on the cached node type so
+       the two halves of the compiler cannot drift. */
+    if (g_promote_mode && sp_streq(name, "<<") && rt == TY_INT &&
+        comp_ntype(c, id) == TY_POLY) {
+      buf_puts(b, "sp_poly_shl(");
+      emit_boxed(c, recv, b);
+      buf_puts(b, ", ");
+      emit_boxed(c, argv[0], b);
+      buf_puts(b, ")");
+      return;
+    }
     const char *aty0 = nt_type(nt, argv[0]);
     int lit_shift = aty0 && sp_streq(aty0, "IntegerNode");
     long long litc = lit_shift ? nt_int(nt, argv[0], "value", 0) : 0;

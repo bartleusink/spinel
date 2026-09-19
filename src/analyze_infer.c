@@ -5811,8 +5811,21 @@ else {
   /* integer bitwise operators */
   if (recv >= 0 && argc == 1 && rt == TY_INT &&
       (sp_streq(name, "&") || sp_streq(name, "|") || sp_streq(name, "^") ||
-       sp_streq(name, "<<") || sp_streq(name, ">>")))
+       sp_streq(name, "<<") || sp_streq(name, ">>"))) {
+    /* --int-overflow=promote: an int `<<` whose operands are not both known
+       constants can escape the word at run time and promote to a Bignum
+       (codegen lowers it to sp_poly_shl), so the value is boxed. A
+       const-const pair is exact -- an overflowing one answered TY_BIGINT
+       above (the infer_int_shl_overflows arm), the rest fit an int. `>>`
+       cannot overflow and keeps its int in every mode. */
+    if (g_promote_mode && sp_streq(name, "<<")) {
+      long long shb, sha;
+      if (!(infer_const_int_node(nt, recv, &shb) &&
+            infer_const_int_node(nt, argv[0], &sha)))
+        return TY_POLY;
+    }
     return TY_INT;
+  }
   /* bigint bitwise ops keep arbitrary precision (a `<<` widening that overflows
      int is exactly why the receiver was promoted to bigint; and `bignum & MASK`
      can still exceed int64, e.g. 0x9e37…c16 & ((1<<64)-1)). */
