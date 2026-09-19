@@ -8570,18 +8570,18 @@ static void each_widened_slot(Compiler *c, void (*fn)(Compiler *, const WidenedS
   }
 }
 
-/* --warn-widen: the widened slots on stderr as `file:line:col: warning: ...`
-   (the column 1-based, as a compiler's warning is read by an editor), one per
-   slot, at the slot. A plain compile said nothing about a signature that
-   degraded to untyped; the fact lived only in --emit-types and as a comment
-   in --emit-rbs. */
+/* --warn-widen: the widened slots on stderr as `spinel: file:line:col:
+   warning: ...` (the other warnings' form, with the column added, 1-based as
+   a compiler's warning is read by an editor), one per slot, at the slot. A
+   plain compile said nothing about a signature that degraded to untyped; the
+   fact lived only in --emit-types and as a comment in --emit-rbs. */
 static void warn_widened_slot(Compiler *c, const WidenedSlot *w, void *ud) {
   (void)ud;
   if (w->param)
-    fprintf(stderr, "%s:%d:%d: warning: parameter `%s` of `%s` widened to untyped (boxed poly slow path)\n",
+    fprintf(stderr, "spinel: %s:%d:%d: warning: parameter `%s` of `%s` widened to untyped (boxed poly slow path)\n",
             emit_file_path(c, w->fid), w->line, w->col + 1, w->param, w->s->name);
   else
-    fprintf(stderr, "%s:%d:%d: warning: the return of `%s` widened to untyped (boxed poly slow path)\n",
+    fprintf(stderr, "spinel: %s:%d:%d: warning: the return of `%s` widened to untyped (boxed poly slow path)\n",
             emit_file_path(c, w->fid), w->line, w->col + 1, w->s->name);
 }
 
@@ -9543,6 +9543,11 @@ char *codegen_program(const NodeTable *nt) {
     emit_write_file(psym_out, json);
     free(json);
   }
+  /* --warn-widen, once, before the analysis-only modes return: the slots
+     are settled here (the RBS below reads them), and emission below changes
+     none of them (checked over the corpus). */
+  { const char *ww = getenv("SPINEL_WARN_WIDEN");
+    if (ww && *ww) each_widened_slot(c, warn_widened_slot, NULL); }
   const char *sym_out = getenv("SPINEL_EMIT_SYMBOL_MAP");
   if (sym_out && *sym_out) {
     char *json = build_symbol_map_json(c);
@@ -11030,8 +11035,6 @@ char *codegen_program(const NodeTable *nt) {
   /* Every refusal was reported as its unit was abandoned; the run fails here,
      once, with nothing written (SP_COLLECT_ERRORS emits the rest regardless,
      for a reduction). */
-  { const char *ww = getenv("SPINEL_WARN_WIDEN");
-    if (ww && *ww) each_widened_slot(c, warn_widened_slot, NULL); }
   if (types_out) {
     char *json = build_types_json(c);
     emit_write_file(types_out, json);

@@ -83,9 +83,14 @@ unknown or void are left out), in node order.
 
 A plain compile says nothing about a widened slot. `--warn-widen` prints
 the same warnings on stderr during any compile, one per slot at the
-slot, `app.rb:4:13: warning: parameter `o` of `dist2` widened to untyped
-(boxed poly slow path)` -- the column 1-based there, as an editor reads a
-compiler's warning; the JSON's is 0-based.
+slot, in the form the other warnings take:
+
+```
+spinel: app.rb:4:13: warning: parameter `o` of `dist2` widened to untyped (boxed poly slow path)
+```
+
+The column is 1-based there, as an editor reads a compiler's warning;
+the JSON's is 0-based.
 
 ## `codegen`
 
