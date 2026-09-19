@@ -4272,6 +4272,14 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
      same reason. */
   int sv_fib_loopd = g_c_loop_depth;
   g_c_loop_depth = 0;
+  /* The enclosing body's ensure regions are not in scope either: an
+     `ensure` in THIS body chained its deferred return / next / exception to
+     the enclosing region's `_ensureN` label and `_retvN` / `_nxtfN` flags,
+     which live in the enclosing function -- `Thread.new do ... ensure end`
+     inside another such body did not compile (#4547). The proc-literal
+     emitter starts its body at depth 0 for the same reason. */
+  int sv_fib_ensd = g_ensure_depth, sv_fib_lensb = g_loop_ensure_base;
+  g_ensure_depth = 0; g_loop_ensure_base = 0;
   int sv_yblkc = g_yblk_celled;
   {
     const char *ybn = (g_lowered_blk_name && g_lowered_blk_name[0]) ? g_lowered_blk_name : "__yblk__";
@@ -4336,6 +4344,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
 
   buf_puts(pb, "}\n");
   g_c_loop_depth = sv_fib_loopd;
+  g_ensure_depth = sv_fib_ensd; g_loop_ensure_base = sv_fib_lensb;
 
   /* Append the completed body to g_procs. Any nested fiber bodies emitted
      while building body_buf already appended themselves to g_procs, so they

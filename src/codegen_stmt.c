@@ -6194,6 +6194,15 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          slot, not a raw C return of an sp_RbVal from an sp_int function */
       else if (has_retval && g_in_proc_body && g_result_var && g_result_poly)
         buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; }\n", eid, g_result_var, eid);
+      /* a proc body with a typed result publishes through the same boxed
+         slot: `lambda do ... :l ensure ... end` returned its sp_RbVal from
+         the sp_int proc function and did not compile (found under #4547) */
+      else if (has_retval && g_in_proc_body && !g_c_ret_void) {
+        char rv[32]; snprintf(rv, sizeof rv, "_retv%d", eid);
+        buf_printf(b, "if (_retf%d) { _sp_proc_poly_ret = ", eid);
+        emit_boxed_text(c, g_ret_type, rv, b);
+        buf_puts(b, "; return 0; }\n");
+      }
       /* a fiber body is `static void`: see g_c_ret_void */
       else if (has_retval && g_c_ret_void) buf_printf(b, "if (_retf%d) return;\n", eid);
       else if (has_retval) buf_printf(b, "if (_retf%d) return _retv%d;\n", eid, eid);
