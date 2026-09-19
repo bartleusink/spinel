@@ -551,6 +551,27 @@ typedef struct {
   unsigned lvw_version; /* nt->version the index was built for */
   int lvw_built;
 
+  /* local-write-by-(scope,name) index; see comp_lvw_first_sc */
+  int *lvws_head;       /* [lvws_nbuckets] first write id in each bucket */
+  int *lvws_next;       /* [lvws_count] next write id sharing the bucket */
+  int lvws_nbuckets, lvws_count;
+  unsigned lvws_version;
+  int lvws_built;
+
+  /* node-by-kind chains; see comp_kind_first */
+  int *kind_head;       /* [NK_COUNT-ish buckets] first node id of each kind */
+  int *kind_next;       /* [kind_count] next node id of the same kind */
+  int kind_nkinds, kind_count;
+  unsigned kind_version;
+  int kind_built;
+
+  /* CallNode-by-scope chain; see comp_scall_first */
+  int *scall_head;      /* [scall_nscopes] first CallNode id in each scope */
+  int *scall_next;      /* [scall_count] next CallNode id in the same scope */
+  int scall_nscopes, scall_count;
+  unsigned scall_version;
+  int scall_built;
+
   char **symbols;   /* interned symbol names; index = sp_sym id */
   size_t *symbol_lens;  /* each name's BYTE length: a name may hold a NUL, and
                            strlen would end it there (#nul symbols) */
@@ -667,6 +688,12 @@ Scope *comp_scope_of(Compiler *c, int node_id);        /* owning scope */
    each write is still read fresh at every visit. */
 int comp_lvw_first(Compiler *c, const char *name);
 int comp_lvw_next(const Compiler *c, int w);
+int comp_lvw_first_sc(Compiler *c, int scope_idx, const char *name);
+int comp_lvw_next_sc(const Compiler *c, int w);
+int comp_scall_first(Compiler *c, int scope_idx);
+int comp_scall_next(const Compiler *c, int u);
+int comp_kind_first(Compiler *c, int kind);
+int comp_kind_next(const Compiler *c, int id);
 int    comp_method_index(Compiler *c, const char *name); /* -1 if none */
 /* A receiverless call's target: the enclosing self's ancestry first, a
    top-level def (a private Object method, and so last in every ancestry) only

@@ -7286,7 +7286,12 @@ static int narrow_locals_from_arrays(Compiler *c) {
       LocalVar *lv = &sc->locals[li];
       if (lv->type != TY_POLY || lv->is_param || lv->is_block_param || lv->rbs_seeded) continue;
       TyKind elem = TY_UNKNOWN; int ok = 1, saw = 0;
-      for (int id = 0; id < nt->count && ok; id++) {
+      /* the (scope, name) write chain replaces a full node-table walk that
+         ran once per candidate local per propagation round -- quadratic on
+         machine-generated programs, where one 52k-line input spent 58% of
+         its analyze in this loop. The chain carries hash collisions, so the
+         kind/scope/name filters stay. */
+      for (int id = comp_lvw_first_sc(c, s, lv->name); id >= 0 && ok; id = comp_lvw_next_sc(c, id)) {
         const char *ty = nt_type(nt, id);
         if (!ty || !sp_streq(ty, "LocalVariableWriteNode") || c->nscope[id] != s) continue;
         const char *nm = nt_str(nt, id, "name");
@@ -10775,7 +10780,13 @@ static int strbuf_slot_eligible_shape(Compiler *c, const char *vn, Scope *vs, Lo
      the local IS; a shared name is only what was done to it. Checked
      syntactically because it has to hold in the fixpoint's first round, before
      any type has settled -- the promotion is sticky once made. */
-  for (int w = 0; w < nt->count; w++) {
+  /* both walks below ran over the WHOLE node table once per candidate local
+     (and this shape check runs per fixpoint round): the (scope, name) write
+     chain and the per-scope call chain make each walk the handful of nodes
+     the scope actually holds. The chains carry hash collisions and every
+     filter stays. */
+  int vsi = (int)(vs - c->scopes);
+  for (int w = comp_lvw_first_sc(c, vsi, vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
     if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
     if (comp_scope_of(c, w) != vs) continue;
     const char *wn = nt_str(nt, w, "name");
@@ -10785,7 +10796,7 @@ static int strbuf_slot_eligible_shape(Compiler *c, const char *vn, Scope *vs, Lo
     NodeKind vk = nt_kind(nt, wv);
     if (vk == NK_HashNode || vk == NK_KeywordHashNode || vk == NK_ArrayNode) return 0;
   }
-  for (int u = 0; u < nt->count; u++) {
+  for (int u = comp_scall_first(c, vsi); u >= 0; u = comp_scall_next(c, u)) {
     const char *uty = nt_type(nt, u);
     if (!uty || !sp_streq(uty, "CallNode")) continue;
     if (comp_scope_of(c, u) != vs) continue;
@@ -11006,7 +11017,22 @@ static int promote_shared_stored_strings(Compiler *c) {
   int changed = 0;
   const NodeTable *nt = c->nt;
   /* mutated string locals: receivers of an in-place mutator */
-  for (int w = 0; w < nt->count; w++) {
+  /* per-kind chains: these walks run every fixpoint round, and the full-table
+     form spent a quarter of a large machine-generated program's analyze just
+     skipping unrelated nodes */
+  /* the four chains are merged in node-id order (each chain is ascending),
+     preserving the full walk's exact processing order -- grouping by kind
+     deferred some promotions to a later round and the extra rounds cost more
+     than the walk saved */
+  int pss_cur[4] = { comp_kind_first(c, NK_ArrayNode), comp_kind_first(c, NK_HashNode),
+                     comp_kind_first(c, NK_KeywordHashNode), comp_kind_first(c, NK_CallNode) };
+  for (;;) {
+    int pk = -1;
+    for (int q = 0; q < 4; q++)
+      if (pss_cur[q] >= 0 && (pk < 0 || pss_cur[q] < pss_cur[pk])) pk = q;
+    if (pk < 0) break;
+    int w = pss_cur[pk];
+    pss_cur[pk] = comp_kind_next(c, w);
     const char *wty = nt_type(nt, w);
     if (!wty) continue;
     int cand3[64]; int nc3 = 0;
@@ -11105,7 +11131,7 @@ static int promote_shared_stored_strings(Compiler *c) {
      (regardless of their own direct mutation), and stored string literals /
      expression results are marked to wrap in a fresh sp_String at the store
      site. The container itself then unifies to the poly variant. */
-  for (int mu = 0; mu < nt->count; mu++) {
+  for (int mu = comp_kind_first(c, NK_CallNode); mu >= 0; mu = comp_kind_next(c, mu)) {
     if (nt_kind(nt, mu) != NK_CallNode) continue;
     const char *mun = nt_str(nt, mu, "name");
     if (!mun) continue;
@@ -11134,7 +11160,7 @@ static int promote_shared_stored_strings(Compiler *c) {
      shared handle and mark the reader read so its emission hands out the
      handle instead of the safe copy -- otherwise the mutation lands in a
      read-out copy and is silently lost. */
-  for (int mu = 0; mu < nt->count; mu++) {
+  for (int mu = comp_kind_first(c, NK_CallNode); mu >= 0; mu = comp_kind_next(c, mu)) {
     if (nt_kind(nt, mu) != NK_CallNode) continue;
     const char *mun = nt_str(nt, mu, "name");
     if (!mun) continue;
@@ -11186,7 +11212,7 @@ static int promote_shared_stored_strings(Compiler *c) {
      objects -- regardless of which mutator (a bang-only alias set shares
      too). Non-literal writes are fine: the write emitter wraps them in
      sp_String_new, which inherits the source's frozen state. */
-  for (int w = 0; w < nt->count; w++) {
+  for (int w = comp_kind_first(c, NK_LocalVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
     if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
     /* the aliasing shapes: `s2 = s1` and the value-position append chain
        `s2 = (s1 << x)`, whose value IS the base object */

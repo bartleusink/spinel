@@ -8895,13 +8895,47 @@ static void bi_collect_assigns(const NodeTable *nt, int id, BiPair *pairs, int *
   }
 }
 
-/* Does `var`'s value flow into `target` through the assignment pairs? */
+/* Does `var`'s value flow into `target` through the assignment pairs?
+   Breadth-first with a visited set, capped at the same 10 hops the old
+   depth-first walk allowed. The answers are identical -- a path that
+   repeats a variable can always be shortened, so "some path of at most 10
+   hops" is "shortest path of at most 10 hops" -- but the old walk re-ran
+   the whole branch fan-out at every hop with no memory of where it had
+   been, and a machine-generated loop body dense with `a = b` rows made
+   that exponential: one 53k-line program spent 45% of its whole analyze
+   in this function. */
 static int bi_reaches(const BiPair *pairs, int np, const char *var, const char *target, int depth) {
+  (void)depth;
   if (sp_streq(var, target)) return 1;
-  if (depth > 10) return 0;
-  for (int i = 0; i < np; i++)
-    if (sp_streq(pairs[i].src, var) &&
-        bi_reaches(pairs, np, pairs[i].dst, target, depth + 1)) return 1;
+  if (np <= 0) return 0;
+  const char *frontier[BI_MAX_PAIRS + 1];
+  unsigned char seen[BI_MAX_PAIRS];
+  int nf = 0, nseen = 0;
+  const char *seen_names[BI_MAX_PAIRS + 1];
+  frontier[nf++] = var;
+  seen_names[nseen++] = var;
+  memset(seen, 0, sizeof seen[0] * (size_t)np);
+  /* 11 hops: the old walk tested the name BEFORE its depth cutoff, so a
+     target 11 edges out was still found */
+  for (int hop = 0; hop < 11 && nf > 0; hop++) {
+    const char *next[BI_MAX_PAIRS + 1];
+    int nn = 0;
+    for (int f = 0; f < nf; f++) {
+      for (int i = 0; i < np; i++) {
+        if (seen[i] || !sp_streq(pairs[i].src, frontier[f])) continue;
+        seen[i] = 1;   /* each pair contributes its dst once */
+        int dup = 0;
+        for (int k = 0; k < nseen && !dup; k++)
+          if (sp_streq(seen_names[k], pairs[i].dst)) dup = 1;
+        if (dup) continue;
+        if (sp_streq(pairs[i].dst, target)) return 1;
+        if (nseen <= BI_MAX_PAIRS) seen_names[nseen++] = pairs[i].dst;
+        if (nn <= BI_MAX_PAIRS) next[nn++] = pairs[i].dst;
+      }
+    }
+    memcpy(frontier, next, sizeof next[0] * (size_t)nn);
+    nf = nn;
+  }
   return 0;
 }
 
