@@ -113,6 +113,18 @@ static int an_nonblock_no_exception(Compiler *c, int id) {
    one, and codegen needs to know the builtin shape to emit its arm (#3459). */
 static int an_builtin_only = 0;
 int an_builtin_only_p(void) { return an_builtin_only; }
+/* What call `id` would be typed if no user class owned the name: the
+   builtin answer alone. Nothing is cached and no node's type is written
+   under the flag (see infer_type), so this is safe to ask after analysis --
+   the why-chain asks it of a send on a poly receiver, to tell a result the
+   builtin already makes untyped from one a user candidate's return made so. */
+TyKind an_builtin_answer(Compiler *c, int id) {
+  int was = an_builtin_only;
+  an_builtin_only = 1;
+  TyKind t = infer_call(c, id);
+  an_builtin_only = was;
+  return t;
+}
 
 /* Name-keyed answer memo, the same shape (and the same staleness argument) as
    udm_ in an_user_defines_method: the question below crosses every class with
@@ -7256,7 +7268,13 @@ TyKind infer_type(Compiler *c, int id) {
   }
   if (!an_builtin_only) {
     c->ntype[id] = t;
-    if (id < c->node_cap) c->norigin[id] = why_node_origin(c, id, t);
+    /* the origin only when a consumer asked (--warn-widen, --emit-types):
+       its ivar arm walks the program's ivar writes per read and its call
+       arm scans the scopes by name, +10% analysis on optcarrot and +23% on
+       a 2000-ivar class when it ran on every plain compile */
+    static int want = -1;
+    if (want < 0) { const char *ww = getenv("SPINEL_WARN_WIDEN"), *et = getenv("SPINEL_EMIT_TYPES"); want = ((ww && *ww) || (et && *et)) ? 1 : 0; }
+    if (want && id < c->node_cap) c->norigin[id] = why_node_origin(c, id, t);
   }
   /* memo_ok still holds here: every mode section inside infer_uncached
      restores its flag before returning, so t is the mode-free answer. */

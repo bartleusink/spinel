@@ -8668,9 +8668,22 @@ int infer_return_types(Compiler *c) {
           }
         }
         if (node < 0) {
-          node = tail >= 0 ? tail : (ret_head && ret_head[s] >= 0 ? return_value_node(c, ret_head[s]) : -1);
-          if (ret_head && ret_head[s] >= 0 && tail >= 0) other = return_value_node(c, ret_head[s]);
-          then = (node >= 0 && node < c->node_cap) ? c->ntype[node] : r;
+          /* two concrete kinds met. One side is the tail when it has a type
+             at this point, else the first typed `return`; the other is the
+             first `return` of a different kind (the list's head can be one
+             of the same kind, which said "String, where a `return` gives
+             String"; String and its mutable refinement are one kind). */
+          TyKind tt = (tail >= 0 && tail < c->node_cap) ? c->ntype[tail] : TY_UNKNOWN;
+          if (tt != TY_UNKNOWN) { node = tail; then = tt; }
+          if (ret_head)
+            for (int rid = ret_head[s]; rid >= 0; rid = ret_next[rid]) {
+              TyKind rt = return_node_type(c, rid);
+              if (rt == TY_UNKNOWN) continue;
+              if (node < 0) { node = return_value_node(c, rid); then = rt; continue; }
+              int same = rt == then || ((rt == TY_STRING || rt == TY_STRBUF) && (then == TY_STRING || then == TY_STRBUF));
+              if (!same) { other = return_value_node(c, rid); break; }
+            }
+          if (node < 0) { node = tail; then = r; }
         }
         sc->ret_why.node = node; sc->ret_why.other = other; sc->ret_why.prev = sc->ret;
         sc->ret_why.then = then; sc->ret_why.round = g_infer_round;
