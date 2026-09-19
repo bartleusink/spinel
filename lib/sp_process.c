@@ -59,6 +59,7 @@
 
 #include "sp_alloc.h"   /* sp_PolyArray, sp_RbVal, sp_box_*, sp_raise_cls */
 #include "sp_process_status.h"   /* sp_ProcessStatus, sp_box_process_status */
+#include "sp_system.h"   /* sp_last_status: $? */
 
 /* Local error-message builder. Returns a static buffer; copy the
    result before another call. Avoids sp_sprintf which would pull
@@ -66,6 +67,12 @@
 static SP_TLS char sp_err_buf[512];
 static const char *sp_errf_errno(const char *prefix, int err) {
   snprintf(sp_err_buf, sizeof sp_err_buf, "%s - %s", prefix, strerror(err));
+  return sp_err_buf;
+}
+/* CRuby's SystemCallError message for a named path: the strerror text,
+   then the path that failed, as `No such file or directory - /bin/nope`. */
+static const char *sp_errf_path(int err, const char *path) {
+  snprintf(sp_err_buf, sizeof sp_err_buf, "%s - %s", strerror(err), path);
   return sp_err_buf;
 }
 
@@ -296,9 +303,10 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
     sp_process_spawn_fail(owned, "SystemCallError", sp_errf_errno("fork failed", errno));
   }
   if (pid == 0) {
-    /* CHILD. If execve fails, write the errno to the parent's pipe
-       and exit 127; the parent will raise the matching Errno
-       (Errno::ENOENT for "no such file") to match CRuby semantics.
+    /* CHILD. If chdir or execve fails, write the errno and which of
+       the two failed to the parent's pipe and exit 127; the parent
+       will raise the matching Errno (Errno::ENOENT for "no such
+       file") naming the directory or the program, as CRuby does.
        Using a pipe (not relying on the child's exit code alone)
        because the exit code is the same regardless of exec failure
        reason. */
@@ -306,8 +314,8 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
     if (fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC) < 0) { _exit(126); }
     if (chdir_to) {
       if (chdir(chdir_to) != 0) {
-        int e = errno;
-        (void)!write(err_pipe[1], &e, sizeof e);
+        int fail[2] = { errno, 1 };
+        (void)!write(err_pipe[1], fail, sizeof fail);
         _exit(127);
       }
     }
@@ -330,8 +338,8 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
     close_redirect_srcs(in_fd, out_fd, err_fd);
     execvp(prog, argv);
     /* exec returned: failure. Send the errno to the parent. */
-    int e = errno;
-    (void)!write(err_pipe[1], &e, sizeof e);
+    int fail[2] = { errno, 0 };
+    (void)!write(err_pipe[1], fail, sizeof fail);
     _exit(127);
   }
   /* PARENT. The child has its own copies of the redirections now, so the
@@ -339,8 +347,8 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
      then close the child's write end and read the errno if any. */
   close(err_pipe[1]);
   close_owned(owned);
-  int exec_errno = 0;
-  ssize_t got = read(err_pipe[0], &exec_errno, sizeof exec_errno);
+  int fail[2] = { 0, 0 };
+  ssize_t got = read(err_pipe[0], fail, sizeof fail);
   close(err_pipe[0]);
   free(argv);
   if (got > 0) {
@@ -354,13 +362,16 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
        take 0.36 to 0.52 s on master and 0.39 to 0.59 s with this wait.
        The polling arm would put a scheduler yield inside a half-finished
        spawn instead. */
-    { int st; pid_t r;
-      do { r = waitpid(pid, &st, 0); } while (r < 0 && errno == EINTR); }
-    errno = exec_errno;
+    { int st = 0; pid_t r;
+      do { r = waitpid(pid, &st, 0); } while (r < 0 && errno == EINTR);
+      /* the reaped child is the last one waited for, so $? reads its
+         exit 127, as it does under CRuby */
+      if (r == pid) sp_last_status = st; }
+    errno = fail[0];
     sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" :
                  errno == EACCES ? "Errno::EACCES" :
                  "SystemCallError",
-                 sp_errf_errno("cannot execute", errno));
+                 sp_errf_path(errno, fail[1] == 1 && chdir_to ? chdir_to : prog));
   }
   return (sp_int)pid;
 }
