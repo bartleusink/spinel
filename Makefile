@@ -712,8 +712,12 @@ RBS_SEED_STRICT := -Werror=incompatible-pointer-types
 # ignores gcc-style implicit lookup and needs an explicit -include-pch.
 # Each variant dir also carries a copy of spinel_rt.h so gcc degrades to a
 # normal textual include if the .gch is unusable. The PCH path is keyed on
-# compiler kind and $(OPT) because a PCH only loads under the exact flags
-# it was built with (for clang a mismatch is a hard error, not a fallback).
+# compiler kind, $(OPT) and the overflow mode because a PCH only loads under
+# the exact flags it was built with. The mode was missing from the key, and
+# a -D mismatch is one clang accepts SILENTLY: after a raise-mode run, the
+# promote suite reused the raise-mode .gch and every test ran against
+# raise-semantics runtime inlines -- the mode-sensitive tests failed and the
+# rest tested the wrong runtime without a word (#4538).
 CC_KIND  := $(if $(findstring clang,$(shell $(CC) --version 2>/dev/null | head -1)),clang,gcc)
 # The key has to be ONE path component: $(OPT) is a flag LIST, so a
 # multi-flag setting (`COPT := -O2 -g0` in config.mk) put a space in the
@@ -724,7 +728,7 @@ CC_KIND  := $(if $(findstring clang,$(shell $(CC) --version 2>/dev/null | head -
 sp_empty :=
 sp_space := $(sp_empty) $(sp_empty)
 sp_pathify = $(subst =,,$(subst /,,$(subst $(sp_space),,$(subst -,,$(1)))))
-PCH_ROOT := build/pch/$(CC_KIND)$(call sp_pathify,$(OPT))
+PCH_ROOT := build/pch/$(CC_KIND)$(call sp_pathify,$(OPT))$(if $(SP_OV_DEFINE),promote)
 PCH_FLAGS = $(CFLAGS) $(SP_OV_DEFINE) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS)
 PCH_PLAIN  := $(PCH_ROOT)/plain/spinel_rt.h.gch
 PCH_NOPOLY := $(PCH_ROOT)/nopoly/spinel_rt.h.gch
