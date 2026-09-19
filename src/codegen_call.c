@@ -21786,6 +21786,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "read")) buf_printf(b, "sp_File_read(_t%d); })", tio2);
       else if (sp_streq(name, "gets")) buf_printf(b, "sp_File_gets(_t%d); })", tio2);
       else if (sp_streq(name, "readline")) buf_printf(b, "sp_File_readline_sep(_t%d, \"\\n\", 0, 0); })", tio2);
+      /* readpartial takes a count and an optional buffer, nothing else:
+         count-less, the arm below was skipped and the fallback answered
+         fileno; over-long, the extras were read and dropped. CRuby refuses
+         both with ArgumentError before touching the stream. */
+      else if (sp_streq(name, "readpartial") && (argc == 0 || argc > 2)) {
+        buf_printf(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments "
+                      "(given %d, expected 1..2)\"); (const char *)0; })", argc);
+      }
       /* the same (len, outbuf) rebind the typed arm makes (#3336) */
       else if (sp_streq(name, "readpartial") && argc >= 1) {
         const char *sbp = NULL;

@@ -12,3 +12,13 @@ begin
 rescue EOFError
   puts "eof"
 end
+begin                           # count-less and over-long forms are refused
+  io.readpartial                # before the stream is touched
+rescue ArgumentError => e
+  puts e.message
+end
+begin
+  io.readpartial(1, +"b", :extra)
+rescue ArgumentError => e
+  puts e.message
+end
