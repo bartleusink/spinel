@@ -10248,35 +10248,34 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
          pointer. For a value recv we hand emit_dispatch the value expression
          (lvalue or hoisted temp); the method takes `self` by value. */
       if (comp_ty_value_obj(c, rt)) {
-        char selfv[64];
+        /* The receiver's C text lives on the heap: a local's C name is as
+           long as its Ruby name, and a 64-byte buffer cut a 61-character
+           name down to another local's name with no diagnostic. */
+        Buf selfv; memset(&selfv, 0, sizeof selfv);
         const char *rty = nt_type(nt, recv);
-        if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfv, sizeof selfv, "%s", rb.p ? rb.p : ""); free(rb.p);
-        }
+        if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode")))
+          selfv = expr_buf(c, recv);
         else {
           int t = ++g_tmp;
           Buf rb = expr_buf(c, recv);
           emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
           buf_printf(g_pre, " _t%d = ", t); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
-          snprintf(selfv, sizeof selfv, "_t%d", t);
+          buf_printf(&selfv, "_t%d", t);
         }
         TyKind svt = TY_UNKNOWN;
         int sv = setter_value_open(c, id, b, &svt);
-        emit_dispatch(c, cid, name, selfv, nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
+        emit_dispatch(c, cid, name, selfv.p ? selfv.p : "", nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
         setter_value_close(c, id, svt, b, sv);
+        free(selfv.p);
         return 1;
       }
       /* receiver is a pointer; reuse it directly if it's a simple lvalue,
          else stash in a temp (the virtual-dispatch switch references it
          multiple times) */
-      char selfptr[64];
+      Buf selfptr; memset(&selfptr, 0, sizeof selfptr);   /* heap text, as above */
       const char *rty = nt_type(nt, recv);
-      if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"))) {
-        Buf rb = expr_buf(c, recv);
-        snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
-        free(rb.p);
-      }
+      if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode")))
+        selfptr = expr_buf(c, recv);
       else {
         int t = ++g_tmp;
         /* emit the receiver first so any setup it pushes into g_pre is fully
@@ -10290,12 +10289,13 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
            Scene.new.render(...)) must survive any GC the call triggers. */
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
-        snprintf(selfptr, sizeof selfptr, "_t%d", t);
+        buf_printf(&selfptr, "_t%d", t);
       }
       TyKind svt = TY_UNKNOWN;
       int sv = setter_value_open(c, id, b, &svt);
-      emit_dispatch(c, cid, name, selfptr, nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
+      emit_dispatch(c, cid, name, selfptr.p ? selfptr.p : "", nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
       setter_value_close(c, id, svt, b, sv);
+      free(selfptr.p);
       return 1;
     }
   }
