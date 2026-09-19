@@ -344,10 +344,18 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   close(err_pipe[0]);
   free(argv);
   if (got > 0) {
-    /* child failed to exec; the child has already exited 127, so the
-       waitpid2 caller will still find a (zombie) pid, but we raise the
-       CRuby-style exception first. The pid is leaked but harmless: the
-       init process reaps the zombie. */
+    /* The child failed to exec: it wrote its errno and is exiting 127.
+       It is reaped here before the raise, as CRuby does, so a failed
+       spawn leaves no zombie and no stray pid for a later waitpid2(-1)
+       to answer with instead of ECHILD. This is a plain blocking wait,
+       not sp_sched_wait_child (#4381, #4528): the child has written its
+       errno and is exiting, so it holds nothing this thread must drain,
+       the wait takes no lock, and it is cheap: two hundred failed spawns
+       take 0.36 to 0.52 s on master and 0.39 to 0.59 s with this wait.
+       The polling arm would put a scheduler yield inside a half-finished
+       spawn instead. */
+    { int st; pid_t r;
+      do { r = waitpid(pid, &st, 0); } while (r < 0 && errno == EINTR); }
     errno = exec_errno;
     sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" :
                  errno == EACCES ? "Errno::EACCES" :
