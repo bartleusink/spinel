@@ -28,8 +28,10 @@ go = false
 done = []
 ws = (1..3).map do |i|
   Thread.new do
-    m3.synchronize { cv3.wait(m3) until go }
-    done << i
+    # the push stays under the mutex: the three waiters run in parallel once
+    # broadcast releases them, and an unsynchronized shared push is a data
+    # race by design (docs/thread.md), which lost an element on a CI run
+    m3.synchronize { cv3.wait(m3) until go; done << i }
   end
 end
 Thread.pass                 # all three reach cv3.wait
