@@ -154,8 +154,8 @@ void sp_io_wait_writable(sp_File *f) {SP_GC_ROOT(f);
     if (poll(&wp, 1, 0) > 0) return; }   /* room already: no park */
 #ifdef SP_THREADS
   {
-    extern int sp_sched_wait_io(int fd, short events);
-    sp_sched_wait_io(wfd, POLLOUT);
+    extern int sp_sched_wait_io_unless(int fd, short events, const unsigned char *cancel);
+    sp_sched_wait_io_unless(wfd, POLLOUT, &f->closed);
     if (f->closed) sp_raise_cls("IOError", "stream closed in another thread");   /* see sp_io_wait_readable */
   }
 #else
@@ -173,9 +173,12 @@ void sp_io_wait_writable(sp_File *f) {SP_GC_ROOT(f);
 #endif
 }
 
-/* The descriptor form, for a pipe the runtime holds without a handle (a
-   backtick's child): the same park, on the bare fd. */
-void sp_io_wait_fd_readable(int fd) {
+/* The park on a bare descriptor. `closed` is the owning handle's closed flag
+   when there is one: a close from another thread between the poll below and
+   the park's registration is then seen under the scheduler lock, instead of
+   the registration going in after the close dropped it (a read with no
+   deadline waited forever, one macOS run in three of the #4546 test). */
+static void sp_io_park_fd_readable(int fd, const unsigned char *closed) {
   if (fd < 0) return;
   /* Already readable: answer from one poll rather than a park. The park is a
      monitor round trip -- register the waiter, write the self-pipe to break
@@ -186,10 +189,11 @@ void sp_io_wait_fd_readable(int fd) {
     if (poll(&rp, 1, 0) > 0) return; }
 #ifdef SP_THREADS
   {
-    extern int sp_sched_wait_io(int fd, short events);
-    sp_sched_wait_io(fd, POLLIN);
+    extern int sp_sched_wait_io_unless(int fd, short events, const unsigned char *cancel);
+    sp_sched_wait_io_unless(fd, POLLIN, closed);
   }
 #else
+  (void)closed;
   /* Cooperative build: a blocking read here would stall EVERY green thread
      (the peer that will produce our data included). Poll with a short
      timeout and hand the scheduler to the other threads until readable. */
@@ -207,11 +211,14 @@ void sp_io_wait_fd_readable(int fd) {
   }
 #endif
 }
+/* The descriptor form, for a pipe the runtime holds without a handle (a
+   backtick's child): the same park, on the bare fd. */
+void sp_io_wait_fd_readable(int fd) { sp_io_park_fd_readable(fd, NULL); }
 void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
   if (!f || !f->fp) return;
   if (!sp_io_parkable(f)) return;
   if (sp_io_stdio_buffered(f->fp) > 0) return;
-  sp_io_wait_fd_readable(fileno(f->fp));
+  sp_io_park_fd_readable(fileno(f->fp), &f->closed);
   /* woken by a close from another thread: the handle is gone, and a read
      would touch a descriptor that is closed or already someone else's */
   if (f->closed) sp_raise_cls("IOError", "stream closed in another thread");
@@ -1320,7 +1327,15 @@ sp_bool sp_File_sync_p(sp_File *f) { SP_IO_OPEN(f); return (f->is_sock || f->syn
 sp_bool sp_File_set_sync(sp_File *f, sp_bool on) {
   SP_IO_OPEN(f);
   f->sync_on = on ? 1 : 0;
-  if (on) fflush(f->fp);
+  /* A sync handle is unbuffered, as in CRuby: every write reaches the
+     descriptor before the call returns. Kernel#puts writes straight through
+     stdio, so the flag alone did nothing for a file or a pipe -- a test that
+     set `$stdout.sync = true` and was killed by the CI timeout left an EMPTY
+     output, with no clue where it had hung. The stream is flushed first so
+     the buffer swap loses nothing. */
+  fflush(f->fp);
+  if (f->fp != sp_io_closed_sentinel())
+    setvbuf(f->fp, NULL, on ? _IONBF : (isatty(fileno(f->fp)) ? _IOLBF : _IOFBF), 0);
   return on;
 }
 sp_bool sp_File_autoclose_p(sp_File *f) { SP_IO_OPEN(f); return !f->no_autoclose; }

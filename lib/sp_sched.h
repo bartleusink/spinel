@@ -132,6 +132,13 @@ void       sp_sched_ev_forget(int fd);
    and with every worker pinned the peer that would make the fd ready never
    gets to run. */
 int        sp_sched_wait_io_timeout(int fd, short events, double timeout_s);
+/* sp_sched_wait_io for a handle another thread may close meanwhile: `cancel`
+   is the handle's closed flag, read under the scheduler lock before the park
+   registers. A close that landed after the caller's own readiness probe is
+   then answered at once (returns 1; the caller finds the handle closed),
+   where the registration would otherwise go in after the close's
+   sp_sched_ev_forget and never be readied. */
+int        sp_sched_wait_io_unless(int fd, short events, const unsigned char *cancel);
 sp_thread *sp_Thread_current(void);       /* Thread.current */
 sp_bool   sp_Thread_alive(sp_thread *t); /* #alive? */
 sp_bool   sp_Thread_set_report_default(sp_bool v);  /* Thread.report_on_exception= */

@@ -23,12 +23,19 @@ def blocked_reader(sock)
     e.class.to_s + ": " + e.message
   end
 end
+# the reader is parked once its status is "sleep"; a fixed sleep instead
+# let a loaded runner close before the read began ("closed stream") or, in
+# the window between the read's own readiness probe and its registration,
+# after the close had already swept the waiters (hang)
+def parked(t)
+  Thread.pass while t.status == "run"
+end
 i = 0
 while i < 30
   a = TCPSocket.new('127.0.0.1', port)
   b = srv.accept
   t = blocked_reader(b)
-  sleep 0.002
+  parked(t)
   b.close
   raise "round #{i}: #{t.value}" unless t.value == "IOError: stream closed in another thread"
   a.close
@@ -41,7 +48,7 @@ p b.closed?
 a = TCPSocket.new('127.0.0.1', port)
 b = srv.accept
 t = blocked_reader(b)
-sleep 0.002
+parked(t)
 a.close
 p t.value
 b.close
@@ -49,7 +56,7 @@ b.close
 # a pipe read end closed under a reader
 r, w = IO.pipe
 t = Thread.new { r.gets }
-sleep 0.05
+parked(t)
 r.close
 begin
   t.value
@@ -67,7 +74,7 @@ t2 = Thread.new do
     "write: #{e.message}"
   end
 end
-sleep 0.05
+parked(t2)
 w2.close
 p t2.value
 r2.close
@@ -130,9 +137,16 @@ while Time.now < deadline
   live.each { |c| begin c[:gg].write(blob); rescue StandardError; nil; end }
   ready = IO.select(live.map { |c| c[:wc] }, nil, nil, 0.01)
   ready[0].each { |s| begin s.read_nonblock(65_536); rescue StandardError; nil; end } if ready
-  live.shift(N / 10).each do |c|
+  live.shift(2).each do |c|
     begin c[:wc].close; rescue StandardError; nil; end
     begin c[:gg].close; rescue StandardError; nil; end
   end
+end
+# every handler winds down through the peer close and the cross-thread
+# close its stop lambda does, so nothing is parked at exit
+live.each do |c|
+  begin c[:wc].close; rescue StandardError; nil; end
+  begin c[:gg].close; rescue StandardError; nil; end
+  c[:th].join
 end
 puts 'churn survived'

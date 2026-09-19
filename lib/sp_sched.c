@@ -2589,7 +2589,8 @@ static int sp_poll_plain(struct pollfd *pp, nfds_t np, double timeout_s) {
   }
   for (;;) { int pr = poll(pp, np, 1000); if (pr > 0) return 1; if (pr == 0 || errno == EINTR) continue; return 0; }
 }
-static int sp_sched_wait_io_impl(int fd, short events, struct pollfd *set, int n, double timeout_s) {
+static int sp_sched_wait_io_impl(int fd, short events, struct pollfd *set, int n, double timeout_s,
+                                 const unsigned char *cancel) {
   if ((set ? n <= 0 : fd < 0) || !g_sysmon_started) {   /* no monitor: plain blocking poll */
     struct pollfd pf; pf.fd = fd; pf.events = events; pf.revents = 0;
     return sp_poll_plain(set ? set : &pf, set ? (nfds_t)n : 1, timeout_s);
@@ -2602,6 +2603,14 @@ static int sp_sched_wait_io_impl(int fd, short events, struct pollfd *set, int n
     sp_fiber_fire_inject_if_pending();   /* raises; does not return */
     SCHED_LOCK();
   }
+  /* A close from another thread that landed between the caller's readiness
+     probe and this lock. The handle's closed flag is written before
+     sp_sched_ev_forget takes the lock, so a park that takes it afterwards
+     sees the flag here, and one that took it first is readied by the forget
+     itself. Without this the registration went in after the forget (or the
+     kernel dropped it at the close that followed) and a read with no
+     deadline waited forever: the #4546 test hung on one macOS run in three. */
+  if (cancel && *cancel) { SCHED_UNLOCK(); return 1; }
   if (set) {
     sp_ev_waiter *es = (sp_ev_waiter *)malloc(sizeof(sp_ev_waiter) * (size_t)n);
     if (!es) { SCHED_UNLOCK(); return sp_poll_plain(set, (nfds_t)n, timeout_s); }
@@ -2666,11 +2675,14 @@ static int sp_sched_wait_io_impl(int fd, short events, struct pollfd *set, int n
   return rev ? 1 : 0;
 }
 int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
-  return sp_sched_wait_io_impl(fd, events, NULL, 0, timeout_s);
+  return sp_sched_wait_io_impl(fd, events, NULL, 0, timeout_s, NULL);
+}
+int sp_sched_wait_io_unless(int fd, short events, const unsigned char *cancel) {
+  return sp_sched_wait_io_impl(fd, events, NULL, 0, -1.0, cancel);
 }
 int sp_sched_wait_io_set(struct pollfd *set, int n, double timeout_s) {
-  if (n == 1) return sp_sched_wait_io_impl(set[0].fd, set[0].events, NULL, 0, timeout_s);
-  return sp_sched_wait_io_impl(-1, 0, set, n, timeout_s);
+  if (n == 1) return sp_sched_wait_io_impl(set[0].fd, set[0].events, NULL, 0, timeout_s, NULL);
+  return sp_sched_wait_io_impl(-1, 0, set, n, timeout_s, NULL);
 }
 
 /* A helper worker: adopt its native stack as a per-worker root fiber, then pull
