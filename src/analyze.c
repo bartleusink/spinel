@@ -14330,6 +14330,11 @@ void analyze_program(Compiler *c) {
     if (any) {
       TyKind *prev = (TyKind *)malloc(sizeof(TyKind) * (nrec > 0 ? nrec : 1));
       TyKind *lprev = (TyKind *)malloc(sizeof(TyKind) * (nlrec > 0 ? nlrec : 1));
+      /* post-derive snapshots of the previous iteration, for the fixed-cycle
+         exit below */
+      TyKind *prevd = (TyKind *)malloc(sizeof(TyKind) * (nrec > 0 ? nrec : 1));
+      TyKind *lprevd = (TyKind *)malloc(sizeof(TyKind) * (nlrec > 0 ? nlrec : 1));
+      int have_prevd = 0;
       for (int iter = 0; iter < 128; iter++) {
         /* Parameters bind from the SETTLED state of the previous iteration,
            before this one's re-clear. Bound after it, a parameter sampled
@@ -14349,28 +14354,28 @@ void analyze_program(Compiler *c) {
         for (int k = 0; k < nlrec; k++) lprev[k] = c->scopes[recLs[k]].locals[recLi[k]].type;
         for (int k = 0; k < nlrec; k++) c->scopes[recLs[k]].locals[recLi[k]].type = TY_UNKNOWN;
         sp_narrow_memo_bump();  /* invalidate per-iteration narrow-helper memo */
-        int ch = 0;
+        int ch = 0, ch_other = 0;
         ch |= infer_write_types(c);
-        ch |= bind_coerce_operator_params(c);   /* 3 + obj calls obj's op WITH obj */
-        ch |= infer_param_hash_value(c);
-        ch |= propagate_prep_params(c);
-        ch |= infer_string_params(c);
-        ch |= infer_default_param_types(c);
-        ch |= infer_block_params(c);
-        ch |= infer_for_index(c);
-        ch |= infer_catch_block_params(c);
-        ch |= infer_global_const_types(c);
-        ch |= infer_multiwrite_const_types(c);
+        { int _w = bind_coerce_operator_params(c); ch |= _w; ch_other |= _w; }   /* 3 + obj calls obj's op WITH obj */
+        { int _w = infer_param_hash_value(c); ch |= _w; ch_other |= _w; }
+        { int _w = propagate_prep_params(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_string_params(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_default_param_types(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_block_params(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_for_index(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_catch_block_params(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_global_const_types(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_multiwrite_const_types(c); ch |= _w; ch_other |= _w; }
         ch |= infer_ivar_types(c);
         /* AFTER the ivar write-merge: the re-clear zeroes recorded ivars at
            each iteration's top, so a promote gated on STRING must see the
            freshly re-derived type, not the cleared UNKNOWN (#3227 P4) */
-        ch |= promote_shared_stored_strings(c);
-        ch |= promote_append_accumulators(c);
-        ch |= widen_shared_cmp_params(c);
-        ch |= infer_cvar_types(c);
-        ch |= infer_inherited_ivars(c);
-        ch |= infer_return_types(c);
+        { int _w = promote_shared_stored_strings(c); ch |= _w; ch_other |= _w; }
+        { int _w = promote_append_accumulators(c); ch |= _w; ch_other |= _w; }
+        { int _w = widen_shared_cmp_params(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_cvar_types(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_inherited_ivars(c); ch |= _w; ch_other |= _w; }
+        { int _w = infer_return_types(c); ch |= _w; ch_other |= _w; }
         /* With reset ivars, the re-clear makes infer_ivar_types report change
            every iteration, so converge on ivar value-stability instead. With
            none (only poly params/returns reset), fall back to the normal
@@ -14382,12 +14387,38 @@ void analyze_program(Compiler *c) {
           for (int k = 0; stable && k < nlrec; k++)
             if (c->scopes[recLs[k]].locals[recLi[k]].type != lprev[k]) stable = 0;
           if (stable) break;
+          /* Fixed-cycle exit: when no pass beyond the re-derive pair
+             (infer_write_types / infer_ivar_types, which re-fill the slots
+             the re-clear zeroes and so report "change" every round by
+             construction) changed anything this iteration, AND every
+             recorded slot re-derived to the value it re-derived to last
+             iteration, the loop is a period-1 cycle: the re-derive pair is
+             deterministic over frozen inputs, so each further iteration
+             recomputes exactly this state, and running to the 128-round cap
+             ends HERE anyway. The stability test above cannot
+             see it: it compares against the pre-clear snapshot, and a slot
+             the top-of-loop param bind re-widens (poly in, nothing derives
+             it back) differs from its own recompute every round, forever.
+             One 53k-line machine-generated program burned the whole cap --
+             123 no-op iterations, each a dozen whole-program passes -- on
+             exactly that shape. */
+          if (!ch_other && have_prevd) {
+            int cyc = 1;
+            for (int k = 0; k < nrec && cyc; k++)
+              if (c->classes[recCi[k]].ivar_types[recIv[k]] != prevd[k]) cyc = 0;
+            for (int k = 0; k < nlrec && cyc; k++)
+              if (c->scopes[recLs[k]].locals[recLi[k]].type != lprevd[k]) cyc = 0;
+            if (cyc) break;
+          }
+          for (int k = 0; k < nrec; k++) prevd[k] = c->classes[recCi[k]].ivar_types[recIv[k]];
+          for (int k = 0; k < nlrec; k++) lprevd[k] = c->scopes[recLs[k]].locals[recLi[k]].type;
+          have_prevd = 1;
         }
         else if (!ch) break;
       }
       /* the bind lags one iteration; take the settled state once more */
       infer_param_types(c);
-      free(prev); free(lprev);
+      free(prev); free(lprev); free(prevd); free(lprevd);
     }
     free(recCi); free(recIv); free(recLs); free(recLi);
   }
