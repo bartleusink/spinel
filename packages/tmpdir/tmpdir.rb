@@ -85,12 +85,16 @@ class Dir
         # world-writable without the sticky bit: a symlink there could
         # redirect our cleanup to an arbitrary location. Check the
         # parent first, before touching path, so we never delete
-        # through a hostile parent.
-        base = File.dirname(path)
-        stat = File.stat(base) rescue nil
-        if stat && (stat.mode & 0o1002) == 0o1002 && (stat.mode & 0o1000) == 0
-          # world-writable (o+w) and NOT sticky (no t-bit) -> reject.
-          raise ArgumentError, "parent directory is world writable but not sticky: #{base}"
+        # through a hostile parent. CRuby runs this check only when
+        # no parent was given; a parent the caller named is the
+        # caller's to vouch for.
+        unless parent_dir
+          base = File.dirname(path)
+          stat = File.stat(base) rescue nil
+          if stat && (stat.mode & 0o002) != 0 && (stat.mode & 0o1000) == 0
+            # world-writable (o+w) and NOT sticky (no t-bit) -> reject.
+            raise ArgumentError, "parent directory is world writable but not sticky: #{base}"
+          end
         end
         TmpdirPackage.remove_tree(path) if File.symlink?(path) || File.exist?(path)
       end
