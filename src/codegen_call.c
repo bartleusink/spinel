@@ -10313,10 +10313,7 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
   }
 
   if (recv >= 0 && argc == 1 && !ty_is_object(rt) && !ty_is_array(rt) &&
-      (int_arith_fn(name) ||
-       /* bigint shifts aren't "int arith" ops but lower through the same
-          TY_BIGINT branch below (sp_bigint_shl / sp_bigint_shr). */
-       (res == TY_BIGINT && (sp_streq(name, "<<") || sp_streq(name, ">>"))))) {
+      int_arith_fn(name)) {
     /* An Integer/Bignum arith op coerces its argument via coerce/to_int; a
        String/Symbol/Array/Hash/nil/bool/Range has neither, so CRuby raises
        "X can't be coerced into Integer" rather than aborting compilation
@@ -10433,18 +10430,22 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (res == TY_BIGINT) {
-      /* **, <<, >> take an int64 second operand (exponent / shift), not a bigint;
-         bigint_arith_fn doesn't map them, so emit them directly. */
-      if (sp_streq(name, "**") || sp_streq(name, "<<") || sp_streq(name, ">>")) {
-        const char *sfn = sp_streq(name, "**") ? "sp_bigint_pow"
-                        : sp_streq(name, "<<") ? "sp_bigint_shl"
-                        : "sp_bigint_shr";
-        buf_printf(b, "%s(", sfn);
+      /* ** takes an int64 exponent, not a bigint; bigint_arith_fn doesn't map
+         it, so emit it directly. The bigint shifts used to ride this arm too,
+         but their shift amount was emitted raw, so a poly count cast an
+         sp_RbVal to int64_t and the C did not build (#4536); they now decline
+         the gate above (int_arith_fn has no shifts) and take emit_call's
+         dedicated bignum-shift arm, which converts the count (emit_int_expr)
+         and roots the receiver across its evaluation. */
+      if (sp_streq(name, "**")) {
+        buf_puts(b, "sp_bigint_pow(");
         emit_bigint_operand(c, recv, b);
-        buf_puts(b, ", ");
-        if (comp_ntype(c, argv[0]) == TY_BIGINT) { buf_puts(b, "sp_bigint_to_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-        else { buf_puts(b, "(int64_t)("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-        buf_puts(b, ")");
+        /* emit_int_expr converts a poly or Bignum exponent and raises CRuby's
+           TypeError for nil/bool; the cast keeps the operand int64 where
+           sp_int is narrower (wasm32) */
+        buf_puts(b, ", (int64_t)(");
+        emit_int_expr(c, argv[0], b);
+        buf_puts(b, "))");
         return 1;
       }
       const char *bfn = bigint_arith_fn(name);
