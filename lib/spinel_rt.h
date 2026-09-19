@@ -8059,6 +8059,15 @@ static sp_RbVal sp_poly_arr_set(sp_RbVal v, sp_int idx, sp_RbVal val) {
   return val;
 }
 static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val);   /* fwd: hash []= from widen_and_set */
+/* A key or value of a kind a typed hash cannot hold: the compiler settled
+   the hash's variant from what it saw and did not widen it for this store.
+   Loud, not a dropped entry (#4540). */
+static SP_NOINLINE SP_NORETURN void sp_poly_typed_hash_store_miss(sp_RbVal key, sp_RbVal val, const char *kk, const char *vk) {
+  sp_raise_cls("TypeError",
+               sp_sprintf("cannot store a %s key with a %s value into a hash Spinel typed as %s-keyed%s%s%s (the hash was not widened for this store)",
+                          sp_poly_class_name(key), sp_poly_class_name(val), kk,
+                          vk ? " with " : "", vk ? vk : "", vk ? " values" : ""));
+}
 /* Like sp_poly_arr_set but widens a typed array to a PolyArray when val does not
    match its element kind (int<-non-int incl. float, flt<-non-float, str<-non-str),
    so the value is stored exactly as CRuby does (e.g. a Float into a former int
@@ -8130,24 +8139,33 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
     case SP_BUILTIN_STR_POLY_HASH:
       if (key.tag == SP_TAG_STR) sp_StrPolyHash_set((sp_StrPolyHash*)v.v.p, key.v.s, val);
       break;
+    /* A typed hash holds one key kind and one value kind. A store of another
+       kind used to fall through these arms silently: the analyzer had not
+       widened the hash (a copy through dup, #4540), and the program went on
+       with the entry missing. Say so instead. */
     case SP_BUILTIN_STR_STR_HASH:
       if (key.tag == SP_TAG_STR && val.tag == SP_TAG_STR)
         sp_StrStrHash_set((sp_StrStrHash*)v.v.p, key.v.s, val.v.s);
+      else sp_poly_typed_hash_store_miss(key, val, "String", "String");
       break;
     case SP_BUILTIN_STR_INT_HASH:
       if (key.tag == SP_TAG_STR && val.tag == SP_TAG_INT)
         sp_StrIntHash_set((sp_StrIntHash*)v.v.p, key.v.s, val.v.i);
+      else sp_poly_typed_hash_store_miss(key, val, "String", "Integer");
       break;
     case SP_BUILTIN_INT_INT_HASH:
       if (key.tag == SP_TAG_INT && val.tag == SP_TAG_INT)
         sp_IntIntHash_set((sp_IntIntHash*)v.v.p, key.v.i, val.v.i);
+      else sp_poly_typed_hash_store_miss(key, val, "Integer", "Integer");
       break;
     case SP_BUILTIN_INT_STR_HASH:
       if (key.tag == SP_TAG_INT && val.tag == SP_TAG_STR)
         sp_IntStrHash_set((sp_IntStrHash*)v.v.p, key.v.i, val.v.s);
+      else sp_poly_typed_hash_store_miss(key, val, "Integer", "String");
       break;
     case SP_BUILTIN_SYM_POLY_HASH:
       if (key.tag == SP_TAG_SYM) sp_SymPolyHash_set((sp_SymPolyHash*)v.v.p, (sp_sym)key.v.i, val);
+      else sp_poly_typed_hash_store_miss(key, val, "Symbol", NULL);
       break;
     case SP_BUILTIN_INT_ARRAY:
       if (key.tag == SP_TAG_INT) sp_IntArray_set((sp_IntArray*)v.v.p, key.v.i,

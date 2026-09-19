@@ -9330,6 +9330,72 @@ static unsigned hash_key_write_bits(Compiler *c, int id, const Scope **sc, const
   *nm = nt_str(nt, wr, "name");
   return (*sc && *nm) ? b : 0;
 }
+/* The hash literals a value expression copies its keys from: the literal
+   itself, `lit.dup` / `lit.clone`, a local that a write in the same scope
+   gave such a literal (`g = {...}; h = g.dup`), or a PARAMETER, which
+   stands for the literals passed in its position at every call of the
+   method (`def parse(arg) = parse_hash(arg.dup)`). A copy has its source's
+   variant, so the widening lands on the source literal; without this a
+   Symbol stored into a dup'ed String-keyed hash raised, and into a dup'ed
+   Integer-keyed one landed as INT64_MIN (#4540). Appends to `out`, up to
+   `cap`; answers the count. */
+static int hash_literal_sources(Compiler *c, int val, int depth, int *out, int cap, int n) {
+  const NodeTable *nt = c->nt;
+  if (val < 0 || depth > 6 || n >= cap) return n;
+  const char *vt = nt_type(nt, val);
+  if (!vt) return n;
+  if (sp_streq(vt, "HashNode")) { out[n++] = val; return n; }
+  if (sp_streq(vt, "CallNode")) {
+    const char *cn = nt_str(nt, val, "name");
+    if (!cn || (!sp_streq(cn, "dup") && !sp_streq(cn, "clone"))) return n;
+    if (nt_ref(nt, val, "arguments") >= 0 || nt_ref(nt, val, "block") >= 0) return n;
+    return hash_literal_sources(c, nt_ref(nt, val, "receiver"), depth + 1, out, cap, n);
+  }
+  if (sp_streq(vt, "LocalVariableReadNode")) {
+    const char *ln = nt_str(nt, val, "name");
+    const Scope *ls = comp_scope_of(c, val);
+    if (!ln || !ls) return n;
+    int pidx = -1;
+    for (int p = 0; p < ls->nparams; p++)
+      if (ls->pnames[p] && sp_streq(ls->pnames[p], ln)) { pidx = p; break; }
+    if (pidx >= 0 && ls->name) {
+      /* a parameter: the arguments in its position at every call by name */
+      for (int id = 0; id < nt->count && n < cap; id++) {
+        if (nt_kind(nt, id) != NK_CallNode) continue;
+        const char *cn = nt_str(nt, id, "name");
+        if (!cn || !sp_streq(cn, ls->name)) continue;
+        int ca = nt_ref(nt, id, "arguments"); int cc = 0;
+        const int *cv = ca >= 0 ? nt_arr(nt, ca, "arguments", &cc) : NULL;
+        if (!cv || pidx >= cc) continue;
+        n = hash_literal_sources(c, cv[pidx], depth + 1, out, cap, n);
+      }
+      return n;
+    }
+    for (int w = 0; w < nt->count && n < cap; w++) {
+      if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || !sp_streq(wn, ln) || comp_scope_of(c, w) != ls) continue;
+      n = hash_literal_sources(c, nt_ref(nt, w, "value"), depth + 1, out, cap, n);
+    }
+    return n;
+  }
+  return n;
+}
+/* widen `lit` to the boxed variant when the key classes written into it
+   (`bits`) and its own keys together name more than one class */
+static void hash_literal_widen_if_mixed(Compiler *c, int lit, unsigned bits) {
+  const NodeTable *nt = c->nt;
+  if (lit < 0 || lit >= c->node_cap || !nt_type(nt, lit) || !sp_streq(nt_type(nt, lit), "HashNode")) return;
+  unsigned mask = bits;
+  int en = 0; const int *els = nt_arr(nt, lit, "elements", &en);
+  for (int e = 0; e < en; e++) {
+    if (!nt_type(nt, els[e]) || !sp_streq(nt_type(nt, els[e]), "AssocNode")) return;
+    unsigned b = hash_key_bit(c, nt_ref(nt, els[e], "key"));
+    if (!b) return;
+    mask |= b;
+  }
+  if (mask && (mask & (mask - 1))) c->hash_want[lit] = TY_POLY_POLY_HASH;
+}
 static void mark_mixed_key_hash_locals(Compiler *c) {
   if (!c->hash_want) return;
   const NodeTable *nt = c->nt;
@@ -9360,7 +9426,6 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
       hash_new = hr >= 0 && nt_kind(nt, hr) == NK_ConstantReadNode &&
                  nt_str(nt, hr, "name") && sp_streq(nt_str(nt, hr, "name"), "Hash");
     }
-    if (!vt || (!sp_streq(vt, "HashNode") && !hash_new) || val >= c->node_cap) continue;
     const char *lname = nt_str(nt, id, "name");
     const Scope *ls = comp_scope_of(c, id);
     if (!lname || !ls) continue;
@@ -9368,6 +9433,14 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
     for (int k = 0; k < nu; k++)
       if (uses[k].sc == ls && sp_streq(uses[k].nm, lname)) { mask = uses[k].bits; break; }
     if (!mask) continue;
+    /* a copy of a literal (`{...}.dup`, `g.dup` with g a literal or a
+       parameter) takes the literal's variant: widen the literals (#4540) */
+    if (!hash_new && !(vt && sp_streq(vt, "HashNode"))) {
+      int srcs[32]; int ns = hash_literal_sources(c, val, 0, srcs, 32, 0);
+      for (int q = 0; q < ns; q++) hash_literal_widen_if_mixed(c, srcs[q], mask);
+      continue;
+    }
+    if (!vt || (!sp_streq(vt, "HashNode") && !hash_new) || val >= c->node_cap) continue;
     int en = 0; const int *els = hash_new ? NULL : nt_arr(nt, val, "elements", &en);
     for (int k = 0; k < en; k++) {
       if (!nt_type(nt, els[k]) || !sp_streq(nt_type(nt, els[k]), "AssocNode")) { mask = 0; break; }
@@ -9396,17 +9469,10 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
       int ca = nt_ref(nt, id, "arguments"); int cc = 0;
       const int *cv = ca >= 0 ? nt_arr(nt, ca, "arguments", &cc) : NULL;
       if (!cv || pidx >= cc) continue;
-      int lit = cv[pidx];
-      if (lit < 0 || lit >= c->node_cap || !nt_type(nt, lit) || !sp_streq(nt_type(nt, lit), "HashNode")) continue;
-      unsigned mask = uses[k].bits;
-      int en = 0; const int *els = nt_arr(nt, lit, "elements", &en);
-      for (int e = 0; e < en; e++) {
-        if (!nt_type(nt, els[e]) || !sp_streq(nt_type(nt, els[e]), "AssocNode")) { mask = 0; break; }
-        unsigned b = hash_key_bit(c, nt_ref(nt, els[e], "key"));
-        if (!b) { mask = 0; break; }
-        mask |= b;
-      }
-      if (mask && (mask & (mask - 1))) c->hash_want[lit] = TY_POLY_POLY_HASH;
+      /* the literal in that position, or what a dup/clone/local/parameter
+         there copies from (#4540) */
+      int srcs[32]; int ns = hash_literal_sources(c, cv[pidx], 0, srcs, 32, 0);
+      for (int q = 0; q < ns; q++) hash_literal_widen_if_mixed(c, srcs[q], uses[k].bits);
     }
   }
   free(uses);
