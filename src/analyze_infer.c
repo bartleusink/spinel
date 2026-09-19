@@ -7150,21 +7150,46 @@ static int why_node_origin(Compiler *c, int id, TyKind t) {
     if (body && n > 0 && body[n - 1] >= 0 && body[n - 1] < c->node_cap && ty_degraded(c->ntype[body[n - 1]])) return body[n - 1];
   }
   if (nk == NK_CallNode) {
-    /* a call bound to a user def whose return degraded: the value it returns */
+    /* a call bound to a user def whose return degraded: the value it
+       returns. The receiver: none (self), an object, or a constant naming
+       a class or module (a singleton method). */
     int recv = nt_ref(nt, id, "receiver");
     const char *name = nt_str(nt, id, "name");
     if (name && (recv < 0 || !(recv < c->node_cap && ty_degraded(c->ntype[recv])))) {
-      int cid = -1;
+      int cid = -1, want_cm = 0;
       if (recv >= 0 && recv < c->node_cap && ty_is_object(c->ntype[recv])) cid = ty_object_class(c->ntype[recv]);
-      else if (recv < 0) { Scope *cs = comp_scope_of(c, id); cid = cs ? cs->class_id : -1; }
+      else if (recv >= 0 && (nt_kind(nt, recv) == NK_ConstantReadNode || nt_kind(nt, recv) == NK_ConstantPathNode)) {
+        const char *cn = nt_str(nt, recv, "name");
+        cid = cn ? comp_class_index(c, cn) : -1; want_cm = 1;
+      }
+      else if (recv < 0) { Scope *cs = comp_scope_of(c, id); cid = cs ? cs->class_id : -1; want_cm = cs ? cs->is_cmethod : 0; }
       for (int si = 1; si < c->nscopes; si++) {
         Scope *m = &c->scopes[si];
         if (!m->name || m->def_node < 0 || !sp_streq(m->name, name)) continue;
-        if (m->class_id != cid) continue;
+        if (m->class_id != cid || (m->is_cmethod != 0) != (want_cm != 0)) continue;
         if (ty_degraded(m->ret) && m->ret_why.node >= 0) return m->ret_why.node;
         break;
       }
     }
+  }
+  if (nk == NK_InstanceVariableReadNode) {
+    /* an instance variable is typed from its writes: the first write of the
+       name, in this class, whose value is degraded; the read itself when no
+       write is (the ivar's kind is the writes' meeting, or a rule's) */
+    const char *nm = nt_str(nt, id, "name");
+    Scope *rs = comp_scope_of(c, id);
+    int cid = rs ? rs->class_id : -1;
+    if (nm) {
+      NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, wid) {
+        const char *wn = nt_str(nt, wid, "name");
+        if (!wn || !sp_streq(wn, nm)) continue;
+        Scope *ws = comp_scope_of(c, wid);
+        if (!ws || ws->class_id != cid) continue;
+        int v = nt_ref(nt, wid, "value");
+        if (v >= 0 && v < c->node_cap && ty_degraded(c->ntype[v])) return v;
+      }
+    }
+    return id;
   }
   const SpNode *n = &nt->nodes[id];
   for (int i = 0; i < n->nr; i++) {

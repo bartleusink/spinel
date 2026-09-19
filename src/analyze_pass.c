@@ -8670,7 +8670,7 @@ int infer_return_types(Compiler *c) {
         if (node < 0) {
           node = tail >= 0 ? tail : (ret_head && ret_head[s] >= 0 ? return_value_node(c, ret_head[s]) : -1);
           if (ret_head && ret_head[s] >= 0 && tail >= 0) other = return_value_node(c, ret_head[s]);
-          then = r;
+          then = (node >= 0 && node < c->node_cap) ? c->ntype[node] : r;
         }
         sc->ret_why.node = node; sc->ret_why.other = other; sc->ret_why.prev = sc->ret;
         sc->ret_why.then = then; sc->ret_why.round = g_infer_round;

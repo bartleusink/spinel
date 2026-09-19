@@ -8622,7 +8622,8 @@ static void why_hop(WhyOut *o, int id, const char *role, const char *extra) {
   int fid = (int)nt_int(nt, id, "node_file", 0);
   char text[64], rbs[128];
   why_slice(c, id, text, sizeof text);
-  why_rbs(c, id < c->node_cap ? c->ntype[id] : TY_UNKNOWN, rbs, sizeof rbs);
+  if (id < c->node_cap && c->ntype[id] == TY_UNKNOWN) snprintf(rbs, sizeof rbs, "untyped (no type of its own)");
+  else why_rbs(c, id < c->node_cap ? c->ntype[id] : TY_UNKNOWN, rbs, sizeof rbs);
   if (!o->json) {
     fprintf(stderr, "spinel: %s:%d:%d: note: %s `%s` is %s%s\n", emit_file_path(c, fid), ln, col + 1, role, text, rbs, extra ? extra : "");
   }
@@ -8648,12 +8649,28 @@ static void why_slot_end(WhyOut *o, const SlotWhy *w, const char *role) {
   Compiler *c = o->c;
   TyKind now = c->ntype[w->node];
   char extra[160], b[64];
-  why_rbs(c, w->prev, b, sizeof b);
-  int meet = !ty_degraded(w->then) && w->prev != TY_UNKNOWN && w->prev != now;
-  if (meet) snprintf(extra, sizeof extra, ", where the slot was %s (two kinds meet: untyped)", b);
+  int other_ok = w->other >= 0 && w->other < c->node_cap && w->other != w->node;
+  /* two concrete kinds met: the slot held one (prev, from `other`) and this
+     value brought another; or, for a return, the tail and a `return` */
+  int meet = !ty_degraded(w->then) && ((w->prev != TY_UNKNOWN && w->prev != now) || other_ok);
+  if (meet) {
+    int is_ret = sp_streq(role, "returned");
+    if (is_ret && other_ok) why_rbs(c, c->ntype[w->other], b, sizeof b); else why_rbs(c, w->prev != TY_UNKNOWN ? w->prev : c->ntype[w->other], b, sizeof b);
+    snprintf(extra, sizeof extra, ", where %s %s (two kinds meet: untyped)", is_ret ? "a `return` gives" : "the slot was", b);
+  }
+  else if (now == TY_UNKNOWN)
+    snprintf(extra, sizeof extra, " (no type of its own: an empty literal, or nothing typed it); on round %d nothing else had typed the slot and it took untyped (pessimistic)", w->round);
   else snprintf(extra, sizeof extra, "; on round %d of inference it was still untyped and the slot kept that (a transient)", w->round);
   why_hop(o, w->node, role, extra);
-  if (meet && w->other >= 0 && w->other < c->node_cap && w->other != w->node) why_hop(o, w->other, "and", NULL);
+  if (meet && other_ok) why_hop(o, w->other, "and", NULL);
+}
+
+/* The return whose recorded value is node `id`, if a def's is: the chain
+   reached a callee's return that met two kinds. */
+static const SlotWhy *why_return_of(Compiler *c, int id) {
+  for (int si = 1; si < c->nscopes; si++)
+    if (c->scopes[si].ret_why.node == id && ty_degraded(c->scopes[si].ret)) return &c->scopes[si].ret_why;
+  return NULL;
 }
 
 /* The slot a read names, if the read's type came from one with a why. */
@@ -8716,7 +8733,11 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
     int cyc = 0; for (int i = 0; i < ns; i++) if (seen[i] == next) cyc = 1;
     if (ns < 16) seen[ns++] = id;
     int ln = (int)nt_int(nt, id, "node_line", 0), col = (int)nt_int(nt, id, "node_col", 0);
-    int silent = ln <= 0 || (ln == last_ln && col == last_col);   /* a synthesized node, or the same span as the hop before */
+    /* not a hop of its own: a synthesized node, a wrapper (a body, an arm,
+       parentheses), or a node whose origin starts at the same place */
+    NodeKind k = nt_kind(nt, id);
+    int wrapper = k == NK_StatementsNode || k == NK_ElseNode || k == NK_ParenthesesNode || k == NK_BeginNode;
+    int silent = ln <= 0 || (ln == last_ln && col == last_col) || (wrapper && !born && !lost && depth > 0);
     /* a read whose slot's widening value is concrete in the end: the
        slot's own story ends the chain */
     const LocalVar *rl = why_read_slot(c, id);
@@ -8740,9 +8761,17 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
       why_hop(o, id, role, " — untraced from here (how the local was typed is not recorded)");
       return;
     }
+    if (born && k == NK_InstanceVariableReadNode) { why_hop(o, id, role, " — untraced from here: no write of it in this class is untyped (its kind is the writes' meeting, or a rule's)"); return; }
     if (born) { why_hop(o, id, role, " — born here: no untyped input"); return; }
-    if (lost || cyc || ++depth > 12) { why_hop(o, id, role, " — untraced from here"); return; }
+    if (lost && !ty_degraded(c->ntype[id])) {
+      /* a concrete value the chain arrived at: a callee's return that met
+         two kinds, else a value the fixpoint saw untyped for a while */
+      const SlotWhy *rw = why_return_of(c, id);
+      if (rw) { why_slot_end(o, rw, role); return; }
+    }
+    if (lost || cyc || depth > 40) { why_hop(o, id, role, " — untraced from here"); return; }
     if (!silent) { why_hop(o, id, role, NULL); last_ln = ln; last_col = col; role = "from"; }
+    depth++;
     id = next;
   }
 }
