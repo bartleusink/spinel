@@ -80,6 +80,11 @@ unknown or void are left out), in node order.
 - `"severity":"error"`, one per refusal, in the order the compile met
   them, at the refused construct: the same lines the compile prints on
   stderr ([limitations.md](limitations.md) says what a refusal is).
+- A program that does not parse exits 1 too, and the JSON is still
+  written: `types` and `codegen` empty, and one `"severity":"error"` per
+  parse error at its span (`end_line`/`end_col` included), in the file
+  it is in when a `require_relative` spliced it — the same
+  `file:line:col: message` lines the compile prints on stderr.
 
 ## `codegen`
 
