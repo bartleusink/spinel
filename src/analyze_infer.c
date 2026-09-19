@@ -187,8 +187,12 @@ int an_user_defines_or_reads(Compiler *c, const char *name) {
   }
   int ans = 0;
   for (int k = 0; k < c->nclasses && !ans; k++) {
-    if (comp_method_in_chain(c, k, name, NULL) >= 0) ans = 1;
-    else if (comp_is_reader(&c->classes[k], name)) ans = 1;
+    /* comp_poly_arm_defines: a native class counts only through its
+       declared bindings (#4504) -- counting its Ruby-side defs here made
+       every caller stand its builtin arm down, and merely loading
+       IO::Buffer turned `h.values` on a poly Hash into NoMethodError. */
+    if (comp_poly_arm_defines(c, k, name)) ans = 1;
+    else if (!c->classes[k].is_native_class && comp_is_reader(&c->classes[k], name)) ans = 1;
   }
   /* A CLASS method of the same name is deliberately not consulted: it is only
      reachable through a Class-valued receiver, so it cannot be the answer to
@@ -1008,6 +1012,17 @@ static TyKind an_user_read_ty(Compiler *c, const char *name, int argc) {
 int an_user_ret_disagrees(Compiler *c, const char *name, TyKind want) {
   if (!name) return 0;
   for (int k = 0; k < c->nclasses; k++) {
+    /* a native class answers by its declared bindings, as the dispatch
+       arms do (#4504); a Ruby-side def on it has no arm to disagree with */
+    if (c->classes[k].is_native_class) {
+      int nmi = comp_native_method_find(c, k, name, 0, 0);
+      if (nmi >= 0) {
+        TyKind r = sp_streq(c->native_methods[nmi].ret, "self")
+                     ? ty_object(k) : native_spec_to_ty(c->native_methods[nmi].ret);
+        if (r != want && r != TY_UNKNOWN) return 1;
+      }
+      continue;
+    }
     int mi = comp_method_in_chain(c, k, name, NULL);
     if (mi < 0 || mi >= c->nscopes) continue;
     TyKind r = (TyKind)c->scopes[mi].ret;
@@ -2113,6 +2128,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       infer_type(c, argv[0]) == TY_STRING) {
     int ncand = 0;
     for (int k = 0; k < c->nclasses; k++) {
+      if (c->classes[k].is_native_class) {   /* bindings only (#4504) */
+        if (comp_poly_arm_defines_n(c, k, name, argc)) ncand++;
+        continue;
+      }
       int mi = comp_method_in_chain(c, k, name, NULL);
       if (mi >= 0 && argc >= c->scopes[mi].nrequired) ncand++;
     }
@@ -4412,6 +4431,10 @@ else {
         if (sp_streq(name, "count")) {
           int can1 = 0;
           for (int k2 = 0; k2 < c->nclasses && !can1; k2++) {
+            if (c->classes[k2].is_native_class) {   /* bindings only (#4504) */
+              if (comp_poly_arm_defines_n(c, k2, "count", 1)) can1 = 1;
+              continue;
+            }
             int mi2 = comp_method_in_chain(c, k2, "count", NULL);
             if (mi2 >= 0 && mi2 < c->nscopes) {
               Scope *cs2 = &c->scopes[mi2];
@@ -4447,7 +4470,7 @@ else {
         int has_user = 0;
         if (!an_builtin_only)
         for (int k = 0; k < c->nclasses && !has_user; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0) has_user = 1;
+          if (comp_poly_arm_defines_n(c, k, name, argc)) has_user = 1;
         if (!has_user) return an_poly_concrete(c, name, TY_POLY_ARRAY);
       }
       if (sp_streq(name, "clamp")) return an_poly_concrete(c, name, TY_POLY);  /* boxed numeric clamp -> poly */
@@ -4463,7 +4486,7 @@ else {
         int has_user = 0;
         if (!an_builtin_only)
         for (int k = 0; k < c->nclasses && !has_user; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0) has_user = 1;
+          if (comp_poly_arm_defines_n(c, k, name, argc)) has_user = 1;
         if (!has_user) {
           /* concrete result types, matching the TY_NIL receiver arm so a
              local settled on an early (pre-widening) pass stays consistent */
@@ -4481,7 +4504,7 @@ else {
         int has_user = 0;
         if (!an_builtin_only)
         for (int k = 0; k < c->nclasses && !has_user; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0) has_user = 1;
+          if (comp_poly_arm_defines_n(c, k, name, argc)) has_user = 1;
         /* A boxed receiver can be a Proc, whose #=== answers the proc's
            return value rather than a boolean (#3818); a poly slot holds the
            booleans every other kind answers just as well. */
@@ -4601,8 +4624,9 @@ else {
         char sbase[256];
         int has_base = setter_base_name(name, sbase, sizeof sbase);
         for (int k = 0; k < c->nclasses && !owned; k++)
-          owned = comp_method_in_chain(c, k, name, NULL) >= 0 ||
-                  (has_base && comp_writer_in_chain(c, k, sbase, NULL));
+          owned = comp_poly_arm_defines_n(c, k, name, argc) ||
+                  (has_base && !c->classes[k].is_native_class &&
+                   comp_writer_in_chain(c, k, sbase, NULL));
         TyKind at = owned ? infer_type(c, argv[0]) : TY_UNKNOWN;
         if (at != TY_UNKNOWN) return at;
       }
@@ -4808,15 +4832,15 @@ else {
         int has_user = 0;
         if (!an_builtin_only)
         for (int k = 0; k < c->nclasses && !has_user; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
-              comp_reader_in_chain(c, k, name, NULL)) has_user = 1;
+          if (comp_poly_arm_defines_n(c, k, name, argc) ||
+              (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL))) has_user = 1;
         if (!has_user) return an_poly_concrete(c, name, TY_POLY_ARRAY);
       }
       if (argc >= 1 && sp_streq(name, "values_at") && nt_ref(nt, id, "block") < 0) {
         int has_user = 0;
         if (!an_builtin_only)
         for (int k = 0; k < c->nclasses && !has_user; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0) has_user = 1;
+          if (comp_poly_arm_defines_n(c, k, name, argc)) has_user = 1;
         if (!has_user) return an_poly_concrete(c, name, TY_POLY_ARRAY);
       }
       /* Array-reduction methods on a boxed array element (a run from

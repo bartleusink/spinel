@@ -700,6 +700,8 @@ int comp_native_find(Compiler *c, const char *mod, const char *name);
 int comp_native_method_find(Compiler *c, int class_id, const char *name, int argc, int kind);
 int comp_native_method_find_typed(Compiler *c, int class_id, const char *name, int argc, int kind,
                                   const TyKind *argtys);
+int comp_poly_arm_defines(Compiler *c, int k, const char *name);
+int comp_poly_arm_defines_n(Compiler *c, int k, const char *name, int argc);
 TyKind native_spec_to_ty(const char *spec);
 /* IO::Buffer type-symbol table (index-compatible with lib/sp_iobuffer.h) */
 int comp_iob_sym_type(const char *name);

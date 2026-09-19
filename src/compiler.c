@@ -1067,6 +1067,36 @@ int comp_native_method_find(Compiler *c, int class_id, const char *name, int arg
   return comp_native_method_find_typed(c, class_id, name, argc, kind, NULL);
 }
 
+/* Whether class `k` contributes a poly-dispatch arm for instance calls of
+   `name`. A native class contributes only through its declared BINDINGS
+   (#4504): a Ruby-side def on it (IO::Buffer#values, StringIO#each_line) is
+   reachable through a typed receiver alone and gets no arm in the cls_id
+   switch -- so a candidate counter that tallied those stood the builtin
+   arms down for every poly receiver, and merely loading IO::Buffer turned
+   `h.values` on a poly Hash into NoMethodError. Every "does any user class
+   define this name" loop that feeds the poly dispatch asks through here so
+   the analyzer, the emitters, and the switch count the same arms. */
+int comp_poly_arm_defines(Compiler *c, int k, const char *name) {
+  if (c->classes[k].is_native_class)
+    return comp_native_method_find(c, k, name, 0, 0) >= 0;
+  return comp_method_in_chain(c, k, name, NULL) >= 0;
+}
+
+/* The arity-pinned form, for the builtin-arm gates that know the call's
+   argc: a native binding is an arm only when it takes exactly that many
+   arguments, the same filter the dispatch arm emission applies. (Ruby
+   chains stay arity-loose, as everywhere: optional and rest parameters
+   make a def's acceptance a runtime question.) StringIO's zero-argument
+   `getbyte` binding otherwise counted for `s.getbyte(i)` on a poly String
+   and stood the builtin arm down again (#4432). */
+int comp_poly_arm_defines_n(Compiler *c, int k, const char *name, int argc) {
+  if (c->classes[k].is_native_class) {
+    int nmi = comp_native_method_find(c, k, name, argc, 0);
+    return nmi >= 0 && c->native_methods[nmi].nargs == argc;
+  }
+  return comp_method_in_chain(c, k, name, NULL) >= 0;
+}
+
 /* IO::Buffer's type-symbol table, index-compatible with lib/sp_iobuffer.h's
    SP_IOB_TY_* enum. Shared by the analyzer (a literal-symbol get_value's
    return type follows the symbol) and the codegen fold that lowers such a

@@ -12335,7 +12335,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
        sp_streq(name, "to_r") || sp_streq(name, "rationalize") || sp_streq(name, "to_c"))) {
     int has_user = 0;
     for (int k = 0; k < c->nclasses && !has_user; k++)
-      if (comp_method_in_chain(c, k, name, NULL) >= 0) has_user = 1;
+      if (comp_poly_arm_defines_n(c, k, name, argc)) has_user = 1;
     if (!has_user) {
       /* rationalize with no argument equals to_r for the values a poly nil/int
          can hold (nil -> (0/1), int -> (n/1)) (#2460). */
@@ -12423,7 +12423,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && rt == TY_POLY && argc == 1 && sp_streq(name, "===")) {
     int has_user = 0;
     for (int k = 0; k < c->nclasses && !has_user; k++)
-      if (comp_method_in_chain(c, k, name, NULL) >= 0) has_user = 1;
+      if (comp_poly_arm_defines_n(c, k, name, argc)) has_user = 1;
     if (!has_user) {
       buf_puts(b, "sp_poly_case_eq(");
       emit_expr(c, recv, b);
@@ -12513,6 +12513,10 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     int has_user_cnt = 0;
     if (!g_poly_builtin_arm)
     for (int kk = 0; kk < c->nclasses && !has_user_cnt; kk++) {
+      if (c->classes[kk].is_native_class) {   /* bindings only (#4504) */
+        if (comp_poly_arm_defines_n(c, kk, "count", 1)) has_user_cnt = 1;
+        continue;
+      }
       int mi_k = comp_method_in_chain(c, kk, "count", NULL);
       if (mi_k >= 0) {
         Scope *cs_k = &c->scopes[mi_k];
@@ -12535,8 +12539,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     int has_user_rnd = 0;
     if (!g_poly_builtin_arm)
     for (int kk = 0; kk < c->nclasses && !has_user_rnd; kk++)
-      if (comp_method_in_chain(c, kk, name, NULL) >= 0 ||
-          comp_reader_in_chain(c, kk, name, NULL)) has_user_rnd = 1;
+      if (comp_poly_arm_defines_n(c, kk, name, argc) ||
+          (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user_rnd = 1;
     if (!has_user_rnd) {
       /* ceil / floor / truncate with a precision had no arm at all and
          raised NoMethodError on a Float (#4532) */
@@ -12615,8 +12619,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     int has_user_dig = 0;
     if (!g_poly_builtin_arm)
     for (int kk = 0; kk < c->nclasses && !has_user_dig; kk++)
-      if (comp_method_in_chain(c, kk, name, NULL) >= 0 ||
-          comp_reader_in_chain(c, kk, name, NULL)) has_user_dig = 1;
+      if (comp_poly_arm_defines_n(c, kk, name, argc) ||
+          (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user_dig = 1;
     if (!has_user_dig) {
       if (argc == 1 && nt_kind(nt, argv[0]) == NK_SplatNode) {
         buf_puts(b, "sp_poly_dig_list("); emit_boxed(c, recv, b);
@@ -12652,8 +12656,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user1 = 0;
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user1; kk++)
-        if (comp_method_in_chain(c, kk, name, NULL) >= 0 ||
-            comp_reader_in_chain(c, kk, name, NULL)) has_user1 = 1;
+        if (comp_poly_arm_defines_n(c, kk, name, argc) ||
+            (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user1 = 1;
       if (!has_user1) {
         buf_printf(b, "%s(", pfn1); emit_expr(c, recv, b);
         buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
@@ -12739,7 +12743,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user_ta = 0;
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user_ta; kk++)
-        if (comp_method_in_chain(c, kk, name, NULL) >= 0) has_user_ta = 1;
+        if (comp_poly_arm_defines_n(c, kk, name, argc)) has_user_ta = 1;
       if (!has_user_ta) {
         buf_puts(b, "sp_poly_to_a_arr("); emit_expr(c, recv, b); buf_puts(b, ")");
         return 1;
@@ -12750,7 +12754,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user_m = 0;
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user_m; kk++)
-        if (comp_method_in_chain(c, kk, "members", NULL) >= 0) has_user_m = 1;
+        if (comp_poly_arm_defines_n(c, kk, "members", argc)) has_user_m = 1;
       if (!has_user_m) {
         buf_puts(b, "sp_poly_struct_members("); emit_expr(c, recv, b); buf_puts(b, ")");
         return 1;
@@ -12762,7 +12766,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user = 0;
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user; kk++)
-        if (comp_method_in_chain(c, kk, name, NULL) >= 0) has_user = 1;
+        if (comp_poly_arm_defines_n(c, kk, name, argc)) has_user = 1;
       if (!has_user) {
         buf_printf(b, "sp_poly_%s(", name); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
       }
@@ -12773,8 +12777,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user_cnt = 0;
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user_cnt; kk++)
-        if (comp_method_in_chain(c, kk, "count", NULL) >= 0 ||
-            comp_reader_in_chain(c, kk, "count", NULL)) has_user_cnt = 1;
+        if (comp_poly_arm_defines_n(c, kk, "count", argc) ||
+            (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, "count", NULL))) has_user_cnt = 1;
       int cblk = nt_ref(nt, id, "block");
       if (!has_user_cnt && argc == 0 && cblk >= 0) {
         int cbody = nt_ref(nt, cblk, "body");
@@ -12842,8 +12846,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
          (#3805). Defining `length` does not define `empty?` in Ruby either. */
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user_len; kk++)
-        if (comp_method_in_chain(c, kk, name, NULL) >= 0 ||
-            comp_reader_in_chain(c, kk, name, NULL)) has_user_len = 1;
+        if (comp_poly_arm_defines_n(c, kk, name, argc) ||
+            (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user_len = 1;
       if (!has_user_len) {
         if (sp_streq(name, "empty?")) {
           /* A user object has no #empty? of its own here, and sp_poly_length
@@ -12872,7 +12876,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     if (sp_streq(name, "to_s") || sp_streq(name, "inspect")) {
       int has_user_method = 0;
       for (int k = 0; k < c->nclasses; k++)
-        if (comp_method_in_chain(c, k, name, NULL) >= 0) { has_user_method = 1; break; }
+        if (comp_poly_arm_defines_n(c, k, name, argc)) { has_user_method = 1; break; }
       if (!has_user_method) {
         buf_printf(b, "%s(", sp_streq(name, "to_s") ? "sp_poly_to_s" : "sp_poly_inspect");
         emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
@@ -12885,7 +12889,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user_conv = 0;
       if (!g_poly_builtin_arm)
         for (int k = 0; k < c->nclasses && !has_user_conv; k++)
-          if (comp_method_in_chain(c, k, name, NULL) >= 0) has_user_conv = 1;
+          if (comp_poly_arm_defines_n(c, k, name, argc)) has_user_conv = 1;
       if (!has_user_conv) {
         /* sp_poly_to_i_meth: this is the METHOD, named by the program, so an
            object without it is NoMethodError rather than the conversion
@@ -12901,7 +12905,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user = 0;
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user; kk++)
-        if (comp_method_in_chain(c, kk, name, NULL) >= 0 || comp_reader_in_chain(c, kk, name, NULL)) has_user = 1;
+        if (comp_poly_arm_defines_n(c, kk, name, argc) || (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user = 1;
       if (!has_user) {
         const char *pfn = sp_streq(name, "real") ? "sp_poly_real"
                         : (sp_streq(name, "imaginary") || sp_streq(name, "imag")) ? "sp_poly_imaginary"
@@ -12916,7 +12920,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       int has_user = 0;
       if (!g_poly_builtin_arm)
       for (int kk = 0; kk < c->nclasses && !has_user; kk++)
-        if (comp_method_in_chain(c, kk, name, NULL) >= 0) has_user = 1;
+        if (comp_poly_arm_defines_n(c, kk, name, argc)) has_user = 1;
       if (!has_user) {
         int t = ++g_tmp;
         /* The arm yields a raw sp_sym. When the call's own slot is poly (a
@@ -12968,8 +12972,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         int has_user = 0;
         if (!g_poly_builtin_arm)
         for (int kk = 0; kk < c->nclasses && !has_user; kk++)
-          if (comp_method_in_chain(c, kk, name, NULL) >= 0 ||
-              comp_reader_in_chain(c, kk, name, NULL)) has_user = 1;
+          if (comp_poly_arm_defines_n(c, kk, name, argc) ||
+              (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user = 1;
         if (!has_user) {
           buf_printf(b, "%s(", pfn); emit_expr(c, recv, b); buf_puts(b, ")");
           return 1;
@@ -13224,7 +13228,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     int has_user = 0;
     if (!g_poly_builtin_arm)
     for (int kk = 0; kk < c->nclasses && !has_user; kk++)
-      if (comp_method_in_chain(c, kk, name, NULL) >= 0) has_user = 1;
+      if (comp_poly_arm_defines_n(c, kk, name, argc)) has_user = 1;
     if (!has_user) {
       const char *fn = sp_streq(name, "ljust") ? "sp_str_ljust"
                      : sp_streq(name, "rjust") ? "sp_str_rjust" : "sp_str_center";
@@ -13327,7 +13331,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     int has_user = 0;
     if (!g_poly_builtin_arm)
     for (int kk = 0; kk < c->nclasses && !has_user; kk++)
-      if (comp_method_in_chain(c, kk, "with", NULL) >= 0) has_user = 1;
+      if (comp_poly_arm_defines_n(c, kk, "with", argc)) has_user = 1;
     if (!has_user) {
       int en = 0; const int *els = nt_arr(nt, argv[0], "elements", &en);
       int th = ++g_tmp;
@@ -13354,8 +13358,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     int has_user = 0;
     if (!g_poly_builtin_arm)
     for (int kk = 0; kk < c->nclasses && !has_user; kk++)
-      if (comp_method_in_chain(c, kk, name, NULL) >= 0 ||
-          comp_reader_in_chain(c, kk, name, NULL)) has_user = 1;
+      if (comp_poly_arm_defines_n(c, kk, name, argc) ||
+          (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user = 1;
     if (!has_user) {
       buf_puts(b, "sp_poly_getbyte("); emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_int_expr(c, argv[0], b); buf_puts(b, ")");
@@ -13585,7 +13589,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
        poly dispatch (line ~4640) which generates both user and builtin arms. */
     int has_user_aref = 0;
     for (int k = 0; k < c->nclasses; k++)
-      if (comp_method_in_chain(c, k, "[]", NULL) >= 0) { has_user_aref = 1; break; }
+      if (comp_poly_arm_defines_n(c, k, "[]", argc)) { has_user_aref = 1; break; }
     if (!has_user_aref) {
       if (at == TY_SYMBOL) {
         buf_puts(b, "sp_poly_get_sym("); emit_expr(c, recv, b);
@@ -13695,7 +13699,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       comp_ntype(c, id) == TY_STRING) {
     int has_user_delete = 0;
     for (int k = 0; k < c->nclasses; k++)
-      if (comp_method_in_chain(c, k, "delete", NULL) >= 0) { has_user_delete = 1; break; }
+      if (comp_poly_arm_defines_n(c, k, "delete", argc)) { has_user_delete = 1; break; }
     if (!has_user_delete) {
       buf_puts(b, "sp_str_delete(sp_poly_to_s("); emit_expr(c, recv, b);
       buf_puts(b, "), "); emit_expr(c, argv[0], b); buf_puts(b, ")");
