@@ -30794,10 +30794,16 @@ else {
   if (recv >= 0 && argc == 1 && sp_streq(name, "===") && nt_type(nt, recv) &&
       (sp_streq(nt_type(nt, recv), "ConstantReadNode") ||
        (sp_streq(nt_type(nt, recv), "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0) ||
-       /* a parented path naming a builtin (exception) class -- Errno::ENOENT
-          === e -- is the same static dispatch; a path holding a VALUE
-          constant stays on the generic route (it does not type as a class) */
-       (sp_streq(nt_type(nt, recv), "ConstantPathNode") && comp_ntype(c, recv) == TY_CLASS))) {
+       /* a parented path is this same static dispatch only when its FULL
+          qualified name is a known builtin (exception) class -- Errno::ENOENT
+          === e. Typing alone is not enough: the leaf fallback types
+          Math::String as a class by its leaf, and claiming it here would
+          answer String === instead of the NameError the qualified constant
+          deserves. */
+       (sp_streq(nt_type(nt, recv), "ConstantPathNode") && ({
+          char _prq[192];
+          const char *_prn = isa_const_qualname(nt, recv, _prq, sizeof _prq);
+          _prn && (builtin_class_id(_prn) != 0 || is_builtin_exception_name(_prn)); })))) {
     char rq[192];
     const char *cn = isa_match_name(nt, recv, rq, sizeof rq);
     if (cn) {
