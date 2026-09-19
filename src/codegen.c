@@ -10243,7 +10243,13 @@ char *codegen_program(const NodeTable *nt) {
       "    return ((sp_Class){-116});\n"
       "  default: return ((sp_Class){-116});\n"
       "  }\n}\n"
+      /* a boxed exception walks its name chain (Errno::ENOENT -> SystemCallError
+         -> StandardError), and a name-backed class (SystemCallError, Errno::*,
+         OpenStruct) matches by name -- both are invisible to the cls_id walk */
       "static int sp_poly_is_a(sp_RbVal obj,sp_Class klass){\n"
+      "  if (obj.tag == SP_TAG_OBJ && obj.cls_id == SP_BUILTIN_EXCEPTION)\n"
+      "    return sp_poly_kind_of_builtin(obj, sp_class_to_s(klass));\n"
+      "  if (klass.name) return sp_poly_is_a_dyn(obj, sp_box_class(klass), 0);\n"
       "  return sp_class_le(sp_poly_get_class(obj),klass);\n}\n");
     for (int ci = 0; ci < c->nclasses; ci++) { free(cls_incs[ci]); free(cls_preps[ci]); }
     free(cls_incs); free(cls_nincs); free(cls_preps); free(cls_npreps);

@@ -1889,6 +1889,10 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
   if (!cty || (!sp_streq(cty, "ConstantReadNode") && !sp_streq(cty, "ConstantPathNode"))) return 0;
   const char *cn = nt_str(nt, cond_id, "name");
   if (!cn) return 0;
+  /* a qualified path naming a known builtin (exception) class matches by its
+     FULL name -- raised exceptions carry "Errno::ENOENT", not "ENOENT" */
+  char qbuf[160];
+  { const char *q = isa_match_name(nt, cond_id, qbuf, sizeof qbuf); if (q) cn = q; }
   /* a class-aliasing constant (Alias = SomeClass) tests the aliased class */
   { const char *_ra = resolve_class_alias(c, cn); if (_ra) cn = _ra; }
   if (sp_streq(cn, "Integer") || sp_streq(cn, "Fixnum"))
@@ -1944,6 +1948,13 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
       if (first) buf_puts(b, "0");
       buf_puts(b, "))");
     }
+    /* A known builtin class with no arm above -- an exception class most of
+       all: a boxed exception walks its hierarchy at run time, so `when
+       SystemCallError` and `when Errno::ENOENT` answer as CRuby does. The
+       silent alternative was a constant false: the arm compiled, ran, and
+       fell to else with no sound (#4558). */
+    else if (is_builtin_exception_name(cn) || builtin_class_id(cn) != 0)
+      buf_printf(b, "sp_poly_kind_of_builtin(%s, \"%s\")", tmp, cn);
     else return 0;
   }
   return 1;
@@ -4121,8 +4132,12 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           else {
           /* when ClassName / when Mod::Klass: Module#=== via is_a? semantics */
           const char *cty2 = nt_type(nt, conds[j]);
+          /* isa_match_name: a qualified path naming a builtin exception
+             matches by its FULL name ("Errno::ENOENT", the name the raised
+             exception carries), the leaf otherwise */
+          char cq2[192];
           const char *cn2 = cty2 && (sp_streq(cty2, "ConstantReadNode") || sp_streq(cty2, "ConstantPathNode"))
-                           ? nt_str(nt, conds[j], "name") : NULL;
+                           ? isa_match_name(nt, conds[j], cq2, sizeof cq2) : NULL;
           /* a VALUE constant (`STATE_TITLE = :title`; registered in
              comp_const with a real type) in `when` is an equality test,
              not Module#=== -- treating it as a class name folded every
@@ -4498,8 +4513,9 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
       if (pred >= 0) {
         /* when ClassName / Mod::Klass: Module#=== via is_a? semantics */
         const char *cty2 = nt_type(nt, conds[j]);
+        char cq2[192];
         const char *cn2 = cty2 && (sp_streq(cty2, "ConstantReadNode") || sp_streq(cty2, "ConstantPathNode"))
-                         ? nt_str(nt, conds[j], "name") : NULL;
+                         ? isa_match_name(nt, conds[j], cq2, sizeof cq2) : NULL;
         /* value constant in `when`: equality, not a class test (see above) */
         if (cn2 && ({ LocalVar *_wv = comp_const(c, cn2); _wv && _wv->type != TY_UNKNOWN && _wv->type != TY_CLASS; })) cn2 = NULL;
         /* An `ffi_const` is a value too, and it lives in its own table

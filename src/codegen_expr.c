@@ -2156,6 +2156,12 @@ void emit_expr(Compiler *c, int id, Buf *b) {
         int _bcid = builtin_class_id(nm);
         if (_bcid != 0)
           buf_printf(b, "((sp_Class){%d})", _bcid);  /* builtin class as value */
+        else if (is_builtin_exception_name(nm)) {
+          /* an exception class with no cls_id of its own (SystemCallError,
+             LoadError): a name-backed Class value, like OpenStruct above --
+             sp_class_eq and the boxed form both compare by name */
+          buf_printf(b, "((sp_Class){(sp_int)-1, SPL(\"%s\")})", nm);
+        }
         else {
           /* A constant defined NOWHERE in the program: spinel is closed-world
              and `const_set` only stores into a constant the program already
@@ -2211,6 +2217,12 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       int qid = builtin_class_id(qbuf);
       if (qid != 0) {
         buf_printf(b, "((sp_Class){(sp_int)%d, SPL(\"%s\")})", qid, qbuf);
+        return;
+      }
+      /* the Errno:: family (and its id-less siblings) is a name-backed
+         Class value; raised exceptions carry this same qualified name */
+      if (is_builtin_exception_name(qbuf)) {
+        buf_printf(b, "((sp_Class){(sp_int)-1, SPL(\"%s\")})", qbuf);
         return;
       }
     }
