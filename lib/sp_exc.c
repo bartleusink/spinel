@@ -1,5 +1,6 @@
 /* sp_exc.c -- cold sp_Exception ops (see sp_exc.h). 0 optcarrot uses. */
 #include "sp_exc.h"
+#include <errno.h>
 
 /* Check if exception class name `raised` is the same as or a subclass of
    `target`, using both the built-in hierarchy and the user hierarchy callback. */
@@ -314,6 +315,50 @@ sp_Exception *sp_exc_cause(volatile sp_Exception *ve) {
 sp_RbVal sp_exc_result(volatile sp_Exception *ve) {
   sp_Exception *e = (sp_Exception *)ve;
   return e ? e->result : sp_box_nil();
+}
+/* The Errno:: family by number. One table both ways: a raise site picks the
+   class for the errno it read, and SystemCallError#errno recovers the number
+   from the class name the exception carries -- no field on the exception, as
+   in CRuby the class determines the number (#4560). The names are the ones
+   the runtime raises today plus the common POSIX rest; an errno with no row
+   raises the parent SystemCallError, and a class with no row answers nil. */
+#define SP_ERRNO_ROWS(X) \
+  X(EPERM) X(ENOENT) X(ESRCH) X(EINTR) X(EIO) X(ENXIO) X(E2BIG) X(ENOEXEC) \
+  X(EBADF) X(ECHILD) X(EAGAIN) X(ENOMEM) X(EACCES) X(EFAULT) X(EBUSY) \
+  X(EEXIST) X(EXDEV) X(ENODEV) X(ENOTDIR) X(EISDIR) X(EINVAL) X(ENFILE) \
+  X(EMFILE) X(ENOTTY) X(EFBIG) X(ENOSPC) X(ESPIPE) X(EROFS) X(EMLINK) \
+  X(EPIPE) X(EDOM) X(ERANGE) X(EDEADLK) X(ENAMETOOLONG) X(ENOLCK) X(ENOSYS) \
+  X(ENOTEMPTY) X(ELOOP) X(ENOTSOCK) X(EMSGSIZE) X(EPROTOTYPE) \
+  X(ENOPROTOOPT) X(EPROTONOSUPPORT) X(EOPNOTSUPP) X(EAFNOSUPPORT) \
+  X(EADDRINUSE) X(EADDRNOTAVAIL) X(ENETDOWN) X(ENETUNREACH) X(ENETRESET) \
+  X(ECONNABORTED) X(ECONNRESET) X(ENOBUFS) X(EISCONN) X(ENOTCONN) \
+  X(ETIMEDOUT) X(ECONNREFUSED) X(EHOSTUNREACH) X(EALREADY) X(EINPROGRESS) \
+  X(ESTALE) X(EDQUOT) X(ECANCELED) X(EOVERFLOW) X(EILSEQ) X(ENOTSUP)
+static const struct { const char *name; int num; } SP_ERRNO_TAB[] = {
+#define SP_ERRNO_ROW(n) { "Errno::" #n, n },
+  SP_ERRNO_ROWS(SP_ERRNO_ROW)
+#undef SP_ERRNO_ROW
+};
+const char *sp_errno_class_name(int e) {
+  for (size_t i = 0; i < sizeof SP_ERRNO_TAB / sizeof SP_ERRNO_TAB[0]; i++)
+    if (SP_ERRNO_TAB[i].num == e) return SP_ERRNO_TAB[i].name;
+  return "SystemCallError";
+}
+/* Errno::ENOENT::Errno: the number the class name stands for */
+sp_int sp_errno_num(const char *cls) {
+  for (size_t i = 0; i < sizeof SP_ERRNO_TAB / sizeof SP_ERRNO_TAB[0]; i++)
+    if (!strcmp(SP_ERRNO_TAB[i].name, cls)) return SP_ERRNO_TAB[i].num;
+  return SP_INT_NIL;
+}
+/* SystemCallError#errno: the number of the Errno:: class the exception is
+   an instance of, nil for a plain SystemCallError; NoMethodError off the
+   family, as CRuby defines the reader on SystemCallError alone. */
+sp_RbVal sp_exc_errno_acc(sp_Exception *e) {SP_GC_ROOT(e);
+  sp_exc_acc_gate(e, "SystemCallError", "errno");
+  const char *cn = e->cls_name ? e->cls_name : "";
+  for (size_t i = 0; i < sizeof SP_ERRNO_TAB / sizeof SP_ERRNO_TAB[0]; i++)
+    if (!strcmp(SP_ERRNO_TAB[i].name, cn)) return sp_box_int(SP_ERRNO_TAB[i].num);
+  return sp_box_nil();
 }
 /* The builtin exception hierarchy, as {class, direct superclass} pairs. Shared
    by Exception#is_a? and the by-name #superclass lookup (#3031). */

@@ -9822,6 +9822,7 @@ static sp_RbVal sp_poly_exc_acc(sp_RbVal v, const char *which) {
   sp_Exception *e = (sp_Exception *)v.v.p;
   if (!strcmp(which, "message")) return sp_box_str(sp_exc_message(e));
   if (!strcmp(which, "result"))  return sp_exc_result(e);
+  if (!strcmp(which, "errno"))   return sp_exc_errno_acc(e);
   if (!strcmp(which, "key"))     return sp_exc_key_acc(e);
   if (!strcmp(which, "receiver")) return sp_exc_receiver_acc(e);
   if (!strcmp(which, "name"))    return sp_exc_name_acc(e);

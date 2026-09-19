@@ -29,6 +29,7 @@
 /* Provided by the generated TU / libspinel_rt.a. */
 extern void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *));
 extern SP_NORETURN void sp_raise_cls(const char *cls, const char *msg);
+extern const char *sp_errno_class_name(int e);   /* lib/sp_exc.c: the Errno:: class for a C errno */
 extern const char *sp_sprintf(const char *fmt, ...);
 
 /* The finalizer honors autoclose: an IO whose fd the program disowned
@@ -1178,28 +1179,7 @@ sp_bool sp_file_symlink(const char *path) {
 /* map errno to the matching Errno:: class (see sp_io.h) */
 SP_NORETURN void sp_file_raise_errno(const char *op, const char *path) {SP_GC_ROOT_STR(op);SP_GC_ROOT_STR(path);
   int e = errno;   /* read once, before the formatting can touch it */
-  sp_raise_cls(e == ENOENT ? "Errno::ENOENT" :
-               e == EACCES ? "Errno::EACCES" :
-               e == EEXIST ? "Errno::EEXIST" :
-               e == EPERM  ? "Errno::EPERM"  :
-               e == EBADF  ? "Errno::EBADF"  :
-               e == EINVAL ? "Errno::EINVAL" :
-               e == EISDIR ? "Errno::EISDIR" :
-               e == ENOTDIR ? "Errno::ENOTDIR" :
-               e == ENOTEMPTY ? "Errno::ENOTEMPTY" :
-               e == ELOOP ? "Errno::ELOOP" :
-               e == ENAMETOOLONG ? "Errno::ENAMETOOLONG" :
-               e == EROFS ? "Errno::EROFS" :
-               e == EXDEV ? "Errno::EXDEV" :
-               e == EBUSY ? "Errno::EBUSY" :
-               e == EADDRINUSE ? "Errno::EADDRINUSE" :
-               e == EADDRNOTAVAIL ? "Errno::EADDRNOTAVAIL" :
-               e == ECONNREFUSED ? "Errno::ECONNREFUSED" :
-               e == ECONNRESET ? "Errno::ECONNRESET" :
-               e == EPIPE  ? "Errno::EPIPE"  :
-               e == EAGAIN ? "Errno::EAGAIN" :
-               e == EAFNOSUPPORT ? "Errno::EAFNOSUPPORT" :
-               e == ENOTCONN ? "Errno::ENOTCONN" : "SystemCallError",
+  sp_raise_cls(sp_errno_class_name(e),
                sp_sprintf("%s @ %s - %s", strerror(e), op, path ? path : ""));
 }
 

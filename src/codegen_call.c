@@ -22973,6 +22973,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
   if (recv >= 0 && comp_ntype(c, recv) == TY_POLY && argc == 0 &&
       nt_ref(nt, id, "block") < 0 &&
       (sp_streq(name, "message") || sp_streq(name, "result") ||
+       sp_streq(name, "errno") ||
        sp_streq(name, "key") || sp_streq(name, "receiver"))) {
     int pu = 0;
     for (int k = 0; k < c->nclasses && !pu; k++)
@@ -23113,6 +23114,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if (sp_streq(name, "result") && argc == 0) {
       /* StopIteration#result: the finished iteration's return value. */
       buf_puts(b, "sp_exc_result("); emit_expr(c, recv, b); buf_puts(b, ")");
+      return;
+    }
+    if (sp_streq(name, "errno") && argc == 0) {
+      /* SystemCallError#errno: the number of the Errno:: class, by name (#4560) */
+      buf_puts(b, "sp_exc_errno_acc("); emit_expr(c, recv, b); buf_puts(b, ")");
       return;
     }
     if (sp_streq(name, "full_message")) {

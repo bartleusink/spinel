@@ -1914,6 +1914,7 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
       !an_user_defines_method(c, name) &&
       (sp_streq(name, "message") || sp_streq(name, "result") ||
+       sp_streq(name, "errno") ||
        sp_streq(name, "key") || sp_streq(name, "receiver")))
     { *out = sp_streq(name, "message") ? TY_STRING : TY_POLY; return 1; }
   /* Integer / Time accessors, Proc#arity on a poly value read out of a

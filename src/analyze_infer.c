@@ -4341,6 +4341,7 @@ else {
     if (sp_streq(name, "backtrace")) return TY_STR_ARRAY;  /* empty: no frames captured */
     if (sp_streq(name, "cause")) return TY_EXCEPTION;      /* the threaded cause, nil if none */
     if (sp_streq(name, "result")) return TY_POLY;          /* StopIteration#result, nil otherwise */
+    if (sp_streq(name, "errno")) return TY_POLY;           /* SystemCallError#errno: the Errno:: class's number, nil for the parent (#4560) */
     if (sp_streq(name, "name")) return TY_POLY;            /* NameError#name, nil otherwise */
     if (sp_streq(name, "dup") || sp_streq(name, "clone")) return rt;  /* a copy keeps the (subclass) type */
     if (sp_streq(name, "key") || sp_streq(name, "receiver") || sp_streq(name, "args") ||
@@ -6500,6 +6501,16 @@ TyKind infer_uncached(Compiler *c, int id) {
         char qbuf[160];
         snprintf(qbuf, sizeof qbuf, "%s::%s", qpnm, nm);
         if (builtin_class_id(qbuf) != 0) return TY_CLASS;
+      }
+      /* Errno::ENOENT::Errno: the number of the class, read at run time
+         since the numbers differ by platform (#4560) */
+      if (nm && sp_streq(nm, "Errno") && qpnm && qpty && sp_streq(qpty, "ConstantPathNode")) {
+        int gp = nt_ref(nt, qpar, "parent");
+        const char *gpty = gp >= 0 ? nt_type(nt, gp) : NULL;
+        const char *gpnm = gpty && sp_streq(gpty, "ConstantReadNode") ? nt_str(nt, gp, "name") : NULL;
+        char eq[160];
+        snprintf(eq, sizeof eq, "Errno::%s", qpnm);
+        if (gpnm && sp_streq(gpnm, "Errno") && is_builtin_exception_name(eq)) return TY_INT;
       }
     }
     const char *par_ty = par_id >= 0 ? nt_type(nt, par_id) : NULL;

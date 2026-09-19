@@ -2214,6 +2214,16 @@ void emit_expr(Compiler *c, int id, Buf *b) {
         return;
       }
     }
+    /* Errno::ENOENT::Errno: the class's number, from the runtime table
+       (the numbers differ by platform) (#4560) */
+    if (nm && sp_streq(nm, "Errno") && par_idc >= 0) {
+      char pq[160];
+      const char *pqn = isa_const_qualname(nt, par_idc, pq, sizeof pq);
+      if (pqn && !strncmp(pqn, "Errno::", 7) && is_builtin_exception_name(pqn)) {
+        buf_printf(b, "sp_errno_num(\"%s\")", pqn);
+        return;
+      }
+    }
     /* `klass::CODE` where the receiver is a VALUE rather than a written path:
        which constant it names is a run-time question, and answering it with
        the leaf-named one made two different receivers answer the same thing --

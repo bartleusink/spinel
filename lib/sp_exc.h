@@ -94,6 +94,9 @@ const char *sp_exc_message(volatile sp_Exception *ve);
 const char *sp_exc_inspect(void *p);   /* #<Cls: msg>, for the inspect dispatch */
 sp_Exception *sp_exc_cause(volatile sp_Exception *ve);
 sp_RbVal sp_exc_result(volatile sp_Exception *ve);
+const char *sp_errno_class_name(int e);   /* "Errno::ENOENT" for ENOENT; the parent for an unlisted one */
+sp_RbVal sp_exc_errno_acc(sp_Exception *e);   /* SystemCallError#errno */
+sp_int sp_errno_num(const char *cls);   /* Errno::ENOENT::Errno */
 const char *sp_exc_parent_of_name(const char *cls);
 sp_RbVal sp_exc_name_acc(sp_Exception *e);
 sp_RbVal sp_exc_key_acc(sp_Exception *e);
