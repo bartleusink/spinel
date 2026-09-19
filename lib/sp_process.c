@@ -59,6 +59,7 @@
 
 #include "sp_alloc.h"   /* sp_PolyArray, sp_RbVal, sp_box_*, sp_raise_cls */
 #include "sp_process_status.h"   /* sp_ProcessStatus, sp_box_process_status */
+#include "sp_system.h"   /* sp_last_status: $? */
 
 /* Local error-message builder. Returns a static buffer; copy the
    result before another call. Avoids sp_sprintf which would pull
@@ -379,6 +380,10 @@ sp_PolyArray *sp_process_waitpid2(sp_int pid) {
     }
     sp_raise_cls("SystemCallError", sp_errf_errno("waitpid failed", errno));
   }
+  /* $? follows the child this wait reaped, as it does after Kernel#system
+     and a backtick; before this a waitpid2 left $? at whatever the last
+     system call or backtick stored. */
+  sp_last_status = status;
   sp_PolyArray *pa = sp_PolyArray_new(); SP_GC_ROOT(pa);   /* the status object below is an allocation */
   sp_PolyArray_push(pa, sp_box_int((sp_int)r));
   /* Second element is a Process::Status instance wrapping (pid, status),
