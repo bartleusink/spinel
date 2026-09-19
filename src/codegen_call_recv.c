@@ -2785,7 +2785,11 @@ else {
         int boxed = ft != et;
         int ta = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp, tnorm = ++g_tmp;
         Buf ra = expr_buf(c, recv);
-        buf_printf(b, "({ sp_%sArray *_t%d = %s;", k, ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        /* The receiver is rooted across the index argument: a method's
+           return or a chain is held by nothing else, and an index that
+           allocates let a collection hand the array's slot on before the
+           length and the element were read. */
+        buf_printf(b, "({ sp_%sArray *_t%d = %s; SP_GC_ROOT(_t%d);", k, ta, ra.p ? ra.p : "NULL", ta); free(ra.p);
         buf_printf(b, " sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b); buf_puts(b, ";");
         buf_printf(b, " sp_int _t%d = sp_%sArray_length(_t%d);", tn, k, ta);
         buf_printf(b, " sp_int _t%d = _t%d < 0 ? _t%d + _t%d : _t%d;", tnorm, ti, ti, tn, ti);
@@ -4530,7 +4534,8 @@ else {
         int blk = nt_ref(nt, id, "block");
         int ta = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp, tnorm = ++g_tmp;
         Buf ra = expr_buf(c, recv);
-        buf_printf(b, "({ sp_PolyArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        /* rooted across the index argument, as the typed-array arm is */
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s; SP_GC_ROOT(_t%d);", ta, ra.p ? ra.p : "NULL", ta); free(ra.p);
         buf_printf(b, " sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b); buf_puts(b, ";");
         buf_printf(b, " sp_int _t%d = sp_PolyArray_length(_t%d);", tn, ta);
         buf_printf(b, " sp_int _t%d = _t%d < 0 ? _t%d + _t%d : _t%d;", tnorm, ti, ti, tn, ti);
@@ -5559,6 +5564,7 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
           TyKind vt = ty_hash_val(rt);
           int th = ++g_tmp, tk = ++g_tmp;
           buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+          buf_printf(b, "; SP_GC_ROOT(_t%d)", th);   /* rooted across the key, as the array arms are */
           buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
           int bbody = nt_ref(nt, blk, "body");
           int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
@@ -5608,6 +5614,7 @@ else {
         snprintf(keytmp, sizeof keytmp, "_t%d", tk);
         snprintf(htmp, sizeof htmp, "_t%d", th);
         buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d)", th);   /* rooted across the key, as the array arms are */
         if (hash_key_misses(c, argv[0], ty_hash_key(rt))) {
           /* a key of a kind the table cannot hold: the KeyError names the
              key itself, so box it once rather than look it up */
@@ -5641,6 +5648,7 @@ else {
         int needs_box = (vt != TY_POLY && ty_unify(vt, dt) == TY_POLY);
         int th = ++g_tmp, tk = ++g_tmp;
         buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d)", th);   /* rooted across the key, as the array arms are */
         buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
         if (needs_box) {
           buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
