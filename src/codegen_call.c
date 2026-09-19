@@ -23444,20 +23444,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         }
         TyKind cret = (TyKind)c->scopes[defmi].ret;
         /* Stash the receiver object in a temp (referenced in every switch case) */
-        char objptr[64];
+        Buf objptr; memset(&objptr, 0, sizeof objptr);   /* heap text: a 64-byte buffer cut long local names silently */
         const char *rty = nt_type(nt, robj);
-        if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"))) {
-          Buf rb = expr_buf(c, robj);
-          snprintf(objptr, sizeof objptr, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
+        if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode")))
+          objptr = expr_buf(c, robj);
         else {
           int ot = ++g_tmp;
           Buf rb = expr_buf(c, robj);
           emit_indent(g_pre, g_indent);
           emit_ctype(c, rrt, g_pre);
           buf_printf(g_pre, " _t%d = %s;\n", ot, rb.p ? rb.p : ""); free(rb.p);
-          snprintf(objptr, sizeof objptr, "_t%d", ot);
+          buf_printf(&objptr, "_t%d", ot);
         }
         if (nimpl <= 1) {
           /* single implementation: call directly. The value still has to fit
@@ -23498,7 +23495,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           buf_puts(b, "({ ");
           if (unified == TY_POLY) buf_puts(b, "sp_RbVal");
           else emit_ctype(c, unified, b);
-          buf_printf(b, " _t%d; switch ((%s)->cls_id) {", rtmp, objptr);
+          buf_printf(b, " _t%d; switch ((%s)->cls_id) {", rtmp, objptr.p ? objptr.p : "");
           for (int k = 0; k < c->nclasses; k++) {
             if (!is_descendant(c, k, cid)) continue;
             int kmi = comp_cmethod_in_chain(c, k, name, NULL);
@@ -23559,6 +23556,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           }
           buf_printf(b, " } _t%d; })", rtmp);
         }
+        free(objptr.p);
         return;
       }
     }
