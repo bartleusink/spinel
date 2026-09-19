@@ -3487,6 +3487,7 @@ else {
     fprintf(stderr, "Parse errors in '%s':\n", source_file);
     const char *types_out = getenv("SPINEL_EMIT_TYPES");
     FILE *jf = (types_out && *types_out) ? fopen(types_out, "w") : NULL;
+    if (types_out && *types_out && !jf) fprintf(stderr, "spinel: cannot write '%s'\n", types_out);
     if (jf) fputs("{\n  \"types\": [\n\n  ],\n  \"diagnostics\": [\n", jf);
     int nd = 0;
     pm_diagnostic_t *diag;
