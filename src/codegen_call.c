@@ -2817,11 +2817,38 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
        exactly that shape) */
     int re_poly = comp_ntype(c, argv[0]) == TY_POLY;
     int im_poly = argc >= 2 && comp_ntype(c, argv[1]) == TY_POLY;
+    if (re_poly || im_poly) {
+      /* A boxed component carries its class at RUN time, and the flag says
+         which components render as Float. Read off the static type it is
+         clear for a boxed one, so `Complex([3.0, nil][0])` came out
+         Integer-classed -- (3+0i), with #real answering an Integer -- while
+         the same literal written plainly is (3.0+0i). Hold each component in
+         a temp, take the flag from its tag, and convert that same temp. */
+      int tre = ++g_tmp, tim = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", tre);
+      if (re_poly) emit_boxed(c, argv[0], b);
+      else { buf_puts(b, "sp_box_nil()"); }
+      buf_printf(b, "; sp_RbVal _t%d = ", tim);
+      if (im_poly) emit_boxed(c, argv[1], b);
+      else { buf_puts(b, "sp_box_nil()"); }
+      buf_puts(b, "; (sp_Complex){");
+      if (re_poly) buf_printf(b, "sp_poly_to_f(_t%d)", tre);
+      else { buf_puts(b, re_rat ? "sp_rational_to_f(" : "(sp_float)("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      buf_puts(b, ", ");
+      if (im_poly) buf_printf(b, "sp_poly_to_f(_t%d)", tim);
+      else if (argc >= 2) { buf_puts(b, im_rat ? "sp_rational_to_f(" : "(sp_float)("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+      else buf_puts(b, "0");
+      buf_printf(b, ", (unsigned char)(%d", fl);
+      if (re_poly) buf_printf(b, " | (_t%d.tag == SP_TAG_FLT ? 1 : 0)", tre);
+      if (im_poly) buf_printf(b, " | (_t%d.tag == SP_TAG_FLT ? 2 : 0)", tim);
+      buf_puts(b, ")}; })");
+      return 1;
+    }
     buf_puts(b, "((sp_Complex){");
-    buf_puts(b, re_rat ? "sp_rational_to_f(" : re_poly ? "sp_poly_to_f(" : "(sp_float)(");
+    buf_puts(b, re_rat ? "sp_rational_to_f(" : "(sp_float)(");
     emit_expr(c, argv[0], b);
     buf_puts(b, "), ");
-    buf_puts(b, im_rat ? "sp_rational_to_f(" : im_poly ? "sp_poly_to_f(" : "(sp_float)(");
+    buf_puts(b, im_rat ? "sp_rational_to_f(" : "(sp_float)(");
     if (argc >= 2) emit_expr(c, argv[1], b);
     else buf_puts(b, "0");
     buf_printf(b, "), %d})", fl);
