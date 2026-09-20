@@ -26977,8 +26977,21 @@ else {
         if (yield_site_type(c, n) == TY_POLY) { buf_puts(b, "sp_poly_arg_perm("); emit_expr(c, n, b); buf_puts(b, ")"); } \
         else emit_int_expr_nilable(c, n, b); \
       } while (0)
+      /* A mode the analysis cannot classify (a boxed read, a computed flags
+         word in a poly slot) is decided at run time rather than assumed to be
+         a mode string -- assumed, `File.open(path, h[:mode])` reached
+         sp_poly_arg_str_chk and raised "no implicit conversion of Integer
+         into String" for the flag word CRuby accepts (#4596). */
+      int poly_mode = mnode >= 0 && !int_mode && comp_ntype(c, mnode) == TY_POLY;
       #define EMIT_FILE_OPEN() do { \
-        if (int_mode) { \
+        if (poly_mode) { \
+          buf_puts(b, "sp_File_open_val("); \
+          emit_path_expr(c, argv[0], b); buf_puts(b, ", "); \
+          emit_boxed(c, mnode, b); buf_puts(b, ", "); \
+          if (perm >= 0) emit_perm_expr(c, perm, b); else buf_puts(b, "SP_INT_NIL"); \
+          buf_puts(b, ")"); \
+        } \
+        else if (int_mode) { \
           buf_puts(b, perm >= 0 ? "sp_File_open_flags_perm(" : "sp_File_open_flags("); \
           emit_path_expr(c, argv[0], b); buf_puts(b, ", "); \
           emit_int_expr(c, mnode, b); \

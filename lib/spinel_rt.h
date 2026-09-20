@@ -10463,6 +10463,19 @@ sp_int sp_file_write_mode(const char *path, const char *data, const char *mode);
 sp_File *sp_File_open_flags(const char *path, sp_int fl);
 sp_File *sp_File_open_flags_perm(const char *path, sp_int fl, sp_int perm);
 sp_File *sp_File_open_perm(const char *path, const char *mode, sp_int perm);
+/* The same open, with a mode whose kind only the run time knows: a value read
+   out of a mixed container, or a flags word a caller computed into a boxed
+   slot. CRuby asks #to_int before #to_str, so an Integer-ish mode is a flag
+   word and anything else a mode string; the typed arms above are picked by the
+   argument's static type, and this is the arm for when there is none to pick
+   by (#4596). A nil mode is CRuby's default "r". perm may be SP_INT_NIL, which
+   both callees already read as 0666. */
+static sp_File *sp_File_open_val(const char *path, sp_RbVal mode, sp_int perm) {
+  if (mode.tag == SP_TAG_INT || mode.tag == SP_TAG_BIGINT)
+    return sp_File_open_flags_perm(path, sp_poly_to_i(mode), perm);
+  if (mode.tag == SP_TAG_NIL) return sp_File_open_perm(path, "r", perm);
+  return sp_File_open_perm(path, sp_poly_arg_str_chk(mode), perm);
+}
 /* File.stat(path) / File#stat: a path-carrying handle whose metadata methods
    (size/mtime/atime/ctime/ftype/mode) stat the path -- the pragmatic subset of
    File::Stat this backend models (#2775, #2790). */
