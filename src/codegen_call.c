@@ -21696,6 +21696,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        (sp_streq(name, "winsize") && sp_feature_enabled("io/console")) ||
        sp_streq(name, "readlines") || sp_streq(name, "rewind") ||
        sp_streq(name, "readpartial") ||
+       /* the descriptor surface a boxed handle needs as much as a typed one:
+          an fd table is a mixed Hash (0/1/2 an IO, the rest Files), so every
+          one of these reached the unresolved-call gate (#4611) */
+       sp_streq(name, "stat") || sp_streq(name, "seek") || sp_streq(name, "tell") ||
+       sp_streq(name, "pos") || sp_streq(name, "pread") || sp_streq(name, "pwrite") ||
+       sp_streq(name, "fsync") || sp_streq(name, "fdatasync") ||
        sp_streq(name, "sync") || sp_streq(name, "sync=") ||
        /* the non-blocking pair: a Socket destructured out of Socket.pair, or
           read back out of a container, is a poly value like any other, and
@@ -21827,6 +21833,31 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_puts(b, "); })");
       }
       else if (sp_streq(name, "read")) buf_printf(b, "sp_File_read(_t%d); })", tio2);
+      /* the same answers the typed arms give for these names */
+      else if (sp_streq(name, "stat") && argc == 0)
+        buf_printf(b, "sp_io_stat_handle(_t%d); })", tio2);
+      else if (sp_streq(name, "seek") && argc >= 1) {
+        buf_printf(b, "sp_File_seek(_t%d, ", tio2);
+        emit_int_expr(c, argv[0], b); buf_puts(b, ", ");
+        if (argc >= 2) emit_int_expr(c, argv[1], b); else buf_puts(b, "0");
+        buf_puts(b, "); })");
+      }
+      else if (sp_streq(name, "tell") || sp_streq(name, "pos"))
+        buf_printf(b, "sp_File_tell(_t%d); })", tio2);
+      else if (sp_streq(name, "pread") && argc >= 1) {
+        buf_printf(b, "sp_File_pread(_t%d, ", tio2);
+        emit_int_expr(c, argv[0], b); buf_puts(b, ", ");
+        if (argc >= 2) emit_int_expr(c, argv[1], b); else buf_puts(b, "0");
+        buf_puts(b, "); })");
+      }
+      else if (sp_streq(name, "pwrite") && argc >= 1) {
+        buf_printf(b, "sp_File_pwrite(_t%d, ", tio2);
+        emit_to_s_expr(c, argv[0], b); buf_puts(b, ", ");
+        if (argc >= 2) emit_int_expr(c, argv[1], b); else buf_puts(b, "0");
+        buf_puts(b, "); })");
+      }
+      else if (sp_streq(name, "fsync") || sp_streq(name, "fdatasync"))
+        buf_printf(b, "sp_File_fsync(_t%d); })", tio2);
       else if (sp_streq(name, "gets")) buf_printf(b, "sp_File_gets(_t%d); })", tio2);
       else if (sp_streq(name, "readline")) buf_printf(b, "sp_File_readline_sep(_t%d, \"\\n\", 0, 0); })", tio2);
       /* readpartial takes a count and an optional buffer, nothing else:
