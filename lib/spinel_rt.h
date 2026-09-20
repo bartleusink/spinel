@@ -10487,6 +10487,9 @@ sp_bool sp_stat_nofollow(sp_File *f);
 sp_int sp_stat_size(sp_File *f);
 sp_int sp_stat_field(sp_File *f, sp_int which);   /* uid/gid/nlink/dev/ino/blksize/blocks/rdev */
 sp_int sp_stat_pred(sp_File *f, sp_int kind);     /* pipe?/zero?/readable?/... /size? */
+sp_int sp_File_truncate(sp_File *f, sp_int n);   /* File#truncate: ftruncate(2) on the handle */
+sp_int sp_stat_type_pred(sp_File *f, sp_int kind);  /* file?/directory?/symlink?/... honouring the handle's stat mode */
+sp_Time sp_stat_handle_time(sp_File *f, sp_int kind);  /* mtime/atime/ctime, likewise */
 sp_int sp_stat_mode(sp_File *f);
 const char *sp_stat_ftype(sp_File *f);
 sp_int sp_file_stat_mode(const char *path);

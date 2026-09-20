@@ -2121,6 +2121,61 @@ sp_int sp_stat_field(sp_File *f, sp_int which) {SP_GC_ROOT(f);
     default: return (sp_int)st.st_rdev;
   }
 }
+/* The TIME accessors of File::Stat, reading the struct the handle's own mode
+   selects. Like the type predicates below, these went through the path
+   helpers -- sp_file_mtime(path) always stat(2)s -- so an lstat handle
+   reported the TARGET's times and File.lutime was invisible through it
+   (#4616). birthtime keeps the path helper: it needs statx/st_birthtimespec,
+   which the plain struct here does not carry portably. Kinds: 0=mtime
+   1=atime 2=ctime. */
+sp_Time sp_stat_handle_time(sp_File *f, sp_int kind) {SP_GC_ROOT(f);
+  struct stat st;
+  int r;
+  if (sp_stat_pathless(f)) r = fstat(fileno(f->fp), &st);
+  else {
+    const char *p = (f && f->path) ? f->path : "";
+    r = sp_stat_nofollow(f) ? lstat(p, &st) : stat(p, &st);
+  }
+  if (r != 0) {
+    sp_file_raise_errno("rb_file_s_mtime", (f && f->path) ? f->path : "");
+    return (sp_Time){0, 0, 0};
+  }
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+  struct timespec ts = kind == 1 ? st.st_atimespec : kind == 2 ? st.st_ctimespec : st.st_mtimespec;
+#else
+  struct timespec ts = kind == 1 ? st.st_atim : kind == 2 ? st.st_ctim : st.st_mtim;
+#endif
+  return (sp_Time){(int64_t)ts.tv_sec, (int32_t)ts.tv_nsec, 0};
+}
+/* The TYPE predicates of File::Stat. These used to be answered from the
+   handle's PATH -- sp_file_symlink(path), sp_file_file(path) -- which throws
+   away which of stat(2) and lstat(2) made the handle: `File.stat(link)`
+   answered symlink? true (the path helper lstats) and `File.lstat(link)`
+   answered file? true (that one stats), both backwards (#4616). Read the
+   struct once, the way every other accessor here picks it. Kinds: 0=file?
+   1=directory? 2=symlink? 3=owned? 4=grpowned? 5=setuid? 6=setgid?
+   7=sticky? 8=socket?. */
+sp_int sp_stat_type_pred(sp_File *f, sp_int kind) {SP_GC_ROOT(f);
+  struct stat st;
+  int r;
+  if (sp_stat_pathless(f)) r = fstat(fileno(f->fp), &st);
+  else {
+    const char *p = (f && f->path) ? f->path : "";
+    r = sp_stat_nofollow(f) ? lstat(p, &st) : stat(p, &st);
+  }
+  if (r != 0) return 0;
+  switch (kind) {
+    case 0: return S_ISREG(st.st_mode) ? 1 : 0;
+    case 1: return S_ISDIR(st.st_mode) ? 1 : 0;
+    case 2: return S_ISLNK(st.st_mode) ? 1 : 0;
+    case 3: return st.st_uid == geteuid() ? 1 : 0;
+    case 4: return st.st_gid == getegid() ? 1 : 0;
+    case 5: return (st.st_mode & S_ISUID) ? 1 : 0;
+    case 6: return (st.st_mode & S_ISGID) ? 1 : 0;
+    case 7: return (st.st_mode & S_ISVTX) ? 1 : 0;
+    default: return S_ISSOCK(st.st_mode) ? 1 : 0;
+  }
+}
 /* The mode-derived predicates of File::Stat that no path helper covers. Kinds:
    0=pipe? 1=zero? 2=readable? 3=writable? 4=executable? 5=blockdev?
    6=chardev? 7=size? (non-zero size, else nil). */
@@ -2143,6 +2198,18 @@ sp_int sp_stat_pred(sp_File *f, sp_int kind) {SP_GC_ROOT(f);
     case 6: return S_ISCHR(st.st_mode) ? 1 : 0;
     default: return st.st_size == 0 ? SP_INT_NIL : (sp_int)st.st_size;
   }
+}
+/* File#truncate(n): ftruncate(2) on the open descriptor, which is what CRuby
+   does -- the class-method form truncates by path and cannot serve a handle
+   whose path is gone or absent. Buffered bytes are flushed first so the file
+   is cut at the size the program believes it has written. */
+sp_int sp_File_truncate(sp_File *f, sp_int n) {SP_GC_ROOT(f);
+  SP_IO_OPEN(f);
+  if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  fflush(f->fp);
+  if (ftruncate(fileno(f->fp), (off_t)n) != 0)
+    sp_raise_cls("Errno::EINVAL", "Invalid argument @ rb_file_truncate");
+  return 0;
 }
 sp_int sp_stat_size(sp_File *f) {SP_GC_ROOT(f);
   struct stat st;
