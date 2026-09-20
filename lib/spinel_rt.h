@@ -8976,6 +8976,17 @@ static sp_bool sp_poly_fiber_alive(sp_RbVal v) {
   sp_raise_nomethod(sp_nomethod_msg("alive?", v));
   return 0;
 }
+/* `kill` on a boxed Thread or Fiber: the sibling of the two above, for the
+   handle a shutdown path holds in an Array or an ivar rather than in a local
+   spinel can trace (#4619). CRuby answers the receiver. */
+sp_thread *sp_Thread_kill(sp_thread *t);
+sp_Fiber  *sp_Fiber_kill(sp_Fiber *f);
+static sp_RbVal sp_poly_thread_kill(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) { sp_Thread_kill((sp_thread *)v.v.p); return v; }
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FIBER)  { sp_Fiber_kill((sp_Fiber *)v.v.p); return v; }
+  sp_raise_nomethod(sp_nomethod_msg("kill", v));
+  return sp_box_nil();
+}
 static sp_RbVal sp_poly_thread_status(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) return sp_Thread_status((sp_thread *)v.v.p);
   sp_raise_nomethod(sp_nomethod_msg("status", v));

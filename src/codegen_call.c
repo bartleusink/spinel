@@ -6049,6 +6049,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         else emit_unbox_text(c, ret, av, b);
         buf_puts(b, "; break;");
       }
+      if (argc == 0 && sp_streq(name, "kill")) {
+        char kv[80];
+        snprintf(kv, sizeof kv, "sp_poly_thread_kill(_t%d)", tv);
+        buf_printf(b, " case SP_BUILTIN_THREAD: case SP_BUILTIN_FIBER: _t%d = ", tr);
+        if (ret == TY_POLY) buf_puts(b, kv);
+        else emit_unbox_text(c, ret, kv, b);
+        buf_puts(b, "; break;");
+      }
       if (argc == 0 && sp_streq(name, "status")) {
         char sv[80];
         snprintf(sv, sizeof sv, "sp_poly_thread_status(_t%d)", tv);
@@ -31159,6 +31167,9 @@ else {
        (#4463); these answer their own C types, not a boxed value */
     else if (sp_streq(name, "alive?")) pm = "sp_poly_fiber_alive";
     else if (sp_streq(name, "status")) pm = "sp_poly_thread_status";
+    /* and #kill, which a shutdown path reaches through the handle it kept in
+       an Array or an ivar rather than a traceable local (#4619) */
+    else if (sp_streq(name, "kill")) pm = "sp_poly_thread_kill";
     if (pm) {
       /* Attr readers count as user definitions too: `attr_accessor :value`
          must shadow the builtin helper exactly like `def value` does, or the
