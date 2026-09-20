@@ -22,6 +22,37 @@
 #include <errno.h>
 #include <fcntl.h>   /* fcntl flags for #close_on_exec?, #fcntl */
 #include <poll.h>    /* POLLIN for the socket read park */
+
+/* Per-call "do not block" for send(2). Linux honours it; Darwin and the BSDs
+   accept the flag and sleep anyway once the send buffer is full, which is why
+   sp_sock_room below exists. Where the flag is missing entirely it is 0 and
+   the room cap carries the socket on its own. */
+#ifdef MSG_DONTWAIT
+#define SP_MSG_DONTWAIT MSG_DONTWAIT
+#else
+#define SP_MSG_DONTWAIT 0
+#endif
+
+/* Bytes the send buffer can take right now, or -1 when the kernel will not
+   say. Capping a send at this is what keeps a blocking socket's write out of
+   the kernel's sleep: poll(POLLOUT) answers "there is room", not "there is
+   room for all of n", so a 64 KB write into a nearly full buffer blocks even
+   though the descriptor was reported writable. */
+static long sp_sock_room(int fd) {
+  int capacity = 0, queued = 0;
+  socklen_t len = sizeof capacity;
+  if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &capacity, &len) != 0 || capacity <= 0) return -1;
+#if defined(SO_NWRITE)          /* Darwin: bytes not yet handed to the peer */
+  len = sizeof queued;
+  if (getsockopt(fd, SOL_SOCKET, SO_NWRITE, &queued, &len) != 0) return -1;
+#elif defined(TIOCOUTQ)         /* Linux (SIOCOUTQ): same question, via ioctl */
+  if (ioctl(fd, TIOCOUTQ, &queued) != 0) return -1;
+#else
+  return -1;
+#endif
+  long room = (long)capacity - (long)queued;
+  return room > 0 ? room : 0;
+}
 #if !defined(__APPLE__) && !defined(__GLIBC__)
 #include <stdio_ext.h>  /* musl __freadahead: pending stdio read-buffer bytes */
 #endif
@@ -236,7 +267,13 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
      blocking. That is the cheap shape: no probe on the way in, and the park
      only on the attempt that actually could not proceed. A socket shares its
      descriptor with the stdio READ side, where fgets treats EAGAIN as EOF
-     (see sp_io_fdopen_sock), so it keeps the probe. */
+     (see sp_io_fdopen_sock), so it cannot carry O_NONBLOCK -- it takes
+     MSG_DONTWAIT per send(2) instead, which says the same thing for this one
+     call and leaves the descriptor's flags, and the read side, untouched.
+     The probe alone was not enough: it answers "there is room", not "there is
+     room for all of n", so a 64 KB write into a nearly full buffer still slept
+     in the kernel with the collector waiting on this worker (the #4528 shape,
+     on the write side). */
   int nb = 0;
   if (!f->is_sock) {
     if (!f->wnonblock) {
@@ -246,11 +283,24 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
     nb = f->wnonblock == 1;
   }
   while (off < n) {
+    ssize_t put;
+    size_t want = n - off;
     if (!nb) sp_io_wait_writable(f);   /* frees the worker while the buffer is full */
-    ssize_t put = write(fd, s + off, n - off);
+    if (f->is_sock) {
+      long room = sp_sock_room(fd);
+      /* No room: go back to the park above, which is where waiting belongs.
+         It cannot spin -- POLLOUT is raised only once the free space reaches
+         SO_SNDLOWAT (2048 by default), so a buffer this full does not report
+         the descriptor writable and the park really parks. */
+      if (room == 0) continue;
+      if (room > 0 && (size_t)room < want) want = (size_t)room;
+      put = send(fd, s + off, want, SP_MSG_DONTWAIT);
+    } else {
+      put = write(fd, s + off, want);
+    }
     if (put < 0) {
       if (errno == EINTR) continue;
-      if (nb && (errno == EAGAIN || errno == EWOULDBLOCK)) { sp_io_wait_writable(f); continue; }
+      if ((nb || f->is_sock) && (errno == EAGAIN || errno == EWOULDBLOCK)) { sp_io_wait_writable(f); continue; }
       sp_file_raise_errno("write", f->is_sock ? "socket" : "pipe");
     }
     off += (size_t)put;
