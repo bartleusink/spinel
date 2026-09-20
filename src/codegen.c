@@ -6536,6 +6536,7 @@ static void emit_obj_to_json_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "static const char *sp_obj_to_json(sp_RbVal v) {\n");
   buf_puts(b, "  switch (v.cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
+    if (comp_class_is_module(c, &c->classes[i])) continue;   /* no instances (#4654) */
     int defc = -1;
     int mi = obj_to_json_method(c, i, &defc);
     if (mi < 0) continue;
@@ -6606,10 +6607,14 @@ static void emit_obj_to_h_dispatch(Compiler *c, Buf *b) {
     }
     buf_puts(b, "      return sp_box_obj(h, SP_BUILTIN_SYM_POLY_HASH);\n    }\n");
   }
-  /* a plain class with its own #deconstruct_keys answers through it */
+  /* a plain class with its own #deconstruct_keys answers through it. A
+     module has no instances and its methods are emitted only as the
+     includer's, so an arm for it named a function no TU defines and the
+     program did not link (#4654, the shape of #4533 at this switch). */
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
     if (ci->is_struct || ci->is_data || !ci->instantiated || ci->is_native_class) continue;
+    if (comp_class_is_module(c, ci)) continue;
     int defc = -1;
     int mi = obj_deconstruct_keys_method(c, i, &defc);
     if (mi < 0) continue;
@@ -6656,7 +6661,7 @@ static int obj_to_a_method(Compiler *c, int cid, int *defc) {
 static int obj_to_a_any(Compiler *c) {
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
-    if (ci->is_native_class || !ci->instantiated) continue;
+    if (ci->is_native_class || !ci->instantiated || comp_class_is_module(c, ci)) continue;   /* a module has no instances (#4654) */
     if (obj_to_a_method(c, i, NULL) >= 0) return 1;
   }
   return 0;
@@ -6667,7 +6672,7 @@ static void emit_obj_to_a_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "  switch (v.cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
-    if (ci->is_native_class || !ci->instantiated) continue;
+    if (ci->is_native_class || !ci->instantiated || comp_class_is_module(c, ci)) continue;   /* a module has no instances (#4654) */
     int defc = -1;
     int mi = obj_to_a_method(c, i, &defc);
     if (mi < 0) continue;
@@ -6699,7 +6704,7 @@ static int obj_to_ary_method(Compiler *c, int cid, int *defc) {
 static int obj_to_ary_any(Compiler *c) {
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
-    if (ci->is_native_class || !ci->instantiated) continue;
+    if (ci->is_native_class || !ci->instantiated || comp_class_is_module(c, ci)) continue;   /* a module has no instances (#4654) */
     if (obj_to_ary_method(c, i, NULL) >= 0) return 1;
   }
   return 0;
@@ -6710,7 +6715,7 @@ static void emit_obj_to_ary_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "  switch (v.cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
-    if (ci->is_native_class || !ci->instantiated) continue;
+    if (ci->is_native_class || !ci->instantiated || comp_class_is_module(c, ci)) continue;   /* a module has no instances (#4654) */
     int defc = -1;
     int mi = obj_to_ary_method(c, i, &defc);
     if (mi < 0) continue;
