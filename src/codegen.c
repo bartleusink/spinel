@@ -11047,6 +11047,27 @@ char *codegen_program(const NodeTable *nt) {
                   different literal. */
                lv->type == TY_STRING ? "NULL" : default_value(lv->type));
   }
+  /* One slot per DISTINCT out-of-int64 literal, filled on first use. The
+     scan is over the AST rather than the emission, so the slots exist before
+     the mark function below is written. */
+  for (int id = 0; id < c->nt->count; id++) {
+    if (nt_kind(c->nt, id) != NK_IntegerNode) continue;
+    const char *bv = nt_str(c->nt, id, "bigval");
+    if (bv) bigl_intern(bv);
+  }
+  if (g_bigl_n) {
+    buf_printf(&b, "static sp_Bigint *sp_bigl[%d];\n", g_bigl_n);
+    buf_printf(&b, "static const char *const sp_bigl_s[%d] = {", g_bigl_n);
+    for (int i = 0; i < g_bigl_n; i++)
+      buf_printf(&b, "%s\"%s\"", i ? ", " : "", g_bigl_val[i]);
+    buf_puts(&b, "};\n");
+    /* A FUNCTION, not an inline `x ? x : (x = ...)`: the same literal can be
+       both operands of one call, and two such expressions in one argument
+       list are unsequenced accesses to the slot (-Wunsequenced). */
+    buf_puts(&b, "static sp_Bigint *sp_bigl_get(int i) {\n"
+                 "  if (!sp_bigl[i]) sp_bigl[i] = sp_bigint_new_str(sp_bigl_s[i], 10);\n"
+                 "  return sp_bigl[i];\n}\n\n");
+  }
   for (int i = 0; i < c->nconsts; i++) {
     LocalVar *lv = &c->consts[i];
     /* `NAME = nil` still needs a slot: the assignment and every read reference
@@ -11131,6 +11152,9 @@ char *codegen_program(const NodeTable *nt) {
        runtime's own sp_re_mark_globals (lib/spinel_rt.h), so a program with
        none of the globals above carries no marker and no startup hook. */
     if (g_has_dyn_syms) buf_puts(&mk, "  sp_mark_dyn_syms();\n");
+    if (g_bigl_n)
+      buf_printf(&mk, "  for (int _i = 0; _i < %d; _i++) if (sp_bigl[_i]) sp_gc_mark((void *)sp_bigl[_i]);\n",
+                 g_bigl_n);
     g_has_user_global_marks = (mk.p && mk.len > 0);
     if (g_has_user_global_marks) {
       buf_puts(&b, "static void sp_mark_user_globals(void) {\n");

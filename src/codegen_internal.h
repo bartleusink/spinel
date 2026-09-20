@@ -351,6 +351,10 @@ extern int g_needs_class_machinery;
    runtime default (sp_re_mark_globals, installed by a constructor before main),
    so it -- and the sp_tu_init hook override -- are skipped. */
 extern int g_has_user_global_marks;
+/* Distinct out-of-int64 integer literals, shared per TU (see codegen_util.c). */
+extern char **g_bigl_val;
+extern int g_bigl_n;
+int bigl_intern(const char *v);
 /* Whole-program feature presence, computed once before main is emitted, so the
    main() prologue can skip setup a trivial program never needs:
    g_uses_symbols -> sp_tu_init sets sp_sym_name_fn; g_uses_regex -> sp_tu_init
