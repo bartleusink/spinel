@@ -10146,7 +10146,8 @@ static int stmts_diverge(Compiler *c, int stmts) {
   const char *lt = nt_type(nt, last);
   if (!lt) return 0;
   if (sp_streq(lt, "ReturnNode")) return 1;
-  if (sp_streq(lt, "CallNode") && nt_ref(nt, last, "receiver") < 0) {
+  if (sp_streq(lt, "CallNode") && nt_ref(nt, last, "receiver") < 0 &&
+      !bare_call_class_owned(c, last)) {
     const char *nm = nt_str(nt, last, "name");
     if (nm && (sp_streq(nm, "raise") || sp_streq(nm, "throw"))) return 1;
   }
@@ -10192,7 +10193,7 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   /* `raise` / `throw` diverge -- no value to return; emit as a plain statement
      (throw unwinds to its catch, so it never falls through with a value; #3087). */
   if (sp_streq(ty, "CallNode") && nt_ref(nt, id, "receiver") < 0 &&
-      nt_str(nt, id, "name") &&
+      nt_str(nt, id, "name") && !bare_call_class_owned(c, id) &&
       (sp_streq(nt_str(nt, id, "name"), "raise") || sp_streq(nt_str(nt, id, "name"), "throw"))) {
     emit_indent(b, indent); emit_expr(c, id, b); buf_puts(b, ";\n");
     return;

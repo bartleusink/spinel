@@ -103,6 +103,9 @@ int class_has_coerce_shape(Compiler *c, int k);
 int class_has_to_str_shape(Compiler *c, int k);
 int is_eq_op(const char *op);
 int is_void_call(const char *name);
+/* The enclosing scope's own chain owns this receiverless call's name, so no
+   Kernel arm may claim it (the codegen twin is bare_call_class_owned). */
+int an_bare_call_class_owned(Compiler *c, int id);
 /* Resolve a struct member from a literal key node: a SymbolNode names a
    member; an IntegerNode is a positional index. Returns the member index
    (0-based, matching ivar order) or -1. */

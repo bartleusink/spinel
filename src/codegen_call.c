@@ -16876,7 +16876,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   {
     int rcv = nt_ref(nt, id, "receiver");
     const char *cn = nt_str(nt, id, "name");
-    if (rcv < 0 && cn && (sp_streq(cn, "require") || sp_streq(cn, "require_relative"))) {
+    if (rcv < 0 && cn && !bare_call_class_owned(c, id) &&
+        (sp_streq(cn, "require") || sp_streq(cn, "require_relative"))) {
       buf_puts(b, "0");
       return;
     }
@@ -17491,7 +17492,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
      proc/block), validate the designator, and return the previous handler
      (#2736, #2737, #2749). */
   {
-    int is_trap = (recv < 0 && sp_streq(name, "trap"));
+    int is_trap = (recv < 0 && sp_streq(name, "trap") && !bare_call_class_owned(c, id));
     if (!is_trap && recv >= 0 && sp_streq(name, "trap") && argc >= 1) {
       const char *rty2 = nt_type(nt, recv);
       if (rty2 && (sp_streq(rty2, "ConstantReadNode") || sp_streq(rty2, "ConstantPathNode"))) {
@@ -22055,7 +22056,13 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
      obj.Float(x)) dispatches here too when the receiver is a plain user object
      whose chain does not define the name. Only a side-effect-free receiver
      (a local/ivar read or self) is accepted, since it is discarded. */
-  int kconv = (recv < 0 && comp_method_index(c, name) < 0);
+  /* ...and the enclosing chain's own method, which `comp_method_index`
+     does not see: only a TOP-LEVEL def registers there, so a module's
+     `module_function; def format(...)` beside a sibling that calls it
+     bare lost to Kernel#format (#4592). Same ownership test every
+     other Kernel arm here makes. */
+  int kconv = (recv < 0 && comp_method_index(c, name) < 0 &&
+               !bare_call_class_owned(c, id));
   if (!kconv && recv >= 0) {
     TyKind krt = comp_ntype(c, recv);
     const char *krty = nt_type(nt, recv);
@@ -22472,7 +22479,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
 
   /* exit / abort as expressions (noreturn, emit as C statement-expression) */
   /* sleep(seconds) / Kernel.sleep(seconds) / ::Kernel.sleep(seconds) */
-  if (sp_streq(name, "sleep") && argc <= 1 &&
+  if (sp_streq(name, "sleep") && argc <= 1 && !bare_call_class_owned(c, id) &&
       (recv < 0 ||
        (nt_type(nt, recv) &&
         (sp_streq(nt_type(nt, recv), "ConstantReadNode") || sp_streq(nt_type(nt, recv), "ConstantPathNode")) &&
