@@ -2523,6 +2523,20 @@ static int bi_subtree_max(const NodeTable *nt, int id) {
   return mx;
 }
 
+/* Retype every node of the subtree at `id` to a NilNode. The generic
+   definition is cloned per call site and then left out of the program, but
+   the passes that walk the node table by id rather than by tree still saw
+   its DefNode, its block parameters and its locals, and declared each of
+   them (rooted) in main. A NilNode is what those passes skip. */
+static void bi_subtree_blank(NodeTable *nt, int id) {
+  if (id < 0 || id >= nt->count) return;
+  SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++) bi_subtree_blank(nt, nd->r[j].ref);
+  for (int j = 0; j < nd->na; j++)
+    for (int k = 0; k < nd->a[j].n; k++) bi_subtree_blank(nt, nd->a[j].ids[k]);
+  nt_node_set_type(nt, id, "NilNode");
+}
+
 int desugar_builtins(Compiler *c) {
   if (sp_builtin_enum_names_n == 0) return 0;
   NodeTable *nt = (NodeTable *)c->nt;
@@ -2629,6 +2643,7 @@ int desugar_builtins(Compiler *c) {
     nb[nbn++] = copy;
   }
   nt_node_set_arr(nt, top, "body", nb, nbn);
+  for (int i = 0; i < sp_builtin_enum_names_n; i++) if (gdef[i] >= 0) bi_subtree_blank(nt, gdef[i]);
   comp_grow_node_arrays(c);
   free(gdef); free(nb);
   return 1;

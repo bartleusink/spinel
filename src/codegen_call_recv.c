@@ -1186,7 +1186,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && rt == TY_ENUMERATOR && g_n_argov < MAX_ARG_OVERRIDE &&
       ((sp_streq(name, "drop") && argc == 1 && nt_ref(nt, id, "block") < 0) ||
        ((sp_streq(name, "reject") || sp_streq(name, "select") || sp_streq(name, "filter") ||
-         sp_streq(name, "max_by") || sp_streq(name, "min_by") || sp_streq(name, "sort_by") ||
+         sp_streq(name, "sort_by") ||
          sp_streq(name, "map") || sp_streq(name, "collect") || sp_streq(name, "flat_map") ||
          sp_streq(name, "filter_map") ||
          sp_streq(name, "sum")) &&
@@ -1465,8 +1465,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
      gives the groups a later .map / .to_a can walk. */
   if (recv >= 0 && rt == TY_POLY && g_n_argov < MAX_ARG_OVERRIDE &&
       g_poly_redispatch_id != id &&
-      ((nt_ref(nt, id, "block") >= 0 &&
-        (sp_streq(name, "sort_by") || sp_streq(name, "max_by") || sp_streq(name, "min_by"))) ||
+      ((nt_ref(nt, id, "block") >= 0 && sp_streq(name, "sort_by")) ||
        /* and the COMPARATOR-block forms. `sort` blockless has an arm of its
           own above; with a block it had none, so a method whose parameter
           sees two element types -- which is what makes it poly rather than a

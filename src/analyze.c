@@ -5574,54 +5574,6 @@ int desugar_enum_method_recv(Compiler *c) {
         continue;
       }
     }
-    /* min_by(n)/max_by(n) { b }: sort_by { b } then take the n smallest /
-       largest (largest reversed, matching CRuby's descending max_by order) */
-    if (nm && (sp_streq(nm, "min_by") || sp_streq(nm, "max_by"))) {
-      int mrc = nt_ref(nt, id, "receiver");
-      int mbk = nt_ref(nt, id, "block");
-      int ma = nt_ref(nt, id, "arguments");
-      int mac = 0;
-      const int *mav = ma >= 0 ? nt_arr(nt, ma, "arguments", &mac) : NULL;
-      if (mrc >= 0 && mbk >= 0 && mac == 1 && ty_is_hash(infer_type(c, mrc))) {
-        /* hash receivers only: arrays already have a native count form */
-        int is_max = nm[1] == 'a';
-        int sortc = nt_new_node(nt, "CallNode");
-        nt_node_set_str(nt, sortc, "name", "sort_by");
-        nt_node_set_ref(nt, sortc, "receiver", mrc);
-        nt_node_set_ref(nt, sortc, "block", mbk);
-        if (is_max) {
-          int lastc = nt_new_node(nt, "CallNode");
-          int largs = nt_new_node(nt, "ArgumentsNode");
-          int mn = mav[0];
-          nt_node_set_arr(nt, largs, "arguments", &mn, 1);
-          nt_node_set_str(nt, lastc, "name", "last");
-          nt_node_set_ref(nt, lastc, "receiver", sortc);
-          nt_node_set_ref(nt, lastc, "arguments", largs);
-          nt_node_set_str(nt, id, "name", "reverse");
-          nt_node_set_ref(nt, id, "receiver", lastc);
-          nt_node_set_ref(nt, id, "arguments", -1);
-          nt_node_set_ref(nt, id, "block", -1);
-          comp_grow_node_arrays(c);
-          c->nscope[sortc] = c->nscope[id];
-          c->nscope[lastc] = c->nscope[id];
-          c->nscope[largs] = c->nscope[id];
-        }
-        else {
-          int fargs = nt_new_node(nt, "ArgumentsNode");
-          int mn = mav[0];
-          nt_node_set_arr(nt, fargs, "arguments", &mn, 1);
-          nt_node_set_str(nt, id, "name", "first");
-          nt_node_set_ref(nt, id, "receiver", sortc);
-          nt_node_set_ref(nt, id, "arguments", fargs);
-          nt_node_set_ref(nt, id, "block", -1);
-          comp_grow_node_arrays(c);
-          c->nscope[sortc] = c->nscope[id];
-          c->nscope[fargs] = c->nscope[id];
-        }
-        changed = 1;
-        continue;
-      }
-    }
     /* Hash[k: v, ...] with a keyword-hash argument IS the hash literal */
     if (nm && sp_streq(nm, "[]")) {
       int krc = nt_ref(nt, id, "receiver");
@@ -12545,7 +12497,6 @@ static int elem_miss_call(Compiler *c, int v) {
   if (sp_streq(nm, "first") || sp_streq(nm, "last") || sp_streq(nm, "sample"))
     return argc == 0 && blk < 0;
   if (sp_streq(nm, "min") || sp_streq(nm, "max")) return argc == 0;
-  if (sp_streq(nm, "min_by") || sp_streq(nm, "max_by")) return argc == 0 && blk >= 0;
   if (sp_streq(nm, "find") || sp_streq(nm, "detect")) return blk >= 0;
   return 0;
 }

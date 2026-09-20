@@ -331,7 +331,18 @@ int sp_yield_site_type(const Compiler *c, int id, TyKind *out) {
   int bn = 0;
   const int *bb = bbody >= 0 ? nt_arr(c->nt, bbody, "body", &bn) : NULL;
   if (bn <= 0 || !bb) return 0;
-  TyKind bt = c->ntype[bb[bn - 1]];
+  int tail = bb[bn - 1];
+  /* A block whose tail is itself a yield (`wrap { yield }`, or the
+     `{ |__fwd| yield __fwd }` a named &block forwards as) answers what the
+     block one level out answers, the one the splice will run: the same
+     one-level rule emit_boxed applies (#4495), so the two agree on the type
+     of one node. That tail's own cache is the union over every expansion. */
+  if (g_yield_block_fallback >= 0 && nt_type(c->nt, tail) && sp_streq(nt_type(c->nt, tail), "YieldNode")) {
+    int fbody = nt_ref(c->nt, g_yield_block_fallback, "body");
+    int fn = 0; const int *fb = fbody >= 0 ? nt_arr(c->nt, fbody, "body", &fn) : NULL;
+    if (fn > 0 && fb) tail = fb[fn - 1];
+  }
+  TyKind bt = c->ntype[tail];
   /* only a CONCRETE per-site answer overrides the cache; an unresolved tail
      leaves the node's own (unified) type in place */
   if (bt == TY_UNKNOWN || bt == TY_VOID) return 0;

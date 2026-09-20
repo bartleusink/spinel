@@ -1547,7 +1547,6 @@ const char *poly_enum_op_for(const char *name) {
     {"find","SP_PENUM_FIND"}, {"detect","SP_PENUM_FIND"},
     {"find_index","SP_PENUM_FIND_INDEX"},
     {"sort_by","SP_PENUM_SORT_BY"},
-    {"min_by","SP_PENUM_MIN_BY"}, {"max_by","SP_PENUM_MAX_BY"},
     {"count","SP_PENUM_COUNT"},
     {"sum","SP_PENUM_SUM"}, {"any?","SP_PENUM_ANY"}, {"all?","SP_PENUM_ALL"},
     {"none?","SP_PENUM_NONE"}, {"take_while","SP_PENUM_TAKE_WHILE"},

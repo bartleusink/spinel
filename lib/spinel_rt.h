@@ -12058,8 +12058,7 @@ static sp_float sp_poly_Float_ex(sp_RbVal v, int raise) {
    second argument (each_with_object, inject) is not dispatched this way. */
 enum {
   SP_PENUM_EACH, SP_PENUM_MAP, SP_PENUM_SELECT, SP_PENUM_REJECT,
-  SP_PENUM_FIND, SP_PENUM_SORT_BY, SP_PENUM_MIN_BY,
-  SP_PENUM_MAX_BY, SP_PENUM_FLAT_MAP, SP_PENUM_COUNT, SP_PENUM_SUM,
+  SP_PENUM_FIND, SP_PENUM_SORT_BY, SP_PENUM_FLAT_MAP, SP_PENUM_COUNT, SP_PENUM_SUM,
   SP_PENUM_ANY, SP_PENUM_ALL, SP_PENUM_NONE,
   SP_PENUM_FIND_INDEX, SP_PENUM_TAKE_WHILE, SP_PENUM_DROP_WHILE,
   SP_PENUM_EACH_WITH_INDEX, SP_PENUM_FILTER_MAP
@@ -12191,18 +12190,6 @@ static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
       sp_RbVal acc = sp_box_int(0);
       for (sp_int i = 0; i < n; i++) acc = sp_poly_add(acc, sp_penum_call1(blk, src->data[i]));
       return acc;
-    }
-    case SP_PENUM_MIN_BY: case SP_PENUM_MAX_BY: {
-      sp_RbVal best = sp_box_nil(), bestk = sp_box_nil();
-      for (sp_int i = 0; i < n; i++) {
-        sp_RbVal k = sp_penum_call1(blk, src->data[i]);
-        if (i == 0) { best = src->data[i]; bestk = k; continue; }
-        sp_bool ok = FALSE;
-        sp_int cmp = sp_poly_cmp(k, bestk, &ok);
-        if (!ok) sp_poly_cmp_fail(k, bestk);
-        if (op == SP_PENUM_MIN_BY ? cmp < 0 : cmp > 0) { best = src->data[i]; bestk = k; }
-      }
-      return best;
     }
     case SP_PENUM_SORT_BY: {
       /* keys computed once per element, as CRuby does, then a stable insertion

@@ -1513,7 +1513,12 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
         c->blk_body_map[bbody] >= 0)
       emit_block_locals_reset(c, c->blk_body_map[bbody], b, 0);
     for (int k3 = 0; k3 < bn3 - 1; k3++) emit_stmt(c, bd3[k3], b, 0);
-    emit_boxed(c, bd3[bn3 - 1], b);
+    /* the tail's prelude stays inside the splice here too: a forwarded
+       proc's `f.call(__fwd)` read its parameter's slot ahead of the binding
+       when the read was hoisted to the enclosing statement */
+    { Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
+      emit_boxed(c, bd3[bn3 - 1], b);
+      g_pre = svp3; g_indent = svi3; }
     buf_puts(b, "; ");
   }
   else {

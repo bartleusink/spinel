@@ -573,9 +573,7 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     int block = nt_ref(nt, id, "block");
     if ((sp_streq(name, "to_a") || sp_streq(name, "entries") || sp_streq(name, "sort")) && block < 0)
       { *out = TY_POLY_ARRAY; return 1; }
-    if (block >= 0 &&
-        (sp_streq(name, "min_by") || sp_streq(name, "max_by") ||
-         sp_streq(name, "find") || sp_streq(name, "detect")))
+    if (block >= 0 && (sp_streq(name, "find") || sp_streq(name, "detect")))
       { *out = TY_POLY_ARRAY; return 1; }   /* the winning [k, v] pair, or nil */
     if (nt_ref(nt, id, "block") >= 0 && sp_streq(name, "sort_by"))
       { *out = TY_POLY_ARRAY; return 1; }   /* [k, v] pairs ordered by the block value */
@@ -842,14 +840,10 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
           sp_streq(name, "sort_by!") ||
           sp_streq(name, "take_while") || sp_streq(name, "drop_while"))
         { *out = rt; return 1; }
-      if ((sp_streq(name, "max_by") || sp_streq(name, "min_by")) && argc >= 1)
-        { *out = TY_POLY_ARRAY; return 1; }  /* count form: n elements as a generic Array */
       if ((sp_streq(name, "find") || sp_streq(name, "detect")) && argc >= 1)
         { *out = TY_POLY; return 1; }  /* find(ifnone): the element or the proc's value */
-      if (sp_streq(name, "max_by") || sp_streq(name, "min_by") ||
-          sp_streq(name, "find") || sp_streq(name, "detect"))
+      if (sp_streq(name, "find") || sp_streq(name, "detect"))
         { *out = ty_array_elem(rt); return 1; }  /* returns an element */
-      if (sp_streq(name, "minmax_by")) { *out = TY_POLY_ARRAY; return 1; }  /* [min, max], or [nil, nil] when empty */
       if (sp_streq(name, "filter_map")) { *out = TY_POLY_ARRAY; return 1; }  /* map then drop falsy */
     }
     /* grep/grep_v without a block filter by `pattern === e`, preserving the

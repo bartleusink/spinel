@@ -906,17 +906,14 @@ int hash_enum_redispatch(Compiler *c, int id) {
       sp_streq(name, "reverse_each")) return 1;
   if (block < 0 || !nt_type(nt, block) || !sp_streq(nt_type(nt, block), "BlockNode")) return 0;
   /* comparator-block min/max/minmax compare the [k, v] pairs like the
-     blockless forms (min_by/max_by keep their dedicated hash emitters) */
+     blockless forms */
   if (sp_streq(name, "min") || sp_streq(name, "max") || sp_streq(name, "minmax")) return 1;
   if (sp_streq(name, "none?") || sp_streq(name, "one?") || sp_streq(name, "find_all")) return 1;
   if (sp_streq(name, "each_with_index")) return 1;
   if (sp_streq(name, "reduce") || sp_streq(name, "inject")) return 1;
   /* comparator-block sort over the [k, v] pairs -> a poly array of pairs */
   if (sp_streq(name, "sort")) return 1;
-  /* each_with_object / flat_map keep their dedicated hash emitters */
-  /* min_by/max_by keep their dedicated hash emitters; only minmax_by rides
-     the pair redispatch */
-  if (sp_streq(name, "minmax_by")) return 1;
+  /* flat_map keeps its dedicated hash emitter */
   return 0;
 }
 
@@ -1401,14 +1398,6 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       if (comp_method_in_chain(c, k, name, NULL) >= 0) return TY_POLY;
     }
   }
-  /* max_by / min_by on a boxed receiver -- an Array read out of a container.
-     Codegen materializes the elements and re-dispatches as the array form, so
-     the result is the winning element, itself boxed. Without a type here the
-     call stayed untyped and every method on the result was rejected, the way
-     sort_by (which does have one) never was. */
-  if (recv >= 0 && rt == TY_POLY && nt_ref(nt, id, "block") >= 0 && argc == 0 &&
-      (sp_streq(name, "max_by") || sp_streq(name, "min_by")))
-    return TY_POLY;
   /* Same, for a name outside that surface: only a yielding candidate makes
      the call a dispatch there, since a non-yielding one leaves a
      block-carrying call on the builtin path entirely. */
@@ -3273,10 +3262,9 @@ else {
          sp_streq(name, "filter_map")) &&
         argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY_ARRAY;
     /* block forms over the materialized pairs: sort_by is a reordered Array;
-       max_by/min_by pick one pair (a boxed element); sum { } folds to a poly. */
+       sum { } folds to a poly. */
     if (sp_streq(name, "sort_by") && argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY_ARRAY;
-    if ((sp_streq(name, "max_by") || sp_streq(name, "min_by") || sp_streq(name, "sum")) &&
-        argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY;
+    if (sp_streq(name, "sum") && argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY;
     if ((sp_streq(name, "to_a") || sp_streq(name, "entries")) && argc == 0) return TY_POLY_ARRAY;
     if ((sp_streq(name, "inspect") || sp_streq(name, "to_s")) && argc == 0) return TY_STRING;
   }
@@ -5117,9 +5105,7 @@ else {
     }
     int block = nt_ref(nt, id, "block");
     /* finite-range Enumerable methods that materialize to an int array in
-       codegen: select/reject/filter (fused loop) and min_by/max_by. */
-    if ((sp_streq(name, "min_by") || sp_streq(name, "max_by")) && argc >= 1) return TY_POLY_ARRAY;
-    if ((sp_streq(name, "min_by") || sp_streq(name, "max_by")) && block >= 0) return TY_INT;
+       codegen: select/reject/filter (fused loop). */
     if ((ty_iter_shape(name) == TY_ITER_SELECT || ty_iter_shape(name) == TY_ITER_REJECT) &&
         block >= 0) return TY_INT_ARRAY;
     if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {

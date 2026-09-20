@@ -51,4 +51,100 @@ module Enumerable
       each
     end
   end
+
+  def min_by(n = nil)
+    if block_given?
+      if n
+        raise ArgumentError, "negative size (#{n})" if n < 0
+        sort_by { |x| yield x }.first(n)
+      else
+        best = first
+        if best.nil?
+          nil
+        else
+          best_key = yield best
+          skip = true
+          each do |x|
+            if skip
+              skip = false
+            else
+              key = yield x
+              if (key <=> best_key) < 0
+                best = x
+                best_key = key
+              end
+            end
+          end
+          best
+        end
+      end
+    else
+      each
+    end
+  end
+
+  def max_by(n = nil)
+    if block_given?
+      if n
+        raise ArgumentError, "negative size (#{n})" if n < 0
+        # descending by key, ties in encounter order: a stable ascending sort
+        # of the reversed elements, read backwards
+        to_a.reverse.sort_by { |x| yield x }.reverse.first(n)
+      else
+        best = first
+        if best.nil?
+          nil
+        else
+          best_key = yield best
+          skip = true
+          each do |x|
+            if skip
+              skip = false
+            else
+              key = yield x
+              if (key <=> best_key) > 0
+                best = x
+                best_key = key
+              end
+            end
+          end
+          best
+        end
+      end
+    else
+      each
+    end
+  end
+
+  def minmax_by
+    if block_given?
+      min = first
+      if min.nil?
+        [nil, nil]
+      else
+        max = min
+        min_key = yield min
+        max_key = min_key
+        skip = true
+        each do |x|
+          if skip
+            skip = false
+          else
+            key = yield x
+            if (key <=> min_key) < 0
+              min = x
+              min_key = key
+            end
+            if (key <=> max_key) > 0
+              max = x
+              max_key = key
+            end
+          end
+        end
+        [min, max]
+      end
+    else
+      each
+    end
+  end
 end

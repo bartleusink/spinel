@@ -24,4 +24,4 @@ begin
   si([1, 2, 3]).max_by(-1) { |n| n }
 rescue ArgumentError => e
   p e.message
-end                                       # "negative size"
+end                                       # "negative size (-1)"
