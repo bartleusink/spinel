@@ -3234,7 +3234,7 @@ sp_RbVal sp_float_numerator(sp_float f) {
    loudly instead of saturating silently. NaN/Inf raise FloatDomainError. */
 sp_int sp_float_to_i_checked(sp_float f) {
   if (isnan(f) || isinf(f)) sp_raise_cls("FloatDomainError", sp_sprintf("%g", f));
-  if (f >= 9223372036854775808.0 || f < -9223372036854775808.0)
+  if (f >= -(sp_float)INTPTR_MIN || f < (sp_float)INTPTR_MIN)  /* exact at either sp_int width */
     sp_raise_cls("RangeError", "float out of Integer range (Bignum promotion pending)");
   return (sp_int)f;
 }

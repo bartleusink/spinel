@@ -8555,7 +8555,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, " ? sp_box_float(sp_float_prec_op(_t%d, _t%d, %s))", tv, tn, precop);
           buf_printf(b, " : ({ if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
                         " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
-                        " double _f = pow(10, (double)(-_t%d)); sp_box_int(isinf(_f) ? 0 : (sp_int)(%s(_t%d / _f) * _f)); }); })",
+                        " double _f = pow(10, (double)(-_t%d)); sp_box_int(isinf(_f) ? 0 : sp_float_fit_i(%s(_t%d / _f) * _f)); }); })",
                      tv, tv, tv, tn, cfn, tv);
         }
         else if (ndig > 0 && sp_streq(name, "round")) {
@@ -8576,7 +8576,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ double _t%d = (%s);"
                         " if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
                         " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
-                        " double _f = pow(10, %d); (sp_int)(%s(_t%d / _f) * _f); })",
+                        " double _f = pow(10, %d); sp_float_fit_i(%s(_t%d / _f) * _f); })",
                      tg, r, tg, tg, tg, -ndig, cfn, tg);
         }
         else {
@@ -8584,7 +8584,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ double _t%d = (%s);"
                         " if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
                         " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
-                        " (sp_int)%s(_t%d); })",
+                        " sp_float_fit_i(%s(_t%d)); })",
                      tg, r, tg, tg, tg, cfn, tg);
         }
       }
@@ -8669,7 +8669,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
                       " sp_PolyArray_push(_t%d, sp_box_int(0)); sp_PolyArray_push(_t%d, sp_box_float(_t%d)); }"
                       "\nelse { sp_PolyArray_push(_t%d, sp_box_int(-1)); sp_PolyArray_push(_t%d, sp_box_float(_t%d)); } }"
                       "\nelse {"
-                      " sp_int _t%d = (sp_int)floor(_t%d / _t%d);"
+                      " sp_int _t%d = sp_float_fit_i(floor(_t%d / _t%d));"
                       " sp_PolyArray_push(_t%d, sp_box_int(_t%d));"
                       " sp_PolyArray_push(_t%d, sp_box_float(_t%d - (sp_float)_t%d * _t%d)); } _t%d; })",
                    tx, tn, tx, tx, tn,
@@ -8727,7 +8727,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "; if (_t%d == 0.0) sp_raise_cls(\"ZeroDivisionError\", \"divided by 0\");"
                       " if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
                       " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
-                      " (sp_int)floor(_t%d / _t%d); })",
+                      " sp_float_fit_i(floor(_t%d / _t%d)); })",
                    tn, tx, tx, tx, tx, tn);
       }
       /* Float#remainder: truncated remainder, sign following the dividend -- exactly
