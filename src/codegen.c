@@ -8182,6 +8182,14 @@ void emit_regex_section(Compiler *c, Buf *b) {
      equal the constructor-installed default, so it isn't emitted either. */
   if (g_has_user_global_marks)
     buf_puts(b, "  sp_gc_mark_globals_hook = sp_mark_user_globals;\n");
+  /* The out-of-int64 literal table is filled here, at startup, once the
+     marker above can see it: filled lazily on first use it was a read-test-
+     write on a shared slot that two threads reaching the same literal raced
+     on, and the Bignum one of them built was dropped mid-return (#4641).
+     A compile-time constant has no reason to wait. */
+  if (g_bigl_n)
+    buf_printf(b, "  for (int _i = 0; _i < %d; _i++) sp_bigl[_i] = sp_bigint_new_str(sp_bigl_s[_i], 10);\n",
+               g_bigl_n);
   /* Install the Marshal vtable: the construction wrappers (spinel_rt.h) plus
      the generated symbol interner and per-class object dump/load. */
   if (g_emit_sym_rt)
@@ -11084,12 +11092,10 @@ char *codegen_program(const NodeTable *nt) {
     for (int i = 0; i < g_bigl_n; i++)
       buf_printf(&b, "%s\"%s\"", i ? ", " : "", g_bigl_val[i]);
     buf_puts(&b, "};\n");
-    /* A FUNCTION, not an inline `x ? x : (x = ...)`: the same literal can be
-       both operands of one call, and two such expressions in one argument
-       list are unsequenced accesses to the slot (-Wunsequenced). */
-    buf_puts(&b, "static sp_Bigint *sp_bigl_get(int i) {\n"
-                 "  if (!sp_bigl[i]) sp_bigl[i] = sp_bigint_new_str(sp_bigl_s[i], 10);\n"
-                 "  return sp_bigl[i];\n}\n\n");
+    /* Filled by sp_tu_init at startup (see emit_regex_section), so a read
+       is a plain load: no lazy fill, and so no race between threads that
+       reach the same literal first (#4641). */
+    buf_puts(&b, "static inline sp_Bigint *sp_bigl_get(int i) { return sp_bigl[i]; }\n\n");
   }
   for (int i = 0; i < c->nconsts; i++) {
     LocalVar *lv = &c->consts[i];
