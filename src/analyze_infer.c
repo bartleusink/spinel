@@ -1109,7 +1109,7 @@ static TyKind an_poly_concrete(Compiler *c, const char *name, TyKind t) {
   return t;
 }
 
-static int an_bare_call_class_owned(Compiler *c, int id) {
+int an_bare_call_class_owned(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (nt_ref(nt, id, "receiver") >= 0) return 0;
   const char *name = nt_str(nt, id, "name");
@@ -1283,6 +1283,21 @@ static TyKind infer_call_inner(Compiler *c, int id) {
          site and the definition disagreeing about the signature. */
       if (!shadowed && !(bmi < c->nscopes && c->scopes[bmi].yields))
         return method_call_ret(c, bmi, id);
+    }
+    /* ...and the first part of that sentence, which only the per-arm
+       `!an_bare_call_class_owned` guards said, one name at a time: the
+       enclosing chain's OWN method answers before any Kernel builtin, with
+       no top-level def of the name anywhere. A module's sibling call is the
+       shape that has none -- `module_function; def trap(m) = raise(...)`
+       beside a `def div` that calls `trap(...)` -- and the Kernel arms below
+       claimed it (#4592). Same ownership test the codegen twin makes. */
+    if (bmi < 0 && an_bare_call_class_owned(c, id)) {
+      Scope *osc = comp_scope_of(c, id);
+      int ocls = osc ? osc->class_id : -1;
+      int omi = osc && osc->is_cmethod ? comp_cmethod_in_chain(c, ocls, name, NULL)
+                                       : comp_method_in_chain(c, ocls, name, NULL);
+      if (omi >= 0 && omi < c->nscopes && !c->scopes[omi].yields)
+        return method_call_ret(c, omi, id);
     }
   }
 
@@ -5927,7 +5942,7 @@ else {
   if (sp_streq(name, "to_f")) return TY_FLOAT;
   if (sp_streq(name, "to_sym")) return TY_SYMBOL;
 
-  if (is_void_call(name) && recv < 0) return TY_VOID;
+  if (is_void_call(name) && recv < 0 && !an_bare_call_class_owned(c, id)) return TY_VOID;
 
   /* $stdout/$stderr.puts/print/write return nil (so a value-position use --
      an if/else arm or assignment -- unifies and boxes as nil). */

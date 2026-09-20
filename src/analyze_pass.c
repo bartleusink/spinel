@@ -5365,6 +5365,10 @@ int desugar_dir_surface(Compiler *c) {
     /* Kernel#open(path, ...) is File.open when no user method shadows it (#2816) */
     if (nm && recv < 0 && sp_streq(nm, "open") &&
         comp_method_index(c, "open") < 0 &&
+        /* ...and no enclosing chain owns it either: comp_method_index sees
+           only a TOP-LEVEL def, so a module's own `open` lost to File.open
+           when a sibling called it bare (#4592) */
+        !an_bare_call_class_owned(c, id) &&
         nt_ref(nt, id, "arguments") >= 0) {
       int fr2 = nt_new_node(nt, "ConstantReadNode");
       if (fr2 >= 0) {
