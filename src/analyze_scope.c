@@ -3531,6 +3531,32 @@ static int scope_body_uses_ivar(Compiler *c, int scope_idx) {
   return 0;
 }
 
+/* A `module_function` method is registered class-level (is_cmethod), so the
+   include transplant below skipped it and a receiverless call to it was
+   rewritten onto the module (`Rt.peek`). That is sound only for a body that
+   does not depend on its receiver, and the rewrite's comment claimed exactly
+   that -- wrongly. Through an includer CRuby runs such a method on the
+   INSTANCE: `@x` is the instance's ivar, `self` is the instance, and a
+   receiverless sibling call dispatches on the instance's class, where the
+   includer may override it. Spinel gave the module's own storage (a
+   `civ_<Mod>_<name>` global), the Module object, and the module's sibling.
+
+   Which bodies care is the question the extend path already answers for the
+   mirror transplant (scope_reads_ivar / scope_has_receiverless_call below):
+   an ivar, a self, or a receiverless call. A body with none of those runs the
+   same either way and keeps the single shared copy. */
+static int module_function_self_dependent(Compiler *c, int scope_idx) {
+  const NodeTable *nt = c->nt;
+  if (scope_body_uses_ivar(c, scope_idx)) return 1;
+  for (int id = 0; id < nt->count; id++) {
+    if (c->nscope[id] != scope_idx) continue;
+    NodeKind k = nt_kind(nt, id);
+    if (k == NK_SelfNode) return 1;
+    if (k == NK_CallNode && nt_ref(nt, id, "receiver") < 0) return 1;
+  }
+  return 0;
+}
+
 /* Process include calls in a single class body, creating scope copies for each
    included module method. We copy (not mutate) so multiple classes can include
    the same module independently. */
@@ -3634,7 +3660,12 @@ void process_include_body(Compiler *c, int ci, int body_node) {
       int snap = c->nscopes;
       for (int ms = 0; ms < snap; ms++) {
         Scope *src = &c->scopes[ms];
-        if (src->class_id != mod_id || src->is_cmethod || !src->name) continue;
+        if (src->class_id != mod_id || !src->name) continue;
+        /* a module_function method whose body depends on its receiver needs a
+           per-includer copy; everything else class-level stays module-side */
+        if (src->is_cmethod &&
+            !(src->is_module_function && module_function_self_dependent(c, ms)))
+          continue;
         const char *dst_name = src->name;
         char inc_shadow[256];
         int own = comp_method_in_class(c, ci, src->name);
@@ -3748,7 +3779,10 @@ else {
         dst->rest_idx = src->rest_idx;
         dst->kwrest_idx = src->kwrest_idx;
         if (src->blk_param) dst->blk_param = strdup(src->blk_param);
-        src->is_transplanted_source = 1;
+        /* ...but a module_function original keeps its module-side spelling:
+           `Rt.peek` is a real call whoever also includes Rt, so the source is
+           not copied AWAY, only copied FROM. */
+        if (!src->is_module_function) src->is_transplanted_source = 1;
         /* Copy parameter names and defaults. */
         dst->nparams = src->nparams;
         if (src->nparams > 0) {
