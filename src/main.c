@@ -371,6 +371,11 @@ int main(int argc, char **argv) {
     else if (sp_streq(a, "-o"))            { if (++i < argc) output = argv[i]; i++; }
     else if (sp_streq(a, "--link"))        { if (++i < argc && n_link_extra < 64) link_extra[n_link_extra++] = argv[i]; i++; }
     else if (sp_streq(a, "-O"))            { if (++i < argc) opt_level = argv[i]; i++; }
+    /* `-O2`, the spelling every C compiler takes and the one a build script
+       reaches for. Only the separated form was matched, so the joined one
+       fell through to the unknown-flag arm below and was DISCARDED: a build
+       asking for -O0 silently got the -O2 default, and nothing said so. */
+    else if (!strncmp(a, "-O", 2) && a[2])  { opt_level = a + 2; i++; }
     else if (sp_streq(a, "--debug"))       { debug = 1; opt_level = "0"; want_g = 1; i++; }
     else if (sp_streq(a, "-g"))            { debug = 1; want_g = 1; i++; }
     else if (sp_streq(a, "--profile"))     { profile = 1; want_g = 1; i++; }
@@ -496,9 +501,14 @@ int main(int argc, char **argv) {
     }
     else {
       /* Unknown flag. In run mode it is the ARGV boundary (the program may
-         take its own flags); otherwise ignore it. */
+         take its own flags, and `--` ends ours); in compile mode it is a
+         mistake, and silence about it builds something other than what was
+         asked for. A mistyped `--int-overflow=promot` produced a default
+         raise build with no diagnostic at all -- the compiler answering a
+         question nobody asked. */
       if (run_mode) { run_args = &argv[i]; n_run_args = argc - i; break; }
-      i++;
+      fprintf(stderr, "spinel: unknown option '%s'\n", a);
+      return 1;
     }
   }
 
