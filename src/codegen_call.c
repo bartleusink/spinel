@@ -21229,7 +21229,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       free(rb.p); return;
     }
     if (sp_streq(name, "pwrite") && argc >= 1) {
-      buf_printf(b, "sp_File_pwrite(%s, ", r); emit_to_s_expr(c, argv[0], b); buf_puts(b, ", ");
+      /* the same String/non-String split the write arm makes: a String knows
+         its own byte count, so an embedded NUL reaches the descriptor (#4623) */
+      buf_printf(b, "%s(%s, ", comp_ntype(c, argv[0]) == TY_STRING
+                               ? "sp_File_pwrite_bin" : "sp_File_pwrite", r);
+      emit_to_s_expr(c, argv[0], b); buf_puts(b, ", ");
       if (argc >= 2) emit_int_expr(c, argv[1], b); else buf_puts(b, "0");
       buf_puts(b, ")"); free(rb.p); return;
     }
@@ -21910,7 +21914,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_puts(b, "); })");
       }
       else if (sp_streq(name, "pwrite") && argc >= 1) {
-        buf_printf(b, "sp_File_pwrite(_t%d, ", tio2);
+        buf_printf(b, "%s(_t%d, ", comp_ntype(c, argv[0]) == TY_STRING
+                                   ? "sp_File_pwrite_bin" : "sp_File_pwrite", tio2);
         emit_to_s_expr(c, argv[0], b); buf_puts(b, ", ");
         if (argc >= 2) emit_int_expr(c, argv[1], b); else buf_puts(b, "0");
         buf_puts(b, "); })");
