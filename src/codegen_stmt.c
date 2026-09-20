@@ -10142,7 +10142,7 @@ int tail_iter_receiver(Compiler *c, int id) {
 /* Does this statement list end in something that leaves the function -- a
    `return`, or a bare `raise`/`throw`? Used to decide whether a construct in
    tail position produces a value at all. */
-static int stmts_diverge(Compiler *c, int stmts) {
+int stmts_diverge(Compiler *c, int stmts) {
   const NodeTable *nt = c->nt;
   if (stmts < 0) return 0;
   int n = 0; const int *bb = nt_arr(nt, stmts, "body", &n);

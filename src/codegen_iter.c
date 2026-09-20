@@ -1560,10 +1560,16 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   if (as_expr) {
     /* `{ return e }`: the block exits the enclosing function, so the
        statement-expr's tail is unreachable -- but C still needs a value
-       expression there (a trailing `return;` makes the ({...}) void). */
+       expression there (a trailing `return;` makes the ({...}) void).
+       `{ raise "x" }` leaves the same hole: the block never produces a value,
+       and the slot it feeds is typed from the OTHER call sites' blocks, so
+       the splice landed a void where an sp_int was wanted and the C did not
+       build -- `@v = yield`, `t += yield i`, and a bare `yield` in a method
+       carrying a rescue all stopped a program that CRuby runs. */
     int bn2 = 0; const int *bd2 = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn2) : NULL;
-    if (bn2 > 0 && nt_type(nt, bd2[bn2 - 1]) &&
-        sp_streq(nt_type(nt, bd2[bn2 - 1]), "ReturnNode")) {
+    int tail_ret = bn2 > 0 && nt_type(nt, bd2[bn2 - 1]) &&
+                   sp_streq(nt_type(nt, bd2[bn2 - 1]), "ReturnNode");
+    if (tail_ret || stmts_diverge(c, bbody)) {
       /* The filler is read as the value of the statement expression, so the
          type it has to have is the CONSUMER's -- want_ty -- not the type of
          the value the unreachable return carries. Taking the return's own put
@@ -1571,12 +1577,16 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
          only agree when the block's value and the method's return happen to
          be the same type, which is the case that had been tried. */
       TyKind ft = want_ty;
-      if (ft == TY_UNKNOWN || ft == TY_VOID || ft == TY_NIL) {
+      /* Only a `return` carries a value whose type can stand in; a raise's
+         argument is its MESSAGE, and taking that put a String where an int
+         slot was wanted. */
+      if ((ft == TY_UNKNOWN || ft == TY_VOID || ft == TY_NIL) && tail_ret) {
         int ra = nt_ref(nt, bd2[bn2 - 1], "arguments");
         int rn = 0; const int *rv = ra >= 0 ? nt_arr(nt, ra, "arguments", &rn) : NULL;
         TyKind rt2 = rn > 0 ? comp_ntype(c, rv[0]) : TY_INT;
         ft = is_scalar_ret(rt2) ? rt2 : TY_INT;
       }
+      if (ft == TY_UNKNOWN || ft == TY_VOID || ft == TY_NIL) ft = TY_INT;
       /* a by-value object is a bare struct: default_value's NULL is ill-typed */
       if (ty_is_object(ft) && comp_ty_value_obj(c, ft))
         buf_printf(b, " (sp_%s){0};", c->classes[ty_object_class(ft)].c_name);
