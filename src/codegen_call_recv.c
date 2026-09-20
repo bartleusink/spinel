@@ -1282,6 +1282,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
       char es[64]; snprintf(es, sizeof es, "sp_PolyArray_get(_t%d, _t%d)", trecv, ti);
+      if (pf_dw) {
+        /* drop_while stops asking once it has stopped dropping: the block
+           runs for the dropped prefix and the first kept element only */
+        emit_indent(g_pre, g_indent + 1);
+        buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, %s); continue; }\n", tdrop, tres, es);
+      }
       int splat = emit_iter_autosplat(c, fblock, TY_POLY_ARRAY, es, g_indent + 1);
       if (!splat && bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_RbVal lv_%s = %s;\n", bp, es); }
       Buf cb; memset(&cb, 0, sizeof cb);
@@ -2261,6 +2267,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
           buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
                      ti, ti, ek, trecv, ti);
           char es_tw[64]; snprintf(es_tw, sizeof es_tw, "sp_%sArray_get(_t%d, _t%d)", ek, trecv, ti);
+          if (is_drop) {
+            /* the block runs for the dropped prefix and the first kept
+               element only; the rest is kept without asking */
+            emit_indent(g_pre, g_indent + 1);
+            buf_printf(g_pre, "if (!_dropping) { sp_%sArray_push(_t%d, %s); continue; }\n", ek, tout, es_tw);
+          }
           if (emit_iter_autosplat(c, tw_blk, rt, es_tw, g_indent + 1)) { }
           else if (tw_bp) {
             /* The block parameter is an ordinary local, and its SLOT may have

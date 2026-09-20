@@ -12079,10 +12079,13 @@ static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
       sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
       int dropping = 1;
       for (sp_int i = 0; i < n; i++) {
+        /* drop_while stops asking once it has stopped dropping: the block
+           runs for the dropped prefix and the first kept element only */
+        if (op == SP_PENUM_DROP_WHILE && !dropping) { sp_PolyArray_push(out, src->data[i]); continue; }
         int t = sp_poly_truthy(sp_penum_call1(blk, src->data[i]));
         if (op == SP_PENUM_TAKE_WHILE) { if (!t) break; sp_PolyArray_push(out, src->data[i]); continue; }
         if (op == SP_PENUM_DROP_WHILE) {
-          if (dropping && t) continue;
+          if (t) continue;
           dropping = 0;
           sp_PolyArray_push(out, src->data[i]);
           continue;
