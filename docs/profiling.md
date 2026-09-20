@@ -6,7 +6,7 @@ neither costs anything when it is off.
 
 Before measuring anything, `spinel-doctor app.rb` is the static half of the
 same question: its `advice` leg lists the source lines that compile to boxed
-dispatch inside loops — the usual suspects — without running the program (see
+dispatch inside loops -- the usual suspects -- without running the program (see
 [`tools/README.md`](../tools/README.md)). The profiler below then tells you
 which of those actually cost time.
 
@@ -20,14 +20,14 @@ perf report
 
 `--profile` builds the same `-O2` binary the default build produces, plus the
 three things a sampling profiler needs: `-g`, `-fno-omit-frame-pointer`, and an
-unstripped symbol table. It also writes `app.symbols.json` beside the binary —
+unstripped symbol table. It also writes `app.symbols.json` beside the binary --
 the `--emit-symbol-map` payload, mapping each emitted C symbol back to the Ruby
 name it came from (`sp_PPU_render_pixel` → `Optcarrot::PPU#render_pixel`).
 
 Methods compile to `static` C functions, so a stack walk names them only when
 the symbol table is present; that is what `--profile` keeps. If `perf` is
-unavailable — `perf_event_paranoid` is locked down on many CI and hardened
-hosts — any sampler that reads frame pointers works the same way.
+unavailable -- `perf_event_paranoid` is locked down on many CI and hardened
+hosts -- any sampler that reads frame pointers works the same way.
 
 ### Reading the result
 
@@ -41,7 +41,7 @@ usually the first question:
 ```
 
 `perf script` gives whole stacks, and with `-g` the inlined frames come back
-too — a helper the C compiler folded into its caller still appears by name:
+too -- a helper the C compiler folded into its caller still appears by name:
 
 ```
     sp_str_byte_len+0x68f (inlined)
@@ -56,7 +56,7 @@ Fold those into one line per stack (`a;b;c count`) for a flamegraph renderer.
 Two things to expect. Kernel frames stay unresolved unless
 `/proc/sys/kernel/kptr_restrict` allows otherwise, which does not affect
 anything above. And a build that discards unwind information reports no
-usable stacks at all — the same limit the allocation sites have below.
+usable stacks at all -- the same limit the allocation sites have below.
 
 ## Where the allocations come from: `SPINEL_ALLOC_REPORT`
 
@@ -76,13 +76,13 @@ alloc;(no-scan) 100
 # bytes String 24200
 ```
 
-`(no-scan)` covers objects with no pointers to trace — an Integer array, a byte
-buffer — which the collector never has to walk.
+`(no-scan)` covers objects with no pointers to trace -- an Integer array, a byte
+buffer -- which the collector never has to walk.
 
 Counters key on the object's GC scan callback, which is the de-facto type
 identity, and are bumped inside the allocator itself. Strings have no scan
 callback, so they carry a reserved key of their own and otherwise behave like
-any other row — including on the per-site path below, which matters because
+any other row -- including on the per-site path below, which matters because
 strings are usually the largest share of the bytes. Nothing is sampled, so
 two runs of the same program report the same numbers.
 
@@ -102,7 +102,7 @@ alloc;./app(+0x2bc5) [0x5a0a1e7acbc5];(no-scan) 5
 The site is captured as a return address on the counted path and symbolised
 only at exit, so the extra cost is one stack walk per allocation and no
 allocation of its own. Names resolve as far as the dynamic symbol table
-reaches; a `static` method — which is how user methods compile — shows as an
+reaches; a `static` method -- which is how user methods compile -- shows as an
 address. Turn it into a name with the symbol map from `--profile`, or with
 `addr2line -f -e ./app <addr>` on a build that kept its symbols.
 
@@ -169,6 +169,6 @@ The `# bytes` lines carry their key in the third field rather than the first.
 
 Start with `--profile` and a sampler: it tells you which method to look at.
 Reach for `SPINEL_ALLOC_REPORT` when the profile points at the collector
-(`sp_gc_collect`, `sp_gc_mark_all`) or at `malloc` — then the question is not
+(`sp_gc_collect`, `sp_gc_mark_all`) or at `malloc` -- then the question is not
 which code is slow but which code allocates, and the counters answer that
 exactly rather than statistically.

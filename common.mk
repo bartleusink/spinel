@@ -9,11 +9,11 @@
 
 CC       ?= cc
 # Auto-wrap CC with sccache or ccache when present. Skip when CC is
-# already wrapped — the substring guard catches both "ccache" and
+# already wrapped -- the substring guard catches both "ccache" and
 # "sccache" since "ccache" is a substring of "sccache", so CI's
 # `CC=sccache <cc>` env stays untouched. NO_CCACHE=1 opts out.
 # `override` is required so that a command-line `make CC=gcc` is also
-# wrapped — without it the wrap would be silently ignored.
+# wrapped -- without it the wrap would be silently ignored.
 ifeq (,$(findstring ccache,$(CC)))
 ifeq (,$(NO_CCACHE))
   CCACHE_BIN := $(shell command -v sccache 2>/dev/null || command -v ccache 2>/dev/null)
@@ -92,7 +92,7 @@ TIMEOUT60 := $(SPINEL_TIMEOUT) 60
 # -j again in a sub-make's MAKEFLAGS triggers GNU Make's "-j forced in
 # makefile: resetting jobserver mode" warning (the --jobserver-auth flag
 # isn't visible in MAKEFLAGS at sub-make parse time, so a plain -j guard
-# can't see it — MAKELEVEL is the reliable discriminator). A command-line
+# can't see it -- MAKELEVEL is the reliable discriminator). A command-line
 # -jN still wins by precedence; the env form `MAKEFLAGS=-jN` is honored
 # by the inner guard.
 ifeq ($(MAKELEVEL),0)

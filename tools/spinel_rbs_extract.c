@@ -237,7 +237,7 @@ static const char *hash_tag_for_kv(const char *k, const char *v) {
     }
     /* `Hash[untyped, untyped]` (and any leftover combination where
      * one side is untyped without a matching concrete variant
-     * above) — map to bare "poly" rather than poly_poly_hash. The
+     * above) -- map to bare "poly" rather than poly_poly_hash. The
      * analyzer treats this slot as sp_RbVal (tagged union), which
      * matches how a top-level `def f(h)` with no caller signal
      * settles. Picking poly_poly_hash here forced a specific tagged
@@ -433,7 +433,7 @@ static bool map_type(rbs_parser_t *p, rbs_node_t *node,
             return true;
         case RBS_TYPES_BASES_ANY:
             /* `untyped` in RBS == anything. Spinel's nearest is poly
-             * (sp_RbVal — tagged union). Hash[untyped, untyped] uses
+             * (sp_RbVal -- tagged union). Hash[untyped, untyped] uses
              * this in hash_tag_for_kv to land on poly_poly_hash. */
             sbuf_set(out, "poly", 4);
             return true;
@@ -541,7 +541,7 @@ static void emit_method(rbs_parser_t *p, rbs_ast_members_method_definition_t *m,
     /* Out-of-subset shapes: rest-positional / rest-keyword / optional
      * or trailing positionals. These break the fixed-arity contract
      * the seed format expects (one ptype slot per Ruby def param).
-     * Required + optional keywords ARE handled — we walk them in
+     * Required + optional keywords ARE handled -- we walk them in
      * insertion order (head/next linked list; rbs_hash_set appends
      * to tail, matching RBS source order) and append the value types
      * to the ptype list after the required positionals. The arity
@@ -553,7 +553,7 @@ static void emit_method(rbs_parser_t *p, rbs_ast_members_method_definition_t *m,
      * `length`. Same applies in the walking code below.
      *
      * Positional rbs_node_list_t.length IS maintained by rbs_node_list_
-     * append — so the optional/trailing positional checks below use
+     * append -- so the optional/trailing positional checks below use
      * `head == NULL` as the safer cross-cutting "is empty" predicate. */
     if ((fn->optional_positionals != NULL && fn->optional_positionals->head != NULL)
         || fn->rest_positionals != NULL
@@ -591,7 +591,7 @@ static void emit_method(rbs_parser_t *p, rbs_ast_members_method_definition_t *m,
      * source order. We walk required then optional, mapping each
      * param's value type. The arity adds up to (positionals +
      * required_kwargs + optional_kwargs), matching Ruby's def in
-     * source-order — same shape collect_all sees. Optionality is an
+     * source-order -- same shape collect_all sees. Optionality is an
      * arity-affecting source property and doesn't change the type
      * slot the seed targets. */
     const rbs_hash_t *kw_hashes[] = { fn->required_keywords, fn->optional_keywords };
@@ -603,7 +603,7 @@ static void emit_method(rbs_parser_t *p, rbs_ast_members_method_definition_t *m,
             /* Defensive: an upstream rbs change adding a different
              * value-node type would land here. Skipping the whole
              * signature (rather than producing a partial seed) keeps
-             * the analyzer consistent — apply_rbs_seeds overwrites a
+             * the analyzer consistent -- apply_rbs_seeds overwrites a
              * method's ptype list wholesale, so a half-populated entry
              * is worse than no entry. Same policy as the positional
              * loop above and the existing out-of-subset early-return. */
@@ -668,7 +668,7 @@ static void emit_attr(rbs_parser_t *p, rbs_ast_symbol_t *name, rbs_node_t *type,
  * `module ActiveRecord; class RecordInvalid; def record: () -> Base`:
  * qualified_scope = "ActiveRecord_RecordInvalid",
  * lookup_scope    = "ActiveRecord".
- * That makes `Base` resolve to `obj_ActiveRecord_Base` — the sibling-
+ * That makes `Base` resolve to `obj_ActiveRecord_Base` -- the sibling-
  * in-module pattern, which dominates real RBS in practice. Ruby's
  * actual constant lookup walks every enclosing scope outward; this
  * single-level fallback covers the common case without a symbol

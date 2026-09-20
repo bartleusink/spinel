@@ -1,7 +1,7 @@
 # Polyvariance-rich exerciser. A `Cell.set(v)` accepts mixed-type
 # `v` across call sites (string / int / array), so `@value` is a
 # genuinely poly ivar and `set`'s param is a genuinely poly param.
-# `render_one(v)` dispatches by is_a? — another poly param whose
+# `render_one(v)` dispatches by is_a? -- another poly param whose
 # return narrows by branch but spinel currently keeps the
 # function-level return as poly. Shape mirrors real-blog's
 # Active Record setter pattern in ~80 lines, so SP_POLY_REPORT

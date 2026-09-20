@@ -866,7 +866,7 @@ static int pm_is_container_pat(const NodeTable *nt, int pat) {
 static int infer_case_pattern_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
-  /* CaseMatchNode: `case X; in PATTERN; ...` — infer locals bound by pattern.
+  /* CaseMatchNode: `case X; in PATTERN; ...` -- infer locals bound by pattern.
      Handles: bare LV (`in x`), guard (`in x if cond`), capture (`in P => x`),
      and array patterns (`in [first, *rest]` / `in Array(head, *tail)`). */
   NT_FOREACH_KIND(nt, NK_CaseMatchNode, id) {
@@ -906,7 +906,7 @@ static int infer_case_pattern_locals(Compiler *c) {
         bind_lv_node = pat;
       }
       else if (sp_streq(pty, "IfNode")) {
-        /* in x if guard — binding is in IfNode.statements body */
+        /* in x if guard -- binding is in IfNode.statements body */
         int stmts = nt_ref(nt, pat, "statements");
         if (stmts >= 0 && nt_type(nt, stmts) &&
             sp_streq(nt_type(nt, stmts), "StatementsNode")) {
@@ -1984,7 +1984,7 @@ int infer_write_types(Compiler *c) {
     }
   }
 
-  /* MatchRequiredNode: `value => pattern` — infer locals from pattern shape. */
+  /* MatchRequiredNode: `value => pattern` -- infer locals from pattern shape. */
   NT_FOREACH_KIND(nt, NK_MatchRequiredNode, id) {
     int value = nt_ref(nt, id, "value");
     int pattern = nt_ref(nt, id, "pattern");
@@ -2280,7 +2280,7 @@ int infer_write_types(Compiler *c) {
                         (sp_streq(name, "[]") && an == 1)) && an >= 1) {
         /* hash.fetch(key,..) / hash[key]: promote TY_UNKNOWN local to a typed hash.
            Only fires when the slot is currently TY_UNKNOWN (empty hash).
-           A 2-arg [] is a string/array slice, never a hash read — only the
+           A 2-arg [] is a string/array slice, never a hash read -- only the
            1-arg form is key-lookup evidence (fetch keeps >=1: (key, default)). */
         TyKind rslot = TY_UNKNOWN;
         const char *rrty = nt_type(nt, recv);
@@ -2299,7 +2299,7 @@ int infer_write_types(Compiler *c) {
              UNKNOWN before the param's call-site type arrives, and a read
              like `@s[i]` would mis-promote it to a hash. Promote from reads
              only when every assignment to the ivar is an empty `{}` literal
-             (the actual empty-hash case) — a syntactic test that is stable
+             (the actual empty-hash case) -- a syntactic test that is stable
              across fixpoint iterations. */
           if (rslot == TY_UNKNOWN) {
             const char *pin = nt_str(nt, recv, "name");
@@ -2510,8 +2510,8 @@ int infer_write_types(Compiler *c) {
          (but allow push-driven array promotion through). Without this guard,
          @free[0] read promotes @free to poly_poly_hash before @free = []
          has been processed as an array. */
-      /* A typed (non-nil) construction write — `@a = [x]*n`, `@a = arr.map{}`,
-         or an `@a = []` literal — means this ivar is an array filled by index,
+      /* A typed (non-nil) construction write -- `@a = [x]*n`, `@a = arr.map{}`,
+         or an `@a = []` literal -- means this ivar is an array filled by index,
          not a hash. Skip usage-driven hash promotion for both plain reads and
          `@a[k]=v` index-writes. A genuine hash (`@h = {}`) infers UNKNOWN from
          its empty literal and is unaffected. */
@@ -2532,7 +2532,7 @@ int infer_write_types(Compiler *c) {
           if (_wt != TY_UNKNOWN && _wt != TY_NIL) { has_typed_write = 1; break; }
           /* @ivar = [] literal: this slot is an array, not subject to
              hash-promotion from [] read or [0]= write. Empty {} does NOT
-             block promotion — the hash type is determined by key/value usage. */
+             block promotion -- the hash type is determined by key/value usage. */
           const char *_wvty = nt_type(nt, _wval);
           if (_wvty && sp_streq(_wvty, "ArrayNode"))
             has_typed_write = 1;
@@ -3056,7 +3056,7 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
     const char *apty = argv ? nt_type(nt, argv[k]) : NULL;
     /* A single SplatNode spreads its array across every remaining fixed param,
        not just this position. Bind each from the array's element type so a
-       splat-only call site (`f(*args)`) still types — and therefore emits —
+       splat-only call site (`f(*args)`) still types -- and therefore emits --
        the callee, then stop (the splat consumes the rest of the positionals). */
     if (apty && sp_streq(apty, "SplatNode")) {
       int inner = nt_ref(nt, argv[k], "expression");
@@ -4026,7 +4026,7 @@ int infer_param_types(Compiler *c) {
     /* Class.new -> initialize params; Class.cmethod -> cmethod params */
     {
       const char *rty = nt_type(nt, recv);
-      /* M::Sub.new(...) — resolve by the final path component */
+      /* M::Sub.new(...) -- resolve by the final path component */
       if (rty && sp_streq(rty, "ConstantPathNode")) {
         const char *cn = nt_str(nt, recv, "name");
         int ci = cn ? comp_class_index(c, cn) : -1;
@@ -7170,7 +7170,7 @@ int infer_block_params(Compiler *c) {
           if (_ya >= 0) nt_arr(nt, _ya, "arguments", &_yc);
           if (_yc < min_yc) min_yc = _yc;
         }
-        /* Block params at index >= min_yc can receive nil — widen to poly. */
+        /* Block params at index >= min_yc can receive nil -- widen to poly. */
         for (int k = min_yc; ; k++) {
           const char *bp = block_param_name(c, block, k);
           if (!bp) break;

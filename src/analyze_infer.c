@@ -6706,7 +6706,7 @@ TyKind infer_uncached(Compiler *c, int id) {
     return r;
   }
   if (nk == NK_CaseMatchNode) {
-    /* case X; in PATTERN; ... — value = unify of each arm's body (+ else). */
+    /* case X; in PATTERN; ... -- value = unify of each arm's body (+ else). */
     int nw = 0; const int *conds = nt_arr(nt, id, "conditions", &nw);
     int else_c = nt_ref(nt, id, "else_clause");
     TyKind r = TY_UNKNOWN;

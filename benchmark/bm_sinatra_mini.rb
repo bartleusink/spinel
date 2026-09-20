@@ -1,8 +1,8 @@
 # Sinatra-mini: tiny HTTP-style router + handler dispatch. Adds a
 # bench shape distinct from the existing three:
-#   bm_jekyll_lite — string-heavy pipeline, 0 poly
-#   bm_poly_cells  — synthetic polyvariance exerciser
-#   bm_micro_lisp  — saturated polyvariance (Lisp eval)
+#   bm_jekyll_lite -- string-heavy pipeline, 0 poly
+#   bm_poly_cells  -- synthetic polyvariance exerciser
+#   bm_micro_lisp  -- saturated polyvariance (Lisp eval)
 #
 # This one exercises: routing table (hash by path), per-route
 # handler with different params shapes, params extraction from a

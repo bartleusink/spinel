@@ -3867,7 +3867,7 @@ int scope_creates_returning_proc(Compiler *c, int si) {
    No-capture case: all locals in the body are fiber-function locals; any
    reference to an outer-scope variable that is NOT heap-celled will compile
    fine only when it's a parameter of the enclosing method (passed by value).
-   Captured outer locals (is_cell) are not yet supported — those fibers will
+   Captured outer locals (is_cell) are not yet supported -- those fibers will
    produce a C compile error rather than silently miscompiling. */
 /* Returns 1 if a type needs a GC root when stored in a fiber capture struct.
    Specifically: the capture is a single GC POINTER, which is what both users
@@ -9583,7 +9583,7 @@ static void reject_runtime_send(Compiler *c) {
     /* Only diagnose a send that codegen will actually emit. A send in a dead
        (unreachable) method is pruned before emission, so rejecting it would
        fail otherwise-valid programs that merely contain an unused method.
-       walk_scope assigns every node — including those inside blocks — the
+       walk_scope assigns every node -- including those inside blocks -- the
        enclosing method's scope, and the emit loop emits a scope's body only
        when it is reachable; mirror that gate here. */
     int sc = c->nscope[id];

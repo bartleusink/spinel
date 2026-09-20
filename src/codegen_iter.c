@@ -424,7 +424,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      expressions are call-site code and must resolve against the caller's
      self and class (e.g. a caller's attr_reader interpolated into a
      `fetch(key) { ... }` cache key). Only the receiver *temp* is declared
-     here — and the receiver expression itself is still emitted in the
+     here -- and the receiver expression itself is still emitted in the
      caller's context (g_self unchanged at this point). */
   const char *recv_self_deref = NULL;
   if (recv >= 0 && recv_class >= 0) {
@@ -644,7 +644,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
 
   /* Now switch into the RECEIVER's context for the method BODY. Both the
      self binding and the emitting-class must move together, and only here
-     — AFTER argument binding — so that implicit-self references inside the
+     -- AFTER argument binding -- so that implicit-self references inside the
      body (`to_a` in `def map; to_a.map { |x| yield x }; end`) resolve
      against the receiver, while call-site arg expressions above stayed in
      the caller's context (a caller's attr_reader interpolated into a
@@ -1370,7 +1370,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   g_ret_type = g_fn_ret_type;
   g_method_pr_exc_depth = 0;   /* the real function's funnel sits at depth 0 */
   /* likewise, the block body's `self` is the CALLER's (an ivar read inside
-     the block must not resolve against the inlined method's receiver) — and
+     the block must not resolve against the inlined method's receiver) -- and
      so is the block body's emitting-class, so an implicit-self *call* in the
      block resolves against the caller's class, not the receiver's. */
   const char *sv_bself = g_self, *sv_bderef = g_self_deref;
@@ -1523,7 +1523,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   g_block_id = svb; g_yield_block_fallback = svfb; g_block_param_name = svbpn;
   if (as_expr) {
     /* `{ return e }`: the block exits the enclosing function, so the
-       statement-expr's tail is unreachable — but C still needs a value
+       statement-expr's tail is unreachable -- but C still needs a value
        expression there (a trailing `return;` makes the ({...}) void). */
     int bn2 = 0; const int *bd2 = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn2) : NULL;
     if (bn2 > 0 && nt_type(nt, bd2[bn2 - 1]) &&
@@ -3214,7 +3214,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
 
-  /* array.zip(other) { |a, b| ... } — block form, returns nil */
+  /* array.zip(other) { |a, b| ... } -- block form, returns nil */
   if (sp_streq(name, "zip") && (ty_is_array(rt) || rt == TY_POLY) && block >= 0) {
     int zargs_n = nt_ref(nt, id, "arguments");
     int zargc = 0; const int *zargv = zargs_n >= 0 ? nt_arr(nt, zargs_n, "arguments", &zargc) : NULL;

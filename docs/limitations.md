@@ -3,18 +3,18 @@
 Spinel is a whole-program **ahead-of-time** compiler: it reads the entire
 program, infers a static type for every value, emits C, compiles it, and runs
 the binary. There is no Ruby interpreter, parser, or type-inference engine in
-the running program — it is just C. That model is what buys the speedup, and it
+the running program -- it is just C. That model is what buys the speedup, and it
 is also the source of every limitation below.
 
 This document is the honest catalogue. It is organized by *kind* of limit:
 
-- **Fundamental** — incompatible with whole-program AOT; will not change without
+- **Fundamental** -- incompatible with whole-program AOT; will not change without
   abandoning the model (e.g. bundling an interpreter).
-- **Partial / relaxable** — genuinely limited today, but additively fixable.
-- **By design** — a deliberate, documented choice; the intentional CRuby
+- **Partial / relaxable** -- genuinely limited today, but additively fixable.
+- **By design** -- a deliberate, documented choice; the intentional CRuby
   deviations are catalogued under [By design](#by-design-deliberate-choices)
   below.
-- **Now supported** — things that are *not* limits (corrects older write-ups
+- **Now supported** -- things that are *not* limits (corrects older write-ups
   that described an earlier version of the compiler).
 
 A limit the compiler meets is a *refusal*: a `spinel: FILE:LINE: ...` line on
@@ -29,11 +29,11 @@ refusals in its `diagnostics` array with `"severity":"error"`.
 ## Fundamental limits (inherent to AOT)
 
 These need a runtime parser, a runtime metaobject protocol, an allocation
-registry, or stack reification — none of which exist in a flat compiled binary.
+registry, or stack reification -- none of which exist in a flat compiled binary.
 
 | Feature | Behaviour | Why it's fundamental |
 |---|---|---|
-| `eval` / `instance_eval("str")` / `class_eval("str")` | unsupported | needs a runtime parser + type system. (Block forms — `instance_eval { }` — DO work; the block is compiled.) |
+| `eval` / `instance_eval("str")` / `class_eval("str")` | unsupported | needs a runtime parser + type system. (Block forms -- `instance_eval { }` -- DO work; the block is compiled.) |
 | `method_missing` | not dispatched (defining it warns at compile time) | every call site is a direct C call; an undefined-method call can't fall back to a per-receiver hook. The method is still callable explicitly. |
 | `define_method` with a runtime-computed name/body | only literal names work | a runtime-built method has no compiled body |
 | `ObjectSpace` (`each_object`, `count_objects`) | unsupported | no class-keyed allocation registry; the GC tracks bytes, not a live-object index |
@@ -45,11 +45,11 @@ registry, or stack reification — none of which exist in a flat compiled binary
 | Singleton methods (`def obj.m`, `class << obj; def m; end; end`, `obj.define_singleton_method(:m) { }`, `obj.extend(Mod)`) on a receiver whose creation site is **not** visible | unsupported | these DO work when the receiver is a constant or a local whose only write is `<UserClass>.new(...)`: the object gets a synthesized anonymous subclass carrying the methods, which is the AOT form of CRuby's hidden singleton class. What is left out is a receiver spinel cannot trace to one `.new` (a factory return, a loop, a conditional), and one whose class has no subclassable layout: `Object.new` / `BasicObject`, a builtin (String, Array), a Struct or Data, an exception. Those are refused at compile time, naming the Ruby line, when the body needs a `self` (its own `@ivar`, or `self`); a body that needs neither compiles as an ordinary function and is simply never reached as a method |
 | `Object#singleton_class` as an OBJECT (and `Class#attached_object`) | unsupported | the singleton class above is synthesized, not reified: there is no runtime class object to hand back. `class << obj` as a *definition* form works -- see the row above |
 | Runtime structural mutation of a class through an explicit receiver (`Klass.include(M)`, `Klass.attr_accessor(...)`, `Klass.define_method(...)` outside the class body) | unsupported | the class graph, ancestor chain, and method/ivar layout are baked at compile time; the same declarations *inside* a `class` body work |
-| General reflection (`methods`, `instance_variables`) and `instance_variable_get`/`set` with a **non-literal** name | unsupported | ivars are C struct offsets with no name→offset table; DCE strips method names. A **literal** `instance_variable_get(:@x)` / `instance_variable_set(:@x, v)` *is* supported — it resolves to the known struct offset, like `send(:literal)` below. |
+| General reflection (`methods`, `instance_variables`) and `instance_variable_get`/`set` with a **non-literal** name | unsupported | ivars are C struct offsets with no name→offset table; DCE strips method names. A **literal** `instance_variable_get(:@x)` / `instance_variable_set(:@x, v)` *is* supported -- it resolves to the known struct offset, like `send(:literal)` below. |
 | User-defined `#hash` / `#eql?` for hash *keys* | not dispatched (identity probe) | the hash machinery can't call back into a user method per key |
-| A method that **uses its block** (`yield` or `block.call`) **and recurses into itself** (`def rec(n, &b); ...; rec(n-1, &b); yield n; end`) | compile error (loud, was a hang / undefined-symbol) | a block-using method is inlined at each call site (there is no standalone function that takes the block), so a self-call inlines its own body unboundedly — the runtime base case is invisible at compile time. Recursion *through a yielded block* (`with_state { with_state { } }`, finite source nesting) does work |
+| A method that **uses its block** (`yield` or `block.call`) **and recurses into itself** (`def rec(n, &b); ...; rec(n-1, &b); yield n; end`) | compile error (loud, was a hang / undefined-symbol) | a block-using method is inlined at each call site (there is no standalone function that takes the block), so a self-call inlines its own body unboundedly -- the runtime base case is invisible at compile time. Recursion *through a yielded block* (`with_state { with_state { } }`, finite source nesting) does work |
 | `Monitor#class` | reports `Thread::Mutex` | a Monitor IS a mutex here, with reentrancy switched on per object, and the class name for a `TY_MUTEX` value is decided at compile time from the type rather than read off the object. `#synchronize` (including reentrant use), `#try_enter` and mutual exclusion across threads all behave as CRuby's do; only the name differs. `Monitor#new_cond` / the `MonitorMixin` module are not modelled. |
-| `require` of stdlib `.rb` that leans on metaprogramming / C extensions (e.g. `json/pure`, the `require "time"` parsing extensions like `Time.parse` / `Time.strptime`) | unsupported | such stdlib code runs off the AOT path. A `require` is resolved at parse time by splicing a bundled `lib/X.rb`; the libraries that ship this way — `set`, `forwardable`, `optparse`, `erb`, `csv`, `pathname`, `stringio`, `strscan` — do work. The built-in `Time` class (`Time.now` / `at` / `local` / `utc`, plus `strftime` / `zone`) works *without* any `require`; only the `require "time"` string-parsing additions are missing. |
+| `require` of stdlib `.rb` that leans on metaprogramming / C extensions (e.g. `json/pure`, the `require "time"` parsing extensions like `Time.parse` / `Time.strptime`) | unsupported | such stdlib code runs off the AOT path. A `require` is resolved at parse time by splicing a bundled `lib/X.rb`; the libraries that ship this way -- `set`, `forwardable`, `optparse`, `erb`, `csv`, `pathname`, `stringio`, `strscan` -- do work. The built-in `Time` class (`Time.now` / `at` / `local` / `utc`, plus `strftime` / `zone`) works *without* any `require`; only the `require "time"` string-parsing additions are missing. |
 
 **`net/http` / `uri`.** An HTTP/1.1 client with `Connection: close`, one
 request per connection -- a second request inside one `Net::HTTP.start` block
@@ -85,12 +85,12 @@ See [require.md](require.md) for which stdlib needs which `require`.
 `send`/`public_send`/`__send__` with a **non-literal** name (`send(meth)`) is
 partially supported: an explicit-receiver send lowers to a static dispatch over
 the method names that appear as symbol/string **literals** anywhere in the
-program — `recv.send(name) → name == :a ? recv.a : name == :b ? recv.b : … :
-raise NoMethodError` — with the receiver's type and the argument count selecting
+program -- `recv.send(name) → name == :a ? recv.a : name == :b ? recv.b : … :
+raise NoMethodError` -- with the receiver's type and the argument count selecting
 which arms resolve (the result is `poly`). A name that is not one of those
 literals, or not a method on the receiver, raises `NoMethodError` at runtime. A
 name drawn from outside the program's closed set of literals still can't be
-dispatched. A **literal** name is fully resolved — see below.
+dispatched. A **literal** name is fully resolved -- see below.
 
 ---
 
@@ -104,12 +104,12 @@ Limited today, but additively fixable; listed roughly easiest-first.
 | `Thread` real parallelism | implemented as a true M:N runtime (no GVL): N OS workers (`min(online cores, SPINEL_WORKERS)`) run green threads in parallel over a stop-the-world GC, with real `Mutex`/`Queue`/`SizedQueue`/`ConditionVariable`. A monitor thread timeslices CPU-bound threads (~10ms quantum) so a thread looping without yielding cannot starve its siblings (it signals the worker with `SIGURG`, overridable via `SPINEL_PREEMPT_SIGNAL`). The single-threaded archive is unchanged (a non-`Thread` program is byte-identical) | the N workers run per-worker run queues with work stealing, and `Kernel#sleep` and blocking I/O are scheduler-aware (a sleeping / I/O-blocked thread frees its OS worker). preemption is taken at safepoint polls (loop back-edges), so a thread spending a long time inside a single runtime call with no poll yields only when that call returns; concurrent allocation is thread-safe (heap-lock-protected allocators, atomic heap byte counters, per-worker object pools) but every allocation still crosses one global heap lock; remaining work: fully async (signal-interrupted) preemption of such regions, and per-worker allocation buffers (TLAB) to make allocation-heavy parallel code scale. See [docs/thread.md](thread.md) |
 | `Marshal` of user objects with container-typed ivars | primitives + Array + Hash + Bignum + Complex + Rational + plain user objects work, including cyclic and shared references (`Marshal.dump`/`load`, CRuby 4.8 wire format, byte-compatible for the supported subset); an object whose ivar is a *statically typed* Array/Hash (not a poly ivar) is not yet dumpable | a user object dumps/loads through a compile-time-generated per-class dispatcher. Supported ivar types: scalars (Integer/Float/String/true/false/Symbol/Bignum), `poly` (mixed) ivars, and nested user objects. A typed-container ivar would mismatch the loader's always-poly containers, so such a class raises `TypeError` on dump; value-type and Exception-subclass objects are also out of scope. Complex's components are float-only, so they round-trip as Floats |
 | Mixin/inheritance lifecycle hooks (`included` / `inherited` / `extended`) | defined but not fired | emit a startup call with the literal class arg (the include/inherit graph is known at compile time) |
-| External `Enumerator` — `.each` with no block is only an Enumerator on `Array` / `Range`, not on an arbitrary user method | mostly supported | `Array#each` / `Range#each` with no block return a working external Enumerator (`#next` / `#peek` / `#rewind` / `#size`, `loop` stops on `StopIteration`). `Enumerator.new { \|y\| ... }` is a fiber-backed generator (`y << v`, `y.yield(v)`, and the bare `y.yield v` without parentheses, plus `#next` / `#peek` / `#rewind` / `#take` / `#first`, infinite generators work). `Enumerator::Lazy` over an int range (incl. endless) or int array fuses map/select/reject/filter/take_while chains terminated by `first(n)` / `to_a` / `force`. Chained block→`.to_a` forms (`each_slice(n).to_a`, `filter_map`, `map{}.to_a`) also work. |
+| External `Enumerator` -- `.each` with no block is only an Enumerator on `Array` / `Range`, not on an arbitrary user method | mostly supported | `Array#each` / `Range#each` with no block return a working external Enumerator (`#next` / `#peek` / `#rewind` / `#size`, `loop` stops on `StopIteration`). `Enumerator.new { \|y\| ... }` is a fiber-backed generator (`y << v`, `y.yield(v)`, and the bare `y.yield v` without parentheses, plus `#next` / `#peek` / `#rewind` / `#take` / `#first`, infinite generators work). `Enumerator::Lazy` over an int range (incl. endless) or int array fuses map/select/reject/filter/take_while chains terminated by `first(n)` / `to_a` / `force`. Chained block→`.to_a` forms (`each_slice(n).to_a`, `filter_map`, `map{}.to_a`) also work. |
 | `Enumerable#each_entry` on a user class whose `#each` yields MULTIPLE values | yields them spread, as `#each` does, rather than packed into an array | on every builtin enumerable (Array/Hash/Range/Enumerator/Dir) `#each` yields one value per element, so `each_entry` is compiled as `each` and matches CRuby exactly. The difference only shows for a user `#each` that does `yield a, b`, where CRuby's `each_entry` hands the block `[a, b]`. Packing needs the yield arity of the user's `#each`, which is a static property of its body |
 | `StringIO#each_line` / `#each` / `#each_char` / `#each_byte` with NO block | `LocalJumpError`, where CRuby answers an `Enumerator` | the block forms are exact. Answering an Enumerator instead would make the method return either that or `self`, a union with no C slot. `io.readlines.each`, `io.read.each_char`, and `io.read.bytes` say the same thing and do have one |
 | `IO::Buffer` | the full in-memory API, CRuby-faithful: `new` (INTERNAL/MAPPED flags), `get_value`/`set_value`/`get_values`/`set_values` over all 18 type symbols (little/big-endian, `u64` round-trips Bignums under `--int-overflow=promote`), `get_string`/`set_string` (NUL-safe binary), `resize`/`clear`/`copy`/`size`, `slice` (live views, safe across a source `resize`), `transfer`/`free`/`dup`, `<=>`/`==`, `hexdump`/`inspect`/`to_s`, the predicates, the tiling bitwise family (`&` `\|` `^` `~` and `and!`/`or!`/`xor!`/`not!`), `locked`, `IO::Buffer.for(string)`/.string/.size_of, the CRuby exception classes (`IO::Buffer::AccessError` etc.), and the IO integration: `#read`/`#write`/`#pread`/`#pwrite` against an IO (one syscall each, answering the count, 0 at EOF or -errno; a blocking read on a socket or pipe parks the green thread, and the buffer is locked for the duration) and `IO::Buffer.map(file, size, offset, flags)` as an mmap view (READONLY / SHARED / PRIVATE; munmap'd by the finalizer; `resize` refused as for EXTERNAL). No `require` needed, as in CRuby. A literal type symbol compiles to a direct typed accessor (the wasm-runtime / binary-protocol hot path) | `#read` serves the bytes the IO's own stream already buffered before reading the descriptor (a `getc` followed by a `read` sees the next bytes); CRuby's reads the descriptor directly and can skip what its buffer holds. Three more deliberate divergences: `IO::Buffer.for(string)` copies (Spinel strings are immutable, so unobservable) and its write-through BLOCK form raises `NotImplementedError`; `each`/`each_byte`/`values` are block-form only (no Enumerator, as with StringIO); `get_string`'s third (encoding) argument is not accepted |
 | `Array#hash` (and arrays as hash keys) | unsupported | a builtin is additive, but array *keys* need the fundamental key-dispatch above |
-| Sockets | TCP / UDP / UNIX-domain, as IO handles — see below | additive: each missing class and method is its own runtime binding |
+| Sockets | TCP / UDP / UNIX-domain, as IO handles -- see below | additive: each missing class and method is its own runtime binding |
 | Passing data through a named pipe (FIFO) between two threads, **on macOS** | the reader gets nothing and the program hangs; Linux answers what CRuby answers | not the open, which is what #4394 was about, and not any change since: a reader and a writer exchanging three lines through one `mkfifo` path fails on macOS against a tree with no runtime change at all (#4406), so it is the readiness path a FIFO descriptor reaches once both ends exist. A pipe (`IO.pipe`) or a UNIX-domain socket carries the same traffic and works on both. Opening a FIFO no longer stalls the other green threads on either platform |
 | `p` / `#inspect` on a `Thread::SizedQueue`, a `Fiber` or a `Thread` | a SizedQueue prints as `#<Thread::Queue:0x...>`; a Fiber or Thread refuses to compile | A SizedQueue and a Queue share one slot type here, so the name a handle prints is the slot's rather than the object's. Fiber and Thread are refused rather than approximated: CRuby's inspect for those carries state -- a Fiber's source location and status, a Thread's run state -- that the handle does not keep, and a truncated render would be a quieter wrong answer than the refusal. Mutex, Queue and ConditionVariable print exactly what CRuby prints for them |
 | `k.new(x)` where `k` is a Class VALUE and the constructor parameter is typed by its DEFAULT | `NoMethodError` where CRuby constructs | `initialize(a = 1)` types `a` Integer. A statically known `Klass.new("x")` widens that parameter, because the inference can see the call site and which class it names; a class-value call site names no class, so it seeds nothing and the parameter keeps the type its default gave it. The dispatch then has no arm for a String argument and raises. Passing an argument of the parameter's own type works, as does any constructor whose parameters are typed by their uses rather than by a default. Before this raise existed the arm was selected anyway and the argument's bits were read as the parameter's type, so the raise is the fix rather than the limitation |
@@ -366,13 +366,13 @@ still works.
 
 ## By design (deliberate choices)
 
-- **Integer overflow** — pick one mode at compile time: `raise` (default,
+- **Integer overflow** -- pick one mode at compile time: `raise` (default,
   `RangeError` on overflow), `wrap`, or `--int-overflow=promote` (auto-bignum).
   Not both in one binary, because the representation is chosen statically. See
   [int-overflow.md](int-overflow.md).
-- **Float `round(ndigits)`** — the value is always correct; the *return class*
+- **Float `round(ndigits)`** -- the value is always correct; the *return class*
   follows CRuby (Integer for `round` with 0 digits, Float otherwise).
-- **`Proc#ruby2_keywords`** — not supported (rejected at compile time). It is a
+- **`Proc#ruby2_keywords`** -- not supported (rejected at compile time). It is a
   migration shim for the Ruby 2.x-to-3.0 keyword-argument transition, flagging a
   proc so a trailing `Hash` forwarded through `*args` is treated as keywords.
   Spinel targets modern Ruby keyword semantics directly, so the shim has nothing
@@ -388,10 +388,10 @@ still works.
   A program must `require` what it actually uses; the transitive requires of
   CRuby's implementation are not part of a library's interface. (Spinel's
   bundled libraries are listed in [require.md](require.md).)
-- **`slice_before` / `slice_after` with a `Proc` pattern** — rejected at
+- **`slice_before` / `slice_after` with a `Proc` pattern** -- rejected at
   compile time (a stored-proc `===` call per element); use the block form.
   Range, Class, Regexp, and value patterns are supported.
-- **`Comparable` with a non-conforming `#<=>`** — `<=>` is a protocol method
+- **`Comparable` with a non-conforming `#<=>`** -- `<=>` is a protocol method
   returning `Integer` or `nil` (a `Float` is accepted, compared by sign). A
   `<=>` whose result type is statically something else (`String`, `Array`,
   `Hash`, `Symbol`, boolean) is a definite protocol violation: any Comparable
@@ -399,18 +399,18 @@ still works.
   is rejected at compile time rather than raising at run time as CRuby does.
   A `<=>` whose result is only `poly`/unknown statically keeps the CRuby
   runtime behavior (an incomparable pair raises `ArgumentError`).
-- **`remove_method` / `undef_method` / `remove_class_variable`** — rejected at
+- **`remove_method` / `undef_method` / `remove_class_variable`** -- rejected at
   compile time. Methods are resolved statically and compiled to direct C calls,
   and class variables to static storage, so there is no runtime table for these
   to mutate; a construct would remove nothing. The call is reported rather than
   silently ignored. (A class that defines its own method by one of these names
   keeps it.)
-- **Frozen literals** — explicit `.freeze` then mutation raises `FrozenError`,
+- **Frozen literals** -- explicit `.freeze` then mutation raises `FrozenError`,
   matching CRuby. String literals ARE frozen by default here
-  (`frozen_string_literal: true` semantics, with no opt-out) — see
+  (`frozen_string_literal: true` semantics, with no opt-out) -- see
   "String literals are frozen by default" below for what that changes and
   where mutable strings come from.
-- **Comparable is keyed on `<=>` presence** — the Comparable operator methods
+- **Comparable is keyed on `<=>` presence** -- the Comparable operator methods
   (`<`, `<=`, `>`, `>=`, `between?`, `clamp`) work on any class that defines
   `<=>`; CRuby additionally requires `include Comparable` (a `NoMethodError`
   otherwise). Spinel does not model the mixin, so it is permissive where CRuby
@@ -423,8 +423,8 @@ still works.
   libc `qsort`); it matches CRuby's comparison schedule for small arrays, but
   for larger ones (roughly 8 elements and up, where CRuby switches to its
   quicksort) the order of tied elements and which incomparable pair the
-  ArgumentError names can differ from CRuby — deterministically so.
-- **Thread data races are observable** — Spinel runs threads with real
+  ArgumentError names can differ from CRuby -- deterministically so.
+- **Thread data races are observable** -- Spinel runs threads with real
   parallelism and no GVL, so two threads mutating the same `Array`/`Hash`/object
   without a `Mutex` race, similar to `Array`/`Hash` in JRuby and `Array` in
   TruffleRuby. What that costs differs by kind of state, and `docs/thread.md`
@@ -433,7 +433,7 @@ still works.
   from one write and half from another, and a shared `Array`/`Hash` can abort
   or SIGSEGV.
   CRuby's GVL makes individual operations appear atomic; Spinel does
-  not, and adds no implicit per-object locking — correctness across threads is the
+  not, and adds no implicit per-object locking -- correctness across threads is the
   program's responsibility via `Mutex`/`Queue`/`ConditionVariable`. Relatedly,
   thread *interleaving* (and so the ordering of `Thread.pass`, `Thread.list`
   membership, and the exact moment a `Thread#raise`/`#kill` is delivered) is
@@ -941,7 +941,7 @@ pins which is which.
 `module Encoding` at the top level is CRuby's `TypeError` (`Encoding is not a
 module`) and Spinel reports the same error at compile time. A *nested*
 `module Foo::Encoding` (or `class Foo; module Encoding; end; end`) is legal
-CRuby — it names a fresh constant — but Spinel's generated C type for a class
+CRuby -- it names a fresh constant -- but Spinel's generated C type for a class
 or module is its bare tail name, which collides with the runtime's own
 `sp_Encoding` type. Spinel refuses these at compile time with
 `unsupported module name '<Name>': collides with the builtin class of that
@@ -953,8 +953,8 @@ normally at any nesting level.
 
 The legacy form `Struct.new("Foo", :a, :b)` registers the new class as the
 constant `Struct::Foo`. Spinel does not support this: a class is a compile-time
-entity here, and the whole point of the string name — a class installed under
-the `Struct::` namespace and reached through `Struct::Foo` — has no analogue in
+entity here, and the whole point of the string name -- a class installed under
+the `Struct::` namespace and reached through `Struct::Foo` -- has no analogue in
 the ahead-of-time model. Spinel refuses both the string-named definition and any
 `Struct::Name` reference at compile time with `Struct.new with a string name …
 is not supported; use \`Name = Struct.new(...)\``. Use the modern constant-
@@ -1008,7 +1008,7 @@ complex result is really wanted.
 #### `defined?(@ivar)` is answered at compile time
 
 CRuby answers `defined?(@ivar)` from the object's runtime state: `nil` until
-the instance variable is first assigned, `"instance-variable"` after — which
+the instance variable is first assigned, `"instance-variable"` after -- which
 is what makes it usable as a memoization guard for falsy values
 (`return @x if defined?(@x)`).
 
@@ -1023,12 +1023,12 @@ memoization pattern silently reads the unassigned slot on the first call:
 ```ruby
 def foo
   return @foo if defined?(@foo)   # compile-time truthy: an @foo= exists below
-  @foo = compute                  # never reached — foo returns nil forever
+  @foo = compute                  # never reached -- foo returns nil forever
 end
 ```
 
 Tracking runtime assignment would need a shadow presence bit per ivar written
-on every assignment — cost on every object and every ivar write to serve a
+on every assignment -- cost on every object and every ivar write to serve a
 rare pattern. Use a nil check (`@foo = compute if @foo.nil?`, i.e. `||=`) when
 `compute` never yields nil/false, or an explicit sentinel/flag ivar when it
 can:
@@ -1235,7 +1235,7 @@ now work on current master:
 
 | Feature | Status |
 |---|---|
-| Mutable strings and aliased in-place mutation (`s = +"x"; s << "y"`; literals are frozen by default — see the String section) | works |
+| Mutable strings and aliased in-place mutation (`s = +"x"; s << "y"`; literals are frozen by default -- see the String section) | works |
 | Hash missing key → `nil` (string- and int-keyed, including `Hash.new(default)`) | works |
 | `define_method(:name) { ... }` with a literal name | works |
 | Block-param arity (un-yielded params are `nil`, not a sentinel) | works |
@@ -1252,8 +1252,8 @@ the master implementation.
 ## Why this still works
 
 Most real programs use the dynamic features above sparingly, in setup code, or
-not at all. Spinel targets the large static core of Ruby — classes, methods,
-blocks, the collection protocols, exceptions, mixins — and compiles it to fast
+not at all. Spinel targets the large static core of Ruby -- classes, methods,
+blocks, the collection protocols, exceptions, mixins -- and compiles it to fast
 native code. When a program does need a feature in the *fundamental* table, that
 program is not a fit for AOT; for everything else, the limits are either by
 design or on the relaxable list.

@@ -2,7 +2,7 @@
 
 Developer tools that ship with the compiler. They are written in the
 spinel subset and compiled by `spinel` itself, so their only runtime
-dependency is `cc` — the same as the compiler. `make` builds them
+dependency is `cc` -- the same as the compiler. `make` builds them
 (`build/spinel-<name>`) and `make install` places them on `PATH` beside
 `spinel`, so each is invoked like a subcommand:
 
@@ -19,23 +19,23 @@ explicit path), `$SPINEL_DIR/spinel`, then `spinel` on `PATH`.
 
 One health report for a program. Independent legs:
 
-- **build** — compiles to a binary; reports any compile / codegen /
+- **build** -- compiles to a binary; reports any compile / codegen /
   C-build failure (with `--line-map`, so C errors point at Ruby lines).
-- **unsupported** — codegen gaps that degrade to a stub.
-- **unresolved** — calls that silently degrade to `nil`/`0` where CRuby
+- **unsupported** -- codegen gaps that degrade to a stub.
+- **unresolved** -- calls that silently degrade to `nil`/`0` where CRuby
   would raise (via `SPINEL_WARN_UNRESOLVED`).
-- **inference** — methods spinel widened to `untyped` (the boxed poly
+- **inference** -- methods spinel widened to `untyped` (the boxed poly
   slow path).
-- **advice** — where the boxed slow path will cost: boxed operations in
+- **advice** -- where the boxed slow path will cost: boxed operations in
   the generated C, ranked by loop depth and mapped back to source lines.
-  Depth propagates across the static call graph — a method reached only
+  Depth propagates across the static call graph -- a method reached only
   from a deep nest ranks at its callers' depth, not at zero. Still
-  static, so it ranks by *expected* cost with no time axis — a deep
+  static, so it ranks by *expected* cost with no time axis -- a deep
   startup nest can outrank per-frame work of the same depth; confirm
   with a profiler before optimizing
   ([`docs/profiling.md`](../docs/profiling.md)).
-- **requires** — non-relative `require`s spinel treats as native / no-op.
-- **behavior** — optional: compiled output vs CRuby; needs `ruby` on
+- **requires** -- non-relative `require`s spinel treats as native / no-op.
+- **behavior** -- optional: compiled output vs CRuby; needs `ruby` on
   `PATH` and skips cleanly otherwise.
 
 ```
@@ -72,5 +72,5 @@ spinel-flatten [-o OUT] app.rb
 
 Drop `tools/<name>.rb` (subset Ruby, `require_relative "tool_common"`
 for the shared helpers); `make` compiles it to `build/spinel-<name>` and
-`make install` installs it. Keep it within the subset — a tool that
+`make install` installs it. Keep it within the subset -- a tool that
 stops compiling breaks the build.

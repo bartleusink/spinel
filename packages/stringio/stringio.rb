@@ -1,4 +1,4 @@
-# Spinel bundled `stringio` — a carried-C spin package (Path B typed object).
+# Spinel bundled `stringio` -- a carried-C spin package (Path B typed object).
 #
 # StringIO is a native-bound class: the struct and every method live in this
 # package's C (sp_stringio.c, linked only when `require "stringio"` appears),

@@ -1,4 +1,4 @@
-# spin — projects and packages
+# spin -- projects and packages
 
 `spin` is Spinel's project tool: it scaffolds a project, resolves
 dependencies (spin packages), and drives the compiler so you never write a
@@ -49,7 +49,7 @@ cd mylib
 ```
 
 A library is the same package shape minus `bin/`: there is nothing to `spin
-build` or `spin run` — a library is *exercised through its tests*:
+build` or `spin run` -- a library is *exercised through its tests*:
 
 ```sh
 cat > mylib.rb <<'RUBY'
@@ -66,7 +66,7 @@ spin test --regen        # freeze the output as the .expected snapshot
 ```
 
 While developing an application against your library, wire it up as a
-live path dependency — edits take effect on the next build, nothing is
+live path dependency -- edits take effect on the next build, nothing is
 pinned:
 
 ```sh
@@ -104,7 +104,7 @@ available, by printed instructions otherwise, or pushed directly with
 ### One version, one spelling
 
 Versions are compared field by field as numbers, with the shorter side padded
-with zeros, so `0.1` and `0.1.0` are the **same version** to every constraint —
+with zeros, so `0.1` and `0.1.0` are the **same version** to every constraint --
 and so are `2026.9.8` and `2026.09.08`. Publishing both would put one version
 in the index twice and split the native object cache, whose directory name is
 the version as written. `spin publish` refuses the second spelling and says
@@ -131,14 +131,14 @@ spin tree                             # nested view (--json on both)
 ```
 
 Dependencies are transitive: each fetched package's own `[dependencies]` is
-resolved too. Inside a project every `require` must resolve — an
+resolved too. Inside a project every `require` must resolve -- an
 unsatisfiable `require` is a compile error naming the missing package, and
 stdlib features need their `require` just like CRuby (`spin` compiles with
 the require gate on; see [require.md](require.md)).
 
 ### The index
 
-A bare `name = "constraint"` dependency is looked up in the index — a git
+A bare `name = "constraint"` dependency is looked up in the index -- a git
 repository (no server) mapping names to repos and releases:
 <https://github.com/matz/spin-index>. Constraints are `"~> 1.2"`
 (pessimistic), `">= 1.2.3"`, an exact version, or `"*"`.
@@ -198,12 +198,12 @@ presence for years, which was a contract for everyone with a `.c` in their tree
 and was written nowhere (#4362). Those arrive as bug reports, and writing one
 down is what puts it in the report from then on.
 
-Index entries also carry **probe records** — which compiler build a release
+Index entries also carry **probe records** -- which compiler build a release
 passed or failed its tests under (`spin publish` records a pass for your
 build automatically; `spinel --version` prints the build revision). When
 you depend on a release with a recorded failure, resolution warns before
-fetching — strongly when the failure was recorded against your exact
-compiler build — but never blocks: your own build is the final answer.
+fetching -- strongly when the failure was recorded against your exact
+compiler build -- but never blocks: your own build is the final answer.
 
 ### spin.lock
 
@@ -219,7 +219,7 @@ the next `spin lock` rewrites the pin.
 Fetched packages live in a shared cache (`$XDG_CACHE_HOME/spin/packages/`),
 keyed by the commit SHA. `spin vendor` copies the resolved tree into
 `vendor/packages/` for hermetic builds; with `SPIN_OFFLINE=1`, resolution uses
-only the cache and `vendor/` — nothing touches the network.
+only the cache and `vendor/` -- nothing touches the network.
 
 ## Tests
 
@@ -234,7 +234,7 @@ spin test --regen         # refresh .expected snapshots from CRuby
 
 A committed `test/<name>.rb.expected` is diffed against the run's stdout.
 With no snapshot, the same file runs under `ruby` and the outputs are
-diffed directly — the test doubles as a CRuby-parity check. A non-zero
+diffed directly -- the test doubles as a CRuby-parity check. A non-zero
 exit or a diff fails, so plain assert-and-raise style works.
 
 ## Native C in a package
@@ -264,7 +264,7 @@ sources = ["fast_ext.c"]
 ```
 
 `spin` compiles each named `.c` once into a shared cache keyed by
-(package, version, toolchain) — set `CC` to choose the compiler — and links the
+(package, version, toolchain) -- set `CC` to choose the compiler -- and links the
 objects into every dependent build. External libraries use the existing
 `ffi_lib` declaration and need no manifest entry.
 
@@ -272,8 +272,8 @@ objects into every dependent build. External libraries use the existing
 
 Both halves of a package are declared. A `.rb` enters the build by being
 required; a `.c` enters by being listed in `sources`. Without the key a package
-carries no C at all, so a program of your own sitting beside the Ruby — or a
-scratch file left there while debugging — is not compiled and cannot collide
+carries no C at all, so a program of your own sitting beside the Ruby -- or a
+scratch file left there while debugging -- is not compiled and cannot collide
 with the generated `main` at link time.
 
 Entries are paths relative to the package root and may be globs:
@@ -287,7 +287,7 @@ whatever `.c` is there. It is the author's call, and it picks scratch files back
 up.
 
 A `.c` in the tree that no entry names is reported and skipped, rather than
-skipped quietly — a forgotten entry would otherwise surface as an undefined
+skipped quietly -- a forgotten entry would otherwise surface as an undefined
 symbol at link, which names a symbol instead of the file. An entry that matches
 nothing is reported for the same reason.
 
@@ -296,7 +296,7 @@ emitted. `spinel app.rb -c -o out.c` writes a translation unit that defines
 `main` and, through the compiler's internal header, its own copy of the runtime,
 so compiling it as carried C collides with the real program on both. spin
 recognises its own output by the banner on the first line, leaves it out even
-when a glob reached it, and says which file it left out — that file may be
+when a glob reached it, and says which file it left out -- that file may be
 sitting on top of a source of the same name it overwrote, in which case the
 source is gone and needs restoring.
 
@@ -312,7 +312,7 @@ exclude = ["standalone_c_app.c", "cbits"]
 ```
 
 Globs are relative to the package root; naming a directory prunes all of it.
-`exclude` covers native sources only — `.rb` needs no entry, since nothing
+`exclude` covers native sources only -- `.rb` needs no entry, since nothing
 compiles it unless something requires it, and an excluded `.h` is still on the
 include path for the C that is compiled. An application scaffolded by
 `spin new` has no `[package]` table; add one to use either field.
@@ -354,7 +354,7 @@ $ spin build
 ```
 
 That is deliberate. The manifest states what the program needs, and an unmet
-statement should fail the way an unresolvable dependency does — quietly
+statement should fail the way an unresolvable dependency does -- quietly
 building something slower than what was asked for is how one machine's binary
 comes to differ from another's without anyone noticing.
 
@@ -366,8 +366,8 @@ image.
 ## Building outside spin
 
 `spin build` owns the tree it sits in. When the build is driven from somewhere
-else — a Makefile that also builds a C program, a repository whose layout is
-not spin's to arrange — `spin flags` hands over instead of taking over. It
+else -- a Makefile that also builds a C program, a repository whose layout is
+not spin's to arrange -- `spin flags` hands over instead of taking over. It
 resolves the dependencies, compiles any carried C into the cache, and prints
 the compiler flags that implies:
 
@@ -478,8 +478,8 @@ own host has no say in it: it may well have pthread when the device does not.
 
 `spin build`/`run`/`test` skip recompilation when nothing changed (input
 mtimes across the project, its dependencies, and the compiler binary).
-There is no file-granular incremental mode — whole-program type
-specialization spans every source — but compiles are fast and package C
+There is no file-granular incremental mode -- whole-program type
+specialization spans every source -- but compiles are fast and package C
 objects are reused from the cache. `spin clean` removes `build/`.
 
 ## Command summary

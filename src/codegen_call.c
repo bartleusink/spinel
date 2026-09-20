@@ -10512,7 +10512,7 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       /* Root both operands when either may allocate: `a + b` evaluates both,
          and a fresh heap string from one can be swept while the other
          allocates or forces a GC (chained `a + b + c` with side-effecting
-         operands — concat_chain_operand_gc_root). Recurses naturally: a
+         operands -- concat_chain_operand_gc_root). Recurses naturally: a
          chain's left operand is itself a `+` and gets its own rooted block.
          Pure literal / bare-read operands need no rooting. */
       /* A poly operand (statically typed string here, holds a string at
@@ -18247,7 +18247,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       return;
     }
   }
-  /* poly_val.arity — a Method read out of a container widened to poly. The
+  /* poly_val.arity -- a Method read out of a container widened to poly. The
      arity was stamped onto the sp_BoundMethod at creation, so read it back
      (a non-Method poly here is a genuine NoMethodError, as before) (#3231). */
   if (recv >= 0 && comp_ntype(c, recv) == TY_POLY && argc == 0 && sp_streq(name, "arity")) {
@@ -18264,7 +18264,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       return;
     }
   }
-  /* poly_val.call — the poly value is a proc; unbox then call. Only applies
+  /* poly_val.call -- the poly value is a proc; unbox then call. Only applies
      when no user-defined class has a `call` method that could take THIS
      call: when one does, the poly method dispatch carries a callable pre-arm
      that routes a boxed Proc/Curry/Method through this same machinery, and
@@ -31167,7 +31167,7 @@ else {
   /* `arr[i] = v` in expression position: do the store, evaluate to the rhs
      (Ruby []= returns the assigned value). The statement form is emitted
      elsewhere; this covers rvalue chains like `b = arr[i] = v`. */
-  /* a[i, n] = src  —  slice assignment */
+  /* a[i, n] = src  --  slice assignment */
   /* arr[start, len] = rhs : a splice (remove `len` at `start`, insert rhs). */
   if (recv >= 0 && ty_is_array(rt) && sp_streq(name, "[]=") && argc == 3) {
     emit_array_splice(c, id, recv, rt, argv[0], argv[1], -1, argv[2], b);

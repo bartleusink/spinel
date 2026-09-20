@@ -551,7 +551,7 @@ void emit_int_divisor(Compiler *c, int node, Buf *b) {
 
 /* True if `root` contains a `break <value>` that binds to the enclosing loop
    (not one inside a nested loop, block, lambda, or def/class/module scope, which
-   capture their own break — but a break in a block-bearing call's receiver or
+   capture their own break -- but a break in a block-bearing call's receiver or
    arguments does bind to the loop, so those are still traversed). A valued break
    makes the loop's value the break value rather than nil; detect it so a loop in
    value position rejects instead of silently yielding nil. */
@@ -2429,7 +2429,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     }
     if (par_nmc && sp_streq(par_nmc, "Integer") && nm &&
         (sp_streq(nm, "MAX") || sp_streq(nm, "MIN"))) {
-      /* Integer::MAX/MIN do not exist in Ruby — raise NameError at runtime */
+      /* Integer::MAX/MIN do not exist in Ruby -- raise NameError at runtime */
       buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant Integer::%s\"), 0)", nm);
       return;
     }
@@ -2624,7 +2624,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       }
     }
     /* defined?(yield) answers "yield" only when the current method actually
-       received a block, else nil — the same runtime question as block_given?.
+       received a block, else nil -- the same runtime question as block_given?.
        An inlined yielding scope statically has a block; a lowered scope tests
        its runtime __yblk__ parameter; any other scope has no block. */
     if (!res && vt && sp_streq(vt, "YieldNode")) {
@@ -2651,7 +2651,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       buf_puts(b, "("); emit_expr(c, bd[0], b); buf_puts(b, ")");
       return;
     }
-    /* Multi-stmt parens: `(s1; s2; expr)` — run leading stmts, then the
+    /* Multi-stmt parens: `(s1; s2; expr)` -- run leading stmts, then the
        value. The tail's emission may hoist statements into g_pre (an
        instance_exec splice, a constructed receiver): the shared prelude is
        flushed BEFORE the statement containing this paren, which would run
@@ -2714,7 +2714,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       for (int j = 0; j < n; j++) {
         const char *ety = nt_type(nt, els[j]);
         if (ety && sp_streq(ety, "SplatNode")) {
-          /* [*arr] or [*range] — expand into poly */
+          /* [*arr] or [*range] -- expand into poly */
           int inner = nt_ref(nt, els[j], "expression");
           TyKind it = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
           Buf el; memset(&el, 0, sizeof el); emit_expr(c, inner, &el);
@@ -3354,7 +3354,7 @@ else {
     emit_ctype(c, rt, b);
     buf_printf(b, " _t%d = %s; sp_exc_check_depth(); sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp; sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n", t, slot_zero(c, rt));
     buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
-    /* expression arm — assign result to temp (skip diverging exprs like raise) */
+    /* expression arm -- assign result to temp (skip diverging exprs like raise) */
     TyKind et = e >= 0 ? comp_ntype(c, e) : TY_UNKNOWN;
     /* An empty container's type reads UNKNOWN for want of an element type; it
        still produces a value, so it must be assigned rather than emitted for

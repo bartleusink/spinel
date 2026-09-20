@@ -1,4 +1,4 @@
-# Spinel bundled `strscan` — a carried-C spin package (Path B typed object).
+# Spinel bundled `strscan` -- a carried-C spin package (Path B typed object).
 #
 # StringScanner is a native-bound class: the struct and every method live in
 # this package's C (sp_strscan.c, linked only when `require "strscan"`

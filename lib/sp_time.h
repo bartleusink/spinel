@@ -2,7 +2,7 @@
  *
  * The whole of spinel's Time implementation lives in lib/sp_time.c
  * (compiled into libspinel_rt.a), including the formatters, which now
- * return GC-heap strings directly (sp_time.c includes sp_alloc.h) — so
+ * return GC-heap strings directly (sp_time.c includes sp_alloc.h) -- so
  * the generated TU calls them straight, with no buffer-copying
  * trampoline in spinel_rt.h.
  *

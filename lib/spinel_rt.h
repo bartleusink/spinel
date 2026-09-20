@@ -48,7 +48,7 @@ const char *sp_str_setbyte_cow(const char *s, sp_int i, sp_int v);
 /* Opt-in native backtrace (spinel --debug). In a -g, non-inlined build the
    sp_<method> symbols are present, so sp_raise_cls can snapshot the live C
    stack at raise time and Exception#backtrace / caller format it into a
-   Ruby-style backtrace — no per-method shadow frames needed. Off unless the
+   Ruby-style backtrace -- no per-method shadow frames needed. Off unless the
    generated main() sets sp_bt_enabled (debug builds), so non-debug behaviour
    and cost are unchanged. execinfo is not quite POSIX-ish; it's absent on
    Windows and other platforms. */
@@ -173,7 +173,7 @@ void sp_warning_warn(const char *msg);
 #define SP_DYN_SYMS_MAX 8192
 #endif
 
-/* sp_raise_cls forward decl — defined later in this header (line ~1017).
+/* sp_raise_cls forward decl -- defined later in this header (line ~1017).
    Used by the integer-division helpers below to match CRuby semantics:
    `a / 0`, `a % 0`, `a.divmod(0)`, `a.ceildiv(0)`, and `a.pow(e, 0)` all
    raise ZeroDivisionError instead of triggering C undefined behaviour
@@ -392,7 +392,7 @@ static inline sp_float sp_math_gamma(sp_float x){if(x<0.0&&x==floor(x))sp_raise_
 /* ---- Time runtime ---- */
 /* sp_Time and the libc-backed accessors / formatters live in
    lib/sp_time.{c,h} (compiled into libspinel_rt.a). What stays here
-   are the GC-aware wrappers — sp_box_time copies the value onto the
+   are the GC-aware wrappers -- sp_box_time copies the value onto the
    GC heap, and the *_gc string forwarders allocate a small stack buf,
    call the libspinel_rt format helper, then sp_str_dup_external the
    result into the GC string heap. is_utc distinguishes UTC-coerced
@@ -533,7 +533,7 @@ static inline sp_Encoding sp_encoding_binary(void){return(sp_Encoding){&("\xff" 
 /* True when `s` carries one of spinel's own string markers in the
    preceding byte (0xfe / 0xfc heap, 0xff rodata literal). FFI returns
    a bare `const char *` whose preceding byte is whatever C variable
-   sits before the buffer in memory — using the pointer as a cache
+   sits before the buffer in memory -- using the pointer as a cache
    key without this gate aliased subsequent FFI calls into the prior
    call's cached length (#611). 0xfd (sp_String wrapper) is excluded
    too because its buffer can move on append. */
@@ -544,7 +544,7 @@ static inline sp_Encoding sp_encoding_binary(void){return(sp_Encoding){&("\xff" 
 /* Issue #858: expand `a-z` range notation in a String#delete /
    String#tr / String#count character set. `^abc` negation is
    NOT handled (separate v1 scope). Result is a malloc'd flat
-   codepoint array — caller frees. */
+   codepoint array -- caller frees. */
 
 /* sp_mark_string is an inline helper in sp_gc.h. sp_str_sweep moved to
    sp_alloc.c (single definition, registered with the GC there). */
@@ -558,7 +558,7 @@ static inline sp_Encoding sp_encoding_binary(void){return(sp_Encoding){&("\xff" 
 /* Cooperative-fiber GC root storage (issue #636).
    sp_gc_roots[] holds the CURRENT fiber's active roots. When a fiber
    yields, its roots get copied out to the fiber's saved_roots buffer
-   and the resuming fiber's saved_roots are copied back in — so the
+   and the resuming fiber's saved_roots are copied back in -- so the
    per-fiber stacks never clobber each other through interleaved
    pushes the way they did when a single global stack was shared by
    every fiber. sp_gc_mark_all calls the hook below (installed once
@@ -586,7 +586,7 @@ static inline int sp_gc_bucket(size_t sz){int b=(int)(sz/16);return b<SP_GC_NBUC
 /* sp_gc_stress_checked moved to sp_alloc.c */
 /* sp_gc_alloc / sp_gc_alloc_nogc moved to sp_alloc.h (shared inline over the
    extern heap + threshold state). */
-/* GC-header frozen bit — used for containers whose mutators are NOT
+/* GC-header frozen bit -- used for containers whose mutators are NOT
    on a hot path (hashes), so the extra cache line vs. a struct field
    doesn't matter. Arrays co-locate `frozen` in the struct instead
    (see sp_IntArray); strings use the 0xff marker / wrapper bit. */
@@ -753,7 +753,7 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
   _p; \
 }))
 
-/* `Object.new` — a sentinel object whose only meaningful property is
+/* `Object.new` -- a sentinel object whose only meaningful property is
    identity. Each call returns a fresh GC-managed allocation, so two
    `Object.new` results compare as `!=` via their pointer addresses. */
 typedef struct sp_Object_s { uint8_t _pad; } sp_Object;
@@ -781,10 +781,10 @@ static inline sp_int sp_int_bit(sp_int n, sp_int i) {
 /* sp_StrArray lives in sp_array.h (hot core inline) + lib/sp_array.c
    (cold ops). sp_StrArray_from_string_range stays here because it needs
    sp_str_succ (a string-batch helper defined further down). */
-/* Forward decl — sp_str_succ is defined further down (it uses
+/* Forward decl -- sp_str_succ is defined further down (it uses
    sp_utf8_decode); the StrArray_from_string_range loop below needs
    it visible early. */
-/* String range to_a — single-char and multi-char ASCII ranges via
+/* String range to_a -- single-char and multi-char ASCII ranges via
    sp_str_succ. The 4096-iteration cap stops a pathological prepend-
    style infinite loop before it eats memory. */
 /* Case-insensitive string compare. Portable across glibc / MinGW
@@ -865,11 +865,11 @@ else{/* result didn't fit the stack temp; re-render at full width (sp_str_alloc 
    that allocation can now trigger a string-heap collection, which would sweep
    an unrooted `s` mid-copy (the read-first pattern sp_str_tr/sp_str_format use). */
 /* Issue #921: shrink the heap-string header length to match the
-   squeezed payload — the alloc gives bl+1 bytes, the squeezed
+   squeezed payload -- the alloc gives bl+1 bytes, the squeezed
    write fills n<=bl, leaving the header's stored length stale.
    `bytes` / `length` consult the header (not strlen), so callers
    would see the alloc size and trailing NULs. */
-/* String#squeeze(chars) — only squeeze chars listed in the charset
+/* String#squeeze(chars) -- only squeeze chars listed in the charset
    (same charset syntax as tr: a-z, ^x, etc.). Consecutive runs of
    non-listed chars pass through untouched. */
 /* Multi-arg delete/squeeze: delete (or squeeze runs of) characters that
@@ -881,7 +881,7 @@ else{/* result didn't fit the stack temp; re-render at full width (sp_str_alloc 
    hash without dragging in libc crypt(3). */
 const char *sp_crypto_hmac_sha256_b64url(const char *key, const char *msg);
 
-/* String#crypt — Spinel's crypt is NOT the libc DES crypt. It
+/* String#crypt -- Spinel's crypt is NOT the libc DES crypt. It
    returns `salt[0..1] || hmac_sha256(salt, password)[0..10]` as
    a 13-char string (same length as DES crypt, deterministic,
    stronger primitive). CRuby's spec says String#crypt is impl-
@@ -890,14 +890,14 @@ const char *sp_crypto_hmac_sha256_b64url(const char *key, const char *msg);
    spinel builds. Short salts get padded with '.' so the result
    still has the canonical first-2-chars-are-salt shape. */
 
-/* String#scrub — walk the bytes; for each valid UTF-8 lead +
+/* String#scrub -- walk the bytes; for each valid UTF-8 lead +
    continuation sequence, copy through. For invalid bytes (lone
    continuation, truncated multi-byte, overlong, etc.), emit the
    replacement string and skip one byte. NULL replacement uses
    U+FFFD (3 UTF-8 bytes: EF BF BD), matching CRuby. */
 
 /* String#setbyte: mutate s[i] = v in place. Spinel adopts
-   `# frozen_string_literal: true` semantics globally — all
+   `# frozen_string_literal: true` semantics globally -- all
    string literals are frozen, mutation requires a heap-allocated
    buffer (e.g. via .dup or string concatenation). The runtime
    marker byte at s[-1] tells us the provenance:
@@ -1057,7 +1057,7 @@ const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *v
    the hot construction/append core is inline in the header, the cold in-place
    mutators (prepend/insert/replace/dup) compile once in the archive. */
 
-/* `File.open(path, mode)` without a block returns an sp_File * — a
+/* `File.open(path, mode)` without a block returns an sp_File * -- a
    GC-managed wrapper around `FILE *fp`. The finalizer fclose()s any
    still-open fp so a dropped file handle doesn't leak. `path` and
    `mode` are kept live for `f.path` / `f.mode` introspection; they
@@ -1244,7 +1244,7 @@ static const char*sp_StrArrayPtrArray_inspect(sp_PtrArray*a){SP_GC_ROOT(a);sp_St
 static const char*sp_SymArrayPtrArray_inspect(sp_PtrArray*a){SP_GC_ROOT(a);sp_String*s=sp_String_new("[");SP_GC_ROOT(s);for(sp_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_SymArray_inspect((sp_IntArray*)a->data[i]));}sp_String_append(s,"]");return sp_str_dup(s->data);}
 /* issue #526: join for a sp_PtrArray of sp_String* (mutable_str_ptr_array).
    Sibling to sp_StrArray_join, but takes advantage of sp_String's known
-   length: two-pass — sum the exact total, sp_str_alloc once, then memcpy
+   length: two-pass -- sum the exact total, sp_str_alloc once, then memcpy
    each element by its s->len (preserves embedded NULs). Avoids the
    realloc-grow loop's leak-on-failure and long-separator overflow
    risks, and skips an intermediate malloc'd buffer. NULL entries
@@ -1264,7 +1264,7 @@ static const char*sp_SymArrayPtrArray_inspect(sp_PtrArray*a){SP_GC_ROOT(a);sp_St
 /* NULL (not "") so sp_mark_string's null-guard handles the unset case
    without reaching the `s[-1]` access. The rodata `""` literal would
    trigger -Wstringop-overflow under -O3 + sp_mark_string inlining at
-   the call site in sp_re_mark_globals — gcc proves the `s[-1] = 0xfc`
+   the call site in sp_re_mark_globals -- gcc proves the `s[-1] = 0xfc`
    write would be out-of-bounds even though the runtime guard
    `s[-1] == 0xfe` (always false for rodata) prevents it from firing. */
 
@@ -1389,7 +1389,7 @@ __attribute__((constructor)) static void sp_gc_install_tu_hooks(void) {
   /* sp_gc_str_sweep_hook is installed by sp_alloc.c's constructor. */
 }
 
-/* `$+` / `$LAST_PAREN_MATCH` — contents of the highest-indexed group
+/* `$+` / `$LAST_PAREN_MATCH` -- contents of the highest-indexed group
    that participated in the match. Walks sp_re_captures[] from 9 down
    and returns the first non-NULL entry. NULL when no group matched
    (codegen ternary falls back to ""). Matches CRuby's behaviour:
@@ -1403,7 +1403,7 @@ __attribute__((constructor)) static void sp_gc_install_tu_hooks(void) {
    is correctly truthy. Direct value use lines up with CRuby's
    `String#=~` int semantics: "abc" =~ /b/ -> 1, not 2. */
 
-/* `s.rindex(regex)` — last match start, in BYTE offset (matches
+/* `s.rindex(regex)` -- last match start, in BYTE offset (matches
    the way sp_str_rindex reports indices for plain-string search;
    codepoint translation would require a UTF-8 walk and the
    handful of call sites that consume rindex don't need it).
@@ -1455,12 +1455,12 @@ typedef uint64_t sp_RbValue;
    bignum, and --int-overflow=promote can box an overflow result). */
 #define SP_TAG_BIGINT 9
 /* Negative cls_id values let SP_TAG_OBJ also carry built-in pointer
-   types (IntArray, FloatArray, ...) — avoids minting a new SP_TAG_*
+   types (IntArray, FloatArray, ...) -- avoids minting a new SP_TAG_*
    per type. Non-negative cls_id stays an index into the user-class
    table as before. The element-type tag and the array cls_id are
    paired by `array_cls_id = -element_tag - 1`. */
 struct sp_Exception_s;
-/* Hash variant cls_ids — boxed into the cls_id of a poly slot so
+/* Hash variant cls_ids -- boxed into the cls_id of a poly slot so
    Hash#dig can recover the concrete hash type at runtime. */
 /* SP_BUILTIN_FOREIGN_PTR (-25), SP_BUILTIN_COMPLEX (-26) and
    SP_BUILTIN_RATIONAL (-27) are defined in sp_gc.h (shared with lib readers). */
@@ -1557,7 +1557,7 @@ static sp_Bigint *sp_poly_as_bigint(sp_RbVal v) {
 static inline sp_int sp_obj_cls_id_of(void *p) { return p ? *(sp_int *)p : 0; }
 /* int? siblings of the String#index family. Same not-found
    semantics as the _poly variants, but the result is the int?
-   sentinel (SP_INT_NIL) rather than a boxed sp_RbVal — keeps the
+   sentinel (SP_INT_NIL) rather than a boxed sp_RbVal -- keeps the
    `i = s.index(sub); return ... if i.nil?; i + 1` idiom on the
    direct integer arithmetic path. */
 /* `s.index(regex)` -- first match start (byte offset, as sp_re_match reports;
@@ -1610,7 +1610,7 @@ sp_RbVal sp_box_proc(void *p)        { return sp_box_obj(p, SP_BUILTIN_PROC); }
 /* int? siblings of the *_index_poly wrappers above. Same not-found
    semantics, but return the int? sentinel (SP_INT_NIL) instead of
    boxing into sp_RbVal. Used when the call site's static type
-   tracking carries the result as int? rather than poly — eliminates
+   tracking carries the result as int? rather than poly -- eliminates
    the box/unbox round-trip for the common `i = arr.index(x);
    i.nil? ? ... : <use i as int>` idiom. */
 /* #step(n) over a Float range -> a Float array toward last. A negative step walks
@@ -3848,7 +3848,7 @@ static sp_RbVal sp_PolyArray_delete(sp_PolyArray *a, sp_RbVal v) {sp_gc_wb((void
   return found ? v : sp_box_nil();
 }
 
-/* MatchData — holds the source string and the per-group byte offsets
+/* MatchData -- holds the source string and the per-group byte offsets
    the engine produced. `[]`/captures extract substrings on demand;
    offset/begin/end report CHARACTER offsets (CRuby semantics), so
    byte offsets are converted via sp_str_count_chars. Group i occupies
@@ -5251,7 +5251,7 @@ static sp_PolyArray *sp_pair_to_poly(sp_RbVal el) {
   return r;
 }
 
-/* Array#assoc — return the first sub-array whose first element equals `key`.
+/* Array#assoc -- return the first sub-array whose first element equals `key`.
    Returns NULL when no match so the caller's `.inspect` round-trips to "nil".
    Each pair may be any array kind, so compare element 0 via sp_poly_arr_get;
    a pair with no element 0 (a non-array or empty array) is skipped. */
@@ -5265,7 +5265,7 @@ static sp_PolyArray *sp_PolyArray_assoc(sp_PolyArray *a, sp_RbVal key) {
   return NULL;
 }
 
-/* Array#rassoc — same as assoc but matches against the second
+/* Array#rassoc -- same as assoc but matches against the second
    element of each sub-array (a pair with fewer than 2 elements is skipped). */
 static sp_PolyArray *sp_PolyArray_rassoc(sp_PolyArray *a, sp_RbVal val) {
   if (!a) return NULL;
@@ -5913,7 +5913,7 @@ static sp_bool sp_PolyArray_include(sp_PolyArray *a, sp_RbVal v) {
    Used as the scan hook for containers that store polymorphic values. */
 /* sp_mark_rbval is an inline helper in sp_gc.h. */
 
-/* StrPolyHash: string keys, sp_RbVal values — for hashes with mixed value types. */
+/* StrPolyHash: string keys, sp_RbVal values -- for hashes with mixed value types. */
 /* `dproc` holds a Hash.new{} default block, lowered to a dedicated C
    fn `sp_RbVal (*)(sp_StrPolyHash *self, const char *key)` with typed
    params (codegen emits it). Called by _get on a miss. Issue #912. */
@@ -5951,7 +5951,7 @@ static sp_bool sp_StrPolyHash_eq(sp_StrPolyHash*a,sp_StrPolyHash*b){if(!a||!b)re
 static const char*sp_StrPolyHash_inspect(sp_StrPolyHash*h){return h?sp_inspect_container(sp_box_obj(h,SP_BUILTIN_STR_POLY_HASH)):SPL("nil");}
 /* Convert a narrower StrStrHash to a StrPolyHash. Needed when the
    analyzer widens an LV slot to sp_StrPolyHash* (e.g. later poly-value
-   writes) but the initial RHS is a sibling narrower hash variant —
+   writes) but the initial RHS is a sibling narrower hash variant --
    raw pointer assignment would mix incompatible struct layouts
    (vals[] of const char** vs sp_RbVal*). See issue #614. */
 static sp_StrPolyHash*sp_StrPolyHash_from_str_str_hash(sp_StrStrHash*h){sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;if(h->default_v)r->default_v=sp_box_str(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_str(sp_StrStrHash_get(h,k)));}return r;}
@@ -5988,7 +5988,7 @@ static sp_RbVal sp_MatchData_match_length_name(sp_MatchData *m, const char *name
 }
 static sp_StrPolyHash*sp_StrPolyHash_from_str_int_hash(sp_StrIntHash*h){sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;r->default_v=sp_box_int(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_int(sp_StrIntHash_get(h,k)));}return r;}
 
-/* SymPolyHash: symbol keys, sp_RbVal values — same shape as SymStrHash but with poly values. */
+/* SymPolyHash: symbol keys, sp_RbVal values -- same shape as SymStrHash but with poly values. */
 /* Named struct so lib/sp_fiber.c can forward-declare it for sp_Fiber's
    `storage` member without pulling in the full poly-hash machinery. */
 /* dproc holds a Hash.new{} default block (symbol-keyed), lowered to a C fn
@@ -6186,7 +6186,7 @@ static const char*sp_SymPolyHash_inspect(sp_SymPolyHash*h){return h?sp_inspect_c
    primitives the hash/eql is tag-based (value equality); for OBJ tag
    the default is pointer identity. Codegen patches sp_obj_hash_hook /
    sp_obj_eql_hook with class-aware overrides (e.g. Method#eql? compares
-   bound receiver + fn_ptr) when the program needs them — null hooks
+   bound receiver + fn_ptr) when the program needs them -- null hooks
    leave the runtime at identity, which is the right default for typed
    pointers like IntArray. */
 /* FNV-1a over a fixed byte range -- gives value-type user objects (by-value
@@ -6569,7 +6569,7 @@ static void sp_PolyPolyHash_update(sp_PolyPolyHash *a, sp_PolyPolyHash *b) {
 }
 static void sp_marv_hash_set(sp_RbVal h, sp_RbVal k, sp_RbVal v) { sp_PolyPolyHash_set((sp_PolyPolyHash *)h.v.p, k, v); }
 /* Array#tally over a poly array keys the count hash by the ELEMENT VALUE (any
-   type), matching CRuby's `#eql?`/`#hash` bucketing — not by symbol identity.
+   type), matching CRuby's `#eql?`/`#hash` bucketing -- not by symbol identity.
    Defined here so the PolyPolyHash helpers above are already in scope. */
 static sp_PolyPolyHash *sp_PolyArray_tally(sp_PolyArray *a) { if (!a) return sp_PolyPolyHash_new(); SP_GC_ROOT(a); sp_PolyPolyHash *h = sp_PolyPolyHash_new(); SP_GC_ROOT(h); for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; sp_RbVal cur = sp_PolyPolyHash_get(h, v); sp_int c = (cur.tag == SP_TAG_INT) ? cur.v.i : 0; sp_PolyPolyHash_set(h, v, sp_box_int(c + 1)); } return h; }
 /* order[] holds slot indices (not keys), so iterate keys/vals by the stored
@@ -9288,7 +9288,7 @@ static inline void sp_exc_check_depth(void) {
 /* ---- Native backtrace formatting (spinel --debug) ---------------------- */
 /* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
    A denylist of the lowercase runtime prefixes; user methods are sp_<rubyname>
-   (top-level) or sp_<Class>_<method>, which don't match. Heuristic — a leaf
+   (top-level) or sp_<Class>_<method>, which don't match. Heuristic -- a leaf
    runtime frame may occasionally slip through; refine with an emitted
    user-method allowlist later. */
 /* sp_bt_format (symbol->Ruby-frame formatting) moved to lib/sp_cold.c. */
@@ -10606,12 +10606,12 @@ const char *sp_file_expand_path(const char *path, const char *base);
 
 /* Read a file's bytes into a fresh IntArray. Distinct from
    `sp_str_bytes(sp_file_read(path))` because plain sp_str_bytes uses
-   null-termination and stops at the first 0x00 byte — wrong for
+   null-termination and stops at the first 0x00 byte -- wrong for
    binary data (e.g. .nes ROM files). */
 /* sp_file_binread_bytes: moved to lib/sp_cold.c */
 sp_IntArray *sp_file_binread_bytes(const char *path);
 
-/* `arr.slice!(from, n)` — returns a fresh array of `n` elements
+/* `arr.slice!(from, n)` -- returns a fresh array of `n` elements
    starting at `from` and removes them from `a`. IntArray uses its
    `start` field for an O(1) head peel (from == 0); the others
    shift the tail down to fill the hole. */

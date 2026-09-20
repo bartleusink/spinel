@@ -1,4 +1,4 @@
-# Spinel bundled `json` — a typed native binding (Path B).
+# Spinel bundled `json` -- a typed native binding (Path B).
 #
 # JSON is backed by C in lib/sp_json.c. Rather than the compiler hardcoding
 # the dispatch, this package declares the binding: `native_lib` names the

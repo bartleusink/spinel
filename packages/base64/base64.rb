@@ -1,4 +1,4 @@
-# Spinel bundled `base64` — a carried-C spin package (Path B).
+# Spinel bundled `base64` -- a carried-C spin package (Path B).
 #
 # The whole implementation lives in this package's C (sp_base64.c, linked only
 # when `require "base64"` appears); the declarations below are the compiler's

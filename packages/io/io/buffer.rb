@@ -1,4 +1,4 @@
-# Spinel bundled `io/buffer` — IO::Buffer as a native binding with NO
+# Spinel bundled `io/buffer` -- IO::Buffer as a native binding with NO
 # carried C: the implementation lives in the runtime (lib/sp_iobuffer.c),
 # and the declarations below are the compiler's knowledge of it. The
 # compiler splices this file into any program that references `IO::Buffer`

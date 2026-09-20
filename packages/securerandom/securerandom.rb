@@ -1,4 +1,4 @@
-# Spinel bundled `securerandom` — a native binding with NO carried C.
+# Spinel bundled `securerandom` -- a native binding with NO carried C.
 #
 # The entropy is the runtime's own CSPRNG (lib/sp_crypto.c: arc4random_buf
 # on BSD/macOS, getrandom(2) then /dev/urandom on Linux, raising rather than
@@ -7,7 +7,7 @@
 #
 # WHY NOT Random.urandom. It is the obvious-looking primitive and it is the
 # wrong one: spinel's `Random.urandom` is a PCG stream seeded from time and
-# clock — its own comment says "a deterministic-per-run stand-in" — whereas
+# clock -- its own comment says "a deterministic-per-run stand-in" -- whereas
 # CRuby's is the OS entropy source. A SecureRandom built on it would hand
 # back guessable session tokens and API keys, and nothing would ever fail.
 # `sp_crypto_random_bin` is the one entry point that is actually seeded from
@@ -16,7 +16,7 @@
 # Subset. Present: random_bytes/bytes, hex, base64, urlsafe_base64, uuid
 # (and its uuid_v4 alias), alphanumeric. Not modelled: `random_number`,
 # `uuid_v7` (needs a millisecond clock and a monotonic counter), `base36`,
-# `choose`, and the `chars:` keyword on `alphanumeric` — all of which are
+# `choose`, and the `chars:` keyword on `alphanumeric` -- all of which are
 # renderings a program can write for itself over `random_bytes`, which the
 # absent ones here are not.
 #
@@ -42,7 +42,7 @@ module SecureRandom
   MAX_DRAW = 256
 
   # The CSPRNG itself. `:cbinstr` because the result is raw bytes whose
-  # length comes from sp_ffi_bin_len rather than strlen — a NUL turns up
+  # length comes from sp_ffi_bin_len rather than strlen -- a NUL turns up
   # about one byte in 256, and strlen would cut the draw short there.
   native_lib "securerandom"
   native_func :draw, [:int], :cbinstr, "sp_crypto_random_bin"
@@ -117,7 +117,7 @@ module SecureRandom
   #
   # REJECTION SAMPLING, not `byte % 62`. 256 is not a multiple of 62, so the
   # modulo would make the first eight letters of the alphabet about 5% more
-  # likely than the rest — invisible in every test that checks the character
+  # likely than the rest -- invisible in every test that checks the character
   # set, and a real reduction in the entropy of a session token. Bytes at or
   # above 248 (the largest multiple of 62 that fits) are thrown away; that is
   # 8 in 256, so a draw of 2n covers n characters comfortably and the loop

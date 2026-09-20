@@ -1,4 +1,4 @@
-# Spinel bundled `digest` — a native binding with NO carried C.
+# Spinel bundled `digest` -- a native binding with NO carried C.
 #
 # The hash implementations are the runtime's vendored crypto (lib/sp_crypto.c,
 # always in libspinel_rt.a because the string/net runtime uses it); this

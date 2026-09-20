@@ -208,7 +208,7 @@ def eval_form(form, env)
  # Hoist .s into a typed local. Without this hoist, spinel widens
  # Env.define's `n` param to poly because the is_a?(SymV) narrow
  # on name_sym doesn't propagate through the .s read at the call-
- # site arg position — name_sym.s on a poly recv reads as poly.
+ # site arg position -- name_sym.s on a poly recv reads as poly.
         if name_sym.is_a?(SymV)
           name_str = name_sym.s
           env.define(name_str, val)

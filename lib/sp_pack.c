@@ -1,5 +1,5 @@
 /*
- * sp_pack.c — Array#pack / String#unpack for Spinel
+ * sp_pack.c -- Array#pack / String#unpack for Spinel
  *
  * Implements the common Perl/Ruby pack format specifiers. Built
  * as a separate translation unit and linked into libspinel_rt.a;

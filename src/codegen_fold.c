@@ -4651,7 +4651,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   /* `arr.map(&blk)` inside `def m(&blk)`: a BlockArgumentNode that forwards
      the current method's block param maps over the caller's (already-inlined)
      literal block rather than treating it as an empty (nil-producing) block.
-     Only a forward of the active block param is redirected — `&:sym` and
+     Only a forward of the active block param is redirected -- `&:sym` and
      `&proc_value` are left to their own handlers. */
   if (nt_type(nt, block) && sp_streq(nt_type(nt, block), "BlockArgumentNode")) {
     int fwd_expr = nt_ref(nt, block, "expression");
@@ -7777,10 +7777,10 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
   /* GC hazard: a freshly-allocated heap argument sits in an unrooted C
      temporary while the rest of the call is evaluated AND while the callee
      runs. Either a later argument or the callee's own body can trigger a
-     collection that sweeps it — and a constructor (sp_X_new) always
+     collection that sweeps it -- and a constructor (sp_X_new) always
      allocates, so even `Ray.new(Vec.new(...), eye)` is exposed. Pre-evaluate
      each allocating heap arg into a rooted temp, left to right; emit_expr
-     substitutes the temp via g_argov. Plain positional calls only — the
+     substitutes the temp via g_argov. Plain positional calls only -- the
      splat/kwarg machinery has its own evaluation order. */
   /* A parameter default that references an earlier parameter (`def f(a, b=a*2)`
      or `def f(a:, b: a*2)`) must be evaluated with that parameter bound. Ruby

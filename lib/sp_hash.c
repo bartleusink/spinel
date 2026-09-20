@@ -73,7 +73,7 @@ sp_bool sp_IntStrHash_eq(sp_IntStrHash*a,sp_IntStrHash*b){SP_GC_ROOT(a);SP_GC_RO
 /* Int → Int typed hash. Mirrors sp_IntStrHash's open-addressing
    layout (used[] bitmap so 0/-1 keys are distinguishable from
    empty), with int-valued slots. Used by Array#tally on int
-   arrays — see #865. */
+   arrays -- see #865. */
 void sp_IntIntHash_fin(void*p){sp_IntIntHash*h=(sp_IntIntHash*)p;sp_pl_free(h->keys);sp_pl_free(h->vals);sp_pl_free(h->order);sp_pl_free(h->used);}
 /* default_v is SP_INT_NIL for a hash with no explicit default, so a
    missing-key `[]` read surfaces Ruby nil (#801). Hash.new(N) sets it via
@@ -108,9 +108,9 @@ sp_IntIntHash*sp_IntArray_tally_int(sp_IntArray*a){SP_GC_ROOT(a);sp_IntIntHash*h
    sym_int_hash. Renders Ruby's `{"k" => v, ...}` (string keys),
    `{42 => "v", ...}` (int keys), or `{:k => v, ...}` (sym keys but
    non-int value, since the bare `k: v` shorthand only applies
-   when values are inspectable as one-liners — match CRuby). */
+   when values are inspectable as one-liners -- match CRuby). */
 const char*sp_StrIntHash_inspect(sp_StrIntHash*h){SP_GC_ROOT(h);return h?sp_inspect_container(sp_box_obj(h,SP_BUILTIN_STR_INT_HASH)):SPL("nil");}
-/* Hash#to_proc lookup fn — cap is the hash, args[0] the string key. */
+/* Hash#to_proc lookup fn -- cap is the hash, args[0] the string key. */
 sp_int sp_StrIntHash_proc_fn(void *cap, sp_int argc, sp_int *args) { if (argc < 1) return 0; return sp_StrIntHash_get((sp_StrIntHash *)cap, (const char *)(uintptr_t)args[0]); }
 const char*sp_StrStrHash_inspect(sp_StrStrHash*h){SP_GC_ROOT(h);return h?sp_inspect_container(sp_box_obj(h,SP_BUILTIN_STR_STR_HASH)):SPL("nil");}
 const char*sp_IntStrHash_inspect(sp_IntStrHash*h){SP_GC_ROOT(h);return h?sp_inspect_container(sp_box_obj(h,SP_BUILTIN_INT_STR_HASH)):SPL("nil");}

@@ -1,10 +1,10 @@
 /*
- * sp_strscan.c — StringScanner for Spinel
+ * sp_strscan.c -- StringScanner for Spinel
  *
  * Implements the StringScanner methods: scan, check, scan_until,
  * matched, matched?, pos, eos?, getch, peek, unscan, rest,
  * terminate, pre_match, post_match, string. Uses spinel's
- * internal regex engine (re_compile / re_exec — see lib/regexp/)
+ * internal regex engine (re_compile / re_exec -- see lib/regexp/)
  * rather than oniguruma; the existing lib/strscan.c is an
  * oniguruma-based draft the rest of the build doesn't link.
  *
@@ -50,7 +50,7 @@ typedef struct sp_StringScanner_s {
   int64_t     last_pos;    /* pos before the last advance (unscan rewinds here) */
   int64_t     match_start; /* where the last match begins (pre/post_match) --
                               differs from last_pos after scan_until */
-  int         matched_p; /* int (not sp_bool) — keep the layout
+  int         matched_p; /* int (not sp_bool) -- keep the layout
                             compact; FALSE=0, TRUE=1 */
   int         ncaps;
   int         caps[SP_SS_MAXCAP];

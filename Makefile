@@ -146,7 +146,7 @@ all: regexp $(SPINEL) $(RBS_EXTRACT_TARGET) tools $(BUNDLED_NATIVE_OBJS) $(BUNDL
 deps: vendor/prism/include/prism/diagnostic.h vendor/rbs/include/rbs/parser.h
 
 # Download the pre-built Prism gem from rubygems.org and extract its C
-# sources (the .gem ships the generated headers — no rake/bundler needed).
+# sources (the .gem ships the generated headers -- no rake/bundler needed).
 vendor/prism/include/prism/diagnostic.h:
 	@mkdir -p vendor/prism
 	@echo "Fetching prism v$(PRISM_VERSION) from rubygems.org..."
@@ -592,7 +592,7 @@ regexp: $(SP_RT_LIB) $(SP_RT_MT_LIB)
 
 # spinel-doctor / spinel-reduce / spinel-flatten: written in the spinel subset
 # and compiled by spinel itself (dogfood), so their only runtime dependency is
-# cc — the same as the compiler. Each tools/<name>.rb becomes bin/spinel-<name>,
+# cc -- the same as the compiler. Each tools/<name>.rb becomes bin/spinel-<name>,
 # beside the compiler, so the `spinel-<name>` command is found next to `spinel`.
 # A tool that no longer fits the subset breaks the build, which keeps them honest.
 TOOL_NAMES = doctor reduce flatten
@@ -814,7 +814,7 @@ re-lit-test: $(SPINEL)
 
 # `make test` always runs fresh: it wipes the prior `.ok` stamps first,
 # then runs the suite. (The old incremental `test` + `retest` split is
-# gone — a stale `.ok` reading PASS was a recurring foot-gun.)
+# gone -- a stale `.ok` reading PASS was a recurring foot-gun.)
 test: $(SPINEL_TIMEOUT)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then \
 	  echo "WARNING: no 'timeout'/'gtimeout' on PATH -- tests run with NO time limit."; \
@@ -1938,7 +1938,7 @@ optcarrot: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	if echo "$$out" | grep -q "^checksum: 59662$$" && [ -n "$$fps" ]; then \
 	  echo "Optcarrot: OK"; \
 	else \
-	  echo "Optcarrot: FAIL — expected 'fps: <num>' and 'checksum: 59662'"; \
+	  echo "Optcarrot: FAIL -- expected 'fps: <num>' and 'checksum: 59662'"; \
 	  exit 1; \
 	fi
 
@@ -1952,7 +1952,7 @@ optcarrot: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 
 # Fast pre-commit: rebuild the compiler and run the suite. OPT=-O1 compiles
 # the spinel_rt.h-heavy per-test C ~3x faster than -O0 (the optimizer prunes
-# the 800+ unreferenced static fns before codegen). Skips bench/optcarrot —
+# the 800+ unreferenced static fns before codegen). Skips bench/optcarrot --
 # run `make gate` before pushing for those.
 check:
 	+@$(MAKE) --no-print-directory all

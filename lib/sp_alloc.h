@@ -913,7 +913,7 @@ static inline sp_RbVal sp_box_nullable_obj_dyn(void *p, int cls_id) {
   (void)cls_id;
   return p ? sp_box_obj(p, (int)*(sp_int *)p) : sp_box_nil();
 }
-/* Built-in pointer boxes — share SP_TAG_OBJ with a reserved negative
+/* Built-in pointer boxes -- share SP_TAG_OBJ with a reserved negative
    cls_id so the dispatch path is uniform. */
 static inline sp_RbVal sp_box_int_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_INT_ARRAY); }
 static inline sp_RbVal sp_box_float_array(void *p) { return sp_box_obj(p, SP_BUILTIN_FLT_ARRAY); }

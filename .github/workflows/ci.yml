@@ -125,7 +125,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc'
         run: make bench
 
-      # End-to-end optcarrot integration test.  Linux only — no
+      # End-to-end optcarrot integration test.  Linux only -- no
       # value in repeating it across compilers / on macOS, since
       # the codegen output is the same and the runtime cost
       # (~10s) is the same too.  Catches regressions in the

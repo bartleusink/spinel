@@ -589,7 +589,7 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
   int child = scope_idx;
   int child_class = class_id;
 
-  /* `class << self; def X; ...; end; end` — treat body defs as class methods. */
+  /* `class << self; def X; ...; end; end` -- treat body defs as class methods. */
   if (ty && sp_streq(ty, "SingletonClassNode")) {
     /* `class << self` inside a class body defines class methods on the
        enclosing class; `class << Const` (a constant naming a class/module)

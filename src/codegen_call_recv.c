@@ -5641,7 +5641,7 @@ else {
         /* fetch(key, default) -> has_key? ? value : default */
         TyKind vt = ty_hash_val(rt);
         TyKind dt = comp_ntype(c, argv[1]);
-        /* Empty `{}` default infers TY_UNKNOWN but is a hash — incompatible with int/str etc. */
+        /* Empty `{}` default infers TY_UNKNOWN but is a hash -- incompatible with int/str etc. */
         if (dt == TY_UNKNOWN) {
           const char *atn = nt_type(c->nt, argv[1]);
           if (atn && (sp_streq(atn, "HashNode") || sp_streq(atn, "KeywordHashNode")))

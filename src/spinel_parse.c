@@ -444,8 +444,8 @@ static int flatten(pm_node_t *node) {
   int id = node_counter++;
   pm_node_type_t t = PM_NODE_TYPE(node);
 
-  /* Debug builds only: stamp every node with its source line — and, when a
-     multi-file map was built, its original file — so codegen can emit
+  /* Debug builds only: stamp every node with its source line -- and, when a
+     multi-file map was built, its original file -- so codegen can emit
      `#line N "file"` directives. Written to dedicated `node_line` /
      `node_file` fields (NOT the overloaded `value`/`start_line` slot). The
      raw value is the line in the concatenated buffer; the map translates it
@@ -517,7 +517,7 @@ static int flatten(pm_node_t *node) {
     break;
   }
   case PM_SINGLETON_CLASS_NODE: {
-    /* `class << self; ...; end` — the singleton class block. We
+    /* `class << self; ...; end` -- the singleton class block. We
        only support `expression == SelfNode` today (i.e. the
        enclosing class/module's singleton). The body is flattened
        up one level so codegen sees `attr_accessor :x` / `def foo`
@@ -1378,7 +1378,7 @@ else {
     break;
   }
   case PM_ASSOC_SPLAT_NODE: {
-    /* `**h` in argument position — splice a hash's entries as
+    /* `**h` in argument position -- splice a hash's entries as
        keyword args. Wraps the inner hash expression; codegen
        handles the expansion at call sites. Issue #917. */
     pm_assoc_splat_node_t *n = (pm_assoc_splat_node_t *)node;
@@ -1612,7 +1612,7 @@ else {
     break;
   }
   case PM_IT_PARAMETERS_NODE:
-    /* Ruby 3.4 implicit `it` is semantically `_1` — lower to a
+    /* Ruby 3.4 implicit `it` is semantically `_1` -- lower to a
        NumberedParametersNode so the codegen's existing
        NumberedParametersNode arity path (get_block_param) handles it
        transparently. The block body's `it` references separately

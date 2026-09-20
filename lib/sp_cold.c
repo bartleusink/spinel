@@ -926,7 +926,7 @@ sp_IntArray *sp_file_binread_bytes(const char *path) {SP_GC_ROOT_STR(path);
   fseek(f, 0, SEEK_SET);
   unsigned char *buf = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
   if (buf && sz > 0) {
-    /* Use fread's actual byte count, not the raw file size — a
+    /* Use fread's actual byte count, not the raw file size -- a
        partial read otherwise pushes uninitialized memory. */
     size_t r = fread(buf, 1, (size_t)sz, f);
     for (size_t i = 0; i < r; i++) sp_IntArray_push(a, (sp_int)buf[i]);
@@ -1493,7 +1493,7 @@ static const char *sp_bt_symbol(const char *line) {
   }
 else {                                        /* macOS: "<idx> <image> <addr> <symbol> + <off>" */
     /* The symbol is the token just before the " + <off>" delimiter. Parse
-       backward from the last " + " rather than forward from "0x" — an image
+       backward from the last " + " rather than forward from "0x" -- an image
        path containing "0x" (e.g. /path/0x_proj/bin) would otherwise misparse. */
     const char *plus = 0, *q = line;
     while ((q = strstr(q, " + ")) != 0) { plus = q; q += 3; }
@@ -1518,7 +1518,7 @@ else {                                        /* macOS: "<idx> <image> <addr> <s
        sp_Tep_Url_parse_query      -> Tep::Url#parse_query
        sp_Tep_AuthOAuth2_cls_find  -> Tep::AuthOAuth2.find
        sp_toplevel                 -> toplevel   (top-level method, no class)
-     (Method names stay sanitized — e.g. enabled? is enabled_p; reversing that
+     (Method names stay sanitized -- e.g. enabled? is enabled_p; reversing that
      needs the emitted name table, a separate refinement.) */
   const char *mstart = 0;   /* first lowercase-starting segment = the method */
   for (const char *p = name; *p; p++) {
@@ -3271,7 +3271,7 @@ sp_PolyArray *sp_str_lines_poly(const char *s) {SP_GC_ROOT_STR(s);
   }
   return a;
 }
-/* String#match?(/re/, pos) — pos is a codepoint index (CRuby semantics),
+/* String#match?(/re/, pos) -- pos is a codepoint index (CRuby semantics),
    unlike Regexp#match?(str, pos) which uses byte offset. Convert the
    codepoint index to a byte offset before dispatching to re_exec. */
 sp_bool sp_str_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int cpos) {SP_GC_ROOT_STR(str);
@@ -3283,7 +3283,7 @@ sp_bool sp_str_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int cp
   int caps[2];
   return re_exec(pat, str, slen, (sp_int)boff, caps, 2, 0) > 0;
 }
-/* Issue #910: sub(string, hash) — literal-substring pattern
+/* Issue #910: sub(string, hash) -- literal-substring pattern
    with a hash replacement. Replaces only the first match. */
 const char *sp_str_sub_str_str_hash(const char *str, const char *pat, sp_StrStrHash *h) {SP_GC_ROOT_STR(pat);SP_GC_ROOT(h);SP_GC_ROOT_STR(str);
   if (!str || !pat) return str;
@@ -3830,7 +3830,7 @@ void sp_marv_raise(const char *cls, const char *msg) {SP_GC_ROOT_STR(msg); sp_ra
    relocated from spinel_rt.h. 0 optcarrot uses. ---- */
 #include "sp_exc.h"
 
-/* String#gsub(regex, hash) — per-match hash lookup form. CRuby's
+/* String#gsub(regex, hash) -- per-match hash lookup form. CRuby's
  * semantics: each matched substring is looked up as a key in the
  * hash; the value (if present) is the replacement, otherwise the
  * matched substring is dropped (CRuby returns "", not the match).
@@ -3892,7 +3892,7 @@ else {
   if (out != out_sb) free(out);
   return res;
 }
-/* Issue #910: sub(regex, hash) — same lookup semantics as
+/* Issue #910: sub(regex, hash) -- same lookup semantics as
    sp_re_gsub_str_str_hash but only the first match. */
 const char *sp_re_sub_str_str_hash(mrb_regexp_pattern *pat, const char *str, sp_StrStrHash *h) {SP_GC_ROOT(h);SP_GC_ROOT_STR(str);
   int64_t slen = (int64_t)strlen(str);

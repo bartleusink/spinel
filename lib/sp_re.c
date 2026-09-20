@@ -985,7 +985,7 @@ sp_MatchData *sp_re_matchdata(mrb_regexp_pattern *pat, const char *str) {SP_GC_R
   for (int i = 0; i < pairs * 2; i++) m->caps[i] = caps[i];
   return m;
 }
-/* String#match(/re/, pos) — pos is a codepoint index (CRuby semantics). */
+/* String#match(/re/, pos) -- pos is a codepoint index (CRuby semantics). */
 sp_MatchData *sp_re_matchdata_at(mrb_regexp_pattern *pat, const char *str, sp_int cpos) {SP_GC_ROOT_STR(str);
   if (!str) return NULL;
   sp_int cl = sp_str_length(str);
@@ -1199,7 +1199,7 @@ sp_IntArray *sp_MatchData_offset_name(sp_MatchData *m, const char *name) {SP_GC_
 sp_int sp_MatchData_bytebegin_name(sp_MatchData *m, const char *name) {SP_GC_ROOT(m);SP_GC_ROOT_STR(name); return sp_MatchData_bytebegin(m, sp_md_group_by_name(m, name)); }
 sp_int sp_MatchData_byteend_name(sp_MatchData *m, const char *name) {SP_GC_ROOT(m);SP_GC_ROOT_STR(name); return sp_MatchData_byteend(m, sp_md_group_by_name(m, name)); }
 sp_IntArray *sp_MatchData_byteoffset_name(sp_MatchData *m, const char *name) {SP_GC_ROOT(m);SP_GC_ROOT_STR(name); return sp_MatchData_byteoffset(m, sp_md_group_by_name(m, name)); }
-/* whole-match string (group 0) — also MatchData#to_s */
+/* whole-match string (group 0) -- also MatchData#to_s */
 const char *sp_MatchData_to_s(sp_MatchData *m) {SP_GC_ROOT(m); const char *r = sp_MatchData_aref(m, 0); return r ? r : sp_str_empty; }
 /* captures: groups 1..n-1 as a poly array (nil for non-participating) */
 sp_PolyArray *sp_MatchData_captures(sp_MatchData *m) {SP_GC_ROOT(m);

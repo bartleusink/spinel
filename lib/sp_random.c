@@ -169,7 +169,7 @@ sp_float sp_Random_rand_float_bound(sp_Random *r, sp_float bound) {SP_GC_ROOT(r)
 sp_Random *sp_random_default_get(void) {
   return &sp_random_default;
 }
-/* Random#bytes(n) — n random bytes as a String, tagged ASCII-8BIT as CRuby
+/* Random#bytes(n) -- n random bytes as a String, tagged ASCII-8BIT as CRuby
    does. sp_str_set_len alone was not enough: #length counts UTF-8 units, and a
    short draw is valid UTF-8 by chance often enough that Random.bytes(8).length
    answered less than 8 about three times in a thousand. That is #3474, which

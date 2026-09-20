@@ -72,7 +72,7 @@ while i < 256
 end
 
 # Build the tree by repeatedly merging the two smallest-freq nodes.
-# Linear-search for the two minima — small alphabet keeps this cheap.
+# Linear-search for the two minima -- small alphabet keeps this cheap.
 while queue.length > 1
   min1 = 0
   i = 1

@@ -74,7 +74,7 @@ tests. The first one is `2026.09.12`. Each release carries a source archive
 (`spinel-<release>.tar.xz`, what `make dist` produces) with the vendored
 parsers included, so it builds with `make` alone and no network.
 
-`spin` is the day-to-day interface — cargo/mix style. It scaffolds
+`spin` is the day-to-day interface -- cargo/mix style. It scaffolds
 projects, resolves dependencies, drives the compiler, and runs tests; no
 Makefile, no hand-written `-I` flags:
 
@@ -85,14 +85,14 @@ spin test                          # snapshot tests (CRuby is the oracle)
 spin build && ./build/bin/myapp
 ```
 
-Dependencies (packages) are source trees compiled into your binary — no
+Dependencies (packages) are source trees compiled into your binary -- no
 runtime loading, no extension builds; a package can even carry `.c` files.
 See **[docs/spin.md](docs/spin.md)** for the full guide, including how to
 write and publish a library.
 
 ### Single files: the compiler directly
 
-`spinel` is the underlying compiler — gcc-like, one job — and stays the
+`spinel` is the underlying compiler -- gcc-like, one job -- and stays the
 right tool for single-file scripts and experiments:
 
 ```bash
@@ -124,7 +124,7 @@ RUBY
 
 `./spinel` is a single native binary (`build/spinel`; the repo-root
 `spinel` is a convenience symlink `make` creates) that parses, infers
-types, emits C, invokes `cc` to link it, and can run the result — no shell
+types, emits C, invokes `cc` to link it, and can run the result -- no shell
 wrapper or chained helper binaries, no network, no manifest knowledge
 (that separation is what keeps builds hermetic; `spin` owns the stateful
 side). It supports the full option set, including `--rbs DIR` (RBS-seeded
@@ -153,7 +153,7 @@ overflow (e.g. a `q = q * k` accumulator) are still auto-promoted to Bigint;
 Spinel can read RBS files to seed the analyzer. When invoked with
 `--rbs DIR`, `spinel` runs `spinel_rbs_extract` over a directory of
 `*.rbs` files (the same layout `rbs` and Steep use) and feeds the
-resulting seed into the analyzer. Seeds are advisory — inference still runs on top and
+resulting seed into the analyzer. Seeds are advisory -- inference still runs on top and
 widens on observed contradiction, so a wrong or unrepresentable seed
 is at worst a no-op. See [docs/rbs-extract.md](docs/rbs-extract.md)
 for the supported subset.
@@ -292,11 +292,11 @@ context switch (x86-64 / arm64; no `ucontext` dependency). `Fiber.new`,
 `Fiber#resume`, `Fiber.yield` with value passing, `Fiber#raise`/`#kill`,
 external `Enumerator`s and `Enumerator::Lazy` ride the same machinery.
 Captures free variables via heap-promoted cells. Per-fiber storage via
-`Fiber[:k]` / `Fiber[:k] = v` (and the `Fiber.current[:k]` aliases) —
+`Fiber[:k]` / `Fiber[:k] = v` (and the `Fiber.current[:k]` aliases) --
 symbol-keyed poly-valued, lazily allocated, shallow-snapshot inherited
 from the parent at `Fiber.new` time.
 
-**Threads**: `Thread` runs with **true parallelism and no GVL** — an
+**Threads**: `Thread` runs with **true parallelism and no GVL** -- an
 M:N scheduler multiplexes green threads onto OS workers (one per core,
 cap with `SPINEL_WORKERS`), with work stealing and a ~10 ms preemption
 quantum, over a stop-the-world GC. `Thread.new/#join/#value/#alive?`,
@@ -304,7 +304,7 @@ quantum, over a stop-the-world GC. `Thread.new/#join/#value/#alive?`,
 primitives `Mutex` (`#synchronize/#lock/#unlock/#try_lock`), `Queue` /
 `SizedQueue` (blocking `#pop`/`#push`), and `ConditionVariable`
 (`#wait/#signal/#broadcast`) are supported. Unsynchronized shared
-mutation is a data race, as in JRuby/TruffleRuby — see
+mutation is a data race, as in JRuby/TruffleRuby -- see
 [docs/thread.md](docs/thread.md) for the model and the full API list.
 The threaded runtime is a separate archive linked only when a program
 actually uses `Thread`; single-threaded programs keep the byte-identical
@@ -494,7 +494,7 @@ which compares Spinel's output against CRuby on the same source.
 
 ## Portability
 
-Spinel can emit C without invoking the C compiler — useful when you
+Spinel can emit C without invoking the C compiler -- useful when you
 want to build the Ruby program on one machine and ship the generated
 sources to another:
 
@@ -554,7 +554,7 @@ design" in [docs/limitations.md](docs/limitations.md).
 
 ## Contributing
 
-Contributions are welcome. The issue tracker doubles as the roadmap —
+Contributions are welcome. The issue tracker doubles as the roadmap --
 anything open is fair game; the most useful entry points are
 reproducer-shaped bug reports (a 5-line Ruby that fails in Spinel but
 passes in CRuby) and codegen fixes that close one such report.
@@ -576,14 +576,14 @@ Workflow:
 
 Adjacent ecosystem (community-built, not part of this repo):
 
-- [rubocop_spinel](https://github.com/gurgeous/rubocop_spinel) —
+- [rubocop_spinel](https://github.com/gurgeous/rubocop_spinel) --
   a RuboCop custom cop that flags Ruby code Spinel doesn't yet
   support.
 - [spinel-dev](https://github.com/OriPekelman/spinel-dev): developer
   tooling for debugging Spinel builds (a CRuby-vs-Spinel value bisector
   for silent miscompiles, a ruby-lsp type addon, and perf/flamegraph
-  analysis). The zero-dependency tools — `spinel-doctor` (health check),
-  `spinel-reduce` (minimal-repro reducer), and `spinel-flatten` — now
+  analysis). The zero-dependency tools -- `spinel-doctor` (health check),
+  `spinel-reduce` (minimal-repro reducer), and `spinel-flatten` -- now
   ship in the box; see [`tools/`](tools/).
 - [spin packages](https://github.com/OriPekelman/spinelgems): a survey of
   which RubyGems compile and run under Spinel, plus bundler-spinel, a

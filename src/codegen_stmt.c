@@ -1436,13 +1436,13 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
       return;
     }
   }
-  /* `arr += other` is `arr = arr + other` — a fresh concatenation, the same
+  /* `arr += other` is `arr = arr + other` -- a fresh concatenation, the same
      helper the binary `+` path uses (codegen_call_recv.c). Covers Int/Float/
      Str/Poly arrays; the RHS must be the same kind, or an empty `[]` literal
-     (passed as NULL, which sp_*Array_concat treats as empty — emitting the
+     (passed as NULL, which sp_*Array_concat treats as empty -- emitting the
      literal would build a wrong-kind IntArray). A genuinely mixed-kind concat
      (which the binary path promotes to a poly array via element boxing) is
-     left to fall through — it isn't in the corpus. */
+     left to fall through -- it isn't in the corpus. */
   if (ty_is_array(t) && sp_streq(op, "+")) {
     const char *k = (t == TY_POLY_ARRAY) ? "Poly" : array_kind(t);
     TyKind vt = comp_ntype(c, v);
@@ -4049,7 +4049,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
     for (int j = 0; j < wc; j++) {
       if (j) buf_puts(b, " || ");
       if (pred >= 0) {
-        /* `when *arr` — array membership test */
+        /* `when *arr` -- array membership test */
         if (nt_type(nt, conds[j]) && sp_streq(nt_type(nt, conds[j]), "SplatNode")) {
           int inner = nt_ref(nt, conds[j], "expression");
           TyKind at = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
@@ -4122,7 +4122,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             if (sp_in >= 0) emit_boxed(c, sp_in, b); else buf_puts(b, "sp_box_nil()");
             buf_puts(b, ")");
           }
-          /* RationalNode: `when 0r` — matches integer iff denominator==1 */
+          /* RationalNode: `when 0r` -- matches integer iff denominator==1 */
           else
           if (cnty && sp_streq(cnty, "RationalNode")) {
             const char *rnum = nt_str(nt, conds[j], "rat_num");
@@ -4132,7 +4132,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             if (den == 1) buf_printf(b, "(_t%d == %lldLL)", t, num);
             else buf_puts(b, "0");
           }
-          /* ImaginaryNode: `when 0i` — Complex(0,imag); integer matches only if imag==0 */
+          /* ImaginaryNode: `when 0i` -- Complex(0,imag); integer matches only if imag==0 */
           else if (cnty && sp_streq(cnty, "ImaginaryNode")) {
             int numnode = nt_ref(nt, conds[j], "numeric");
             long long imval = numnode >= 0 ? (long long)nt_int(nt, numnode, "value", 0) : -1;

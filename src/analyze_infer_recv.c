@@ -535,7 +535,7 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       if (argc == 2) {
         TyKind dt = infer_type(c, argv[1]);
         /* A hash literal default `{}` infers TY_UNKNOWN but is still a hash value
-           — incompatible with a non-hash hash-val type like TY_INT. */
+           -- incompatible with a non-hash hash-val type like TY_INT. */
         if (dt == TY_UNKNOWN) {
           const char *atn = nt_type(nt, argv[1]);
           if (atn && (sp_streq(atn, "HashNode") || sp_streq(atn, "KeywordHashNode")))
@@ -998,7 +998,7 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         if (sop && (sp_streq(sop, "&") || sp_streq(sop, "|") || sp_streq(sop, "-"))) { *out = TY_INT_ARRAY; return 1; }
       }
       /* When an init argument is provided, the return type matches the init type.
-         inject(:op) is the no-init operator form — the sole symbol arg is the
+         inject(:op) is the no-init operator form -- the sole symbol arg is the
          operator, NOT an init value, so skip the "return argv[0] type" path. */
       if (argc > 0 && argv) {
         /* A runtime (non-literal) symbol operator -- `reduce(sym)` or

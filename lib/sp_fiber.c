@@ -215,7 +215,7 @@ extern void  __tsan_switch_to_fiber(void *fiber, unsigned flags);
 #define SP_TSAN_SWITCH(to)         ((void)0)
 #endif
 
-/* The root fiber is a static, not a GC allocation — but `Fiber.current`
+/* The root fiber is a static, not a GC allocation -- but `Fiber.current`
    hands it to user code, where a rooted local makes the collector mark
    it. Lay a 0xfd skip byte directly before it so sp_gc_mark's tag-byte
    protocol bails out instead of treating .bss as a GC header. The guard

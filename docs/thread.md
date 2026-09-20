@@ -10,7 +10,7 @@ This document describes what you can rely on when you use threads, which of the
 `Thread` API is supported, and the semantics that differ from CRuby. The
 implementation (the M:N scheduler, per-worker run queues, work stealing, the
 preemption monitor) is a separate concern and lives in
-[internals/thread-mn-design.md](internals/thread-mn-design.md) — nothing there
+[internals/thread-mn-design.md](internals/thread-mn-design.md) -- nothing there
 is a user guarantee.
 
 ## The execution model
@@ -81,7 +81,7 @@ announces that on the way out so the collector does not wait for it.
 
 ### Synchronization primitives
 
-Real, blocking primitives — not busy-waits:
+Real, blocking primitives -- not busy-waits:
 
 | type | methods |
 |---|---|

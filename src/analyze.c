@@ -183,7 +183,7 @@ void compute_reachable(Compiler *c) {
   for (int s = 0; s < c->nscopes; s++) {
     if (c->scopes[s].body >= 0)
       cr_collect_calls(c, c->nt, c->scopes[s].body, &scope_calls[s], &sc_n[s], &sc_cap[s]);
-    /* Also scan parameter defaults (e.g. def foo(opt = bar)) — these emit calls
+    /* Also scan parameter defaults (e.g. def foo(opt = bar)) -- these emit calls
        within the method scope but live in the DefNode parameters subtree. */
     if (c->scopes[s].def_node >= 0) {
       int pn = nt_ref(c->nt, c->scopes[s].def_node, "parameters");
@@ -238,7 +238,7 @@ void compute_reachable(Compiler *c) {
     if(!_f){if(cn_n>=cn_cap){cn_cap=cn_cap?cn_cap*2:32;called_names=realloc(called_names,sizeof(char*)*cn_cap);} \
     called_names[cn_n++]=strdup(_n);}} } while(0)
 
-  /* Helper: mark a name reachable — all scopes with that name join the BFS. */
+  /* Helper: mark a name reachable -- all scopes with that name join the BFS. */
   #define MARK_NAME(NM) do { const char *_mn=(NM); if(_mn){ CN_ADD(_mn); \
     for(int _t=0;_t<c->nscopes;_t++) \
       if(!c->scopes[_t].reachable&&c->scopes[_t].name&&sp_streq(c->scopes[_t].name,_mn)) \
@@ -444,7 +444,7 @@ void compute_reachable(Compiler *c) {
         const char *pt = cls->prep_to[i];   /* shadow name, e.g. "__prep_0_hi" */
         if (!pf || !pt) continue;
         /* When the user-facing name is called, the codegen wrapper calls the shadow
-           implementation directly — so mark the shadow reachable too. */
+           implementation directly -- so mark the shadow reachable too. */
         int pf_in_called = 0;
         for (int j = 0; j < cn_n; j++) if (sp_streq(called_names[j], pf)) { pf_in_called = 1; break; }
         if (!pf_in_called) {

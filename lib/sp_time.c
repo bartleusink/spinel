@@ -129,14 +129,14 @@ static void sp_time_shift_ns(double secs, int64_t base_sec, int32_t base_ns,
 
 /* POSIX convention: keep tv_nsec in [0, 1e9). For negative epoch with
    a non-integer fractional part, decrement tv_sec and roll the fraction
-   into the positive nsec range — so Time.at(-0.5).to_i returns -1, not 0. */
+   into the positive nsec range -- so Time.at(-0.5).to_i returns -1, not 0. */
 sp_Time sp_time_at_float(double epoch) {
   sp_Time r = { 0, 0, 0 };
   sp_time_shift_ns(epoch, 0, 0, &r.tv_sec, &r.tv_nsec);
   return r;
 }
 
-/* Time.new(y[,mo[,d[,h[,mi[,s]]]]]) — local construction. mktime
+/* Time.new(y[,mo[,d[,h[,mi[,s]]]]]) -- local construction. mktime
    interprets the broken-down value in the host local zone and resolves
    DST itself (tm_isdst=-1). The fixed-offset 7-arg form is a separate
    issue. */
@@ -181,7 +181,7 @@ static int64_t sp_time_civil_epoch(int64_t y, int64_t mo, int64_t d,
   return days * 86400 + h * 3600 + mi * 60 + s;
 }
 
-/* Time.utc(y, m, d, h, mi, s) — UTC construction. */
+/* Time.utc(y, m, d, h, mi, s) -- UTC construction. */
 /* The month argument of the civil constructors accepts an English month name
    as well as a number: Time.utc(2020, "feb", 4). A plain strtoll read those as
    zero and the constructor rejected them (#3703). */
@@ -252,7 +252,7 @@ sp_Time sp_time_in_zone_s(sp_Time t, const char *z) {
   return t;
 }
 
-/* Time.new(y, mo, d, h, mi, s, utc_offset) — the civil value is read in a
+/* Time.new(y, mo, d, h, mi, s, utc_offset) -- the civil value is read in a
    fixed zone off seconds east of UTC, so the epoch is the UTC epoch of the
    same civil value minus that offset. CRuby bounds the offset to a day. */
 sp_Time sp_time_new_off(int64_t y, int64_t mo, int64_t d,
@@ -265,7 +265,7 @@ sp_Time sp_time_new_off(int64_t y, int64_t mo, int64_t d,
   return t;
 }
 
-/* Time.utc/local(y, mo, d, h, mi, s, usec) — the 7th positional argument is
+/* Time.utc/local(y, mo, d, h, mi, s, usec) -- the 7th positional argument is
    microseconds of second. */
 sp_Time sp_time_with_usec(sp_Time t, int64_t usec) {
   if (usec < 0 || usec >= 1000000)

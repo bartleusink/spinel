@@ -18,8 +18,8 @@ spinel app.rb --int-overflow=promote
 
 | mode | on overflow | matches CRuby? | use it for |
 |---|---|---|---|
-| **`raise`** (default) | raises `RangeError` (`integer overflow in +`) | no — CRuby would grow the integer | catching overflow loudly; never silently wrong |
-| **`wrap`** | two's-complement wraparound, like C (`a + b` with no check) | no | modular arithmetic, hashes, checksums, PRNGs — anywhere defined wraparound *is* the intent |
+| **`raise`** (default) | raises `RangeError` (`integer overflow in +`) | no -- CRuby would grow the integer | catching overflow loudly; never silently wrong |
+| **`wrap`** | two's-complement wraparound, like C (`a + b` with no check) | no | modular arithmetic, hashes, checksums, PRNGs -- anywhere defined wraparound *is* the intent |
 | **`promote`** | promotes the result to an arbitrary-precision integer (bigint) | yes | CRuby-faithful integer math (experimental, see below) |
 
 The mode applies to integer `+`, `-`, `*`, unary `-`, and (under `promote`) `**`
@@ -36,8 +36,8 @@ deviation from CRuby (which would never raise here) in favour of loudness.
 ### `wrap`
 
 `wrap` skips the overflow check entirely, so arithmetic is plain C wraparound.
-Choose it when wraparound is the algorithm — hashing, checksums, fixed-width bit
-manipulation, RNGs — not as a blanket "make overflow go away", since it will
+Choose it when wraparound is the algorithm -- hashing, checksums, fixed-width bit
+manipulation, RNGs -- not as a blanket "make overflow go away", since it will
 silently truncate a value the program genuinely needed. It is the fastest mode
 (no checks); for example the optcarrot build uses `wrap`.
 
@@ -109,5 +109,5 @@ cc app.c -DSP_INT_OVERFLOW_MODE_WRAP -Ilib libspinel_rt.a -lm -o app
 
 ## See also
 
-- [limitations.md](limitations.md) — where Spinel's static, fixed-width model
+- [limitations.md](limitations.md) -- where Spinel's static, fixed-width model
   differs from CRuby, including integer precision.

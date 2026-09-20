@@ -44,8 +44,8 @@ end
 ### `ffi_cflags "..."`
 
 Declares cflags (include dirs, defines, link-search paths) needed for
-this module's externs. Rarely needed — externs use standard C types
-only, so headers don't have to be included in the generated code — but
+this module's externs. Rarely needed -- externs use standard C types
+only, so headers don't have to be included in the generated code -- but
 useful when a library is installed somewhere non-standard.
 
 ```ruby
@@ -124,7 +124,7 @@ binary socket reads or raw digests where `:str` would truncate.
 
 `:float_array` / `:int_array` hand the C side a pointer to the Spinel
 Array's contiguous storage (`.data`). Length is **not** part of the
-spec — pass it as a separate `:size_t` arg, same way as `:str` +
+spec -- pass it as a separate `:size_t` arg, same way as `:str` +
 `strlen`. Lifetime is call-duration only: the GC may free the
 underlying Array after the call returns, so the C side must not
 stash the pointer (copy if it needs to).
@@ -149,7 +149,7 @@ keeps the plain call. The single-threaded runtime ignores the keyword.
 ### `ffi_const :NAME, <int>`
 
 Declares an integer constant accessible as `Module::NAME`. Pure
-convenience — the value is inlined at use sites like any other Ruby
+convenience -- the value is inlined at use sites like any other Ruby
 integer constant.
 
 ```ruby
@@ -304,8 +304,8 @@ struct declarations and callbacks are covered. Not supported yet:
 
 Runnable examples live under `examples/ffi/`:
 
-- `examples/ffi/libm/`     — libc / libm smoke (cos, sqrt, pow, strlen, getpid)
-- `examples/ffi/sqlite/`   — blog system (posts, tags, comments) on sqlite3
+- `examples/ffi/libm/`     -- libc / libm smoke (cos, sqrt, pow, strlen, getpid)
+- `examples/ffi/sqlite/`   -- blog system (posts, tags, comments) on sqlite3
 
 Each subdirectory has a `README.md` with build instructions and the
 required system packages.

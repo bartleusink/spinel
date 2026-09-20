@@ -2,8 +2,8 @@
 
 Spinel is a *subset* of Ruby: a program that compiles and runs under Spinel
 should behave the same under CRuby. One place Spinel used to be a *superset*
-instead was `require`. Some stdlib that CRuby gates behind a `require` —
-`StringIO`, `IO#winsize`, and friends — was always available in Spinel, so code
+instead was `require`. Some stdlib that CRuby gates behind a `require` --
+`StringIO`, `IO#winsize`, and friends -- was always available in Spinel, so code
 that forgot the `require` ran under Spinel but raised `NameError` /
 `NoMethodError` under CRuby. The **require-gate** closes that gap.
 
@@ -18,7 +18,7 @@ They are different mechanisms and stay distinct:
 | form | resolves to | when |
 |---|---|---|
 | `require_relative "path"` | a project-local file, spliced into the program | always; a missing file is a **compile error** |
-| `require "name"` | a named **feature** (bundled stdlib, native, or — planned — a package) | the feature must exist, else a **compile error** |
+| `require "name"` | a named **feature** (bundled stdlib, native, or -- planned -- a package) | the feature must exist, else a **compile error** |
 
 `require` is *not* a runtime file load. Spinel is a whole-program
 ahead-of-time compiler, so every `require` is known at compile time and there is
@@ -41,7 +41,7 @@ SPINEL_REQUIRE_GATE=1 spinel myprogram.rb   # the same switch
 `spin build` always compiles with the gate on: inside a resolved dependency set
 the universe is known, so a `require` that resolves to nothing is a bug rather
 than something to warn past. `spin flags` hands the flag to a build driven from
-outside spin, which is why it has a flag spelling at all — an environment
+outside spin, which is why it has a flag spelling at all -- an environment
 assignment cannot ride inside a flag string.
 
 ### Require-gated stdlib
@@ -78,7 +78,7 @@ Two shapes, which set what the failure looks like:
   `monitor`): without the `require` the constant is undefined.
 - A feature that **extends a core class** (`io/console` adds `IO#winsize`,
   `time` adds `Time#iso8601`): without the `require` the method is undefined.
-  The rest of `IO` and `Time` are core and always available — only the gated
+  The rest of `IO` and `Time` are core and always available -- only the gated
   method needs the `require`.
 
 ```ruby
@@ -95,8 +95,8 @@ STDOUT.winsize
 
 ### Unsatisfiable requires
 
-A `require` that Spinel cannot satisfy at all — a stdlib Spinel does not
-implement (`date`, `pp`, `securerandom`, ...) or an unknown name — is a compile
+A `require` that Spinel cannot satisfy at all -- a stdlib Spinel does not
+implement (`date`, `pp`, `securerandom`, ...) or an unknown name -- is a compile
 error under the gate, the same as a missing `require_relative`:
 
 ```
@@ -116,7 +116,7 @@ A few `require`s name a capability Spinel already provides as core, and are
 
 ### Pre-installed packages (the carved-out stdlib)
 
-Some stdlib ships with Spinel as Ruby source and is spliced when required —
+Some stdlib ships with Spinel as Ruby source and is spliced when required --
 `set`, `forwardable`, `optparse`, `erb`, `csv`, `pathname`, `digest`, `base64`
 (plus the `stringio`/`strscan`/`json` marker shims for their C-backed
 features). `net/http` and `uri` are there, and so
@@ -125,13 +125,13 @@ headers did at build time, and `require "openssl"` is otherwise the
 unsatisfiable require it is for any library Spinel does not carry. Each lives as an ordinary
 spinelgem under `packages/<name>/` beside the compiler (`packages/set/set.rb` with
 its `spin.toml`); `lib/` holds only the C runtime. The `require` pulls in
-the package's file like any other package — pre-installed just means no fetch.
+the package's file like any other package -- pre-installed just means no fetch.
 
 Two of these are also spliced **implicitly**, because CRuby provides them with
 no require at all: a program that references `Set` (or calls `.to_set`) gets
 `require "set"` prepended, and one that references `IO::Buffer` gets
 `require "io/buffer"` (packages/io) the same way. Writing the require
-explicitly is fine too — the splice only fills it in when absent.
+explicitly is fine too -- the splice only fills it in when absent.
 
 ## Providing your own feature
 
@@ -145,8 +145,8 @@ spinel -I mylibs main.rb
 
 A feature name is a path, looked up in each `-I` root in two forms:
 
-- **single file** — `require "thing"` → `mylibs/thing.rb` (the CRuby form);
-- **colocated directory** — `require "thing"` → `mylibs/thing/thing.rb`, so a
+- **single file** -- `require "thing"` → `mylibs/thing.rb` (the CRuby form);
+- **colocated directory** -- `require "thing"` → `mylibs/thing/thing.rb`, so a
   feature's sources (`.rb`, later its `.c`/`.rbs`) share one directory.
   `require "my/thing"` → `mylibs/my/thing.rb` or `mylibs/my/thing/thing.rb`.
 
@@ -157,7 +157,7 @@ root satisfies is the compile error from the previous section.
 
 **A spin package is already in the colocated form.** A package named `curses`
 lives at `<pkgs>/curses/curses.rb`, so `-I <pkgs>` resolves `require "curses"`
-against it — with no project file and no `spin` involved — and one root serves
+against it -- with no project file and no `spin` involved -- and one root serves
 every package under it. Its carried C reaches the link line through the
 compiler's repeatable `--link`:
 

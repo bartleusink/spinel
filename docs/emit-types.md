@@ -89,7 +89,7 @@ unknown or void are left out), in node order.
 - A program that does not parse exits 1 too, and the JSON is still
   written: `types` and `codegen` empty, and one `"severity":"error"` per
   parse error at its span (`end_line`/`end_col` included), in the file
-  it is in when a `require_relative` spliced it — the same
+  it is in when a `require_relative` spliced it -- the same
   `file:line:col: message` lines the compile prints on stderr (where the
   column is 1-based, as an editor reads it; the JSON's is 0-based).
 

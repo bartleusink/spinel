@@ -1156,7 +1156,7 @@ TyKind yield_value_type(Compiler *c, int mi) {
     TyKind bt;
     if (bn == 0) bt = TY_NIL;
     else if (nt_type(nt, bd[bn - 1]) && sp_streq(nt_type(nt, bd[bn - 1]), "ReturnNode"))
-      /* `{ return e }`: a non-local return — the yield never produces a
+      /* `{ return e }`: a non-local return -- the yield never produces a
          value, but typing it as e's type keeps the enclosing method's
          return shape consistent (the inline emits `return e` directly). */
       bt = return_node_type(c, bd[bn - 1]);

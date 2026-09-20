@@ -234,7 +234,7 @@ static inline sp_bool sp_str_eq_cstr(const char *marked, const char *plain) {
   return (sp_bool)(sp_str_byte_len(marked) == lp && memcmp(marked, plain, lp) == 0);
 }
 
-/* String#valid_encoding? — walks the buffer and accepts pure ASCII
+/* String#valid_encoding? -- walks the buffer and accepts pure ASCII
    or well-formed UTF-8 (RFC 3629 byte sequences with no overlong
    forms, no surrogate halves, code points <= U+10FFFF). */
 /* A BINARY string hashes apart from its UTF-8 twin, but only when it holds a
