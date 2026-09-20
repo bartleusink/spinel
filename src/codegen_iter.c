@@ -2676,7 +2676,14 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
         return 1;
       }
       return 0;
-    } }
+    }
+    /* An anonymous `&` inside an inlined body resolved to the CALLER's
+       literal block: the loops below read the block's params and body off
+       `block`, so it has to be that node, not the BlockArgumentNode -- with
+       the latter every loop ran with an empty body, silently doing nothing
+       (`def each(&) = @items.each(&)`, #4618). A named `&blk` never reached
+       this because desugar_value_callable_forwards rewrote it first. */
+    if (rfb != block) block = rfb; }
 
 
   /* loop { ... } -- infinite loop, exited by break */

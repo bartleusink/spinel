@@ -1701,7 +1701,22 @@ int desugar_value_callable_forwards(Compiler *c) {
     int blk = nt_ref(nt, id, "block");
     if (blk < 0 || !nt_type(nt, blk) || !sp_streq(nt_type(nt, blk), "BlockArgumentNode")) continue;
     int ex = nt_ref(nt, blk, "expression");
-    if (ex < 0) continue;  /* anonymous `&`: inline-forward path, not a value */
+    /* An anonymous `&` (`def each(&) = @items.each(&)`) forwards the method's
+       own block, which the inline path splices at every caller: the method
+       is marked yielding, and the builtin loop that consumes the forward
+       reads the caller's literal block. But nothing typed that block's
+       parameters from the container, and nothing connected the caller's
+       block to the loop the way a `yield` does: the loop ran with an empty
+       body, silently doing nothing (#4618). The forward becomes the block
+       `{ |__fwd..| yield __fwd.. }` here, exactly as a named `&blk` becomes
+       `{ |__fwd..| blk.call(__fwd..) }` below, and the yield does the rest. */
+    int anon = ex < 0;
+    TyKind ct = TY_UNKNOWN;
+    if (anon) {
+      Scope *ms = comp_scope_of(c, id);
+      if (!ms || !ms->name || !ms->blk_param || ms->blk_param[0]) continue;
+    }
+    else {
     const char *exty = nt_type(nt, ex);
     if (!exty) continue;
     /* a constant read is as deterministic and side-effect-free as a local one,
@@ -1717,12 +1732,13 @@ int desugar_value_callable_forwards(Compiler *c) {
        building it per element has no observable side effect */
     int inline_lambda = sp_streq(exty, "LambdaNode");
     if (!simple_ref && !method_obj && !inline_lambda) continue;
-    TyKind ct = infer_type(c, ex);
+    ct = infer_type(c, ex);
     /* A poly local can hold a callable produced by an operation whose static
        type stays poly -- e.g. `procs.reduce(:>>)`, a composed Proc. Forward it
        as a value callable too (its `.call` dispatches at runtime); restricted
        to a bare local/ivar read so re-evaluation is side-effect-free (#3167). */
     if (ct != TY_PROC && ct != TY_METHOD && !(ct == TY_POLY && simple_ref)) continue;
+    }
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0) continue;
     const char *name = nt_str(nt, id, "name");
@@ -1783,7 +1799,12 @@ int desugar_value_callable_forwards(Compiler *c) {
        the scalar `each_key`/`each_value` yields -- needs cross-procedural param
        typing not yet modeled, so decline to the pre-existing path. */
     int wrap_pair = 0;
-    if (ty_is_hash(rt)) {
+    if (ty_is_hash(rt) && anon) {
+      /* a yield hands the pair as one array, which the caller's block
+         auto-splats into |k, v| or takes whole as |pair|, as Hash#each does */
+      wrap_pair = (arity == 2);
+    }
+    else if (ty_is_hash(rt)) {
       if (ct == TY_METHOD) {
         wrap_pair = (arity == 2);  /* each: pair as array; each_key/value: bare value */
       }
@@ -1801,8 +1822,8 @@ int desugar_value_callable_forwards(Compiler *c) {
     }
 
     int base = nt->count;
-    int proc_clone = nt_clone_subtree(nt, ex);  /* re-read the proc per element */
-    if (proc_clone < 0) continue;
+    int proc_clone = anon ? -1 : nt_clone_subtree(nt, ex);  /* re-read the proc per element */
+    if (!anon && proc_clone < 0) continue;
 
     int reqs[4], reads[4];
     char pn[48];
@@ -1828,11 +1849,18 @@ int desugar_value_callable_forwards(Compiler *c) {
       nt_node_set_arr(nt, callargs, "arguments", &pairarr, 1);
     }
     else nt_node_set_arr(nt, callargs, "arguments", reads, arity);
-    int callnode = nt_new_node(nt, "CallNode");
-    nt_node_set_ref(nt, callnode, "receiver", proc_clone);
-    nt_node_set_str(nt, callnode, "name", "call");
-    nt_node_set_ref(nt, callnode, "arguments", callargs);
-    nt_node_set_ref(nt, callnode, "block", -1);
+    int callnode;
+    if (anon) {
+      callnode = nt_new_node(nt, "YieldNode");
+      nt_node_set_ref(nt, callnode, "arguments", callargs);
+    }
+    else {
+      callnode = nt_new_node(nt, "CallNode");
+      nt_node_set_ref(nt, callnode, "receiver", proc_clone);
+      nt_node_set_str(nt, callnode, "name", "call");
+      nt_node_set_ref(nt, callnode, "arguments", callargs);
+      nt_node_set_ref(nt, callnode, "block", -1);
+    }
 
     int body = nt_new_node(nt, "StatementsNode");
     nt_node_set_arr(nt, body, "body", &callnode, 1);
