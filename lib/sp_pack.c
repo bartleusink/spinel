@@ -241,6 +241,15 @@ int64_t sp_bigint_to_int(sp_Bigint *b);  /* wraps mod 2^64, as pack does */
    otherwise (a 64-bit quantity on a 32-bit sp_int), as CRuby answers */
 #define pk_box_i64 sp_box_i64
 
+sp_Bigint *sp_bigint_new_u64(uint64_t v);
+/* The same for an UNSIGNED 64-bit quantity, whose top half no int64 holds:
+   `Q` above 2**63-1 is a Bignum in CRuby, and reading it as a signed value
+   answered a negative number for every such byte pattern. */
+static sp_RbVal pk_box_u64(uint64_t v) {
+  if (v > (uint64_t)INT64_MAX) return sp_box_bigint(sp_bigint_new_u64(v));
+  return pk_box_i64((int64_t)v);
+}
+
 static int64_t pk_poly_to_int(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT:    return v.v.i;
@@ -1140,7 +1149,13 @@ else if (spec == 'Z') {
         case 'l': v = (int32_t)pk_get_int(u, 4, big); break;
         case 'L': v = (uint32_t)pk_get_int(u, 4, big); break;
         case 'q': v = (int64_t)pk_get_int(u, 8, big); break;
-        case 'Q': v = (int64_t)pk_get_int(u, 8, big); break;
+        /* unsigned, so it does not share the signed boxing below */
+        case 'Q': {
+          uint64_t uv = pk_get_int(u, 8, big);
+          off += fsize;
+          sp_PolyArray_push(out, pk_box_u64(uv));
+          continue;
+        }
         case 'x': break;
       }
       off += fsize;

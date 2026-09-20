@@ -353,7 +353,12 @@ static TyKind an_unpack1_lit_type(const NodeTable *nt, int arg) {
   while (*p >= '0' && *p <= '9') p++;
   if (*p == '*') p++;
   if (*p) return TY_POLY;  /* further directives: not this one's type */
-  if (strchr("cCsSlLqQnNvV", d)) return TY_INT;
+  /* The 64-bit pair is the exception: `Q` above 2**63-1 is a Bignum, and
+     `q`'s INT64_MIN is the value an sp_int slot spells as nil. An sp_int
+     slot holds neither, so they keep the boxed answer the runtime already
+     hands back -- typed int, the Bignum truncated and the INT64_MIN read
+     back as nil (#4588). The narrower directives all fit. */
+  if (strchr("cCsSlLnNvV", d)) return TY_INT;
   if (strchr("dDfFeEgG", d)) return TY_FLOAT;
   return TY_POLY;
 }
