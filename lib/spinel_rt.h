@@ -2753,7 +2753,18 @@ extern sp_bool sp_convert_failed;
 /* Hash subset/superset comparisons (boxed, any variant pairing): every pair
    of `a` present in `b` with an equal value; strict adds len <. */
 static void sp_poly_hash_pair(sp_RbVal v, sp_int i, sp_RbVal *k, sp_RbVal *out);
-static sp_bool sp_poly_eq(sp_RbVal a, sp_RbVal b);
+static sp_bool sp_poly_eq_slow(sp_RbVal a, sp_RbVal b);
+/* Two plain Integers are what a boxed comparison actually holds, and no
+   arm of the body below can match either tag -- a user `==` needs a user
+   object receiver, and every tower arm needs its own kind -- so answer
+   them here rather than after all of them. sp_poly_add settled the same
+   shape for arithmetic (#3984); sp_poly_eq kept walking the tower, and a
+   2.3KB body with no early return also paid a full frame and the
+   callee-saved spills on every call. */
+static SP_INLINE sp_bool sp_poly_eq(sp_RbVal a, sp_RbVal b) {
+  if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i == b.v.i;
+  return sp_poly_eq_slow(a, b);
+}
 static sp_int sp_poly_length(sp_RbVal v);
 static sp_bool sp_OpenStruct_eq(sp_OpenStruct *a, sp_OpenStruct *b);   /* defined with OpenStruct below */
 static sp_RbVal sp_poly_hash_get_pair_val(sp_RbVal h, sp_RbVal key, sp_bool *found) {
@@ -3215,7 +3226,7 @@ typedef sp_bool (*sp_obj_eq_fn)(sp_RbVal a, sp_RbVal b);
 static sp_obj_eq_fn sp_obj_eq_hook = NULL;
 /* The == arms that can walk back into the pair they started from (below). */
 static sp_bool sp_poly_eq_deep(sp_RbVal a, sp_RbVal b);
-static sp_bool sp_poly_eq(sp_RbVal a, sp_RbVal b) {
+static SP_NOINLINE sp_bool sp_poly_eq_slow(sp_RbVal a, sp_RbVal b) {
   /* a user class's own == answers before any builtin reading, the way its
      other operators now do; the field-wise hook below stays the default for
      a class that does not define one (#3501) */
@@ -3386,10 +3397,10 @@ static sp_int sp_poly_spaceship(sp_RbVal a, sp_RbVal b) {
   if (sp_poly_eq(a, b)) return 0;
   return SP_INT_NIL;
 }
-static sp_bool sp_poly_lt(sp_RbVal a, sp_RbVal b) { SP_POLY_USER_CMP("<"); SP_POLY_COERCE_CMP("<"); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp < 0; }
-static sp_bool sp_poly_le(sp_RbVal a, sp_RbVal b) { SP_POLY_USER_CMP("<="); SP_POLY_COERCE_CMP("<="); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp <= 0; }
-static sp_bool sp_poly_gt(sp_RbVal a, sp_RbVal b) { SP_POLY_USER_CMP(">"); SP_POLY_COERCE_CMP(">"); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp > 0; }
-static sp_bool sp_poly_ge(sp_RbVal a, sp_RbVal b) { SP_POLY_USER_CMP(">="); SP_POLY_COERCE_CMP(">="); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp >= 0; }
+static sp_bool sp_poly_lt(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i < b.v.i;   /* see sp_poly_eq */ SP_POLY_USER_CMP("<"); SP_POLY_COERCE_CMP("<"); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp < 0; }
+static sp_bool sp_poly_le(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i <= b.v.i;   /* see sp_poly_eq */ SP_POLY_USER_CMP("<="); SP_POLY_COERCE_CMP("<="); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp <= 0; }
+static sp_bool sp_poly_gt(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i > b.v.i;   /* see sp_poly_eq */ SP_POLY_USER_CMP(">"); SP_POLY_COERCE_CMP(">"); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp > 0; }
+static sp_bool sp_poly_ge(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i >= b.v.i;   /* see sp_poly_eq */ SP_POLY_USER_CMP(">="); SP_POLY_COERCE_CMP(">="); if ((sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) && sp_poly_tower_p(a) && sp_poly_tower_p(b)) return FALSE; sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable); if (!comparable) sp_poly_cmp_fail(a, b); return cmp >= 0; }
 /* Comparable#between? is defined on `<=>` alone: CRuby computes
    `(self <=> min) >= 0 && (self <=> max) <= 0` and raises "comparison failed"
    when either answers nil. Lowering it to `>=` and `<=` instead would
