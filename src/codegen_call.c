@@ -4041,7 +4041,13 @@ static int poly_pred_kind(const char *name, int argc) {
      NoMethodError for a tag that has no sign, as CRuby does. */
   if (argc == 0) return (sp_streq(name, "frozen?") || sp_streq(name, "nil?") ||
                          sp_streq(name, "zero?") || sp_streq(name, "positive?") ||
-                         sp_streq(name, "negative?")) ? 1 : 0;
+                         sp_streq(name, "negative?") ||
+                         /* the rest of the numeric predicates: a class merely
+                            defining `finite?` took this switch for every
+                            union-typed number in the program, and the Float
+                            or Integer reaching it raised (#4651, #4650) */
+                         sp_streq(name, "finite?") || sp_streq(name, "nan?") ||
+                         sp_streq(name, "real?") || sp_streq(name, "integer?")) ? 1 : 0;
   if (argc == 1) return (sp_streq(name, "eql?") || sp_streq(name, "equal?") ||
                          sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") ||
                          sp_streq(name, "instance_of?")) ? 1 : 0;
@@ -4065,6 +4071,10 @@ static int emit_poly_pred_value(Compiler *c, int id, const char *tvref,
   if (argc == 0 && sp_streq(name, "zero?"))     { buf_printf(b, "sp_poly_zero_p(%s)", tvref); return 1; }
   if (argc == 0 && sp_streq(name, "positive?")) { buf_printf(b, "sp_poly_positive_p(%s)", tvref); return 1; }
   if (argc == 0 && sp_streq(name, "negative?")) { buf_printf(b, "sp_poly_negative_p(%s)", tvref); return 1; }
+  if (argc == 0 && sp_streq(name, "finite?"))   { buf_printf(b, "sp_poly_finite_p(%s)", tvref); return 1; }
+  if (argc == 0 && sp_streq(name, "nan?"))      { buf_printf(b, "sp_poly_nan_p(%s)", tvref); return 1; }
+  if (argc == 0 && sp_streq(name, "real?"))     { buf_printf(b, "sp_poly_real_p(%s)", tvref); return 1; }
+  if (argc == 0 && sp_streq(name, "integer?"))  { buf_printf(b, "sp_poly_integer_p(%s)", tvref); return 1; }
   if (argc == 1 && sp_streq(name, "eql?"))    { buf_printf(b, "sp_poly_eql(%s, %s)", tvref, argref); return 1; }
   if (argc == 1 && sp_streq(name, "equal?"))  { buf_printf(b, "sp_poly_equal(%s, %s)", tvref, argref); return 1; }
   int is_isa = argc == 1 && (sp_streq(name, "is_a?") || sp_streq(name, "kind_of?"));
@@ -5975,16 +5985,28 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           (sp_streq(name, "abs") || sp_streq(name, "round") ||
            sp_streq(name, "succ") || sp_streq(name, "next") ||
            sp_streq(name, "pred") || sp_streq(name, "ceil") ||
-           sp_streq(name, "floor") || sp_streq(name, "truncate"))) {
+           sp_streq(name, "floor") || sp_streq(name, "truncate") ||
+           /* the value-answering numeric queries a user class can shadow the
+              same way: abs2 and infinite? answer boxed, numerator and
+              denominator a machine int (#4651) */
+           sp_streq(name, "abs2") || sp_streq(name, "infinite?") ||
+           sp_streq(name, "numerator") || sp_streq(name, "denominator"))) {
         char nv[96];
+        int int_valued = sp_streq(name, "numerator") || sp_streq(name, "denominator");
         if (sp_streq(name, "succ") || sp_streq(name, "next"))
           snprintf(nv, sizeof nv, "sp_poly_succ_m(_t%d, %d)", tv, sp_streq(name, "next") ? 1 : 0);
         else if (sp_streq(name, "pred"))
           snprintf(nv, sizeof nv, "sp_poly_sub(_t%d, sp_box_int(1))", tv);
+        else if (sp_streq(name, "infinite?"))
+          snprintf(nv, sizeof nv, "sp_poly_infinite(_t%d)", tv);
         else
           snprintf(nv, sizeof nv, "sp_poly_%s(_t%d)", name, tv);
         buf_printf(b, " default: _t%d = ", tr);
-        if (ret == TY_POLY) buf_puts(b, nv);
+        if (int_valued) {
+          if (ret == TY_POLY) emit_boxed_text(c, TY_INT, nv, b);
+          else buf_puts(b, nv);
+        }
+        else if (ret == TY_POLY) buf_puts(b, nv);
         else emit_unbox_text(c, ret, nv, b);
         buf_puts(b, "; break;");
         obj_default_done = 1;

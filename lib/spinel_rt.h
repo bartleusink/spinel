@@ -3089,6 +3089,19 @@ static int sp_poly_rat_sign(sp_RbVal v) {
   return sp_bigint_sign(((sp_BigRational *)v.v.p)->num);
 }
 static inline int sp_poly_is_rat_kind(sp_RbVal v) { return (sp_poly_is_rational(v) || sp_poly_is_brat(v)) && v.v.p; }
+/* Numeric#real? / #integer? on a boxed value: every Numeric but Complex is
+   real, only Integer (either width) is integer; a tag that is not a number
+   raises CRuby's NoMethodError (#4650). */
+static sp_bool sp_poly_real_p(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT || v.tag == SP_TAG_BIGINT || sp_poly_is_rat_kind(v)) return TRUE;
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return FALSE;
+  sp_raise_poly_nomethod("real?", v);
+}
+static sp_bool sp_poly_integer_p(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return TRUE;
+  if (v.tag == SP_TAG_FLT || sp_poly_is_rat_kind(v) || (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX)) return FALSE;
+  sp_raise_poly_nomethod("integer?", v);
+}
 /* Complex#zero? is `self == 0`: both parts zero. It has no #positive? /
    #negative?, so only this one gets the arm. */
 static sp_bool sp_poly_zero_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return v.v.i == 0; if (v.tag == SP_TAG_FLT) return v.v.f == 0.0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_sign((sp_Bigint *)v.v.p) == 0; if (sp_poly_is_rat_kind(v)) return sp_poly_rat_sign(v) == 0; if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX && v.v.p) { sp_Complex *_cz = (sp_Complex *)v.v.p; return _cz->re == 0.0 && _cz->im == 0.0; } sp_raise_poly_nomethod("zero?", v); }
