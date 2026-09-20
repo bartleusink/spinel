@@ -1328,22 +1328,27 @@ sp_int sp_file_mkfifo(const char *path, sp_int mode) {SP_GC_ROOT_STR(path);
   if (mkfifo(path, (mode_t)mode) != 0) sp_file_raise_errno("mkfifo", path);
   return 0;
 }
-sp_int sp_file_utime(double atime, double mtime, const char *path) {SP_GC_ROOT_STR(path);
-  struct timeval tv[2];
-  tv[0].tv_sec = (time_t)atime; tv[0].tv_usec = (long)((atime - (double)(time_t)atime) * 1e6);
-  tv[1].tv_sec = (time_t)mtime; tv[1].tv_usec = (long)((mtime - (double)(time_t)mtime) * 1e6);
-  if (utimes(path, tv) != 0) sp_file_raise_errno("utime", path);
+/* File.utime / File.lutime. The times arrive as a whole second and a
+   nanosecond REMAINDER, not as a double: a Time carries nanoseconds and a
+   timestamp near 2^31 seconds leaves a double about 100ns of resolution, so
+   the fraction was lost long before utimes' microseconds were (#4635).
+   utimensat takes the pair as it stands; the `l` form is the same call with
+   AT_SYMLINK_NOFOLLOW, the way lstat is to stat. */
+static sp_int sp_file_utime_at(int64_t asec, int32_t ansec, int64_t msec, int32_t mnsec,
+                               const char *path, int flags, const char *who) {
+  struct timespec ts[2];
+  ts[0].tv_sec = (time_t)asec; ts[0].tv_nsec = (long)ansec;
+  ts[1].tv_sec = (time_t)msec; ts[1].tv_nsec = (long)mnsec;
+  if (utimensat(AT_FDCWD, path, ts, flags) != 0) sp_file_raise_errno(who, path);
   return 1;
 }
-/* File.lutime: the same, on the LINK itself when the final component is a
-   symlink -- utimensat's AT_SYMLINK_NOFOLLOW, the way lstat is to stat. */
-sp_int sp_file_lutime(double atime, double mtime, const char *path) {SP_GC_ROOT_STR(path);
-  struct timespec ts[2];
-  ts[0].tv_sec = (time_t)atime; ts[0].tv_nsec = (long)((atime - (double)(time_t)atime) * 1e9);
-  ts[1].tv_sec = (time_t)mtime; ts[1].tv_nsec = (long)((mtime - (double)(time_t)mtime) * 1e9);
-  if (utimensat(AT_FDCWD, path, ts, AT_SYMLINK_NOFOLLOW) != 0)
-    sp_file_raise_errno("lutime", path);
-  return 1;
+sp_int sp_file_utime_ns(int64_t asec, int32_t ansec, int64_t msec, int32_t mnsec,
+                        const char *path) {SP_GC_ROOT_STR(path);
+  return sp_file_utime_at(asec, ansec, msec, mnsec, path, 0, "utime");
+}
+sp_int sp_file_lutime_ns(int64_t asec, int32_t ansec, int64_t msec, int32_t mnsec,
+                         const char *path) {SP_GC_ROOT_STR(path);
+  return sp_file_utime_at(asec, ansec, msec, mnsec, path, AT_SYMLINK_NOFOLLOW, "lutime");
 }
 
 /* stat, not fopen: opening a FIFO for read blocks until a writer appears, so
