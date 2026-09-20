@@ -355,6 +355,10 @@ extern int g_needs_class_machinery;
    runtime default (sp_re_mark_globals, installed by a constructor before main),
    so it -- and the sp_tu_init hook override -- are skipped. */
 extern int g_has_user_global_marks;
+/* Does this statement list leave the function at its tail -- a `return`, or a
+   bare `raise` / `throw`? A splice of it into a value position has to supply a
+   value of its own, because the C statement expression is then void. */
+int stmts_diverge(Compiler *c, int stmts);
 /* Distinct out-of-int64 integer literals, shared per TU (see codegen_util.c). */
 extern char **g_bigl_val;
 extern int g_bigl_n;
