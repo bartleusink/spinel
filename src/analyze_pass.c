@@ -3325,6 +3325,38 @@ int propagate_prep_params(Compiler *c) {
 }
 
 /* Optional parameters get a type from their default value too. */
+/* Does any call site supply a positional argument at index `pi` of method
+   `sc`? By name, receiver-blind: a call of that name (or `new`, for
+   initialize) with more than `pi` positional arguments, or one whose
+   arguments cannot be counted (a splat, forwarding), or a reference that can
+   call it any way (`method(:x)`, `send`, `super`). Unsure answers 1. */
+static int param_supplied_anywhere(Compiler *c, Scope *sc, int pi) {
+  const NodeTable *nt = c->nt;
+  if (!sc->name) return 1;
+  int is_init = sp_streq(sc->name, "initialize");
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    if (sp_streq(nm, "send") || sp_streq(nm, "__send__") || sp_streq(nm, "public_send") ||
+        sp_streq(nm, "method") || sp_streq(nm, "instance_method") || sp_streq(nm, "define_method"))
+      return 1;
+    if (!sp_streq(nm, sc->name) && !(is_init && sp_streq(nm, "new"))) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int n = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    int pos = 0;
+    for (int k = 0; k < n; k++) {
+      NodeKind ak = nt_kind(nt, av[k]);
+      const char *aty = nt_type(nt, av[k]);
+      if (ak == NK_SplatNode || (aty && sp_streq(aty, "ForwardingArgumentsNode"))) return 1;
+      if (ak == NK_KeywordHashNode || ak == NK_BlockArgumentNode) continue;
+      pos++;
+    }
+    if (pos > pi) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_SuperNode, id) { (void)id; return 1; }
+  NT_FOREACH_KIND(nt, NK_ForwardingSuperNode, id) { (void)id; return 1; }
+  return 0;
+}
 int infer_default_param_types(Compiler *c) {
   int changed = 0;
   for (int s = 0; s < c->nscopes; s++) {
@@ -3348,9 +3380,22 @@ int infer_default_param_types(Compiler *c) {
           if (dn == 0) dt = TY_POLY_ARRAY;
         }
       }
-      if (dt == TY_NIL || dt == TY_UNKNOWN) continue;
       LocalVar *p = scope_local(sc, sc->pnames[i]);
       if (!p || p->rbs_seeded) continue;
+      /* A `= nil` default no call site ever supplies a value for is the
+         parameter's whole type, and the post-fixpoint backstop makes it poly
+         (a boxed nil). Deciding that only after the fixpoint left the body's
+         joins built on the dropped unknown: `spinel || ENV[...] || "x"` had
+         typed String, the literal holding the ivar Array[String] and the
+         callee's parameter with it, then the ivar re-derived untyped and the
+         C had an sp_PolyArray * meeting an sp_StrArray * (#4583). Poly from
+         the first round, the dependents derive on it. */
+      if (dt == TY_NIL && p->type == TY_UNKNOWN && !param_supplied_anywhere(c, sc, i)) {
+        slot_rule(c, p, TY_POLY, sc->pdefault[i], "a `= nil` default and no call site typing it: the parameter holds nil or a value, untyped");
+        changed = 1;
+        continue;
+      }
+      if (dt == TY_NIL || dt == TY_UNKNOWN) continue;
       /* an empty literal default is untyped by the rule above, not by any
          value: say so; another default's value speaks for itself */
       TyKind merged = ty_unify(p->type, dt);
