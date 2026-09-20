@@ -3555,6 +3555,18 @@ void process_include_body(Compiler *c, int ci, int body_node) {
       if (aty && sp_streq(aty, "ConstantReadNode")) mname = nt_str(nt, args[j], "name");
       else if (aty && sp_streq(aty, "ConstantPathNode")) mname = nt_str(nt, args[j], "name");
       int mod_id = mname ? comp_class_index(c, mname) : -1;
+      /* `M = ::M` beside the include: a constant that merely ALIASES the
+         module names it just as well, and the collision qualifier rewrites
+         the include's own argument to the owner-qualified constant
+         (`Consumer__Rt`) the moment two classes hold an alias of that name.
+         Resolving through the alias keeps the include registered -- without
+         it the module was silently not included at all, and every
+         receiverless call to its module_function methods lost its callee
+         and was refused as an unsupported call. */
+      if (mod_id < 0 && mname) {
+        const char *al = resolve_class_alias(c, mname);
+        if (al) mod_id = comp_class_index(c, al);
+      }
       if (mod_id < 0) {
         /* A module with no class of its own -- a builtin named through its
            path, `include IO::WaitReadable`. The AST name is the leaf, so the
