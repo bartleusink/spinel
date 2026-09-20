@@ -3500,6 +3500,18 @@ static int name_used_outside(Compiler *c, int id, int skip, const char *name) {
    A reader is a call whose body is a bare ivar read, which is what both
    `attr_reader :a` and `def a; @a; end` come to. A call that builds is not
    one, and is left alone. */
+/* Is scope `s` a method whose whole body is one ivar read -- what both
+   `attr_reader :a` and `def a; @a; end` come to? */
+static int scope_body_is_ivar_read(Compiler *c, int s) {
+  if (s < 0) return 0;
+  Scope *sc = &c->scopes[s];
+  if (sc->body < 0) return 0;
+  int n = 0; const int *st = nt_arr(c->nt, sc->body, "body", &n);
+  if (n != 1 || !st) return 0;
+  const char *bt = nt_type(c->nt, st[0]);
+  return bt && sp_streq(bt, "InstanceVariableReadNode");
+}
+
 int conv_reads_shared_storage(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   if (node < 0) return 0;
@@ -3512,13 +3524,24 @@ int conv_reads_shared_storage(Compiler *c, int node) {
     if (an > 0 || nt_ref(nt, node, "block") >= 0) return 0; }
   const char *nm = nt_str(nt, node, "name");
   if (!nm) return 0;
+  /* The reader is a method of the RECEIVER's class, so ask that class. A
+     receiver the compiler already knows to be a builtin -- a Range, a typed
+     array, a Hash -- reaches no user method however many classes spell one by
+     the same name: `(1..max).to_a` makes a fresh array whether or not a
+     `Result#to_a` answering `@rows` exists somewhere in the program, and the
+     name-only scan below refused it. Only a receiver whose class is not known
+     here falls back to that scan. */
+  int recv = nt_ref(nt, node, "receiver");
+  if (recv >= 0) {
+    TyKind rt = comp_ntype(c, recv);
+    if (ty_is_object(rt))
+      return scope_body_is_ivar_read(c, comp_method_in_chain(c, ty_object_class(rt), nm, NULL));
+    if (rt != TY_UNKNOWN && rt != TY_POLY) return 0;
+  }
   for (int i = 1; i < c->nscopes; i++) {
     Scope *sc = &c->scopes[i];
-    if (!sc->name || !sp_streq(sc->name, nm) || sc->body < 0) continue;
-    int n = 0; const int *st = nt_arr(nt, sc->body, "body", &n);
-    if (n != 1 || !st) continue;
-    const char *bt = nt_type(nt, st[0]);
-    if (bt && sp_streq(bt, "InstanceVariableReadNode")) return 1;
+    if (!sc->name || !sp_streq(sc->name, nm)) continue;
+    if (scope_body_is_ivar_read(c, i)) return 1;
   }
   return 0;
 }
