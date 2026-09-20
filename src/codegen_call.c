@@ -4415,13 +4415,22 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
                tv, tv, tv, tv);
     return 1;
   }
-  /* Integer#to_s(base): base-N string of a poly integer. */
+  /* Integer#to_s(base): base-N string of a poly integer. A Bignum answers in
+     the base too -- it reached here as a heap value, not as a different
+     method, and falling through to sp_poly_to_s rendered 2**70 in decimal
+     whatever base was asked for. Every other type has a zero-arity to_s, so
+     the argument makes the call CRuby's ArgumentError rather than something
+     to ignore. Receiver then argument are bound in that order, as the
+     to_i(base) arm does: CRuby evaluates both before the call raises. */
   if (sp_streq(name, "to_s") && argc == 1) {
-    int tv = ++g_tmp;
+    int tv = ++g_tmp, tb = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-    buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_int_to_s_base(_t%d.v.i, ", tv, tv);
-    emit_int_expr(c, argv[0], b);
-    buf_printf(b, ") : sp_poly_to_s(_t%d); })", tv);
+    buf_printf(b, "; sp_int _t%d = ", tb); emit_int_expr(c, argv[0], b);
+    buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_int_to_s_base(_t%d.v.i, _t%d)"
+                  " : _t%d.tag == SP_TAG_BIGINT ? sp_bigint_to_s_base(sp_poly_as_bigint(_t%d), _t%d)"
+                  " : (const char *)(sp_raise_cls(\"ArgumentError\","
+                  " \"wrong number of arguments (given 1, expected 0)\"), (void *)0); })",
+               tv, tv, tb, tv, tv, tb);
     return 1;
   }
   /* Hash#merge(other): fold both hashes into a general PolyPoly hash. */
