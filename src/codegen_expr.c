@@ -1011,7 +1011,13 @@ void emit_expr(Compiler *c, int id, Buf *b) {
 
   if (sp_streq(ty, "IntegerNode")) {
     const char *bigval = nt_str(nt, id, "bigval");
-    if (bigval) { buf_printf(b, "sp_bigint_new_str(\"%s\", 10)", bigval); return; }
+    if (bigval) {
+      /* An Integer is immutable, so one slot per distinct literal serves
+         every use: the string was re-parsed and a Bignum re-allocated at
+         each one, every time the line ran (#4637). */
+      buf_printf(b, "sp_bigl_get(%d)", bigl_intern(bigval));
+      return;
+    }
     buf_printf(b, "%lldLL", nt_int(nt, id, "value", 0)); return;
   }
   if (sp_streq(ty, "FloatNode")) { const char *v = nt_content(nt, id); buf_puts(b, v ? v : "0.0"); return; }

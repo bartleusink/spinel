@@ -689,6 +689,25 @@ NameSet *g_cap_names = NULL;
 int g_needs_at_exit = 0;
 int g_needs_class_machinery = 0;
 int g_has_user_global_marks = 0;
+/* The distinct out-of-int64 integer LITERALS of this TU. Each was emitted as
+   its own sp_bigint_new_str(...) at every use, so one `0xFFFFFFFF00000000`
+   written in forty places parsed a decimal string and allocated a Bignum
+   forty times over, every time the line ran. An Integer is immutable, so the
+   value can be built once per distinct literal and shared: these hold the
+   strings, the emitter names slot i, and the slot is filled on first use and
+   marked with the other TU globals. */
+char **g_bigl_val = NULL;
+int g_bigl_n = 0, g_bigl_cap = 0;
+int bigl_intern(const char *v) {
+  if (!v) return -1;
+  for (int i = 0; i < g_bigl_n; i++) if (sp_streq(g_bigl_val[i], v)) return i;
+  if (g_bigl_n >= g_bigl_cap) {
+    g_bigl_cap = g_bigl_cap ? g_bigl_cap * 2 : 16;
+    g_bigl_val = (char **)realloc(g_bigl_val, sizeof(char *) * (size_t)g_bigl_cap);
+  }
+  g_bigl_val[g_bigl_n] = strdup(v);
+  return g_bigl_n++;
+}
 int g_uses_symbols = 0;
 int g_uses_marshal = 0;
 int g_emit_sym_rt = 0;
