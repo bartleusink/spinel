@@ -283,6 +283,17 @@ TyKind ty_unify(TyKind a, TyKind b) {
      single-class reference need not widen to poly. */
   if (a == TY_NIL && ty_is_object(b)) return b;
   if (b == TY_NIL && ty_is_object(a)) return a;
+  /* A String that also sees nil stays a (nullable) String: the const char *
+     NULL is nil, the same slot `&.`, an ivar and an --rbs `String?` seed
+     already hand out, and every String consumer reads it as nil (#nil?,
+     truth, to_s, boxing, and NoMethodError from the rest). The join used to
+     widen to poly, so `v.nil? ? nil : v.upcase`, `return nil if v.nil?` and
+     `t = nil; t = "y" if ...` all took the boxed slow path where `v&.upcase`
+     did not, and that one rule was the largest single source of untyped
+     slots in a real tree (#4567). Integer and Float have sentinels too and
+     may follow; bool and Symbol have no spare inhabitant and stay poly. */
+  if (a == TY_NIL && b == TY_STRING) return b;
+  if (b == TY_NIL && a == TY_STRING) return a;
   /* A poly array that also sees nil stays a (nullable) poly array: the
      sp_PolyArray* NULL encodes nil, and the poly-array method paths already
      NULL-guard, so a method returning `array | nil` need not widen to poly

@@ -1434,7 +1434,7 @@ const char *default_value(TyKind t) {
     case TY_INT:    return "0";
     case TY_FLOAT:  return "0.0";
     case TY_BOOL:   return "0";
-    case TY_STRING: return "(&(\"\\xff\")[1])";
+    case TY_STRING: return "NULL";
     case TY_SYMBOL: return "((sp_sym)-1)";
     case TY_RANGE:  return "(sp_Range){0}";
     case TY_FLOAT_RANGE: return "(sp_FloatRange){0}";

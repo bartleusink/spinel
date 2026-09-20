@@ -410,6 +410,20 @@ still works.
   (`frozen_string_literal: true` semantics, with no opt-out) -- see
   "String literals are frozen by default" below for what that changes and
   where mutable strings come from.
+- **`nil` meeting a String is a nullable String, not untyped.** Where a
+  value can be either nil or a String -- a ternary, an `if` with no else, a
+  `return nil if ...` ahead of a String, a `case` with no matching arm, a
+  local written nil on one path and a String on another, a `next nil` in a
+  block -- the slot stays a String whose C form carries nil as NULL, the
+  same representation `v&.upcase`, an ivar written nil and a `String?` seed
+  already use, and every String consumer reads it as nil (`nil?`, truth,
+  `to_s`, interpolation, boxing, and `NoMethodError` from the rest). It
+  used to widen to untyped, and `return nil if v.nil?` at the head of a
+  method was the largest single source of the boxed slow path in a real
+  tree. A literal `nil` inside an array or hash literal keeps the
+  container boxed, as before. `nil` meeting an Integer, Float or bool
+  still widens (Integer and Float have a sentinel and may follow; bool
+  and Symbol have no spare value).
 - **Comparable is keyed on `<=>` presence** -- the Comparable operator methods
   (`<`, `<=`, `>`, `>=`, `between?`, `clamp`) work on any class that defines
   `<=>`; CRuby additionally requires `include Comparable` (a `NoMethodError`

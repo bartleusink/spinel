@@ -31,9 +31,9 @@ class Box
 end
 
 b = Box.new
-b.write(:body, "hi")
+b.write(:body, String.new("hi"))   # literals are frozen here (frozen_string_literal semantics), and the value form now keeps the argument itself
 b.stamp
 puts b.body
 puts b.write(:n, 2).to_s
-puts b.write(:body, "z").to_s
+puts b.write(:body, String.new("z")).to_s
 puts b.body

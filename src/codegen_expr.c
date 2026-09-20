@@ -1486,6 +1486,23 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
       else emit_expr(c, v, b);
     }
+    else if (ivt2 == TY_STRBUF && comp_ntype(c, v) != TY_STRBUF && comp_ntype(c, v) != TY_POLY) {
+      /* a shared-handle slot takes an alias RHS by handle and wraps anything
+         else in a fresh handle, exactly as the statement form does; the raw
+         const char * went into the sp_String * slot here (a value-position
+         write, `def w(v) = (@body = v.to_s)`, #3993 / #4567). The value of
+         the expression is the slot's ordinary read face below. */
+      char srefW2[1024];
+      if (strbuf_slot_ref(c, v, srefW2, sizeof srefW2)) buf_puts(b, srefW2);
+      else {
+        buf_puts(b, "sp_String_new_shared(");
+        emit_str_expr(c, v, b);
+        buf_puts(b, ")");
+      }
+      buf_printf(b, "; (_sp_ret_strbuf = (void *)%s, %s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL); })",
+                 ref2e, ref2e, ref2e);
+      return;
+    }
     else if (ivt2 == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
     else if (ivt2 != TY_POLY && ivt2 != TY_UNKNOWN && comp_ntype(c, v) == TY_POLY) {
       /* poly rhs assigned to a typed ivar: unbox to the concrete type */
@@ -3155,6 +3172,11 @@ else {
             emit_boxed_text(c, subt, sub_e.p ? sub_e.p : default_value(subt), &bx3);
             buf_puts(g_pre, bx3.p ? bx3.p : "sp_box_nil()"); free(bx3.p);
           }
+          /* a nested chain whose every written arm raises is the implicit
+             nil, held in a boxed temp; into a concrete slot with a nil of
+             its own (a nullable String, #4567) it is that nil, not the box */
+          else if (subt == TY_NIL && res != TY_POLY && nil_value(res))
+            buf_puts(g_pre, nil_value(res));
           else buf_puts(g_pre, sub_e.p ? sub_e.p : default_value(res));
           buf_puts(g_pre, ";\n");
           free(sub_e.p);

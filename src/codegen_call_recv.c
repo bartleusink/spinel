@@ -5,7 +5,7 @@
 #include "codegen_internal.h"
 
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b);
-static void emit_str_force_encoding(Compiler *c, const char *r, const int *argv, int argc, Buf *b);
+static void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const int *argv, int argc, Buf *b);
 
 /* Object's identity protocol, text form (defined with its node form at the end of this file). */
 static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKind rt, const char *r, TyKind at, const char *a, Buf *b);
@@ -7524,7 +7524,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "({ const char *_t%d = %s; sp_str_check_mutable(_t%d); _t%d; })", trc0, r, trc0, trc0);
       }
       else if ((sp_streq(name, "force_encoding") || sp_streq(name, "encode!")) && argc <= 2)
-        emit_str_force_encoding(c, r, argv, argc, b);
+        emit_str_force_encoding(c, name, r, argv, argc, b);
       else if ((sp_streq(name, "=~") || sp_streq(name, "!~")) && argc == 1 &&
                comp_ntype(c, argv[0]) == TY_STRING) {
         /* `str =~ str` is a TypeError in CRuby, not a missing method: only a
@@ -10326,7 +10326,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
    check and the retag, and a receiver that is a call with effects --
    campfire's `request.body.read.force_encoding("UTF-8")`, where `read`
    advances a cursor -- ran twice and retagged the second, empty, read. */
-static void emit_str_force_encoding(Compiler *c, const char *r, const int *argv, int argc, Buf *b) {
+static void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const int *argv, int argc, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *fe_nm = NULL;
   if (argc >= 1) {
@@ -10349,7 +10349,10 @@ static void emit_str_force_encoding(Compiler *c, const char *r, const int *argv,
     fe_txt = sp_streq(fe_up, "UTF-8");
   }
   int trc = ++g_tmp;
-  buf_printf(b, "({ const char *_t%d = %s; sp_str_check_mutable(_t%d); ", trc, r, trc);
+  /* a nil receiver (a nullable String slot, #4567) is NoMethodError, not the
+     FrozenError the mutability check reads a NULL as */
+  buf_printf(b, "({ const char *_t%d = %s; if (!_t%d) sp_nil_recv(\"%s\"); sp_str_check_mutable(_t%d); ",
+             trc, r, trc, name, trc);
   if (fe_bin) buf_printf(b, "sp_str_as_binary(_t%d); })", trc);
   else if (fe_txt) buf_printf(b, "sp_str_as_text(_t%d); })", trc);
   else buf_printf(b, "_t%d; })", trc);
@@ -13320,7 +13323,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       Buf rb; memset(&rb, 0, sizeof rb);
       buf_puts(&rb, "sp_poly_recv_s("); emit_expr(c, recv, &rb); buf_printf(&rb, ", \"%s\")", name);
       buf_puts(b, "sp_box_str(");
-      emit_str_force_encoding(c, rb.p ? rb.p : "", argv, argc, b);
+      emit_str_force_encoding(c, name, rb.p ? rb.p : "", argv, argc, b);
       buf_puts(b, ")");
       free(rb.p);
     }

@@ -102,6 +102,7 @@ static inline void sp_String_append_bin(sp_String*s,const char*t){if(!s||!t)retu
    sp_String_new above (reading s[-1] there is OOB and, under clang's rodata
    layout, misreads as frozen; cf. the #282 marker-probe lesson). */
 static inline sp_String*sp_String_new_shared(const char*s){
+  if(!s)return NULL;   /* nil into a shared-string slot stays nil (a nullable String, #4567) */
   /* Read every property of `s` HERE, before the allocation below: the handle's
      constructor can collect, and `s` is typically an unrooted temporary (the
      codegen hands this `sp_IntArray_pack(...)` directly), so touching it

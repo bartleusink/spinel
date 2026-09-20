@@ -6295,7 +6295,10 @@ TyKind infer_uncached(Compiler *c, int id) {
     if (wcls < 0) return infer_type(c, nt_ref(nt, id, "value"));
     ClassInfo *ci = &c->classes[wcls];
     int iv = nm ? comp_ivar_index(ci, nm) : -1;
-    return iv >= 0 ? ci->ivar_types[iv] : TY_UNKNOWN;
+    /* a strbuf slot's write, like its read, is the String face (the handle
+       rides _sp_ret_strbuf): the raw STRBUF typed a method whose body is the
+       write `sp_String *` while its callers read the face (#4567) */
+    return ivar_value_ty(ci, iv);
   }
   if (nk == NK_LocalVariableOperatorWriteNode) {
     const char *nm2 = nt_str(nt, id, "name");
@@ -6786,6 +6789,10 @@ TyKind infer_uncached(Compiler *c, int id) {
                     sp_streq(ety, "KeywordHashNode")))
           et = TY_POLY;
       }
+      /* a nil element keeps the literal a boxed container, as it always was:
+         the String join now absorbs nil (#4567), and a typed array or hash
+         is not where a written nil belongs */
+      if (et == TY_NIL) et = TY_POLY;
       e = ty_unify(e, et);
     }
     /* ty_array_of holds an all-unknown element type at bottom while the
@@ -6856,6 +6863,7 @@ TyKind infer_uncached(Compiler *c, int id) {
                          sp_streq(vnode_ty, "ArrayNode")))
           vt_elem = TY_POLY;
       }
+      if (vt_elem == TY_NIL) vt_elem = TY_POLY;   /* a nil value keeps the hash poly-valued (see the array literal) */
       vt = ty_unify(vt, vt_elem);
     }
     /* symbol keys -> SymPolyHash (boxed values), regardless of value type */
