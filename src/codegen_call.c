@@ -22350,7 +22350,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       else if (at == TY_FLOAT) {
         int tf = ++g_tmp;
         buf_printf(b, "({ sp_float _t%d = ", tf); emit_expr(c, av[0], b);
-        buf_printf(b, "; sp_poly_flo_domain_ck(_t%d); (sp_int)_t%d; })", tf, tf);
+        buf_printf(b, "; sp_poly_flo_domain_ck(_t%d); sp_float_fit_i(_t%d); })", tf, tf);
       }
       else if (at == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_raise_cls(\"TypeError\", \"can't convert nil into Integer\"), (sp_int)0)"); }  /* #2514 */
       else if (at == TY_POLY) { buf_puts(b, "sp_poly_Integer("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
