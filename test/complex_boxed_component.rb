@@ -9,3 +9,17 @@ p Complex(y, x)
 p Complex(x, y)
 p Complex(3, y)
 p Complex(y, 4)
+
+# A boxed component carries its class at run time; the Float-classed flag must
+# come from the value, not from the static type, or an integral Float read out
+# of a container renders and answers #real as an Integer.
+f = [3.0, nil][0]
+p Complex(f)
+p Complex(f).real.class
+p Complex(f, f)
+p Complex(x, f)
+p Complex(x, f).imaginary.class
+p Complex(f, x).real.class
+p Complex(f, 4)
+p Complex(3, f)
+
