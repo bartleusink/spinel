@@ -30,6 +30,10 @@ typedef struct {
                                   with no header to flip (sp_io_stdout) */
   unsigned char wnonblock;     /* write side of this handle is O_NONBLOCK:
                                   0 not asked, 1 yes, 2 could not (#4307) */
+  unsigned char wstream;       /* SOCK_STREAM, asked once: 0 not yet, 1 yes,
+                                  2 no. Only a byte stream may have a write
+                                  split at the send buffer's free space; on a
+                                  datagram socket each send IS one message */
   unsigned char park;          /* readiness-park kind, computed on the first
                                   read: 0 not yet asked, 1 never (a regular
                                   file is always ready), 2 park before a read

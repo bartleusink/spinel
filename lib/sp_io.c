@@ -287,7 +287,15 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
     size_t want = n - off;
     if (!nb) sp_io_wait_writable(f);   /* frees the worker while the buffer is full */
     if (f->is_sock) {
-      long room = sp_sock_room(fd);
+      /* A datagram or seqpacket send is one message: shortening it would
+         deliver two where the caller wrote one, and would hide the EMSGSIZE
+         the kernel owes an over-long payload. Only a byte stream is capped. */
+      if (!f->wstream) {
+        int sotype = 0; socklen_t solen = sizeof sotype;
+        f->wstream = (getsockopt(fd, SOL_SOCKET, SO_TYPE, &sotype, &solen) == 0 &&
+                      sotype == SOCK_STREAM) ? 1 : 2;
+      }
+      long room = f->wstream == 1 ? sp_sock_room(fd) : -1;
       /* No room: go back to the park above, which is where waiting belongs.
          It cannot spin -- POLLOUT is raised only once the free space reaches
          SO_SNDLOWAT (2048 by default), so a buffer this full does not report
