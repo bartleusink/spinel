@@ -4042,8 +4042,14 @@ void register_extends(Compiler *c) {
         int snap = c->nscopes;
         for (int ms = 0; ms < snap; ms++) {
           Scope *src = &c->scopes[ms];
-          /* Only transplant instance methods; self.* on the module stay on it. */
-          if (src->class_id != mod_id || src->is_cmethod || !src->name) continue;
+          /* Only transplant instance methods; self.* on the module stay on it.
+             A module_function method is registered class-level on the module
+             but is an instance method of it too, so `extend` hands it to the
+             extending class like any other; skipped, a bare call to it from
+             one of that class's own class methods fell to the INSTANCE copy an
+             `include` of the same module had made, with the class object cast
+             to an instance pointer (#4648). */
+          if (src->class_id != mod_id || (src->is_cmethod && !src->is_module_function) || !src->name) continue;
           if (comp_cmethod_in_class(c, ci, src->name) >= 0) continue;
           /* A module method whose body makes a receiverless call binds `self`
              to the extending class: a bare `new` constructs that class, and a
@@ -4066,7 +4072,9 @@ void register_extends(Compiler *c) {
                   comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name")); }
             specialize_cmethod_for(c, ms, mod_id, ci);
             src = &c->scopes[ms];  /* realloc-safe */
-            src->is_transplanted_source = 1;
+            /* a module_function stays callable on the module itself
+               (`Coordinates.countdown(1)`), so its source is not dead */
+            if (!src->is_module_function) src->is_transplanted_source = 1;
             did_clone = 1;
             continue;
           }
@@ -4096,7 +4104,7 @@ void register_extends(Compiler *c) {
               }
             }
           }
-          src->is_transplanted_source = 1;
+          if (!src->is_module_function) src->is_transplanted_source = 1;
         }
       }
     }
