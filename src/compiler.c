@@ -226,6 +226,7 @@ Scope *comp_scope_new(Compiler *c, const char *name, int def_node) {
   s->rest_idx = -1;
   s->kwrest_idx = -1;
   s->ret = TY_UNKNOWN;
+  s->ret_noblock = TY_UNKNOWN;
   why_reset(&s->ret_why);
   s->dm_subst_node = -1;
   return s;

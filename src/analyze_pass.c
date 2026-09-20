@@ -5915,6 +5915,108 @@ static void ewo_scan_pushes(Compiler *c, int id, const char *memo, TyKind *acc) 
     for (int k = 0; k < n; k++) if (ids[k] >= 0) ewo_scan_pushes(c, ids[k], memo, acc); }
 }
 
+/* An empty `[]` passed to a yielding user method takes the element kind the
+   method pushes into it, directly or through the block parameter it yields
+   it as: `f(xs, []) { |x, m| m << x }` with `def f(xs, memo); xs.each { |x|
+   yield x, memo }; memo; end` builds an sp_IntArray, not a boxed array. The
+   literal carries no kind of its own, and nothing read the callee's pushes
+   for it before: the each_with_object emitter had this recovery for its one
+   memo (ewo_memo_elem_type), and its Ruby definition (builtins/enumerable.rb)
+   is the first of these methods. A scalar element kind is stamped on the
+   literal (arr_want); an object element is narrow_object_arrays' to decide,
+   and a poly push keeps the boxed default. */
+/* ewo_scan_pushes, reporting an argument whose type is still open: a stamp
+   taken before every push has settled would fix the literal on the first
+   kind seen (`m << x; m << x.to_s` with `x` still unknown read as String). */
+static void yarg_scan_pushes(Compiler *c, int id, const char *memo, TyKind *acc, int *open) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  if (id < 0) return;
+  const char *ty = nt_type(nt, id);
+  if (ty && sp_streq(ty, "CallNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int rcv = nt_ref(nt, id, "receiver");
+    const char *rty = rcv >= 0 ? nt_type(nt, rcv) : NULL;
+    if (nm && rty && sp_streq(rty, "LocalVariableReadNode") &&
+        nt_str(nt, rcv, "name") && sp_streq(nt_str(nt, rcv, "name"), memo) &&
+        (sp_streq(nm, "<<") || sp_streq(nm, "push"))) {
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      for (int k = 0; k < an; k++) {
+        TyKind at = infer_type(c, argv[k]);
+        if (at == TY_UNKNOWN) *open = 1;
+        *acc = ty_unify(*acc, at);
+      }
+    }
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) { int ch = nt_ref_at(nt, id, i); if (ch >= 0) yarg_scan_pushes(c, ch, memo, acc, open); }
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) { int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int k = 0; k < n; k++) if (ids[k] >= 0) yarg_scan_pushes(c, ids[k], memo, acc, open); }
+}
+
+int narrow_empty_array_args_by_yield(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  if (!c->arr_want) return 0;
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    int blk = nt_ref(nt, id, "block");
+    if (blk >= 0 && nt_kind(nt, blk) != NK_BlockNode) continue;
+    int anode = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+    if (an == 0) continue;
+    int any_empty = 0;
+    for (int j = 0; j < an; j++) {
+      int a = av[j];
+      if (a < 0 || a >= c->node_cap || nt_kind(nt, a) != NK_ArrayNode) continue;
+      int en = 0; nt_arr(nt, a, "elements", &en);
+      if (en == 0 && c->arr_want[a] == TY_UNKNOWN) any_empty = 1;
+    }
+    if (!any_empty) continue;
+    /* with a block: an inlinable yielding method; without: a receiverless
+       call to a user method, whose own pushes are the evidence */
+    int mi = blk >= 0 ? call_user_yield_mi(c, id)
+           : (nt_ref(nt, id, "receiver") < 0 ? comp_self_call_mi(c, id, nt_str(nt, id, "name")) : -1);
+    if (mi < 0) continue;
+    Scope *m = &c->scopes[mi];
+    int mbody = m->body;
+    int bbody = blk >= 0 ? nt_ref(nt, blk, "body") : -1;
+    if (mbody < 0 || (blk >= 0 && bbody < 0)) continue;
+    for (int j = 0; j < an && j < m->nparams; j++) {
+      int a = av[j];
+      if (a < 0 || a >= c->node_cap || nt_kind(nt, a) != NK_ArrayNode) continue;
+      int en = 0; nt_arr(nt, a, "elements", &en);
+      if (en != 0 || c->arr_want[a] != TY_UNKNOWN) continue;
+      const char *pn = m->pnames[j];
+      if (!pn) continue;
+      TyKind acc = TY_UNKNOWN; int open = 0;
+      yarg_scan_pushes(c, mbody, pn, &acc, &open);   /* the callee's own pushes */
+      /* the block parameter the callee yields it as */
+      int hi = mbody;
+      for (int y = mbody; bbody >= 0 && y < nt->count && y <= hi; y++) {
+        if (c->nscope[y] != mi || nt_kind(nt, y) != NK_YieldNode) { if (y == hi && y + 1 < nt->count && c->nscope[y + 1] == mi) hi = y + 1; continue; }
+        if (y + 1 < nt->count && c->nscope[y + 1] == mi) hi = y + 1;
+        int ya = nt_ref(nt, y, "arguments");
+        int yn = 0; const int *yv = ya >= 0 ? nt_arr(nt, ya, "arguments", &yn) : NULL;
+        for (int q = 0; q < yn; q++) {
+          if (nt_kind(nt, yv[q]) != NK_LocalVariableReadNode) continue;
+          const char *vn = nt_str(nt, yv[q], "name");
+          if (!vn || !sp_streq(vn, pn)) continue;
+          const char *bp = block_param_name(c, blk, q);
+          if (bp) yarg_scan_pushes(c, bbody, bp, &acc, &open);
+        }
+      }
+      if (!open && (acc == TY_INT || acc == TY_FLOAT || acc == TY_STRING)) {
+        c->arr_want[a] = ty_array_of(acc);
+        changed = 1;
+      }
+    }
+  }
+  return changed;
+}
+
 /* The element type an `each_with_object([])` array accumulator is filled with,
    inferred from how its memo param (block param 1) is used. Scans the block body
    for pushes onto memo; when the body merely forwards to a callable
@@ -8640,6 +8742,32 @@ int infer_return_types(Compiler *c) {
     }
   }
   if (ret_acc && has_ret) {
+    /* `return x unless block_given?` (or `if !block_given?`) in a yielding
+       method: the return a BLOCKLESS call answers. Its type is kept apart
+       (Scope.ret_noblock) so the call with a block, which the inliner
+       specializes with the guard folded away, reads the body proper: the
+       union of an Enumerator with the memo `each_with_object` answers was
+       neither. The guarded returns are found from their guard, since a
+       return node does not know its parent. */
+    unsigned char *noblk = (unsigned char *)calloc((size_t)(nt->count ? nt->count : 1), 1);
+    for (int id = 0; noblk && id < nt->count; id++) {
+      NodeKind gk = nt_kind(nt, id);
+      if (gk != NK_UnlessNode && gk != NK_IfNode) continue;
+      int pred = nt_ref(nt, id, "predicate");
+      if (pred < 0) continue;
+      int bg = -1;
+      if (gk == NK_UnlessNode) bg = pred;
+      else if (nt_kind(nt, pred) == NK_CallNode && nt_str(nt, pred, "name") &&
+               sp_streq(nt_str(nt, pred, "name"), "!")) bg = nt_ref(nt, pred, "receiver");
+      if (bg < 0 || nt_kind(nt, bg) != NK_CallNode || nt_ref(nt, bg, "receiver") >= 0) continue;
+      const char *bn = nt_str(nt, bg, "name");
+      if (!bn || !sp_streq(bn, "block_given?")) continue;
+      if (nt_ref(nt, id, "subsequent") >= 0) continue;   /* an else arm: not a plain guard */
+      int stm = nt_ref(nt, id, "statements");
+      int sn = 0; const int *sb = stm >= 0 ? nt_arr(nt, stm, "body", &sn) : NULL;
+      for (int k = 0; k < sn; k++) if (nt_kind(nt, sb[k]) == NK_ReturnNode) noblk[sb[k]] = 1;
+    }
+    for (int s = 1; s < ns; s++) c->scopes[s].ret_noblock = TY_UNKNOWN;
     for (int id = 0; id < nt->count; id++) {
       if (nt_kind(nt, id) != NK_ReturnNode) continue;
       Scope *rs = comp_scope_of(c, id);
@@ -8647,10 +8775,15 @@ int infer_return_types(Compiler *c) {
       int si = (int)(rs - c->scopes);
       if (si < 0 || si >= ns) continue;
       TyKind rt = (ret_narrow && ret_narrow[id]) ? ret_narrow[id] : return_node_type(c, id);
+      if (noblk && noblk[id] && rs->yields) {
+        rs->ret_noblock = rs->ret_noblock == TY_UNKNOWN ? rt : ty_unify(rs->ret_noblock, rt);
+        continue;
+      }
       ret_acc[si] = has_ret[si] ? ty_unify(ret_acc[si], rt) : rt;
       has_ret[si] = 1;
       if (ret_head && ret_next) { ret_next[id] = ret_head[si]; ret_head[si] = id; }
     }
+    free(noblk);
   }
   /* implicit return: the body's value */
   for (int s = 1; s < c->nscopes; s++) {
@@ -8740,8 +8873,41 @@ int infer_return_types(Compiler *c) {
     TyKind r = empty_body ? TY_POLY
              : tail_unreachable ? ret_acc[s]
              : infer_type(c, sc->body);
+    /* A yielding method whose body ends in `if block_given? ... else ... end`
+       has two values, one per call form, and the inliner keeps only the arm a
+       call site takes: the block arm types the call with a block, the else
+       arm the call without one (Scope.ret_noblock, read by method_call_ret).
+       Unified, the Enumerator of the one arm and the memo of the other made
+       the method poly for both (builtins/enumerable.rb). */
+    if (!empty_body && !tail_unreachable && sc->yields && nt_kind(nt, sc->body) == NK_StatementsNode) {
+      int bn3 = 0; const int *bb3 = nt_arr(nt, sc->body, "body", &bn3);
+      int last = bn3 > 0 ? bb3[bn3 - 1] : -1;
+      int pred = last >= 0 && nt_kind(nt, last) == NK_IfNode ? nt_ref(nt, last, "predicate") : -1;
+      int sub = last >= 0 ? nt_ref(nt, last, "subsequent") : -1;
+      if (pred >= 0 && nt_kind(nt, pred) == NK_CallNode && nt_ref(nt, pred, "receiver") < 0 &&
+          nt_str(nt, pred, "name") && sp_streq(nt_str(nt, pred, "name"), "block_given?") &&
+          sub >= 0 && nt_kind(nt, sub) == NK_ElseNode) {
+        int ts = nt_ref(nt, last, "statements"), es = nt_ref(nt, sub, "statements");
+        int tn3 = 0; const int *tb3 = ts >= 0 ? nt_arr(nt, ts, "body", &tn3) : NULL;
+        int en3 = 0; const int *eb3 = es >= 0 ? nt_arr(nt, es, "body", &en3) : NULL;
+        TyKind et = en3 > 0 ? infer_type(c, eb3[en3 - 1]) : TY_NIL;
+        if (et != TY_UNKNOWN && sc->ret_noblock != et) sc->ret_noblock = et;
+        /* a block arm ending in `yield` is typed per call site by
+           method_call_ret, as a yield-tailed body is; any other block arm
+           types the method alone, even while it is still unknown: letting
+           the unified body type stand in would hand a call with a block the
+           else arm's Enumerator on the round before the memo settles, and a
+           local only widens from there */
+        if (!(tn3 > 0 && nt_kind(nt, tb3[tn3 - 1]) == NK_YieldNode)) {
+          TyKind bt = tn3 > 0 ? infer_type(c, tb3[tn3 - 1]) : TY_NIL;
+          r = bt != TY_UNKNOWN && has_ret && has_ret[s] ? ty_unify(bt, ret_acc[s]) : bt;
+          goto ret_decided;
+        }
+      }
+    }
     /* explicit returns within this scope (collected above) */
     if (!tail_unreachable && has_ret && has_ret[s]) r = ty_unify(r, ret_acc[s]);
+    ret_decided:
     /* Post-backstop re-runs fill returns whose body only settled after the
        main fixpoint (a `r = expr; r` chain, #1670). Adopting a NEW poly there
        is a net loss: the late-settling chains that matter are scalar, while a

@@ -3309,7 +3309,7 @@ static void synth_struct_each(Compiler *c) {
 
 /* Does `class <ci>`'s body say `include Enumerable`? A builtin module has no
    class-table entry, so the AST is what records it (#3755). */
-static int an_class_includes_enumerable(Compiler *c, int ci) {
+int an_class_includes_enumerable(Compiler *c, int ci) {
   const NodeTable *nt = c->nt;
   if (ci < 0 || ci >= c->nclasses) return 0;
   const char *cn = c->classes[ci].name;
@@ -13465,6 +13465,9 @@ void analyze_program(Compiler *c) {
       comp_grow_node_arrays(c);
     }
   }
+  /* builtins/enumerable.rb, spliced by the parser: its definitions become
+     the receiver-taking top-level functions before any scope is built */
+  desugar_builtins(c);
   scope_numbered_block_params(c);
   rename_shadowing_block_params(c);
   /* `:m.to_proc.call(r, a)` -> `r.m(a)`, before the to_proc rewrite below
@@ -14252,6 +14255,13 @@ void analyze_program(Compiler *c) {
     ch |= desugar_proc_expr_block_arg(c);      /* &(a >> b) -> hoisted temp */
     ch |= desugar_to_hash_splat(c);            /* f(**obj) -> f(**obj.to_hash) */
     ch |= desugar_value_callable_forwards(c);  /* &proc -> { |x| proc.call(x) } */
+    if (desugar_builtin_enum_calls(c)) {       /* recv.m(a) { } -> __enum_m(recv, a) { } */
+      ch = 1;
+      /* the call is a user method's now: its empty `{}` argument takes the
+         widest hash the way any yielding method's does */
+      mark_empty_literal_args(c);
+    }
+    ch |= narrow_empty_array_args_by_yield(c); /* f([]) { |m| m << 1 }: the [] is an int array */
     ch |= infer_block_params(c);
     ch |= infer_for_index(c);
     ch |= infer_catch_block_params(c);
@@ -15033,6 +15043,10 @@ void analyze_program(Compiler *c) {
     m->is_lowered_yield = 1;
     m->lowered_lifted_yield = thread_yld;
     m->yields = 0;
+    /* `if block_given? ... else ... end` was typed per call form while the
+       method was inlined (Scope.ret_noblock); as one emitted function both
+       arms are live at run time, so its value is the two joined */
+    if (m->ret_noblock != TY_UNKNOWN) { m->ret = ty_unify(m->ret, m->ret_noblock); m->ret_noblock = TY_UNKNOWN; }
     /* The return the fixpoint derived stands. This forced TY_INT, which was
        right only by coincidence: the body's own tail already types the method,
        and overwriting it made `walk` answer Integer where it answers nil, and

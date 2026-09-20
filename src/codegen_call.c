@@ -17127,7 +17127,6 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (emit_inject_expr(c, id, b)) return;
   if (emit_reduce_block_expr(c, id, b)) return;
   if (emit_sortby_expr(c, id, b)) return;
-  if (emit_each_with_object_expr(c, id, b)) return;
   if (emit_tap_then_expr(c, id, b)) return;
   if (emit_group_by_expr(c, id, b)) return;
   }

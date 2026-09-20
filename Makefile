@@ -2279,6 +2279,9 @@ install: all bin/spin
 	fi
 	rm -rf $(SPNLDIR)/packages
 	cp -r packages $(SPNLDIR)/packages
+	@# the core methods written in Ruby, spliced by the compiler beside packages/
+	rm -rf $(SPNLDIR)/builtins
+	cp -r builtins $(SPNLDIR)/builtins
 	rm -rf $(SPNLDIR)/packages/*/build
 	install -d $(PREFIX)/bin
 	ln -sf $(SPNLDIR)/spinel $(PREFIX)/bin/spinel

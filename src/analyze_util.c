@@ -1437,8 +1437,27 @@ TyKind yield_aware_elem_ty(Compiler *c, int node) {
   return infer_type(c, node);
 }
 
+/* The statement a call with a block answers from, when the body ends in
+   `if block_given? ... else ... end`: the block arm's last statement. */
+static int block_given_tail_then_last(Compiler *c, int last) {
+  const NodeTable *nt = c->nt;
+  if (last < 0 || nt_kind(nt, last) != NK_IfNode) return -1;
+  int pred = nt_ref(nt, last, "predicate");
+  if (pred < 0 || nt_kind(nt, pred) != NK_CallNode || nt_ref(nt, pred, "receiver") >= 0) return -1;
+  const char *pn = nt_str(nt, pred, "name");
+  if (!pn || !sp_streq(pn, "block_given?")) return -1;
+  int sub = nt_ref(nt, last, "subsequent");
+  if (sub < 0 || nt_kind(nt, sub) != NK_ElseNode) return -1;
+  int ts = nt_ref(nt, last, "statements");
+  int tn = 0; const int *tb = ts >= 0 ? nt_arr(nt, ts, "body", &tn) : NULL;
+  return tn > 0 ? tb[tn - 1] : -1;
+}
+
 TyKind method_call_ret(Compiler *c, int mi, int call_id) {
   int last = scope_body_last(c, mi);
+  /* `if block_given? ... yield ... else ... end`: the call with a block
+     answers from the block arm, typed per call site like a yield tail */
+  { int tl = block_given_tail_then_last(c, last); if (tl >= 0) last = tl; }
   int is_yield = last >= 0 && nt_type(c->nt, last) && sp_streq(nt_type(c->nt, last), "YieldNode");
   /* A force-lowered Enumerable #each returns self (its ret is pinned to the
      defining class), not the block's value -- the per-call-site block typing
@@ -1494,6 +1513,19 @@ TyKind method_call_ret(Compiler *c, int mi, int call_id) {
         return infer_type(c, bb[bn - 1]);
       }
     }
+  }
+  /* `return x unless block_given?`: a blockless call site reads the value
+     of that return, one with a block the value of the body proper */
+  if (c->scopes[mi].yields && c->scopes[mi].ret_noblock != TY_UNKNOWN) {
+    int blk = nt_ref(c->nt, call_id, "block");
+    int fwd = 0;
+    if (blk < 0) {
+      int a = nt_ref(c->nt, call_id, "arguments");
+      int an = 0; const int *av = a >= 0 ? nt_arr(c->nt, a, "arguments", &an) : NULL;
+      fwd = (an == 1 && av && nt_type(c->nt, av[0]) &&
+             sp_streq(nt_type(c->nt, av[0]), "ForwardingArgumentsNode"));
+    }
+    if (blk < 0 && !fwd) return c->scopes[mi].ret_noblock;
   }
   return c->scopes[mi].ret;
 }

@@ -10577,6 +10577,28 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   buf_puts(b, ";\n");
 }
 
+/* A guard folded at compile time whose taken arm ends in a return: nothing
+   after it in its statement list runs. The `return to_enum(:m) unless
+   block_given?` idiom under a call site WITH a block folds the guard away,
+   and under one WITHOUT it folds to the return; emitting the statements past
+   it there assigned the body's value (the memo of `each_with_object`, say)
+   into a result slot typed for the return's value, and the C did not build.
+   1 when the statement list is cut here. */
+static int stmt_is_folded_return(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, id);
+  if (k != NK_IfNode && k != NK_UnlessNode) return 0;
+  if (nt_ref(nt, id, k == NK_UnlessNode ? "else_clause" : "subsequent") >= 0) return 0;
+  int pred = nt_ref(nt, id, "predicate");
+  int sc = static_block_given_cond(c, pred);
+  if (sc < 0) return 0;
+  int taken = k == NK_UnlessNode ? !sc : sc;
+  if (!taken) return 0;
+  int then_b = nt_ref(nt, id, "statements");
+  int n = 0; const int *body = then_b >= 0 ? nt_arr(nt, then_b, "body", &n) : NULL;
+  return n > 0 && nt_kind(nt, body[n - 1]) == NK_ReturnNode;
+}
+
 void emit_stmts(Compiler *c, int id, Buf *b, int indent) {
   /* Ruby block-locals are FRESH on every block invocation. Find the
      BlockNode whose body this is (map built lazily on the compiler, so it
@@ -10607,7 +10629,10 @@ void emit_stmts(Compiler *c, int id, Buf *b, int indent) {
   if (ty && sp_streq(ty, "StatementsNode")) {
     int n = 0;
     const int *body = nt_arr(nt, id, "body", &n);
-    for (int k = 0; k < n; k++) emit_stmt(c, body[k], b, indent);
+    for (int k = 0; k < n; k++) {
+      emit_stmt(c, body[k], b, indent);
+      if (stmt_is_folded_return(c, body[k])) break;
+    }
   }
   else {
     emit_stmt(c, id, b, indent);
@@ -10623,7 +10648,10 @@ void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
     const int *body = nt_arr(nt, id, "body", &n);
     for (int k = 0; k < n; k++) {
       if (k == n - 1) emit_stmt_tail(c, body[k], b, indent);
-      else emit_stmt(c, body[k], b, indent);
+      else {
+        emit_stmt(c, body[k], b, indent);
+        if (stmt_is_folded_return(c, body[k])) break;
+      }
     }
   }
   else {

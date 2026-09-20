@@ -244,6 +244,12 @@ typedef struct {
                        though `ret` collapsed to poly (see LocalVar.poly_ctr) */
   int ret_specialized; /* ret was set by specialization (inherited-cls-new copy);
                           don't overwrite it from the shared body in the fixpoint */
+  TyKind ret_noblock;  /* a yielding method's value when called WITHOUT a block:
+                          the type of its `return x unless block_given?`
+                          returns, kept out of `ret` so a call with a block
+                          (which the inliner specializes, folding the guard
+                          away) reads the value of the body proper. UNKNOWN
+                          when the method has no such guard. */
   int is_ext_entry;    /* designated --ext-entry: emitted non-static, a DCE
                           root, declared in the emitted extension header (#M1
                           of docs/internals/ext-design.md) */

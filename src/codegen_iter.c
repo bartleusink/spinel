@@ -1858,11 +1858,19 @@ int emit_iter_bind_rest(Compiler *c, int block, int np, TyKind elem_t,
 
 /* Does the subtree contain a `redo` that belongs to THIS loop, i.e. one not
    nested inside a deeper loop/block/def (which would own it instead)? */
-int subtree_has_own_redo(const NodeTable *nt, int id) {
+static int subtree_has_own_redo_ex(const NodeTable *nt, int id, int follow_yield) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
   if (sp_streq(ty, "RedoNode")) return 1;
+  /* a yield inside an inlined method's loop splices the call site's block
+     here, and a `redo` in THAT block re-runs this loop body with the same
+     element: `xs.each { |x| yield x, memo }` under a caller whose block
+     redoes had no label and fell to `continue`, which is `next` (the first
+     of the shapes builtins/enumerable.rb runs through). The spliced block
+     is looked into once: a yield inside it belongs to the next level out. */
+  if (sp_streq(ty, "YieldNode") && follow_yield && g_block_id >= 0 &&
+      subtree_has_own_redo_ex(nt, nt_ref(nt, g_block_id, "body"), 0)) return 1;
   /* nested scope/loop boundaries: a redo inside binds to that inner loop */
   if (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode") ||
       sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "ForNode") ||
@@ -1870,14 +1878,15 @@ int subtree_has_own_redo(const NodeTable *nt, int id) {
     return 0;
   if (sp_streq(ty, "CallNode") && nt_ref(nt, id, "block") >= 0) return 0;  /* nested iteration */
   int nr = nt_num_refs(nt, id);
-  for (int i = 0; i < nr; i++) if (subtree_has_own_redo(nt, nt_ref_at(nt, id, i))) return 1;
+  for (int i = 0; i < nr; i++) if (subtree_has_own_redo_ex(nt, nt_ref_at(nt, id, i), follow_yield)) return 1;
   int na = nt_num_arrs(nt, id);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
-    for (int k = 0; k < n; k++) if (subtree_has_own_redo(nt, ids[k])) return 1;
+    for (int k = 0; k < n; k++) if (subtree_has_own_redo_ex(nt, ids[k], follow_yield)) return 1;
   }
   return 0;
 }
+int subtree_has_own_redo(const NodeTable *nt, int id) { return subtree_has_own_redo_ex(nt, id, 1); }
 
 /* Does the subtree contain a `next` that belongs to THIS block, i.e. one not
    nested inside a deeper loop/block/def (which would own it instead)? Same

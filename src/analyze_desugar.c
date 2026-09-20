@@ -2417,3 +2417,319 @@ int desugar_forwarding_to_rest_callee(Compiler *c) {
   }
   return changed;
 }
+
+/* ---- builtins/: Enumerable written in Ruby (builtins/enumerable.rb) ----
+   The file is spliced ahead of a program that mentions one of its names
+   (spinel_parse.c, sp_splice_builtins). Its `module Enumerable` reopen would
+   register a class of that name, which no builtin receiver dispatches
+   through, and would bring the class machinery along for a program that
+   never asks for it. So, before the scopes are built, each definition
+   becomes a top-level function that takes its receiver as the first
+   parameter:
+
+     module Enumerable                  def __enum_each_with_object(__self, memo)
+       def each_with_object(memo)   ->    __self.each { |x| yield x, memo }
+         each { |x| yield x, memo }       memo
+         memo                           end
+       end
+     end
+
+   `self` reads as `__self`, a receiverless call that is not a Kernel
+   function goes to `__self`, and the module node is dropped. The inliner
+   then specializes the function for every call site's receiver type, as it
+   does for any yielding method the program wrote. The calls are rewritten
+   onto these functions inside the fixpoint (desugar_builtin_enum_calls),
+   once the receiver's type is known. */
+extern char **sp_builtin_enum_names;
+extern int sp_builtin_enum_names_n;
+
+int builtin_enum_name_index(const char *name) {
+  if (!name) return -1;
+  for (int i = 0; i < sp_builtin_enum_names_n; i++)
+    if (sp_streq(sp_builtin_enum_names[i], name)) return i;
+  return -1;
+}
+
+/* the receiverless calls a builtin body may make that are NOT methods of
+   the receiver: Kernel's functions */
+static int bi_kernel_call_name(const char *nm) {
+  static const char *const ks[] = {
+    "raise", "puts", "p", "print", "printf", "format", "sprintf", "block_given?", "loop",
+    "lambda", "proc", "rand", "srand", "sleep", "require", "require_relative", "catch",
+    "throw", "Integer", "Float", "String", "Array", "Hash", "Rational", "Complex", "gets",
+    "exit", "abort", "at_exit", "binding", "warn", "fail", "freeze", "frozen?", "nil?",
+    "respond_to?", "is_a?", "kind_of?", "instance_of?", "equal?", "eql?", "hash",
+    "object_id", "dup", "clone", "itself", "then", "tap", "inspect", "to_s", "class", NULL };
+  for (int k = 0; ks[k]; k++) if (sp_streq(nm, ks[k])) return 1;
+  return 0;
+}
+
+static int bi_subtree_max(const NodeTable *nt, int id) {
+  if (id < 0 || id >= nt->count) return -1;
+  const SpNode *nd = &nt->nodes[id];
+  int mx = id;
+  for (int j = 0; j < nd->nr; j++) { int m = bi_subtree_max(nt, nd->r[j].ref); if (m > mx) mx = m; }
+  for (int j = 0; j < nd->na; j++)
+    for (int k = 0; k < nd->a[j].n; k++) { int m = bi_subtree_max(nt, nd->a[j].ids[k]); if (m > mx) mx = m; }
+  return mx;
+}
+
+int desugar_builtins(Compiler *c) {
+  if (sp_builtin_enum_names_n == 0) return 0;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int root = nt->root_id;
+  int top = root >= 0 ? nt_ref(nt, root, "statements") : -1;
+  if (top < 0) return 0;
+  int changed = 0;
+  int tn = 0; const int *tb = nt_arr(nt, top, "body", &tn);
+  if (!tb || tn == 0) return 0;
+  int *nb = (int *)malloc(sizeof(int) * (size_t)(tn + 64));
+  if (!nb) return 0;
+  int nbn = 0, cap = tn + 64;
+  /* the generic definitions, one per builtin name, taken out of the module */
+  int *gdef = (int *)malloc(sizeof(int) * (size_t)sp_builtin_enum_names_n);
+  if (!gdef) { free(nb); return 0; }
+  for (int i = 0; i < sp_builtin_enum_names_n; i++) gdef[i] = -1;
+  int n0 = nt->count;   /* the program's own nodes: the call sites to clone for */
+  for (int i = 0; i < tn; i++) {
+    int st = tb[i];
+    int cp = nt_kind(nt, st) == NK_ModuleNode ? nt_ref(nt, st, "constant_path") : -1;
+    const char *mn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (!mn || !sp_streq(mn, "Enumerable")) { nb[nbn++] = st; continue; }
+    int body = nt_ref(nt, st, "body");
+    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+    int all_builtin = bn > 0;
+    for (int k = 0; k < bn; k++)
+      if (nt_kind(nt, bb[k]) != NK_DefNode || builtin_enum_name_index(nt_str(nt, bb[k], "name")) < 0) all_builtin = 0;
+    if (!all_builtin) { nb[nbn++] = st; continue; }   /* a program's own reopen: left as it was */
+    for (int k = 0; k < bn; k++) {
+      int def = bb[k];
+      const char *name = nt_str(nt, def, "name");
+      int bi = builtin_enum_name_index(name);
+      /* the receiver becomes the first required parameter */
+      int hi = bi_subtree_max(nt, def);
+      int pn = nt_ref(nt, def, "parameters");
+      if (pn < 0) { pn = nt_new_node(nt, "ParametersNode"); if (pn < 0) break; nt_node_set_ref(nt, def, "parameters", pn); }
+      int sp = nt_new_node(nt, "RequiredParameterNode"); if (sp < 0) break;
+      nt_node_set_str(nt, sp, "name", "__self");
+      { int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
+        int *nr = (int *)malloc(sizeof(int) * (size_t)(rn + 1));
+        if (!nr) break;
+        nr[0] = sp; for (int j = 0; j < rn; j++) nr[j + 1] = reqs[j];
+        nt_node_set_arr(nt, pn, "requireds", nr, rn + 1); free(nr); }
+      /* `self` and the receiverless calls in the body */
+      int dbody = nt_ref(nt, def, "body");
+      int lo = dbody >= 0 ? dbody : def;
+      for (int id = lo; id <= hi; id++) {
+        NodeKind kind = nt_kind(nt, id);
+        if (kind == NK_SelfNode) {
+          nt_node_set_type(nt, id, "LocalVariableReadNode");
+          nt_node_set_str(nt, id, "name", "__self");
+          nt_node_set_int(nt, id, "depth", 0);
+        }
+        else if (kind == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
+          const char *nm = nt_str(nt, id, "name");
+          if (!nm || bi_kernel_call_name(nm)) continue;
+          int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) break;
+          nt_node_set_str(nt, rd, "name", "__self");
+          nt_node_set_int(nt, rd, "depth", 0);
+          nt_node_set_ref(nt, id, "receiver", rd);
+        }
+      }
+      /* the generic definition itself stays out of the program: the copies
+         below are what the call sites use. It keeps a name of its own so
+         that, orphaned in the node table, it cannot be mistaken for a
+         method of the builtin's name. */
+      { char gn[256]; snprintf(gn, sizeof gn, "__enum_%s", name); nt_node_set_str(nt, def, "name", gn); }
+      if (bi >= 0) gdef[bi] = def;
+    }
+    changed = 1;
+  }
+  if (!changed) { free(gdef); free(nb); return 0; }
+  /* One copy per call site. A method's parameters are typed by the union of
+     its call sites, so one shared definition called on an IntArray here and
+     a Hash there would carry a poly receiver and a poly memo everywhere;
+     with its own copy each site's parameters take that site's types, and
+     the inliner specializes the copy for the receiver it sees, as it does
+     for a yielding method the program wrote for one purpose. The copy is
+     named `__enum_<m>__<site>`, recorded on the call, and the call is
+     rewritten onto it in the fixpoint once the receiver's type says the
+     builtin serves it (desugar_builtin_enum_calls). A copy no site ends up
+     calling is unreachable and never reaches the generated C. */
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *cn0 = nt_str(nt, id, "name");
+    /* `enum.with_object(memo)` is renamed to each_with_object by the
+       Enumerator desugar inside the fixpoint, after this pass: give it its
+       copy under the name it will have. `recv.m(args).each { blk }` becomes
+       `recv.m(args) { blk }` there too, on the OUTER node (#4332), so that
+       node takes a copy of the inner's name. */
+    if (cn0 && sp_streq(cn0, "each") && nt_ref(nt, id, "block") >= 0) {
+      int er = nt_ref(nt, id, "receiver");
+      if (er >= 0 && nt_kind(nt, er) == NK_CallNode && nt_ref(nt, er, "block") < 0) cn0 = nt_str(nt, er, "name");
+    }
+    if (cn0 && sp_streq(cn0, "with_object")) cn0 = "each_with_object";
+    int bi = builtin_enum_name_index(cn0);
+    if (bi < 0 || gdef[bi] < 0) continue;
+    int copy = nt_clone_subtree(nt, gdef[bi]);
+    if (copy < 0) break;
+    char cn[256]; snprintf(cn, sizeof cn, "__enum_%s__%d", sp_builtin_enum_names[bi], id);
+    nt_node_set_str(nt, copy, "name", cn);
+    nt_node_set_int(nt, id, "enum_copy", copy);
+    if (nbn >= cap) { cap *= 2; int *g = (int *)realloc(nb, sizeof(int) * (size_t)cap); if (!g) break; nb = g; }
+    nb[nbn++] = copy;
+  }
+  nt_node_set_arr(nt, top, "body", nb, nbn);
+  comp_grow_node_arrays(c);
+  free(gdef); free(nb);
+  return 1;
+}
+
+/* `recv.m(args) { }` with `m` a builtins name, on a receiver the builtin
+   serves: an Array, a Hash, a Range, an Enumerator, a class that includes
+   Enumerable without defining `m` itself, or a value known only at run time
+   when no class in the program defines `m`. Rewritten into
+   `__enum_m(recv, args) { }`; runs in the fixpoint so the receiver's type has
+   settled. A receiver whose class defines `m` keeps its call. */
+int desugar_builtin_enum_calls(Compiler *c) {
+  if (sp_builtin_enum_names_n == 0) return 0;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  int changed = 0;
+  /* `recv.m(args).each { blk }` is `recv.m(args) { blk }` (the Enumerator's
+     each runs the method it came from, #4332), and that chain rule keys on
+     the inner call's receiver: a blockless call that is the receiver of an
+     `each { }` is left for it, and comes back here with the block. */
+  unsigned char *chained = (unsigned char *)calloc((size_t)(n0 ? n0 : 1), 1);
+  for (int id = 0; chained && id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !sp_streq(nm, "each")) continue;
+    int er = nt_ref(nt, id, "receiver");
+    if (er >= 0 && er < n0 && nt_kind(nt, er) == NK_CallNode && nt_ref(nt, er, "block") < 0) chained[er] = 1;
+  }
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *name = nt_str(nt, id, "name");
+    if (builtin_enum_name_index(name) < 0) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    if (chained && chained[id]) continue;
+    TyKind rt = infer_type(c, recv);
+    int ok = 0;
+    if (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE || rt == TY_FLOAT_RANGE ||
+        rt == TY_STR_RANGE || rt == TY_ENUMERATOR) ok = 1;
+    /* an empty `[]` / `{}` receiver has no type until its use decides one,
+       and this is that use */
+    else if (rt == TY_UNKNOWN && (nt_kind(nt, recv) == NK_ArrayNode || nt_kind(nt, recv) == NK_HashNode)) ok = 1;
+    else if (ty_is_object(rt)) {
+      int ci = ty_object_class(rt);
+      ok = an_class_includes_enumerable(c, ci) && comp_method_in_chain(c, ci, name, NULL) < 0;
+    }
+    else if (rt == TY_POLY) ok = 1;   /* a class of its own definition is dispatched below */
+    if (!ok) continue;
+    int copy = (int)nt_int(nt, id, "enum_copy", -1);
+    if (copy < 0 || copy >= nt->count) continue;   /* no copy was made for this site */
+    const char *gn = nt_str(nt, copy, "name");
+    if (!gn || comp_method_index(c, gn) < 0) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    int base = nt->count;
+    int encl = c->nscope[id];
+    /* A receiver known only at run time may be an instance of a class that
+       defines the name itself, which keeps its own method: the call becomes
+         (__r = recv; __r.is_a?(K) ? __r.m(args) { } : __enum_m(__r, args) { })
+       over the classes that define it, the block copied for the second arm.
+       Without such a class the call is rewritten in place. */
+    int ndef = 0, defcls[64];
+    if (rt == TY_POLY) {
+      for (int k = 0; k < c->nclasses && ndef < 64; k++)
+        if (!c->classes[k].is_native_class && comp_poly_arm_defines_n(c, k, name, an)) defcls[ndef++] = k;
+    }
+    int blk = nt_ref(nt, id, "block");
+    int recv_read = recv;
+    int generic = id;
+    if (ndef > 0) {
+      char rn[64]; snprintf(rn, sizeof rn, "__enumrecv_%d", id);
+      int w = nt_new_node(nt, "LocalVariableWriteNode");
+      int own = nt_new_node(nt, "CallNode");
+      int ownr = nt_new_node(nt, "LocalVariableReadNode");
+      int genr = nt_new_node(nt, "LocalVariableReadNode");
+      int gen = nt_new_node(nt, "CallNode");
+      int ifn = nt_new_node(nt, "IfNode");
+      int ts = nt_new_node(nt, "StatementsNode");
+      int es = nt_new_node(nt, "StatementsNode");
+      int eln = nt_new_node(nt, "ElseNode");
+      int body = nt_new_node(nt, "StatementsNode");
+      if (w < 0 || own < 0 || ownr < 0 || genr < 0 || gen < 0 || ifn < 0 || ts < 0 || es < 0 || eln < 0 || body < 0) { free(chained); return changed; }
+      nt_node_set_str(nt, w, "name", rn); nt_node_set_int(nt, w, "depth", 0);
+      nt_node_set_ref(nt, w, "value", recv);
+      nt_node_set_str(nt, ownr, "name", rn); nt_node_set_int(nt, ownr, "depth", 0);
+      nt_node_set_str(nt, genr, "name", rn); nt_node_set_int(nt, genr, "depth", 0);
+      /* the class test, one is_a? per defining class, or-ed */
+      int pred = -1;
+      for (int k = 0; k < ndef; k++) {
+        int pr = nt_new_node(nt, "LocalVariableReadNode");
+        int cr = nt_new_node(nt, "ConstantReadNode");
+        int ia = nt_new_node(nt, "CallNode");
+        int iaa = nt_new_node(nt, "ArgumentsNode");
+        if (pr < 0 || cr < 0 || ia < 0 || iaa < 0) { free(chained); return changed; }
+        nt_node_set_str(nt, pr, "name", rn); nt_node_set_int(nt, pr, "depth", 0);
+        nt_node_set_str(nt, cr, "name", c->classes[defcls[k]].name);
+        nt_node_set_arr(nt, iaa, "arguments", &cr, 1);
+        nt_node_set_str(nt, ia, "name", "is_a?");
+        nt_node_set_ref(nt, ia, "receiver", pr);
+        nt_node_set_ref(nt, ia, "arguments", iaa);
+        if (pred < 0) pred = ia;
+        else {
+          int orn = nt_new_node(nt, "OrNode");
+          if (orn < 0) { free(chained); return changed; }
+          nt_node_set_ref(nt, orn, "left", pred);
+          nt_node_set_ref(nt, orn, "right", ia);
+          pred = orn;
+        }
+      }
+      /* the class's own method, on the same receiver, with the block */
+      nt_node_set_str(nt, own, "name", name);
+      nt_node_set_ref(nt, own, "receiver", ownr);
+      if (args >= 0) nt_node_set_ref(nt, own, "arguments", args);
+      if (blk >= 0) nt_node_set_ref(nt, own, "block", blk);
+      nt_node_set_arr(nt, ts, "body", &own, 1);
+      /* the builtin's copy, with a copy of the block */
+      nt_node_set_arr(nt, es, "body", &gen, 1);
+      nt_node_set_ref(nt, eln, "statements", es);
+      nt_node_set_ref(nt, ifn, "predicate", pred);
+      nt_node_set_ref(nt, ifn, "statements", ts);
+      nt_node_set_ref(nt, ifn, "subsequent", eln);
+      int stmts[2] = { w, ifn };
+      nt_node_set_arr(nt, body, "body", stmts, 2);
+      nt_node_set_type(nt, id, "ParenthesesNode");
+      nt_node_set_ref(nt, id, "body", body);
+      nt_node_set_ref(nt, id, "receiver", -1);
+      nt_node_set_ref(nt, id, "arguments", -1);
+      nt_node_set_ref(nt, id, "block", -1);
+      if (blk >= 0) { int bc = nt_clone_subtree(nt, blk); if (bc >= 0) nt_node_set_ref(nt, gen, "block", bc); }
+      recv_read = genr;
+      generic = gen;
+      Scope *es2 = comp_scope_of(c, id);
+      if (es2) scope_local_intern(es2, rn);
+    }
+    int *na = (int *)malloc(sizeof(int) * (size_t)(an + 1));
+    if (!na) { free(chained); return changed; }
+    na[0] = recv_read; for (int j = 0; j < an; j++) na[j + 1] = av[j];
+    /* a fresh arguments node: the old one may be shared with a call the
+       Enumerator each rule rewrote onto it (an orphan keeps a reference) */
+    int nargs = nt_new_node(nt, "ArgumentsNode");
+    if (nargs < 0) { free(na); free(chained); return changed; }
+    nt_node_set_arr(nt, nargs, "arguments", na, an + 1);
+    nt_node_set_ref(nt, generic, "arguments", nargs);
+    free(na);
+    nt_node_set_ref(nt, generic, "receiver", -1);
+    { char gnb[256]; snprintf(gnb, sizeof gnb, "%s", gn); nt_node_set_str(nt, generic, "name", gnb); }
+    comp_grow_node_arrays(c);
+    for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  free(chained);
+  return changed;
+}

@@ -2537,12 +2537,100 @@ static int sp_require_preloaded(const char *name) {
 
 /* ---- Plain require resolution ---- */
 static char *resolve_plain_requires(char *source, const char *exe_path,
-                                    unsigned char **fsl, size_t *fsl_n) {
-  /* Find lib/ relative to this executable, resolving symlinks the same way
-     the compiler locates its runtime (#1663): an installed tree runs through
-     the /usr/local/bin/spinel symlink, and dirname(argv0) would point the
-     bundled-gem lookup at bin/. */
-  char lib_dir[1024];
+                                    unsigned char **fsl, size_t *fsl_n);
+
+static void sp_lib_dir(const char *exe_path, char *lib_dir, size_t lib_dir_n);
+/* ---- builtins/: the core methods written in Ruby ----
+   The names builtins/enumerable.rb defines, read once: the analyzer rewrites
+   a call to one of them on an Enumerable receiver into a call of the
+   top-level function the definition becomes (desugar_builtins). */
+char **sp_builtin_enum_names = NULL;
+int sp_builtin_enum_names_n = 0;
+
+static void sp_builtin_names_from(const char *content) {
+  const char *p = content;
+  while ((p = strstr(p, "\n  def ")) != NULL) {
+    p += 7;
+    const char *q = p;
+    while ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9') || *q == '_') q++;
+    if (*q == '?' || *q == '!') q++;
+    if (q == p) continue;
+    char *nm = (char *)malloc((size_t)(q - p) + 1);
+    if (!nm) return;
+    memcpy(nm, p, (size_t)(q - p)); nm[q - p] = 0;
+    sp_builtin_enum_names = (char **)realloc(sp_builtin_enum_names, sizeof(char *) * (size_t)(sp_builtin_enum_names_n + 1));
+    sp_builtin_enum_names[sp_builtin_enum_names_n++] = nm;
+    p = q;
+  }
+}
+
+/* Does the source mention `name` as a method: `.name` or a bare `name`
+   followed by `(`, ` {`, ` do` or an argument, outside a comment? A textual
+   test, as the Set splice's is: a false positive costs the parse of a small
+   file, and the names never reach the generated C uncalled. */
+static int sp_source_mentions_method(const char *src, const char *name) {
+  size_t nl = strlen(name);
+  const char *p = src;
+  while ((p = strstr(p, name)) != NULL) {
+    const char *after = p + nl;
+    unsigned char ac = (unsigned char)*after;
+    int word_end = !((ac >= 'a' && ac <= 'z') || (ac >= 'A' && ac <= 'Z') || (ac >= '0' && ac <= '9') || ac == '_' || ac == '?' || ac == '!' || ac == '=');
+    unsigned char bc = p > src ? (unsigned char)p[-1] : ' ';
+    int word_start = !((bc >= 'a' && bc <= 'z') || (bc >= 'A' && bc <= 'Z') || (bc >= '0' && bc <= '9') || bc == '_' || bc == '@' || bc == '$' || bc == ':');
+    p = after;
+    if (!word_end || !word_start) continue;
+    /* not in a comment: no `#` between the line start and the name */
+    const char *ls = p - nl;
+    while (ls > src && ls[-1] != '\n') ls--;
+    int in_comment = 0;
+    for (const char *k = ls; k < p - nl; k++) if (*k == '#') { in_comment = 1; break; }
+    if (in_comment) continue;
+    if (bc == '.') return 1;
+    if (ac == '(' || ac == ' ' || ac == '\n') return 1;
+  }
+  return 0;
+}
+
+static char *sp_splice_builtins(char *source, const char *exe_path,
+                                unsigned char **fsl, size_t *fsl_n) {
+  if (getenv("SPINEL_NO_BUILTINS")) return source;   /* the A/B switch: the C emitters alone */
+  if (sp_builtin_enum_names_n == 0) {
+    char lib_dir[1024], gp[1200];
+    sp_lib_dir(exe_path, lib_dir, sizeof lib_dir);
+    int base_len = (int)strlen(lib_dir);
+    if (base_len >= 4 && strcmp(lib_dir + base_len - 4, "/lib") == 0) base_len -= 4;
+    snprintf(gp, sizeof gp, "%.*s/builtins/enumerable.rb", base_len, lib_dir);
+    char *content = read_file(gp);
+    if (!content) { snprintf(gp, sizeof gp, "%.*s/../builtins/enumerable.rb", base_len, lib_dir); content = read_file(gp); }
+    if (content) { sp_builtin_names_from(content); free(content); }
+    if (sp_builtin_enum_names_n == 0) return source;
+  }
+  if (strstr(source, "module Enumerable")) return source;   /* the program reopens it itself: leave that alone for now */
+  int any = 0;
+  for (int i = 0; i < sp_builtin_enum_names_n && !any; i++)
+    if (sp_source_mentions_method(source, sp_builtin_enum_names[i])) any = 1;
+  /* the spellings the analyzer rewrites onto a builtin's name */
+  static const char *const aliases[][2] = { { "with_object", "each_with_object" }, { NULL, NULL } };
+  for (int k = 0; aliases[k][0] && !any; k++) {
+    int known = 0;
+    for (int i = 0; i < sp_builtin_enum_names_n; i++) if (strcmp(sp_builtin_enum_names[i], aliases[k][1]) == 0) known = 1;
+    if (known && sp_source_mentions_method(source, aliases[k][0])) any = 1;
+  }
+  if (!any) return source;
+  const char *head = "require \"builtins/enumerable\"\n";
+  size_t sl = strlen(source), hl = strlen(head);
+  char *ns = (char *)malloc(sl + hl + 1);
+  if (!ns) return source;
+  memcpy(ns, head, hl); memcpy(ns + hl, source, sl + 1);
+  free(source);
+  return resolve_plain_requires(ns, exe_path, fsl, fsl_n);
+}
+
+/* lib/ relative to this executable, resolving symlinks the same way the
+   compiler locates its runtime (#1663): an installed tree runs through the
+   /usr/local/bin/spinel symlink, and dirname(argv0) would point the
+   bundled-gem lookup at bin/. */
+static void sp_lib_dir(const char *exe_path, char *lib_dir, size_t lib_dir_n) {
   {
     char self[1024];
     self[0] = '\0';
@@ -2562,13 +2650,19 @@ static char *resolve_plain_requires(char *source, const char *exe_path,
       if (exe_path && realpath(exe_path, rp)) snprintf(self, sizeof self, "%s", rp);
       else snprintf(self, sizeof self, "%s", exe_path ? exe_path : ".");
     }
-    strncpy(lib_dir, self, sizeof(lib_dir) - 1);
-    lib_dir[sizeof(lib_dir) - 1] = '\0';
+    strncpy(lib_dir, self, lib_dir_n - 1);
+    lib_dir[lib_dir_n - 1] = '\0';
   }
   char *slash = strrchr(lib_dir, '/');
   if (slash) *slash = '\0';
   else strcpy(lib_dir, ".");
   strcat(lib_dir, "/lib");
+}
+
+static char *resolve_plain_requires(char *source, const char *exe_path,
+                                    unsigned char **fsl, size_t *fsl_n) {
+  char lib_dir[1024];
+  sp_lib_dir(exe_path, lib_dir, sizeof lib_dir);
 
   char *result = source;
   /* The scan finds a `require` wherever it stands -- at the margin, indented
@@ -2649,8 +2743,19 @@ else {
         }
         int base_len = (int)strlen(lib_dir);
         if (base_len >= 4 && strcmp(lib_dir + base_len - 4, "/lib") == 0) base_len -= 4;
-        snprintf(gp, sizeof(gp), "%.*s/packages/%s/%s.rb", base_len, lib_dir, first, lib_name);
-        content = read_file(gp);
+        /* builtins/: the core methods written in Ruby (builtins/enumerable.rb),
+           spliced by sp_splice_builtins below rather than by a require the
+           program writes; `require "builtins/<x>"` is <root>/builtins/<x>.rb */
+        if (strncmp(lib_name, "builtins/", 9) == 0) {
+          snprintf(gp, sizeof(gp), "%.*s/%s.rb", base_len, lib_dir, lib_name);
+          content = read_file(gp);
+          if (!content) {
+            snprintf(gp, sizeof(gp), "%.*s/../%s.rb", base_len, lib_dir, lib_name);
+            content = read_file(gp);
+          }
+        }
+        if (!content) snprintf(gp, sizeof(gp), "%.*s/packages/%s/%s.rb", base_len, lib_dir, first, lib_name);
+        if (!content) content = read_file(gp);
         if (!content) {
           /* dev binary one level below the repo root (build/spinel) */
           snprintf(gp, sizeof(gp), "%.*s/../packages/%s/%s.rb", base_len, lib_dir, first, lib_name);
@@ -3424,6 +3529,7 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
   char *resolved = resolve_requires(source, source_file, &fsl, &fsl_n);
   free(source);
   source = resolve_plain_requires(resolved, argv0, &fsl, &fsl_n);
+  source = sp_splice_builtins(source, argv0, &fsl, &fsl_n);
 
   /* Debug: build the buffer-line -> (file, original line) map from the
      marker-annotated buffer *before* syntax-sugar rewriting (which could
