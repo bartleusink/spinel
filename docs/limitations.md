@@ -422,8 +422,11 @@ still works.
   method was the largest single source of the boxed slow path in a real
   tree. A literal `nil` inside an array or hash literal keeps the
   container boxed, as before. `nil` meeting an Integer, Float or bool
-  still widens (Integer and Float have a sentinel and may follow; bool
-  and Symbol have no spare value).
+  still widens to untyped: the nullable Integer and Float slots that exist
+  (an ivar written nil, an `Integer?` seed) carry a sentinel, and a
+  comparison on one raises as CRuby does (`nil > 0` is NoMethodError,
+  `1 > nil` the Comparable ArgumentError, `nil <=> 1` nil), but bool and
+  Symbol have no spare value at all.
 - **Comparable is keyed on `<=>` presence** -- the Comparable operator methods
   (`<`, `<=`, `>`, `>=`, `between?`, `clamp`) work on any class that defines
   `<=>`; CRuby additionally requires `include Comparable` (a `NoMethodError`

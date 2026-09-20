@@ -4023,6 +4023,17 @@ SP_NORETURN void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op) {SP_GC_
   sp_raise_cls("TypeError", "nil can't be coerced into Integer");
 }
 
+/* A comparison whose operand is the int or float nil sentinel: nil on the
+   LEFT has no `<`, and nil on the right is the Comparable failure CRuby
+   reports from Integer#< / Float#<. The sentinel compared as a number
+   before, so `nil > 0` on a nullable Integer slot answered false where
+   every arithmetic operator already raised (#4567). */
+SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls) {SP_GC_ROOT_STR(op);SP_GC_ROOT_STR(cls);
+  if (left_nil)
+    sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for nil", op));
+  sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with nil failed", cls));
+}
+
 /* `Queue#freeze` raises rather than freezing: a frozen queue could never be
    pushed to again, so Ruby refuses it outright. Names the receiver the way
    CRuby's message does, so a SizedQueue reports as one. */

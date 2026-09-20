@@ -815,6 +815,14 @@ int name_is_enumerable_module_method(const char *m) {
   return 0;
 }
 
+/* Can this Integer / Float operand carry the nil sentinel? The #3505 marking
+   answers: a local or ivar some write left the sentinel in, a call whose
+   return can be it, a missed element read; a literal, an arithmetic result
+   or a length never. Its answer is what decides whether a comparison tests
+   for the sentinel, so a loop's `i < n` stays a bare compare. */
+static int cmp_operand_may_be_nil(Compiler *c, int id) {
+  return id >= 0 && nullable_int_value(c, id);
+}
 /* Comparable's instance methods, for respond_to? on a user class that mixes it
    in (spinel keys the mixin off the presence of a user `<=>`). */
 static int name_is_comparable_module_method(const char *m) {
@@ -29935,6 +29943,12 @@ else {
       if (lrt == TY_FLOAT || lat == TY_FLOAT)
         buf_printf(b, "; (isnan((double)_t%d) || isnan((double)_t%d)) ? SP_INT_NIL"
                       " : (sp_int)((_t%d > _t%d) - (_t%d < _t%d)); })", ta, tb, ta, tb, ta, tb);
+      /* an Integer slot's nil sentinel on either side: nil <=> n and n <=> nil
+         are nil, as the NaN test above answers for a Float (#4567) */
+      else if (lrt == TY_INT && lat == TY_INT &&
+               (cmp_operand_may_be_nil(c, recv) || cmp_operand_may_be_nil(c, argv[0])))
+        buf_printf(b, "; (_t%d == SP_INT_NIL || _t%d == SP_INT_NIL) ? SP_INT_NIL"
+                      " : (_t%d > _t%d) - (_t%d < _t%d); })", ta, tb, ta, tb, ta, tb);
       else
         buf_printf(b, "; (_t%d > _t%d) - (_t%d < _t%d); })", ta, tb, ta, tb);
       return;
@@ -30091,6 +30105,31 @@ else {
                    cn9, an9);
         return;
       }
+      TyKind rht9 = (rt == TY_FLOAT || rt == TY_RATIONAL) ? TY_FLOAT : TY_INT;
+      /* An Integer or Float slot can hold its nil sentinel (an ivar written
+         nil, a `--rbs` `Integer?`, a hash read). Every arithmetic helper
+         tests for it, but the comparison compared it as a number: `nil > 0`
+         answered false where CRuby raises. The test is emitted only when an
+         operand can carry the sentinel: a literal, an arithmetic result (its
+         helper raised already) and a length never do, which keeps a loop's
+         `i < n` as it was when `i` counts from a literal (#4567). */
+      int guard9 = rt == rht9 && (rt == TY_INT || rt == TY_FLOAT) &&
+                   (cat == rt || cat == TY_POLY) &&
+                   (cmp_operand_may_be_nil(c, recv) || (cat == rt && cmp_operand_may_be_nil(c, argv[0])));
+      if (guard9) {
+        int tg = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", rt == TY_FLOAT ? "sp_float" : "sp_int", tg);
+        emit_expr(c, recv, b);
+        buf_printf(b, ", _t%d_r = ", tg);
+        if (cat == TY_POLY) {
+          buf_printf(b, "%s(", rht9 == TY_FLOAT ? "sp_poly_to_f" : "sp_poly_to_i");
+          emit_expr(c, argv[0], b); buf_puts(b, ")");
+        }
+        else emit_expr(c, argv[0], b);
+        buf_printf(b, "; %s(_t%d, _t%d_r, \"%s\"); _t%d %s _t%d_r; })",
+                   rt == TY_FLOAT ? "SP_FLOAT_NIL_CMP_CK" : "SP_INT_NIL_CMP_CK", tg, tg, name, tg, name, tg);
+        return;
+      }
       buf_puts(b, "(");
       emit_expr(c, recv, b);
       buf_printf(b, " %s ", name);
@@ -30098,7 +30137,6 @@ else {
          numeric left: coerce it to the comparison's numeric type so the C `>=`
          does not compare an sp_int with an sp_RbVal (`len >= x.megabytes`, an
          unresolved Rails method). */
-      TyKind rht9 = (rt == TY_FLOAT || rt == TY_RATIONAL) ? TY_FLOAT : TY_INT;
       if (cat == TY_POLY) {
         buf_printf(b, "%s(", rht9 == TY_FLOAT ? "sp_poly_to_f" : "sp_poly_to_i");
         emit_expr(c, argv[0], b); buf_puts(b, ")");
@@ -30614,6 +30652,11 @@ else {
     if (ty_is_numeric(rt)) {
       int tv = ++g_tmp;
       buf_puts(b, "({ "); emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tv); emit_expr(c, recv, b);
+      /* a receiver that can hold the nil sentinel has no between? (#4567) */
+      if (rt == TY_INT && cmp_operand_may_be_nil(c, recv))
+        buf_printf(b, "; if (SP_UNLIKELY(_t%d == SP_INT_NIL)) sp_nil_recv(\"between?\")", tv);
+      else if (rt == TY_FLOAT && cmp_operand_may_be_nil(c, recv))
+        buf_printf(b, "; if (SP_UNLIKELY(sp_float_is_nil(_t%d))) sp_nil_recv(\"between?\")", tv);
       buf_printf(b, "; (_t%d >= ", tv); emit_expr(c, argv[0], b);
       buf_printf(b, " && _t%d <= ", tv); emit_expr(c, argv[1], b); buf_puts(b, "); })");
       return;

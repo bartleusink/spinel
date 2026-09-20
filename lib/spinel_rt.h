@@ -200,6 +200,15 @@ sp_RbVal sp_raise_nomethod(const char *msg);
 SP_NORETURN void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op);
 #define SP_INT_NIL_CK(a, b, op) \
   if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_int_op((a), (b), op)
+/* The same sentinel test ahead of a comparison (see sp_raise_nil_cmp): the
+   left nil is NoMethodError, the right the Comparable ArgumentError. Emitted
+   only for an operand that can carry the sentinel; a literal or an
+   arithmetic result never does. */
+SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls);
+#define SP_INT_NIL_CMP_CK(a, b, op) \
+  if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_cmp((a) == SP_INT_NIL, op, "Integer")
+#define SP_FLOAT_NIL_CMP_CK(a, b, op) \
+  if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_cmp(sp_float_is_nil(a), op, "Float")
 
 static inline sp_int sp_idiv(sp_int a, sp_int b) {
   SP_INT_NIL_CK(a, b, "/");
