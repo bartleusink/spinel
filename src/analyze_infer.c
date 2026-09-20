@@ -4927,8 +4927,14 @@ else {
       if (sp_streq(name, "read_nonblock")) return an_poly_concrete(c, name, TY_STRING);
       if (sp_streq(name, "write_nonblock")) return an_poly_concrete(c, name, TY_INT);
       if (sp_streq(name, "read") || sp_streq(name, "gets") ||
-          sp_streq(name, "readline") ||
+          sp_streq(name, "readline") || sp_streq(name, "pread") ||
           sp_streq(name, "readpartial")) return an_poly_concrete(c, name, TY_STRING);
+      /* the descriptor surface, typed as the TY_IO arms type it: a stat is
+         carried as the handle itself, the offsets and counts are ints */
+      if (sp_streq(name, "stat") && argc == 0) return an_poly_concrete(c, name, TY_IO);
+      if (sp_streq(name, "seek") || sp_streq(name, "tell") || sp_streq(name, "pos") ||
+          sp_streq(name, "pwrite") || sp_streq(name, "fsync") ||
+          sp_streq(name, "fdatasync")) return an_poly_concrete(c, name, TY_INT);
       if (sp_streq(name, "write") || sp_streq(name, "syswrite"))
         return an_poly_concrete(c, name, TY_INT);   /* IO#write / #syswrite: the byte count */
       if (sp_streq(name, "close") || sp_streq(name, "flush")) return an_poly_concrete(c, name, TY_NIL);
