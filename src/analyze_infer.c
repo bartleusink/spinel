@@ -2974,6 +2974,7 @@ else {
           sp_streq(name, "size?") || sp_streq(name, "chmod") || sp_streq(name, "truncate") ||
           sp_streq(name, "chown") || sp_streq(name, "symlink") || sp_streq(name, "link") ||
           sp_streq(name, "mkfifo") || sp_streq(name, "umask") || sp_streq(name, "utime") ||
+          sp_streq(name, "lutime") ||
           sp_streq(name, "world_readable?") || sp_streq(name, "world_writable?"))
         return TY_INT;   /* world_*? are nullable int (bits or nil) */
       if (sp_streq(name, "readlink")) return TY_STRING;
@@ -3426,6 +3427,7 @@ else {
       return TY_BOOL;
     if (sp_streq(name, "fileno") || sp_streq(name, "to_i") || sp_streq(name, "lineno") ||
         sp_streq(name, "lineno=") || sp_streq(name, "pos=") || sp_streq(name, "flock") ||
+        sp_streq(name, "truncate") ||
         sp_streq(name, "fsync") || sp_streq(name, "fdatasync") || sp_streq(name, "getbyte") ||
         (sp_streq(name, "chown") && argc == 2) ||   /* (#3104) */
         sp_streq(name, "sysseek") || sp_streq(name, "size") || sp_streq(name, "chmod") ||

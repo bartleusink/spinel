@@ -20857,10 +20857,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_stat_%s(%s)", name, r);
       free(rb.p); return;
     }
+    /* the handle's own stat mode decides these too (#4616); birthtime keeps
+       the path helper, which carries the statx/st_birthtimespec portability */
     if (argc == 0 && (sp_streq(name, "mtime") ||
-                      sp_streq(name, "atime") || sp_streq(name, "ctime") ||
-                      sp_streq(name, "birthtime"))) {
-      buf_printf(b, "sp_file_%s(sp_File_path(%s))", name, r);
+                      sp_streq(name, "atime") || sp_streq(name, "ctime"))) {
+      buf_printf(b, "sp_stat_handle_time(%s, %d)", r,
+                 sp_streq(name, "atime") ? 1 : sp_streq(name, "ctime") ? 2 : 0);
+      free(rb.p); return;
+    }
+    if (argc == 0 && sp_streq(name, "birthtime")) {
+      buf_printf(b, "sp_file_birthtime(sp_File_path(%s))", r);
       free(rb.p); return;
     }
     /* File::Stat is carried as the IO handle itself, so its accessors ride the
@@ -20896,10 +20902,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                       sp_streq(name, "grpowned?") || sp_streq(name, "setuid?") ||
                       sp_streq(name, "setgid?") || sp_streq(name, "sticky?") ||
                       sp_streq(name, "socket?"))) {
-      char fn[32];
-      size_t nl = strlen(name);
-      snprintf(fn, sizeof fn, "%.*s", (int)(nl - 1), name);   /* drop the `?` */
-      buf_printf(b, "sp_file_%s(sp_File_path(%s))", fn, r);
+      /* NOT the path helpers: those pick stat(2) or lstat(2) by the name
+         being asked, which discards which one made this handle (#4616) */
+      static const char *const tpred[] = { "file?", "directory?", "symlink?",
+                                           "owned?", "grpowned?", "setuid?",
+                                           "setgid?", "sticky?", "socket?", NULL };
+      for (int k = 0; tpred[k]; k++)
+        if (sp_streq(name, tpred[k])) {
+          buf_printf(b, "sp_stat_type_pred(%s, %d)", r, k);
+          free(rb.p); return;
+        }
       free(rb.p); return;
     }
     if (argc == 0 && sp_streq(name, "lstat")) {
@@ -21290,6 +21302,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     }
     if ((sp_streq(name, "fsync") || sp_streq(name, "fdatasync")) && argc == 0) {
       buf_printf(b, "sp_File_fsync(%s)", r); free(rb.p); return;
+    }
+    /* File#truncate(n): ftruncate(2) on this handle. The class-method form
+       truncates by path and cannot serve a handle whose path is absent. */
+    if (sp_streq(name, "truncate") && argc == 1) {
+      buf_printf(b, "sp_File_truncate(%s, ", r); emit_int_expr(c, argv[0], b);
+      buf_puts(b, ")"); free(rb.p); return;
     }
     if (sp_streq(name, "autoclose?") && argc == 0) {
       buf_printf(b, "sp_File_autoclose_p(%s)", r); free(rb.p); return;
@@ -26894,14 +26912,16 @@ else {
       else buf_puts(b, "0, 0)");
       return;
     }
-    if (sp_streq(name, "utime") && argc >= 3) {
+    if ((sp_streq(name, "utime") || sp_streq(name, "lutime")) && argc >= 3) {
       /* File.utime(atime, mtime, *paths): set the times on every path, return
          the count. Time args carry .tv_sec; numeric args are seconds. */
       buf_puts(b, "({ double _ua = "); emit_utime_arg(c, argv[0], b);
       buf_puts(b, "; double _um = "); emit_utime_arg(c, argv[1], b);
       buf_puts(b, "; ");
       for (int k = 2; k < argc; k++) {
-        buf_puts(b, "sp_file_utime(_ua, _um, "); emit_path_expr(c, argv[k], b); buf_puts(b, "); ");
+        /* lutime is the same call on the LINK itself (#4616) */
+        buf_printf(b, "sp_file_%sutime(_ua, _um, ", sp_streq(name, "lutime") ? "l" : "");
+        emit_path_expr(c, argv[k], b); buf_puts(b, "); ");
       }
       buf_printf(b, "(sp_int)%d; })", argc - 2); return;
     }

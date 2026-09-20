@@ -1319,6 +1319,16 @@ sp_int sp_file_utime(double atime, double mtime, const char *path) {SP_GC_ROOT_S
   if (utimes(path, tv) != 0) sp_file_raise_errno("utime", path);
   return 1;
 }
+/* File.lutime: the same, on the LINK itself when the final component is a
+   symlink -- utimensat's AT_SYMLINK_NOFOLLOW, the way lstat is to stat. */
+sp_int sp_file_lutime(double atime, double mtime, const char *path) {SP_GC_ROOT_STR(path);
+  struct timespec ts[2];
+  ts[0].tv_sec = (time_t)atime; ts[0].tv_nsec = (long)((atime - (double)(time_t)atime) * 1e9);
+  ts[1].tv_sec = (time_t)mtime; ts[1].tv_nsec = (long)((mtime - (double)(time_t)mtime) * 1e9);
+  if (utimensat(AT_FDCWD, path, ts, AT_SYMLINK_NOFOLLOW) != 0)
+    sp_file_raise_errno("lutime", path);
+  return 1;
+}
 
 /* stat, not fopen: opening a FIFO for read blocks until a writer appears, so
    the old fopen probe hung File.exist? on a fresh mkfifo path (#3118). stat
