@@ -5229,8 +5229,34 @@ else if (conv == 's' || conv == 'p') {
       const char *sv = (conv == 's') ? sp_poly_to_s(v) : sp_poly_inspect(v);
       if (!sv) sv = "";
       fmt_use[sl - 1] = 's';
-      if (strlen(sv) + 8 >= sizeof(tmp)) {
-        size_t svl = strlen(sv);
+      /* The BYTE length, not strlen: an embedded NUL is a byte of the string
+         (sp_str_byte_len falls back to strlen for anything without a header),
+         and snprintf's %s stops at the first one -- `format("%s", "ab\0cd")`
+         answered two bytes where CRuby answers five, and a width padded the
+         truncation out to the right size with the wrong contents (#4632).
+         A value that carries one is copied by hand, with the width, the
+         precision and the '-' flag the spec asks for. */
+      size_t svl = sp_str_byte_len(sv);
+      if (memchr(sv, 0, svl) != NULL) {
+        int left = 0, width = 0, prec = -1, in_prec = 0;
+        for (size_t fi = 1; fi + 1 < sl; fi++) {
+          char fc = spec[fi];
+          if (fc == '-') left = 1;
+          else if (fc == '.') { in_prec = 1; prec = 0; }
+          else if (fc >= '0' && fc <= '9') {
+            if (in_prec) prec = prec * 10 + (fc - '0');
+            else width = width * 10 + (fc - '0');
+          }
+        }
+        if (prec >= 0 && (size_t)prec < svl) svl = (size_t)prec;
+        size_t pad = (size_t)width > svl ? (size_t)width - svl : 0;
+        if (out + svl + pad + 1 >= cap) { cap = (out + svl + pad) * 2 + 64; buf = (char *)realloc(buf, cap); }
+        if (!left) { memset(buf + out, ' ', pad); out += pad; }
+        memcpy(buf + out, sv, svl); out += svl;
+        if (left) { memset(buf + out, ' ', pad); out += pad; }
+        continue;
+      }
+      if (svl + 8 >= sizeof(tmp)) {
         if (out + svl + 1 >= cap) { cap = (out + svl) * 2 + 64; buf = (char *)realloc(buf, cap); }
         memcpy(buf + out, sv, svl); out += svl;
         continue;

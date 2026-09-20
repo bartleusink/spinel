@@ -313,11 +313,16 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
          Collected into `decls` and emitted as a leading sequence of a
          statement-expression below -- NOT into g_pre, since emit_interp may
          run while g_pre holds a half-written enclosing statement.
-         The length is taken with strlen, NOT sp_str_byte_len: string values
-         can be foreign C literals with no sp_str_hdr and no marker byte
-         (lib raise messages, class names, "" fallbacks), so reading s[-1]
-         here is out of bounds -- and if the preceding byte happens to match
-         a heap marker, the garbage header length corrupts the copy. */
+         The length is the BYTE length. It used to be strlen, on the reason
+         that a string value can be a foreign C literal with no sp_str_hdr
+         and no marker byte (lib raise messages, class names, "" fallbacks)
+         -- but strlen stops at an embedded NUL, so `"#{bytes}"` silently
+         dropped everything past the first one, and interpolation is how a
+         program assembles bytes (#4632). sp_str_byte_len answers strlen for
+         exactly those foreign strings: it reads the marker byte first and
+         only trusts a header behind one of the five it knows. That is the
+         same test every other binary-safe path here makes (the write and
+         puts operands, String#==, the formatter's %s). */
       int tv2 = ++g_tmp;
       if (wkind == WK_INT) {
         buf_printf(&decls, "sp_int _t%d = %s; ", tv2, conv.p ? conv.p : "0");
@@ -332,7 +337,7 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         tv2 = -1;
       }
       else {
-        buf_printf(&decls, "const char *_t%d = %s; SP_GC_ROOT(_t%d); size_t _l%d = strlen(_t%d); ",
+        buf_printf(&decls, "const char *_t%d = %s; SP_GC_ROOT(_t%d); size_t _l%d = sp_str_byte_len(_t%d); ",
                    tv2, conv.p ? conv.p : "sp_str_empty", tv2, tv2, tv2);
       }
       free(conv.p);
