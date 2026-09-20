@@ -4941,6 +4941,17 @@ else {
         return an_poly_concrete(c, name, TY_INT);   /* IO#write / #syswrite: the byte count */
       if (sp_streq(name, "close") || sp_streq(name, "flush")) return an_poly_concrete(c, name, TY_NIL);
       if (sp_streq(name, "fileno")) return an_poly_concrete(c, name, TY_INT);
+      /* The rest of the names the poly-IO arm emits. Left untyped, the call
+         read as valueless and the emitted value was DISCARDED -- `@fds[k].path`
+         through a method answered nil while the arm had produced the path
+         (#4626). The types are the TY_IO arms': a path is a String, readlines
+         the lines, rewind and truncate ints, and the output family nil. */
+      if (sp_streq(name, "path") || sp_streq(name, "to_path"))
+        return an_poly_concrete(c, name, TY_STRING);
+      if (sp_streq(name, "readlines")) return an_poly_concrete(c, name, TY_STR_ARRAY);
+      if (sp_streq(name, "rewind")) return an_poly_concrete(c, name, TY_INT);
+      if (sp_streq(name, "puts") || sp_streq(name, "print") || sp_streq(name, "putc"))
+        return an_poly_concrete(c, name, TY_NIL);
       if (sp_streq(name, "synchronize")) {
         int blk_id = nt_ref(nt, id, "block");
         if (blk_id >= 0) {
