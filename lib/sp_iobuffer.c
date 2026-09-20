@@ -257,20 +257,23 @@ static sp_RbVal iob_get_core(sp_IOBuffer *b, int ty, int64_t off) {
     union { uint64_t u; double f; } u; u.u = raw; return sp_box_float(u.f);
   }
   uint64_t raw = iob_load(p, t->width, t->be);
+  /* A loaded value goes out as a machine int when it fits sp_int and is not
+     SP_INT_NIL (the nullable-int sentinel, INTPTR_MIN), and as a Bignum
+     otherwise. That is by the WIDTH OF sp_int, not of the field: on a 32-bit
+     build a U32 above 2**31-1 and an S32 of exactly INT32_MIN are Bignums
+     the same way a u64 above 2**63-1 and an s64 of INT64_MIN are on a 64-bit
+     one (#4647). */
   if (t->sign) {
     /* sign-extend from width */
     int shift = 64 - 8 * t->width;
     int64_t sv = (int64_t)(raw << shift) >> shift;
-    /* INT64_MIN is SP_INT_NIL, the runtime's nullable-int sentinel; an s64
-       load of exactly that value goes out as a Bignum so it stays an
-       Integer through every poly path instead of reading back as nil */
-    if (sv == SP_INT_NIL) {
+    if (sv < (int64_t)INTPTR_MIN || sv > (int64_t)INTPTR_MAX || (sp_int)sv == SP_INT_NIL) {
       SP_GC_ROOT(b);
       return sp_box_bigint(sp_bigint_new_int(sv));
     }
-    return sp_box_int(sv);
+    return sp_box_int((sp_int)sv);
   }
-  if (t->width == 8 && raw > (uint64_t)INT64_MAX) {
+  if (raw > (uint64_t)INTPTR_MAX) {
     SP_GC_ROOT(b);
     return sp_box_bigint(sp_bigint_new_u64(raw));
   }
