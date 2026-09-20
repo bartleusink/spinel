@@ -4657,10 +4657,37 @@ void inherit_members(Compiler *c) {
     if (pc->is_struct && !ci->is_struct && !ci->is_data) ci->is_struct = 1;
 
     char **old = ci->ivars; TyKind *oldt = ci->ivar_types; int oldn = ci->nivars;
-    ci->ivars = NULL; ci->ivar_types = NULL; ci->ivar_nullable_int = NULL; ci->ivar_nullable_int_elem = NULL; ci->ivar_arr_elem_arr_or_nil = NULL; ci->nivars = ci->civars = 0;
+    /* The per-slot side fields ride along with the names: this rebuild runs
+       again after the fixpoint, and dropping them there undid what the
+       passes had decided. narrow_object_arrays' pin (ivar_oa_type and
+       ivar_int_table) was the one that showed: the ivar kept its narrowed
+       type but lost the pin, so the final narrowing no longer saw it as a
+       slot, the locals in its component fell back to the poly array, and
+       the C did not build (#4642, a controller under a superclass). */
+    unsigned char *old_ss = ci->ivar_str_shared, *old_it = ci->ivar_int_table,
+                  *old_oc = ci->ivar_oa_conflict, *old_ni = ci->ivar_nullable_int,
+                  *old_ne = ci->ivar_nullable_int_elem, *old_ae = ci->ivar_arr_elem_arr_or_nil;
+    TyKind *old_oa = ci->ivar_oa_type; int *old_os = ci->ivar_oa_seed;
+    ci->ivars = NULL; ci->ivar_types = NULL; ci->ivar_str_shared = NULL; ci->ivar_int_table = NULL;
+    ci->ivar_oa_type = NULL; ci->ivar_oa_seed = NULL; ci->ivar_oa_conflict = NULL;
+    ci->ivar_nullable_int = NULL; ci->ivar_nullable_int_elem = NULL; ci->ivar_arr_elem_arr_or_nil = NULL;
+    ci->nivars = ci->civars = 0;
+    #define IV_SIDE_COPY(dst, di, src, si) do { \
+      (dst)->ivar_str_shared[di] = (src)->ivar_str_shared[si]; \
+      (dst)->ivar_int_table[di] = (src)->ivar_int_table[si]; \
+      (dst)->ivar_oa_type[di] = (src)->ivar_oa_type[si]; \
+      (dst)->ivar_oa_seed[di] = (src)->ivar_oa_seed[si]; \
+      (dst)->ivar_oa_conflict[di] = (src)->ivar_oa_conflict[si]; \
+      (dst)->ivar_nullable_int[di] = (src)->ivar_nullable_int[si]; \
+      (dst)->ivar_nullable_int_elem[di] = (src)->ivar_nullable_int_elem[si]; \
+      (dst)->ivar_arr_elem_arr_or_nil[di] = (src)->ivar_arr_elem_arr_or_nil[si]; \
+    } while (0)
     for (int k = 0; k < pc->nivars; k++) {
       int idx = comp_ivar_intern(ci, pc->ivars[k]);
       ci->ivar_types[idx] = pc->ivar_types[k];
+      /* the layouts must stay cast-compatible, so a slot the parent narrowed
+         is narrowed the same way here */
+      IV_SIDE_COPY(ci, idx, pc, k);
     }
     for (int k = 0; k < oldn; k++) {
       int idx = comp_ivar_intern(ci, old[k]);
@@ -4689,9 +4716,19 @@ void inherit_members(Compiler *c) {
       }
       else
         ci->ivar_types[idx] = ty_unify(ci->ivar_types[idx], oldt[k]);
+      /* an own slot keeps its side fields; one the parent also carries took
+         the parent's above */
+      if (comp_ivar_index(pc, old[k]) < 0 && old_oa) {
+        ci->ivar_str_shared[idx] = old_ss[k]; ci->ivar_int_table[idx] = old_it[k];
+        ci->ivar_oa_type[idx] = old_oa[k]; ci->ivar_oa_seed[idx] = old_os[k];
+        ci->ivar_oa_conflict[idx] = old_oc[k]; ci->ivar_nullable_int[idx] = old_ni[k];
+        ci->ivar_nullable_int_elem[idx] = old_ne[k]; ci->ivar_arr_elem_arr_or_nil[idx] = old_ae[k];
+      }
       free(old[k]);
     }
-    free(old); free(oldt);
+    #undef IV_SIDE_COPY
+    free(old); free(oldt); free(old_ss); free(old_it); free(old_oa); free(old_os);
+    free(old_oc); free(old_ni); free(old_ne); free(old_ae);
 
     for (int k = 0; k < pc->nreaders; k++) comp_add_reader(ci, pc->readers[k]);
     for (int k = 0; k < pc->nwriters; k++) comp_add_writer(ci, pc->writers[k]);
