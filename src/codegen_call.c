@@ -15371,27 +15371,50 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
-/* File.utime's time operands: a Time's seconds, nil the current time, a
-   number as seconds, and any other class CRuby's "can't convert X into time". */
-static void emit_utime_arg(Compiler *c, int node, Buf *b) {
+/* File.utime's time operands, as a whole second and a nanosecond remainder:
+   a Time carries both (its nanoseconds were dropped when this went through a
+   double, #4635), nil is the current time, a number is seconds, and any other
+   class is CRuby's "can't convert X into time". Writes into the two named
+   temps rather than answering an expression, so the operand is evaluated
+   once for both halves. */
+static void emit_utime_arg_bad(Compiler *c, int node, TyKind t, Buf *b);
+static void emit_utime_arg_ns(Compiler *c, int node, const char *sv, const char *nv, Buf *b) {
   TyKind t = comp_ntype(c, node);
-  if (t == TY_TIME) { buf_puts(b, "(double)("); emit_expr(c, node, b); buf_puts(b, ").tv_sec"); return; }
-  if (t == TY_NIL) { buf_puts(b, "({ (void)("); emit_expr(c, node, b); buf_puts(b, "); (double)time(NULL); })"); return; }  /* nil is now */
-  if (t == TY_INT || t == TY_FLOAT || t == TY_BIGINT || t == TY_POLY || t == TY_UNKNOWN) {
-    buf_puts(b, "(double)("); emit_float_expr(c, node, b); buf_puts(b, ")");
+  if (t == TY_TIME) {
+    int tt = ++g_tmp;
+    buf_printf(b, "{ sp_Time _t%d = ", tt); emit_expr(c, node, b);
+    buf_printf(b, "; %s = _t%d.tv_sec; %s = _t%d.tv_nsec; } ", sv, tt, nv, tt);
     return;
   }
+  if (t == TY_NIL) {
+    buf_puts(b, "{ (void)("); emit_expr(c, node, b);
+    buf_printf(b, "); %s = (int64_t)time(NULL); } ", sv);
+    return;
+  }
+  if (t == TY_INT || t == TY_FLOAT || t == TY_BIGINT || t == TY_POLY || t == TY_UNKNOWN) {
+    int td = ++g_tmp;
+    buf_printf(b, "{ double _t%d = ", td); emit_float_expr(c, node, b);
+    buf_printf(b, "; %s = (int64_t)_t%d; %s = (int32_t)((_t%d - (double)(int64_t)_t%d) * 1e9); } ",
+               sv, td, nv, td, td);
+    return;
+  }
+  buf_puts(b, "{ ");
+  emit_utime_arg_bad(c, node, t, b);
+  buf_puts(b, " } ");
+}
+/* The type errors the two arms above do not take. */
+static void emit_utime_arg_bad(Compiler *c, int node, TyKind t, Buf *b) {
   if (t == TY_BOOL) {
     /* CRuby names the class, which a static bool only knows at run time */
-    buf_puts(b, "({ sp_raise_cls(\"TypeError\", (");
+    buf_puts(b, "sp_raise_cls(\"TypeError\", (");
     emit_expr(c, node, b);
     buf_puts(b, ") ? \"can't convert TrueClass into time\""
-                " : \"can't convert FalseClass into time\"); 0.0; })");
+                " : \"can't convert FalseClass into time\");");
     return;
   }
   const char *cn = conv_cls_name_of(c, t);
-  buf_puts(b, "({ (void)("); emit_expr(c, node, b);
-  buf_printf(b, "); sp_raise_cls(\"TypeError\", \"can't convert %s into time\"); 0.0; })", cn ? cn : "Object");
+  buf_puts(b, "(void)("); emit_expr(c, node, b);
+  buf_printf(b, "); sp_raise_cls(\"TypeError\", \"can't convert %s into time\");", cn ? cn : "Object");
 }
 
 static void emit_call_body(Compiler *c, int id, Buf *b);
@@ -26994,12 +27017,18 @@ else {
     if ((sp_streq(name, "utime") || sp_streq(name, "lutime")) && argc >= 3) {
       /* File.utime(atime, mtime, *paths): set the times on every path, return
          the count. Time args carry .tv_sec; numeric args are seconds. */
-      buf_puts(b, "({ double _ua = "); emit_utime_arg(c, argv[0], b);
-      buf_puts(b, "; double _um = "); emit_utime_arg(c, argv[1], b);
-      buf_puts(b, "; ");
+      int ua = ++g_tmp, um = ++g_tmp;
+      char uas[24], uan[24], ums[24], umn[24];
+      snprintf(uas, sizeof uas, "_t%ds", ua); snprintf(uan, sizeof uan, "_t%dn", ua);
+      snprintf(ums, sizeof ums, "_t%ds", um); snprintf(umn, sizeof umn, "_t%dn", um);
+      buf_printf(b, "({ int64_t %s = 0; int32_t %s = 0; int64_t %s = 0; int32_t %s = 0; ",
+                 uas, uan, ums, umn);
+      emit_utime_arg_ns(c, argv[0], uas, uan, b);
+      emit_utime_arg_ns(c, argv[1], ums, umn, b);
       for (int k = 2; k < argc; k++) {
         /* lutime is the same call on the LINK itself (#4616) */
-        buf_printf(b, "sp_file_%sutime(_ua, _um, ", sp_streq(name, "lutime") ? "l" : "");
+        buf_printf(b, "sp_file_%sutime_ns(%s, %s, %s, %s, ", sp_streq(name, "lutime") ? "l" : "",
+                   uas, uan, ums, umn);
         emit_path_expr(c, argv[k], b); buf_puts(b, "); ");
       }
       buf_printf(b, "(sp_int)%d; })", argc - 2); return;
