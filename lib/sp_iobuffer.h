@@ -70,6 +70,7 @@ sp_RbVal sp_IOBuffer_get_x(sp_IOBuffer *b, sp_int ty, sp_int off);
 double sp_IOBuffer_get_f(sp_IOBuffer *b, sp_int ty, sp_int off);
 sp_int sp_IOBuffer_set_i(sp_IOBuffer *b, sp_int ty, sp_int off, sp_int v);
 sp_int sp_IOBuffer_set_f(sp_IOBuffer *b, sp_int ty, sp_int off, double v);
+sp_int sp_IOBuffer_set_v(sp_IOBuffer *b, sp_int ty, sp_int off, sp_RbVal v);
 
 /* strings */
 const char *sp_IOBuffer_get_string0(sp_IOBuffer *b);
