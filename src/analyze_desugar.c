@@ -1692,6 +1692,46 @@ int desugar_lazy_method_call(Compiler *c) {
   return changed;
 }
 
+/* The iterators whose poly arm yields exactly one boxed value per element,
+   so an anonymous `&` forward on a poly receiver can become a one-parameter
+   yielding block (#4625). */
+static int fwd_poly_recv_one_param_iter(const char *name) {
+  static const char *const names[] = {
+    "each", "each_value", "each_key", "each_entry", "map", "collect", "flat_map",
+    "filter_map", "select", "filter", "reject", "find", "detect", "find_index",
+    "any?", "all?", "none?", "sort_by", "min_by", "max_by", "group_by",
+    "partition", "count", "sum", "take_while", "drop_while", NULL };
+  for (int k = 0; names[k]; k++) if (sp_streq(name, names[k])) return 1;
+  return 0;
+}
+
+/* The anonymous `&` of the method around call `id`, once every forward
+   through it has become a yielding block, names nothing any more: drop it,
+   so the method is the plain yielding method the same body spells by hand
+   (`def map = xs.map { |x| yield x }`). Kept, the nameless parameter put the
+   method on the block-parameter path, where a yield inside a block that a
+   poly receiver runs as a materialized proc found no block (#4625). */
+static void fwd_drop_spent_anon_block_param(Compiler *c, int id, int n0) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  Scope *ms = comp_scope_of(c, id);
+  if (!ms || !ms->blk_param || ms->blk_param[0] || ms->def_node < 0) return;
+  for (int j = 0; j < n0; j++) {
+    if (!nt_type(nt, j) || !sp_streq(nt_type(nt, j), "CallNode")) continue;
+    int b = nt_ref(nt, j, "block");
+    if (b < 0 || !nt_type(nt, b) || !sp_streq(nt_type(nt, b), "BlockArgumentNode")) continue;
+    if (nt_ref(nt, b, "expression") >= 0) continue;
+    if (comp_scope_of(c, j) == ms) return;   /* another forward still needs it */
+  }
+  int pn = nt_ref(nt, ms->def_node, "parameters");
+  if (pn < 0) return;
+  int bp = nt_ref(nt, pn, "block");
+  if (bp < 0 || !nt_type(nt, bp) || !sp_streq(nt_type(nt, bp), "BlockParameterNode")) return;
+  if (nt_str(nt, bp, "name")) return;
+  nt_node_set_ref(nt, pn, "block", -1);
+  free(ms->blk_param);
+  ms->blk_param = NULL;
+}
+
 int desugar_value_callable_forwards(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -1783,6 +1823,18 @@ int desugar_value_callable_forwards(Compiler *c) {
             ewo_memo_elem_type(c, id) == TY_UNKNOWN)
           pty[1] = TY_POLY_ARRAY;
       }
+    }
+    else if (anon && rt == TY_POLY && fwd_poly_recv_one_param_iter(name)) {
+      /* A poly receiver (`@mutex.synchronize { @items.dup }.each(&)`, a
+         snapshot handed out from under a lock) has no static element type
+         to read a yield shape from, and the decline below left the forward
+         on the inline path, which splices the caller's block into this
+         method and runs it with the wrong self (#4625). The poly iterator
+         arms yield one boxed value per element (a Hash's pair as one
+         array, which the caller's block auto-splats), so the forward is
+         `{ |__fwd| yield __fwd }` with a poly parameter. */
+      arity = 1;
+      pty[0] = TY_POLY;
     }
     else {
       arity = ty_block_yield(rt, name, pty, 4);
@@ -1883,6 +1935,7 @@ int desugar_value_callable_forwards(Compiler *c) {
       lv->is_block_param = 1;
       lv->type = pty[k];
     }
+    if (anon) fwd_drop_spent_anon_block_param(c, id, n0);
     changed = 1;
   }
   return changed;
