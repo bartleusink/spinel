@@ -946,12 +946,12 @@ family, `chomp` / `chop` / `delete_prefix` / `delete_suffix`, `index` /
 `each_line`, `reverse`, `succ`, `sum`, a regexp match position, and
 padding (`ljust` / `rjust` / `center`, a `"\0"` pad included).
 
-What still walks the C string and stops at the first NUL: interpolation
-and `%` formatting (`"x#{s}y"` and `"%s" % s` drop the NUL and its
-tail). `inspect` renders `\x00` where CRuby prints `\u0000`. A string
-that carries a NUL is a byte container; build it with `<<`, `+` and
-`pack`, not with interpolation. `test/embedded_nul_method_partition.rb`
-pins which is which.
+Interpolation and the `format` family are byte-exact too since #4632:
+`"x#{s}y"`, `format` / `sprintf` / `String#%` (with a width or a
+precision as well) carry the NUL and its tail, as do `IO#write`,
+`#print`, `#puts` and `#pwrite`. `inspect` renders `\x00` where CRuby
+prints `\u0000`. `test/embedded_nul_method_partition.rb` pins which
+method is which, and `test/format_interp_binary.rb` the formatting.
 
 #### Nested modules named after a builtin class
 

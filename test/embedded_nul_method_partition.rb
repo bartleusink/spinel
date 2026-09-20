@@ -4,8 +4,9 @@
 # each_line(chomp:)), which measured with strlen, and the NUL pad, which
 # decoded to nothing and padded nothing. This file is the list; the docs
 # section "Embedded NUL bytes" points at it.
-# The two documented divergences (interpolation and % formatting stop at the
-# NUL) are pinned at spinel's answer; everything else is CRuby's.
+# Interpolation and % formatting used to stop at the NUL and were pinned here
+# at spinel's answer; they are byte-exact now (#4632), so every line in this
+# file is CRuby's.
 s = "a\x00bc"
 p s.length
 p s.end_with?("c")
@@ -34,8 +35,8 @@ p s.split("\x00").map(&:bytes)
 p s.sub("b", "B").bytes
 p s.tr("c", "C").bytes
 p s.succ.bytes
-p("%s!" % s)   # documented: stops at the NUL
-p "#{s}!".bytes   # documented: stops at the NUL
+p("%s!" % s)      # byte-exact since #4632
+p "#{s}!".bytes   # ...and so is interpolation
 begin
   "ab".ljust(6, "")
 rescue ArgumentError => e
