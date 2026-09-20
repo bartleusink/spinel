@@ -1095,6 +1095,17 @@ int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b) {
   /* A nil narrowed into an int or float slot is that slot's nil sentinel, not
      the 0 under the tag (#4288). TY_BOOL keeps the plain form: nil in a bool
      slot is false, and the int sentinel would read truthy. */
+  /* A class-typed slot (a parameter an RBS declaration pinned to its class)
+     reassigned from a boxed value (`comment = subtree.shift` over a poly
+     array) took the raw sp_RbVal and the C did not compile (#4640). The
+     checked unbox: the tag and class are verified, nil stays NULL. */
+  if (ty_is_object(slot)) {
+    Buf e; memset(&e, 0, sizeof e);
+    emit_expr(c, v, &e);
+    emit_unbox_text(c, slot, e.p ? e.p : "sp_box_nil()", b);
+    free(e.p);
+    return 1;
+  }
   const char *fn = slot == TY_INT   ? "sp_poly_to_i_or_nil"
                  : slot == TY_BOOL  ? "sp_poly_to_i"
                  : slot == TY_FLOAT ? "sp_poly_to_f_or_nil"
