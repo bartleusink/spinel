@@ -3330,17 +3330,63 @@ int propagate_prep_params(Compiler *c) {
    initialize) with more than `pi` positional arguments, or one whose
    arguments cannot be counted (a splat, forwarding), or a reference that can
    call it any way (`method(:x)`, `send`, `super`). Unsure answers 1. */
+/* Is parameter `pi` of `sc` a keyword parameter? Its default node is the
+   value of one of the def's OptionalKeywordParameterNodes. */
+static int param_is_keyword(Compiler *c, Scope *sc, int pi) {
+  const NodeTable *nt = c->nt;
+  if (sc->def_node < 0 || sc->pdefault[pi] < 0) return 0;
+  int pn = nt_ref(nt, sc->def_node, "parameters");
+  int kn = 0; const int *kws = pn >= 0 ? nt_arr(nt, pn, "keywords", &kn) : NULL;
+  for (int i = 0; i < kn; i++)
+    if (nt_ref(nt, kws[i], "value") == sc->pdefault[pi]) return 1;
+  return 0;
+}
 static int param_supplied_anywhere(Compiler *c, Scope *sc, int pi) {
   const NodeTable *nt = c->nt;
   if (!sc->name) return 1;
   int is_init = sp_streq(sc->name, "initialize");
+  int is_kw = param_is_keyword(c, sc, pi);
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
+    /* a dynamic reference can call it any way -- unless the name is a user
+       method of the program's own (an LSP's `send(obj)`), which is a call
+       like any other, or the reference names a literal other method */
     if (sp_streq(nm, "send") || sp_streq(nm, "__send__") || sp_streq(nm, "public_send") ||
-        sp_streq(nm, "method") || sp_streq(nm, "instance_method") || sp_streq(nm, "define_method"))
-      return 1;
+        sp_streq(nm, "method") || sp_streq(nm, "instance_method") || sp_streq(nm, "define_method")) {
+      if (an_user_defines_method(c, nm)) { if (!sp_streq(nm, sc->name)) continue; }
+      else {
+        int dargs = nt_ref(nt, id, "arguments"); int dn = 0;
+        const int *dav = dargs >= 0 ? nt_arr(nt, dargs, "arguments", &dn) : NULL;
+        const char *lit = NULL;
+        if (dav && dn > 0) {
+          NodeKind dk = nt_kind(nt, dav[0]);
+          if (dk == NK_SymbolNode) lit = nt_str(nt, dav[0], "unescaped");
+          else if (dk == NK_StringNode) lit = nt_str(nt, dav[0], "unescaped");
+        }
+        if (!lit || sp_streq(lit, sc->name)) return 1;
+        continue;
+      }
+    }
     if (!sp_streq(nm, sc->name) && !(is_init && sp_streq(nm, "new"))) continue;
+    /* `K.new(...)` reaches this initialize only from K or a class under it;
+       a `new` on a constant naming another class is that class's. A `new`
+       on anything but a written constant could be anyone's: unsure. */
+    if (is_init && sp_streq(nm, "new")) {
+      int recv = nt_ref(nt, id, "receiver");
+      NodeKind rk = recv >= 0 ? nt_kind(nt, recv) : NK_CallNode;
+      if (recv >= 0 && (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode)) {
+        const char *rn = nt_str(nt, recv, "name");
+        int rci = rn ? comp_class_index(c, rn) : -1;
+        if (rci >= 0 && sc->class_id >= 0) {
+          int under = 0;
+          for (int k = rci; k >= 0; k = c->classes[k].parent) if (k == sc->class_id) { under = 1; break; }
+          if (!under) continue;
+        }
+        /* a builtin's `new` (Hash.new(0), Array.new(n)) is not ours either */
+        else if (rci < 0 && rn && is_builtin_class_name(rn)) continue;
+      }
+    }
     int args = nt_ref(nt, id, "arguments");
     int n = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
     int pos = 0;
@@ -3348,14 +3394,50 @@ static int param_supplied_anywhere(Compiler *c, Scope *sc, int pi) {
       NodeKind ak = nt_kind(nt, av[k]);
       const char *aty = nt_type(nt, av[k]);
       if (ak == NK_SplatNode || (aty && sp_streq(aty, "ForwardingArgumentsNode"))) return 1;
-      if (ak == NK_KeywordHashNode || ak == NK_BlockArgumentNode) continue;
+      if (ak == NK_KeywordHashNode) {
+        /* a keyword parameter is supplied by a `name:` pair (or by a `**`
+           spread, which may carry anything); a braceless hash no keyword
+           parameter claims packs into a positional one, so it counts as
+           a positional argument for those (#4436) */
+        if (!is_kw) { pos++; continue; }
+        int en = 0; const int *els = nt_arr(nt, av[k], "elements", &en);
+        for (int e = 0; e < en; e++) {
+          if (nt_kind(nt, els[e]) == NK_AssocSplatNode) return 1;
+          int key = nt_ref(nt, els[e], "key");
+          const char *kn = key >= 0 && nt_kind(nt, key) == NK_SymbolNode ? nt_str(nt, key, "value") : NULL;
+          if (kn && sc->pnames[pi] && sp_streq(kn, sc->pnames[pi])) return 1;
+        }
+        continue;
+      }
+      if (ak == NK_BlockArgumentNode) continue;
       pos++;
     }
-    if (pos > pi) return 1;
+    if (!is_kw && pos > pi) return 1;
   }
   NT_FOREACH_KIND(nt, NK_SuperNode, id) { (void)id; return 1; }
   NT_FOREACH_KIND(nt, NK_ForwardingSuperNode, id) { (void)id; return 1; }
   return 0;
+}
+/* A `= nil` default no call site ever supplies a value for is the
+   parameter's whole type, and the post-fixpoint backstop makes it poly (a
+   boxed nil). Deciding that only after the fixpoint left the body's joins
+   built on the dropped unknown: `spinel || ENV[...] || "x"` had typed
+   String, the literal holding the ivar Array[String] and the callee's
+   parameter with it, then the ivar re-derived untyped and the C had an
+   sp_PolyArray * meeting an sp_StrArray * (#4583). Decided once, BEFORE the
+   fixpoint: the first round's parameter binding already reads the ivar the
+   parameter feeds, so a rule inside the round came too late for it. */
+void seed_unsupplied_nil_defaults(Compiler *c) {
+  for (int s = 0; s < c->nscopes; s++) {
+    Scope *sc = &c->scopes[s];
+    for (int i = 0; i < sc->nparams; i++) {
+      if (sc->pdefault[i] < 0 || nt_kind(c->nt, sc->pdefault[i]) != NK_NilNode) continue;
+      LocalVar *p = scope_local(sc, sc->pnames[i]);
+      if (!p || p->rbs_seeded || p->type != TY_UNKNOWN) continue;
+      if (param_supplied_anywhere(c, sc, i)) continue;
+      slot_rule(c, p, TY_POLY, sc->pdefault[i], "a `= nil` default and no call site typing it: the parameter holds nil or a value, untyped");
+    }
+  }
 }
 int infer_default_param_types(Compiler *c) {
   int changed = 0;
@@ -3380,22 +3462,9 @@ int infer_default_param_types(Compiler *c) {
           if (dn == 0) dt = TY_POLY_ARRAY;
         }
       }
+      if (dt == TY_NIL || dt == TY_UNKNOWN) continue;
       LocalVar *p = scope_local(sc, sc->pnames[i]);
       if (!p || p->rbs_seeded) continue;
-      /* A `= nil` default no call site ever supplies a value for is the
-         parameter's whole type, and the post-fixpoint backstop makes it poly
-         (a boxed nil). Deciding that only after the fixpoint left the body's
-         joins built on the dropped unknown: `spinel || ENV[...] || "x"` had
-         typed String, the literal holding the ivar Array[String] and the
-         callee's parameter with it, then the ivar re-derived untyped and the
-         C had an sp_PolyArray * meeting an sp_StrArray * (#4583). Poly from
-         the first round, the dependents derive on it. */
-      if (dt == TY_NIL && p->type == TY_UNKNOWN && !param_supplied_anywhere(c, sc, i)) {
-        slot_rule(c, p, TY_POLY, sc->pdefault[i], "a `= nil` default and no call site typing it: the parameter holds nil or a value, untyped");
-        changed = 1;
-        continue;
-      }
-      if (dt == TY_NIL || dt == TY_UNKNOWN) continue;
       /* an empty literal default is untyped by the rule above, not by any
          value: say so; another default's value speaks for itself */
       TyKind merged = ty_unify(p->type, dt);

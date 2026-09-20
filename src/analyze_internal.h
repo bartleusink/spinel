@@ -221,6 +221,7 @@ void class_unpin_ivar(ClassInfo *ci, const char *name);
 void sp_ivwatch(const char *name, const char *where, TyKind old, TyKind nw);
 void sp_narrow_memo_bump(void);
 int infer_write_types(Compiler *c);
+void seed_unsupplied_nil_defaults(Compiler *c);
 int infer_container_flow(Compiler *c);
 int an_builtin_only_p(void);
 TyKind an_builtin_answer(Compiler *c, int id);

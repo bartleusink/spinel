@@ -14145,6 +14145,7 @@ void analyze_program(Compiler *c) {
     if (iter + 1 > g_fixpoint_rounds) g_fixpoint_rounds = iter + 1;
     g_infer_round = iter + 1;
     int ch = 0;
+    seed_unsupplied_nil_defaults(c);   /* ahead of the round's binding, every round: the round's reset clears it (#4583) */
     sp_narrow_memo_bump();  /* invalidate per-iteration narrow-helper memo */
     build_ie_map(c);  /* refresh instance_exec receiver-class map each pass */
     ch |= register_ie_block_ivars(c);  /* slot ivars first assigned in iexec blocks */
@@ -14356,6 +14357,7 @@ void analyze_program(Compiler *c) {
            bind sampled the same partial state. The call site then read the
            Array's header as a Relation (#4437). One iteration of lag, and the
            loop's stability test already waits for the ivars to stop moving. */
+        seed_unsupplied_nil_defaults(c);   /* a re-cleared nil-default parameter is poly again before anything binds on it (#4583) */
         infer_param_types(c);
         /* stash last-settled values, then re-clear the reset ivars so they
            recompute fresh (narrowing) this iteration. */
