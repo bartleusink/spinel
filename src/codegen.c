@@ -158,7 +158,14 @@ void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
     case TY_STRING: buf_printf(b, "(%s).v.s", expr); return;
     case TY_BOOL:   buf_printf(b, "(%s).v.b", expr); return;
     case TY_SYMBOL: buf_printf(b, "(sp_sym)(%s).v.i", expr); return;
-    case TY_BIGINT: buf_printf(b, "(sp_Bigint *)(%s).v.p", expr); return;
+    /* NOT the bare `.v.p` cast: a poly slot holds a small Integer inline
+       (SP_TAG_INT), and under promote mode that is the common case -- the
+       cast then read the integer itself as an sp_Bigint pointer and the
+       program segfaulted on the first use (`(x >= 0) ? x : (x & M64)`,
+       whose two arms unify on Bignum, #4590). sp_poly_as_bigint hands an
+       already-Bignum value straight back and converts the rest, the same
+       shape the STRBUF line below uses. */
+    case TY_BIGINT: buf_printf(b, "sp_poly_as_bigint(%s)", expr); return;
     case TY_STRBUF: buf_printf(b, "sp_poly_as_strbuf(%s)", expr); return;
     default: break;
   }
