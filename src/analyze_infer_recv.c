@@ -712,33 +712,10 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         sp_streq(name, "include?") || sp_streq(name, "member?") ||
         sp_streq(name, "has_value?") || sp_streq(name, "value?") ||
         sp_streq(name, "empty?")) { *out = TY_BOOL; return 1; }
-    if (sp_streq(name, "each_with_object") && argc > 0 && argv) {
-      /* the memo block-param's settled type IS the result: the widening pass
-         narrows it from what the block pushes (a string push into an []
-         seed makes it a StrArray -- the seed-based guess mistyped it) */
-      int ewo_blk = nt_ref(nt, id, "block");
-      if (ewo_blk >= 0 && nt_type(nt, ewo_blk) && sp_streq(nt_type(nt, ewo_blk), "BlockNode")) {
-        const char *mn = block_param_name(c, ewo_blk, 1);
-        if (!mn) mn = block_param_name(c, ewo_blk, 2);   /* |k, v, memo| */
-        if (mn) {
-          LocalVar *ml = scope_local(comp_scope_of(c, ewo_blk), mn);
-          if (ml && ml->type != TY_UNKNOWN && (ty_is_array(ml->type) || ty_is_hash(ml->type)))
-            { *out = ml->type; return 1; }
-        }
-      }
-      TyKind at = infer_type(c, argv[0]);
-      if (at == TY_UNKNOWN) {
-        const char *a0ty = nt_type(nt, argv[0]);
-        int an0 = 0;
-        if (a0ty && sp_streq(a0ty, "ArrayNode")) nt_arr(nt, argv[0], "elements", &an0);
-        if (a0ty && sp_streq(a0ty, "ArrayNode") && an0 == 0) {
-          /* When hash values are poly the block pushes poly values, so the
-             accumulator widens to poly_array */
-          { *out = ty_hash_val(rt) == TY_POLY ? TY_POLY_ARRAY : TY_INT_ARRAY; return 1; }
-        }
-      }
-      { *out = at; return 1; }
-    }
+    /* blockless each_with_object -> Enumerator (#2540); the blocked form is a
+       Ruby method by now (builtins/enumerable.rb) and types as one */
+    if (sp_streq(name, "each_with_object") && argc > 0 && argv && nt_ref(nt, id, "block") < 0)
+      { *out = TY_ENUMERATOR; return 1; }
     if (sp_streq(name, "flatten") && argc <= 1) { *out = TY_POLY_ARRAY; return 1; }
     if (sp_streq(name, "invert") && argc == 0) {
       /* swap key/value types where we have a typed variant */
@@ -1177,29 +1154,10 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       }
       { *out = ty_array_elem(rt); return 1; }
     }
-    if (sp_streq(name, "each_with_object") && argc > 0 && argv && block < 0)
-      { *out = TY_ENUMERATOR; return 1; }   /* blockless each_with_object -> Enumerator (#2540) */
-    if (sp_streq(name, "each_with_object") && argc > 0 && argv) {
-      TyKind at = infer_type(c, argv[0]);
-      if (at == TY_UNKNOWN) {
-        const char *a0ty = nt_type(nt, argv[0]);
-        int an0 = 0;
-        if (a0ty && sp_streq(a0ty, "ArrayNode")) nt_arr(nt, argv[0], "elements", &an0);
-        if (a0ty && sp_streq(a0ty, "ArrayNode") && an0 == 0) {
-          /* empty `[]`: element type from how the memo is filled; a memo the
-             block only hands to a callable is the general boxed array (#3657),
-             else int. */
-          TyKind me = ewo_memo_elem_type(c, id);
-          if (me != TY_UNKNOWN) { *out = ty_array_of(me); return 1; }
-          { *out = ewo_memo_passed_to_callable(c, id) ? TY_POLY_ARRAY : TY_INT_ARRAY; return 1; }
-        }
-        /* empty `{}` memo: a general (boxed key/value) hash builder. */
-        if (a0ty && sp_streq(a0ty, "HashNode") &&
-            (nt_arr(nt, argv[0], "elements", &an0), an0 == 0))
-          { *out = TY_POLY_POLY_HASH; return 1; }
-      }
-      { *out = at; return 1; }
-    }
+    /* blockless each_with_object -> Enumerator (#2540); the blocked form is a
+       Ruby method by now (builtins/enumerable.rb) and types as one */
+    if (sp_streq(name, "each_with_object") && argc > 0 && argv && nt_ref(nt, id, "block") < 0)
+      { *out = TY_ENUMERATOR; return 1; }
     if (sp_streq(name, "tally") && argc == 0) {
       if (rt == TY_INT_ARRAY) { *out = TY_INT_INT_HASH; return 1; }
       if (rt == TY_STR_ARRAY) { *out = TY_STR_INT_HASH; return 1; }
@@ -1751,19 +1709,6 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
          sp_streq(name, "chunk") ||
          sp_streq(name, "slice_before") || sp_streq(name, "slice_after")))
       { *out = an_chunk_family_to_a(c, id) ? TY_POLY_ARRAY : TY_ENUMERATOR; return 1; }
-    /* each_with_object answers the seed it was handed; an empty literal seed
-       carries no type of its own, and the emitter builds the general container
-       of that shape -- a poly hash for `{}`, a poly array for `[]`. */
-    if (has_blk && sp_streq(name, "each_with_object") && argc == 1) {
-      TyKind st = infer_type(c, argv[0]);
-      if (st == TY_UNKNOWN) {
-        const char *sty = nt_type(nt, argv[0]);
-        st = (sty && (sp_streq(sty, "HashNode") || sp_streq(sty, "KeywordHashNode")))
-               ? TY_POLY_POLY_HASH : TY_POLY_ARRAY;
-      }
-      *out = st;
-      return 1;
-    }
   }
   /* poly.tr / the String-pattern sub / gsub: same shape with two arguments. */
   if (recv >= 0 && rt == TY_POLY && argc == 2 && nt_ref(nt, id, "block") < 0 &&

@@ -5816,43 +5816,7 @@ static int fwd_callable_def(Compiler *c, int ref, int *out_body, int *out_pn) {
   return *out_body >= 0;
 }
 
-/* Settle an each_with_object memo parameter on a seed type. A usage-derived
-   answer overrides the bare int-array guess (the no-evidence default the first
-   fixpoint round takes, before the pushed element is typed), so an early guess
-   cannot widen a later str/poly memo all the way to poly; otherwise unify. */
-static TyKind ewo_memo_settle(TyKind cur, TyKind at, int from_usage) {
-  if (from_usage && (cur == TY_UNKNOWN || cur == TY_INT_ARRAY)) return at;
-  return ty_unify(cur, at);
-}
-/* The type an `each_with_object` seed settles on when the seed is an EMPTY
-   literal, which carries no type of its own: from how the block fills the memo
-   (`memo << e`), then from a memo the block only hands to a callable, else the
-   bare int array -- and the general boxed hash for `{}`. TY_UNKNOWN when the
-   seed is not an empty literal. `from_usage` reports an answer derived from a
-   fill rather than the no-evidence default, so a caller can let it override an
-   earlier guess. */
-static TyKind ewo_empty_seed_type(Compiler *c, int callid, int seed, int *from_usage) {
-  const NodeTable *nt = c->nt;
-  const char *sty = seed >= 0 ? nt_type(nt, seed) : NULL;
-  int sn = 0;
-  if (!sty) return TY_UNKNOWN;
-  if (sp_streq(sty, "ArrayNode")) {
-    nt_arr(nt, seed, "elements", &sn);
-    if (sn != 0) return TY_UNKNOWN;
-    TyKind me = ewo_memo_elem_type(c, callid);
-    if (me != TY_UNKNOWN) { if (from_usage) *from_usage = 1; return ty_array_of(me); }
-    if (ewo_memo_passed_to_callable(c, callid)) { if (from_usage) *from_usage = 1; return TY_POLY_ARRAY; }
-    return TY_INT_ARRAY;
-  }
-  if (sp_streq(sty, "HashNode") || sp_streq(sty, "KeywordHashNode")) {
-    nt_arr(nt, seed, "elements", &sn);
-    if (sn != 0) return TY_UNKNOWN;
-    if (from_usage) *from_usage = 1;
-    return TY_POLY_POLY_HASH;
-  }
-  return TY_UNKNOWN;
-}
-/* Does the block of this each_with_object hand its memo parameter to a
+/* Does the block of this inject / reduce hand its memo parameter to a
    callable (`f.call(memo, ...)`) rather than filling it inline? Then no push
    is visible to type it from. */
 static int ewo_memo_arg_scan(const NodeTable *nt, int id, const char *memo, int depth) {
@@ -5885,9 +5849,6 @@ int ewo_memo_passed_to_callable_at(Compiler *c, int callid, int pidx) {
   int body = nt_ref(nt, blk, "body");
   if (!memo || body < 0) return 0;
   return ewo_memo_arg_scan(nt, body, memo, 0);
-}
-int ewo_memo_passed_to_callable(Compiler *c, int callid) {
-  return ewo_memo_passed_to_callable_at(c, callid, 1);
 }
 
 /* Unify into *acc the element type pushed onto a local named `memo` (`memo << e`
@@ -8107,36 +8068,6 @@ int infer_block_params(Compiler *c) {
       continue;
     }
 
-    /* array.each_with_object(init) { |x, acc| } binds element + accumulator */
-    if (sp_streq(name, "each_with_object") && ty_is_array(rt)) {
-      Scope *es = comp_scope_of(c, block);
-      if (p0) {
-        TyKind et = ty_array_elem(rt);
-        LocalVar *ep = scope_local_intern(es, p0); ep->is_block_param = 1;
-        if (!(ty_is_array(ep->type) && !ty_is_array(et))) {
-          TyKind em = ty_unify(ep->type, et);
-          if (em != ep->type) { ep->type = em; changed = 1; }
-        }
-      }
-      const char *p1_name = block_param_name(c, block, 1);
-      if (p1_name) {
-        int ewobj_args = nt_ref(nt, id, "arguments");
-        int ewobj_argc = 0;
-        const int *ewobj_argv = ewobj_args >= 0 ? nt_arr(nt, ewobj_args, "arguments", &ewobj_argc) : NULL;
-        if (ewobj_argc > 0 && ewobj_argv) {
-          TyKind at = infer_type(c, ewobj_argv[0]);
-          int from_usage = 0;
-          if (at == TY_UNKNOWN) at = ewo_empty_seed_type(c, id, ewobj_argv[0], &from_usage);
-          if (at != TY_UNKNOWN) {
-            LocalVar *ap = scope_local_intern(es, p1_name); ap->is_block_param = 1;
-            TyKind am = ewo_memo_settle(ap->type, at, from_usage);
-            if (am != ap->type) { ap->type = am; changed = 1; }
-          }
-        }
-      }
-      continue;
-    }
-
     /* hash.merge/merge!/update(other) { |k, v1, v2| } binds key + both values */
     if ((sp_streq(name, "merge") || sp_streq(name, "merge!") || sp_streq(name, "update")) &&
         ty_is_hash(rt)) {
@@ -8201,43 +8132,8 @@ int infer_block_params(Compiler *c) {
       continue;
     }
 
-    /* A boxed receiver's each_with_object: the element rides poly either way
-       (a Hash yields its [k, v] pair, an Array its element), while the memo
-       takes the seed's own type so the seed's C representation fits the slot.
-       Typing the memo poly instead put an unboxed seed in a boxed slot and the
-       generated C did not compile (#3449). */
-    if (sp_streq(name, "each_with_object") && rt == TY_POLY) {
-      Scope *ps = comp_scope_of(c, block);
-      if (block_param_is_multi(c, block, 0)) {
-        int lc = block_param_multi_count(c, block, 0);
-        for (int li = 0; li < lc; li++) {
-          const char *ln = block_param_multi_leaf(c, block, 0, li);
-          if (!ln) continue;
-          LocalVar *lp = scope_local_intern(ps, ln); lp->is_block_param = 1;
-          TyKind lm = ty_unify(lp->type, TY_POLY);
-          if (lm != lp->type) { lp->type = lm; changed = 1; }
-        }
-      }
-      else if (p0) {
-        LocalVar *ep = scope_local_intern(ps, p0); ep->is_block_param = 1;
-        TyKind em = ty_unify(ep->type, TY_POLY);
-        if (em != ep->type) { ep->type = em; changed = 1; }
-      }
-      const char *mp = block_param_name(c, block, 1);
-      int ea = nt_ref(nt, id, "arguments"); int eac = 0;
-      const int *eav = ea >= 0 ? nt_arr(nt, ea, "arguments", &eac) : NULL;
-      TyKind seedT = (eac > 0 && eav) ? infer_type(c, eav[0]) : TY_UNKNOWN;
-      if (mp && seedT != TY_UNKNOWN) {
-        LocalVar *mlv = scope_local_intern(ps, mp); mlv->is_block_param = 1;
-        TyKind mm = ty_unify(mlv->type, seedT);
-        if (mm != mlv->type) { mlv->type = mm; changed = 1; }
-      }
-      continue;
-    }
-
     /* hash.each / each_pair { |k, v| } or { |(k,v)| } binds two params.
-       Also handles each_with_object { |(k,v), memo| } and mutating
-       iteration (delete_if / select! / reject! / keep_if). */
+       Also handles mutating iteration (delete_if / select! / reject! / keep_if). */
     if ((sp_streq(name, "each") || sp_streq(name, "each_pair") || sp_streq(name, "map") ||
          sp_streq(name, "collect") || sp_streq(name, "flat_map") ||
          sp_streq(name, "collect_concat") || sp_streq(name, "select") ||
@@ -8249,7 +8145,7 @@ int infer_block_params(Compiler *c) {
          sp_streq(name, "any?") || sp_streq(name, "all?") || sp_streq(name, "none?") ||
          sp_streq(name, "delete_if") || sp_streq(name, "select!") || sp_streq(name, "reject!") ||
          sp_streq(name, "filter!") || sp_streq(name, "keep_if") ||
-         sp_streq(name, "each_with_index") || sp_streq(name, "each_with_object")) && ty_is_hash(rt)) {
+         sp_streq(name, "each_with_index")) && ty_is_hash(rt)) {
       Scope *hs = comp_scope_of(c, block);
       /* |(k,v)| or |(k,v), memo| destructuring (MultiTargetNode first param) */
       if (block_param_is_multi(c, block, 0)) {
@@ -8269,51 +8165,6 @@ int infer_block_params(Compiler *c) {
             TyKind vm2 = ty_unify(vp2->type, ty_hash_val(rt));
             if (vm2 != vp2->type) { vp2->type = vm2; changed = 1; }
           }
-        }
-        /* for each_with_object: bind the memo param (position 1) */
-        if (sp_streq(name, "each_with_object")) {
-          const char *mp = block_param_name(c, block, 1);
-          if (mp) {
-            int ewobj_args = nt_ref(nt, id, "arguments");
-            int ewobj_argc = 0;
-            const int *ewobj_argv = ewobj_args >= 0 ? nt_arr(nt, ewobj_args, "arguments", &ewobj_argc) : NULL;
-            if (ewobj_argc > 0 && ewobj_argv) {
-              TyKind at2 = infer_type(c, ewobj_argv[0]);
-              /* An empty seed types from the block's fill, exactly as on an
-                 array receiver. Left UNKNOWN the memo param never settles,
-                 and the seed, the memo and the call's own type each pick a
-                 different answer (#3922). */
-              int from_usage2 = 0;
-              if (at2 == TY_UNKNOWN) at2 = ewo_empty_seed_type(c, id, ewobj_argv[0], &from_usage2);
-              if (at2 != TY_UNKNOWN) {
-                LocalVar *mp_lv = scope_local_intern(hs, mp); mp_lv->is_block_param = 1;
-                TyKind mm = ewo_memo_settle(mp_lv->type, at2, from_usage2);
-                if (mm != mp_lv->type) { mp_lv->type = mm; changed = 1; }
-              }
-            }
-          }
-        }
-      }
-      else if (sp_streq(name, "each_with_object") &&
-               block_param_name(c, block, 1) && !block_param_name(c, block, 2)) {
-        /* hash.each_with_object(seed) { |element, memo| }: CRuby yields the
-           [k,v] pair as the element (the desugared |__destr, memo| shape). */
-        if (p0) {
-          LocalVar *ep = scope_local_intern(hs, p0); ep->is_block_param = 1;
-          TyKind em = ty_unify(ep->type, TY_POLY_ARRAY);
-          if (em != ep->type) { ep->type = em; changed = 1; }
-        }
-        const char *mp = block_param_name(c, block, 1);
-        int ewo_args = nt_ref(nt, id, "arguments"); int ewo_argc = 0;
-        const int *ewo_argv = ewo_args >= 0 ? nt_arr(nt, ewo_args, "arguments", &ewo_argc) : NULL;
-        TyKind accT = (ewo_argc > 0 && ewo_argv) ? infer_type(c, ewo_argv[0]) : TY_UNKNOWN;
-        int accU = 0;
-        if (accT == TY_UNKNOWN && ewo_argc > 0 && ewo_argv)
-          accT = ewo_empty_seed_type(c, id, ewo_argv[0], &accU);
-        if (mp && accT != TY_UNKNOWN) {
-          LocalVar *mlv = scope_local_intern(hs, mp); mlv->is_block_param = 1;
-          TyKind mm = ewo_memo_settle(mlv->type, accT, accU);
-          if (mm != mlv->type) { mlv->type = mm; changed = 1; }
         }
       }
       else {
