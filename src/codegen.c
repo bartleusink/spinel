@@ -6406,7 +6406,9 @@ static void emit_marshal_unbox_ivar(Compiler *c, TyKind t, Buf *b) {
     case TY_STRING: buf_puts(b, "(val.tag == SP_TAG_STR ? val.v.s : NULL)"); break;
     case TY_BOOL:   buf_puts(b, "(val.tag == SP_TAG_BOOL ? val.v.b : 0)"); break;
     case TY_SYMBOL: buf_puts(b, "(val.tag == SP_TAG_SYM ? (sp_sym)val.v.i : 0)"); break;
-    case TY_BIGINT: buf_puts(b, "(val.tag == SP_TAG_BIGINT ? (sp_Bigint *)val.v.p : NULL)"); break;
+    /* a Bignum whose value fits the inline representation arrives INT-tagged
+       (sp_box_bigint normalizes, #4594): convert rather than answer NULL */
+    case TY_BIGINT: buf_puts(b, "(val.tag == SP_TAG_NIL ? NULL : sp_poly_as_bigint(val))"); break;
     default:        buf_puts(b, "0"); break;
   }
 }

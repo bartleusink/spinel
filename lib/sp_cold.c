@@ -3185,7 +3185,25 @@ sp_RbVal sp_unsentinel(sp_RbVal v) {SP_GC_ROOT_RBVAL(v);
 }
 /* box a sp_Bigint* into a poly slot (heterogeneous container element, or a
    promote-mode overflow result). */
-sp_RbVal sp_box_bigint(sp_Bigint *b) { sp_RbVal r; r.tag = SP_TAG_BIGINT; r.cls_id = 0; r.v.p = b; return r; }
+extern int sp_bigint_mag_u64(sp_Bigint *b, uint64_t *out);   /* 1 iff |b| < 2^64 */
+/* Ruby has ONE Integer: a value small enough for the inline representation
+   IS the inline one, whoever computed it. Every bigint operation used to box
+   its result as a Bignum whatever its size, so `big & 0xffff_ffff`, and
+   equally `big * 0` and `big - (big - 7)`, answered a Bignum holding 0, 7 or
+   a 32-bit mask -- right when printed or compared, and refused by every
+   consumer that decides on the tag: IO::Buffer's u32 lane called such a
+   value "bignum too big to convert into 'unsigned int'" (#4594). Normalize
+   on the way into the poly slot, the same range test sp_box_i64 makes, so
+   the tag says what the value is. INTPTR_MIN stays a Bignum: the inline
+   representation spells it nil. */
+sp_RbVal sp_box_bigint(sp_Bigint *b) {
+  uint64_t mag;
+  if (b && sp_bigint_mag_u64(b, &mag) && mag <= (uint64_t)INTPTR_MAX) {
+    sp_int v = (sp_int)mag;
+    return sp_box_int(sp_bigint_sign(b) < 0 ? -v : v);
+  }
+  sp_RbVal r; r.tag = SP_TAG_BIGINT; r.cls_id = 0; r.v.p = b; return r;
+}
 int64_t sp_unbox_i64(sp_RbVal v) {
   if (v.tag == SP_TAG_INT) return (int64_t)v.v.i;
   if (v.tag == SP_TAG_BIGINT) return sp_bigint_to_int((sp_Bigint *)v.v.p);
