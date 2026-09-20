@@ -2811,11 +2811,17 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
     int im_rat = argc >= 2 && comp_ntype(c, argv[1]) == TY_RATIONAL;
     int fl = (comp_ntype(c, argv[0]) == TY_FLOAT || re_rat ? 1 : 0) |
              (argc >= 2 && (comp_ntype(c, argv[1]) == TY_FLOAT || im_rat) ? 2 : 0);
+    /* a boxed component reads through sp_poly_to_f: `(sp_float)` on an
+       sp_RbVal is not a conversion, it is a C error, and a parameter with
+       no evidence is poly (a Method captured with method(:Complex) has
+       exactly that shape) */
+    int re_poly = comp_ntype(c, argv[0]) == TY_POLY;
+    int im_poly = argc >= 2 && comp_ntype(c, argv[1]) == TY_POLY;
     buf_puts(b, "((sp_Complex){");
-    buf_puts(b, re_rat ? "sp_rational_to_f(" : "(sp_float)(");
+    buf_puts(b, re_rat ? "sp_rational_to_f(" : re_poly ? "sp_poly_to_f(" : "(sp_float)(");
     emit_expr(c, argv[0], b);
     buf_puts(b, "), ");
-    buf_puts(b, im_rat ? "sp_rational_to_f(" : "(sp_float)(");
+    buf_puts(b, im_rat ? "sp_rational_to_f(" : im_poly ? "sp_poly_to_f(" : "(sp_float)(");
     if (argc >= 2) emit_expr(c, argv[1], b);
     else buf_puts(b, "0");
     buf_printf(b, "), %d})", fl);
