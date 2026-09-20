@@ -102,7 +102,7 @@ untyped was born at, one `note:` per hop:
 ```
 spinel: app.rb:4:13: warning: parameter `o` of `dist2` widened to untyped (boxed poly slow path)
 spinel: app.rb:11:28: note: passed `pts[0]` is untyped
-spinel: app.rb:10:7: note: from `[Point.new(1, 2), Point.new(3, 4)]` is Array[untyped] — born here: no untyped input
+spinel: app.rb:10:7: note: from `[Point.new(1, 2), Point.new(3, 4)]` is Array[untyped] -- born here: no untyped input
 ```
 
 The column is 1-based there, as an editor reads a compiler's warning;

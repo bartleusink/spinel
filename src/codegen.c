@@ -8794,7 +8794,7 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
        expression) leads on as any value would. */
     int subj = (w->node >= 0 && w->node < c->node_cap) ? w->node : -1;
     if (subj < 0) { why_plain(o, w->reason); return; }
-    char extra[256]; snprintf(extra, sizeof extra, " — %s", w->reason);
+    char extra[256]; snprintf(extra, sizeof extra, " -- %s", w->reason);
     if (!ty_degraded(c->ntype[subj]) || c->norigin[subj] == subj || c->norigin[subj] < 0) { why_hop(o, subj, "by", extra); return; }
     why_hop(o, subj, "by", extra);
     SlotWhy on = *w; on.reason = NULL;
@@ -8850,11 +8850,11 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
         role = "from"; id = recv; last_ln = -1;
         continue;
       }
-      why_hop(o, id, role, " — untraced from here (how the local was typed is not recorded)");
+      why_hop(o, id, role, " -- untraced from here (how the local was typed is not recorded)");
       return;
     }
-    if (born && k == NK_InstanceVariableReadNode) { why_hop(o, id, role, " — untraced from here: no write of it in this class is untyped (its kind is the writes' meeting, or a rule's)"); return; }
-    if (born) { why_hop(o, id, role, " — born here: no untyped input"); return; }
+    if (born && k == NK_InstanceVariableReadNode) { why_hop(o, id, role, " -- untraced from here: no write of it in this class is untyped (its kind is the writes' meeting, or a rule's)"); return; }
+    if (born) { why_hop(o, id, role, " -- born here: no untyped input"); return; }
     if (k == NK_CallNode && !lost && next == nt_ref(nt, id, "receiver")) {
       /* a send on a poly receiver: its result is the meeting of every user
          def of the name with the builtin answer. When the builtin answer is
@@ -8881,7 +8881,7 @@ static void why_chain(WhyOut *o, const SlotWhy *w, const char *first) {
       const SlotWhy *rw = why_return_of(c, id);
       if (rw) { why_slot_end(o, rw, role); return; }
     }
-    if (lost || cyc || depth > 40) { why_hop(o, id, role, " — untraced from here"); return; }
+    if (lost || cyc || depth > 40) { why_hop(o, id, role, " -- untraced from here"); return; }
     if (!silent) { why_hop(o, id, role, NULL); last_ln = ln; last_col = col; role = "from"; }
     depth++;
     id = next;
