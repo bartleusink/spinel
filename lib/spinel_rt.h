@@ -7788,7 +7788,26 @@ static sp_RbVal sp_poly_fetch(sp_RbVal recv, sp_RbVal key, int has_dflt, sp_RbVa
    typed dup arm). Containers and value tags return as-is -- their memcpy
    would alias the backing store (and double-free through the finalizer);
    they keep their dedicated copy paths. clone preserves the frozen bit. */
+static sp_PolyPolyHash*sp_PolyPolyHash_dup(sp_PolyPolyHash*h);  /* fwd */
 static sp_RbVal sp_poly_dup(sp_RbVal v, int keep_frozen) {
+  /* Hash#dup/#clone on a boxed hash: a shallow copy of the same variant. The
+     hash went out as-is, so a `dup` taken to keep the caller's hash intact
+     aliased it and every write through the copy landed in the original
+     (#4646: a parameter typed poly by a recursive call cycle). */
+  if (v.tag == SP_TAG_OBJ && v.v.p && sp_poly_is_hash_kind(v.cls_id)) {
+    void *p = v.v.p; SP_GC_ROOT(p);
+    switch (v.cls_id) {
+      case SP_BUILTIN_STR_INT_HASH:  v.v.p = sp_StrIntHash_dup((sp_StrIntHash *)p); break;
+      case SP_BUILTIN_STR_STR_HASH:  v.v.p = sp_StrStrHash_dup((sp_StrStrHash *)p); break;
+      case SP_BUILTIN_INT_STR_HASH:  v.v.p = sp_IntStrHash_dup((sp_IntStrHash *)p); break;
+      case SP_BUILTIN_INT_INT_HASH:  v.v.p = sp_IntIntHash_dup((sp_IntIntHash *)p); break;
+      case SP_BUILTIN_STR_POLY_HASH: v.v.p = sp_StrPolyHash_dup((sp_StrPolyHash *)p); break;
+      case SP_BUILTIN_SYM_POLY_HASH: v.v.p = sp_SymPolyHash_dup((sp_SymPolyHash *)p); break;
+      case SP_BUILTIN_POLY_POLY_HASH: v.v.p = sp_PolyPolyHash_dup((sp_PolyPolyHash *)p); break;
+    }
+    if (keep_frozen && sp_gc_is_frozen(p)) sp_gc_freeze(v.v.p);
+    return v;
+  }
   /* Array#dup/#clone on a boxed array (read out of a poly container): a shallow
      copy of the same kind. A raw struct memcpy (the user-object path below)
      would share the element buffer, so the copy would alias -- mutating it
