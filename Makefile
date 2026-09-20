@@ -42,7 +42,7 @@ RBS_SRC      = $(wildcard $(RBS_DIR)/src/*.c) $(wildcard $(RBS_DIR)/src/util/*.c
 RBS_OBJ      = $(patsubst $(RBS_DIR)/src/%.c,build/rbs/%.o,$(RBS_SRC))
 RBS_LIB      = build/librbs.a
 
-.PHONY: all regexp wasm-rt wasm-test rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
+.PHONY: all regexp wasm-rt wasm-test rbs_extract rbs-test rbs-seed-test re-lit-test reject-test cli-opts-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test gc-str-major-test threaded-render-test gc-locality-test test-corpus test-corpus-summary \
         gate-optcarrot clean install uninstall deps tools
@@ -826,7 +826,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test thread-puts-test ext-test ext-cruby-test test-corpus-summary
+test-run: rbs-test rbs-seed-test re-lit-test reject-test cli-opts-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test thread-puts-test ext-test ext-cruby-test test-corpus-summary
 
 # The test/*.rb corpus (and the bundled packages') on its own, without the
 # C-side legs: what a 32-bit target runs (`make test-corpus CC='cc -m32'`),
@@ -911,6 +911,35 @@ ext-cruby-test: $(SPINEL) $(SP_RT_LIB)
 	fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "ext-cruby-test: pass"; else exit 1; fi
+
+# An option spinel does not know is a mistake, and building something other
+# than what was asked for is the one thing it must not do quietly. Also pins
+# the joined -O<n> spelling, which every C compiler takes and which used to
+# fall through to the unknown-flag arm and be discarded.
+cli-opts-test: $(SPINEL)
+	@ok=1; tmp=$$(mktemp -d /tmp/spinel-cliopts.XXXXXX); \
+	printf 'p ARGV\n' > "$$tmp/p.rb"; \
+	for f in --no-such-flag --no-inline-hott -Q; do \
+	  if $(SPINEL) "$$f" "$$tmp/p.rb" -c -o "$$tmp/o.c" >"$$tmp/o.out" 2>&1; then \
+	    echo "cli-opts-test: FAIL ($$f was accepted)"; ok=0; \
+	  else grep -qF "unknown option '$$f'" "$$tmp/o.out" || \
+	    { echo "cli-opts-test: FAIL ($$f refused without naming it)"; sed -n 1,3p "$$tmp/o.out"; ok=0; }; fi; \
+	done; \
+	printf '#!/bin/sh\necho "$$@" >> "$$0.args"\nexec cc "$$@"\n' > "$$tmp/ccwrap"; \
+	chmod +x "$$tmp/ccwrap"; \
+	for o in 0 1 2; do \
+	  : > "$$tmp/ccwrap.args"; \
+	  $(SPINEL) -O$$o --cc="$$tmp/ccwrap" "$$tmp/p.rb" -o "$$tmp/j$$o" >"$$tmp/j.out" 2>&1 || \
+	    { echo "cli-opts-test: FAIL (-O$$o joined form refused)"; sed -n 1,3p "$$tmp/j.out"; ok=0; continue; }; \
+	  grep -qe "-O$$o" "$$tmp/ccwrap.args" || \
+	    { echo "cli-opts-test: FAIL (-O$$o accepted but the C compiler was not given it)"; \
+	      cat "$$tmp/ccwrap.args"; ok=0; }; \
+	done; \
+	out=$$($(SPINEL) -E "$$tmp/p.rb" --a-program-flag 2>&1); \
+	[ "$$out" = '["--a-program-flag"]' ] || \
+	  { echo "cli-opts-test: FAIL (run mode did not hand the program its flag: $$out)"; ok=0; }; \
+	rm -rf "$$tmp"; \
+	[ $$ok = 1 ] && echo "cli-opts-test: pass" || exit 1
 
 reject-test: $(SPINEL)
 	@ok=1; tmp=$$(mktemp -d /tmp/spinel-reject.XXXXXX); \
