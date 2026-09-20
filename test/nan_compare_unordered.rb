@@ -19,3 +19,26 @@ begin
 rescue ArgumentError
   puts "max: ArgumentError"
 end
+
+# NaN is unordered only against the numeric tower. Against anything else the
+# pair is genuinely incomparable and CRuby raises, so the short-circuit that
+# answers false must not reach nil, a String or a Symbol -- and the Bignum and
+# Rational arms convert their float operand before comparing, which must not
+# be reached with a NaN either (the conversion is undefined, and one that
+# completes reports the pair comparable).
+big = [2**70, nil][0]
+rat = [Rational(1, 3), nil][0]
+others = [[nil, "nil"], ["x", "String"], [:sym, "Symbol"], [big, "Bignum"], [rat, "Rational"]]
+others.each do |o, what|
+  begin
+    puts "NaN < #{what}: #{a < o}"
+  rescue ArgumentError
+    puts "NaN < #{what}: ArgumentError"
+  end
+end
+others.each { |o, what| puts "NaN <=> #{what}: #{(a <=> o).inspect}" }
+begin
+  p [a, big].max
+rescue ArgumentError
+  puts "max with Bignum: ArgumentError"
+end
