@@ -1135,6 +1135,22 @@ static TyKind infer_call_inner(Compiler *c, int id);
    -- compile down to the raise instead of a miss. The guard runs after a
    few arms of emit_call, so none of those may claim a call it refuses, or
    the value typed here is not the one emitted. */
+/* The type of an implicit-self call to `name` bound to `mi` in scope `self`:
+   the method's return unified with every descendant's direct override,
+   since codegen's dispatch switches over them all. */
+static TyKind an_self_call_ret(Compiler *c, Scope *self, const char *name, int mi, int id) {
+  TyKind r = method_call_ret(c, mi, id);
+  for (int k = 0; k < c->nclasses; k++) {
+    int is_desc = 0;
+    for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
+      if (p == self->class_id) { is_desc = 1; break; }
+    if (!is_desc) continue;
+    int dmi = self->is_cmethod ? comp_cmethod_in_class(c, k, name) :
+                                 comp_method_in_class(c, k, name);
+    if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
+  }
+  return r;
+}
 TyKind infer_call(Compiler *c, int id) {
   TyKind t = infer_call_inner(c, id);
   if (t == TY_UNKNOWN && builtin_arity_violation(c, id)) return TY_NIL;
@@ -1301,8 +1317,13 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       int ocls = osc ? osc->class_id : -1;
       int omi = osc && osc->is_cmethod ? comp_cmethod_in_chain(c, ocls, name, NULL)
                                        : comp_method_in_chain(c, ocls, name, NULL);
-      if (omi >= 0 && omi < c->nscopes && !c->scopes[omi].yields)
-        return method_call_ret(c, omi, id);
+      /* the same answer the implicit-self arm below gives, overrides
+         included: codegen's dispatch switches over every descendant's
+         override, so the type must hold each of their returns. Answering
+         the base's declared return alone typed `@snap = attributes` a
+         Hash where the switch answered sp_RbVal (#4600). */
+      if (omi >= 0 && omi < c->nscopes && !c->scopes[omi].yields && osc)
+        return an_self_call_ret(c, osc, name, omi, id);
     }
   }
 
@@ -3749,22 +3770,7 @@ else {
       int mi = comp_method_in_chain(c, self->class_id, name, NULL);
       if (mi < 0 && self->is_cmethod)
         mi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
-      if (mi >= 0) {
-        TyKind r = method_call_ret(c, mi, id);
-        /* Unify with descendant direct overrides: codegen dispatch will
-           emit a cls_id switch over all overrides, so the return type
-           must accommodate every override's return type. */
-        for (int k = 0; k < c->nclasses; k++) {
-          int is_desc = 0;
-          for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-            if (p == self->class_id) { is_desc = 1; break; }
-          if (!is_desc) continue;
-          int dmi = self->is_cmethod ? comp_cmethod_in_class(c, k, name) :
-                                       comp_method_in_class(c, k, name);
-          if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
-        }
-        return r;
-      }
+      if (mi >= 0) return an_self_call_ret(c, self, name, mi, id);
       /* Built-in class reopening: implicit self → delegate to built-in type lookup */
       if (mi < 0 && !self->is_cmethod) {
         const char *bcn = c->classes[self->class_id].name;
