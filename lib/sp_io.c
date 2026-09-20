@@ -1169,17 +1169,29 @@ const char *sp_File_inspect(sp_File *f) {SP_GC_ROOT(f);
   return sp_sprintf("#<%s:%s>", cls, p);
 }
 
-void sp_File_puts(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
+static void sp_File_puts_n(sp_File *f, const char *s, size_t n) {
   SP_IO_OPEN(f);
-  if (!s) return;
-  size_t n = strlen(s);
   if (f->is_sock) {
     sp_sock_write(f, s, n);
     if (n == 0 || s[n - 1] != '\n') sp_sock_write(f, "\n", 1);
     return;
   }
-  fputs(s, f->fp);
+  fwrite(s, 1, n, f->fp);
   if (n == 0 || s[n - 1] != '\n') fputc('\n', f->fp);
+}
+void sp_File_puts(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
+  if (!s) { SP_IO_OPEN(f); return; }
+  sp_File_puts_n(f, s, strlen(s));
+}
+/* Binary-safe puts, the pair of sp_File_write_bin: sizes the operand with the
+   header length, so an embedded NUL reaches the descriptor and the trailing
+   newline is decided by the real last byte. Reads s[-1], so it is for
+   CODEGEN-emitted String values only -- the emitter picks it exactly where
+   the write arm picks sp_File_write_bin. */
+void sp_File_puts_bin(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
+  /* a nil String arrives as NULL and prints as `puts nil` does: a newline */
+  if (!s) { sp_File_puts_n(f, "", 0); return; }
+  sp_File_puts_n(f, s, sp_str_byte_len(s));
 }
 
 void sp_File_print(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);

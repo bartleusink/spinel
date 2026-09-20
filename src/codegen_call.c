@@ -21417,7 +21417,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", tfa, fab.p ? fab.p : "sp_box_nil()");
         free(fab.p);
       }
-      buf_printf(b, "({ sp_File_write(%s, sp_str_format_polyarr(_t%d, _t%d)); sp_box_nil(); })", r, tfp, tfa);
+      /* the formatted value is a spinel String, so it sizes by its header */
+      buf_printf(b, "({ sp_File_write_bin(%s, sp_str_format_polyarr(_t%d, _t%d)); sp_box_nil(); })", r, tfp, tfa);
       free(rb.p); return;
     }
     /* each_char / each_byte (#2794) / each_codepoint (#3038) */
@@ -21623,8 +21624,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          the format/sprintf codegen below (#1498 / #1508). */
       Buf *abs = (Buf *)calloc(argc > 0 ? (size_t)argc : 1, sizeof(Buf));
       int *aarr = (int *)calloc(argc > 0 ? (size_t)argc : 1, sizeof(int));
+      /* a String operand carries its own byte count, so the write can be the
+         binary-safe entry and an embedded NUL survives (#4629) */
+      int *abin = (int *)calloc(argc > 0 ? (size_t)argc : 1, sizeof(int));
       for (int k = 0; k < argc; k++) {
         TyKind akt = comp_ntype(c, argv[k]);
+        abin[k] = (akt == TY_STRING);
         if (sp_streq(name, "puts") && (ty_is_array(akt) || akt == TY_POLY_ARRAY || akt == TY_POLY)) {
           /* an Array argument prints one element per line (#2813) */
           aarr[k] = 1;
@@ -21652,11 +21657,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           if (is_puts && aarr[k])
             buf_printf(g_pre, "sp_File_puts_val(%s, %s); ", r, at);
           else if (is_puts) {
-            int ts = ++g_tmp;
-            buf_printf(g_pre, "sp_File_puts(%s, ({ const char *_t%d = %s; _t%d ? _t%d : \"\"; })); ",
-                       r, ts, at, ts, ts);
+            /* a nil String is a NULL, which the binary entry answers with the
+               bare newline itself; the "" stand-in has no header to read */
+            if (abin[k]) buf_printf(g_pre, "sp_File_puts_bin(%s, %s); ", r, at);
+            else {
+              int ts = ++g_tmp;
+              buf_printf(g_pre, "sp_File_puts(%s, ({ const char *_t%d = %s; _t%d ? _t%d : \"\"; })); ",
+                         r, ts, at, ts, ts);
+            }
           }
-          else buf_printf(g_pre, "sp_File_write(%s, %s); ", r, at);
+          else buf_printf(g_pre, "%s(%s, %s); ",
+                          abin[k] ? "sp_File_write_bin" : "sp_File_write", r, at);
           free(abs[k].p);
         }
         if (is_puts && argc == 0) buf_printf(g_pre, "sp_File_write(%s, \"\\n\"); ", r);
@@ -21665,6 +21676,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       else for (int k = 0; k < argc; k++) free(abs[k].p);
       free(abs);
       free(aarr);
+      free(abin);
       buf_puts(b, "((sp_int)0)");
       free(rb.p); return;
     }
@@ -21835,13 +21847,19 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           else if (akt2 == TY_STRING) emit_expr(c, argv[k2], &ab2);
           else { buf_puts(&ab2, "sp_poly_to_s("); emit_boxed(c, argv[k2], &ab2); buf_puts(&ab2, ")"); }
           const char *at2 = ab2.p ? ab2.p : "\"\"";
+          /* the same String/non-String split the typed arm makes (#4629) */
+          int bin2 = (akt2 == TY_STRING);
           if (is_puts2 && arr2) buf_printf(b, "sp_File_puts_val(_t%d, %s); ", tio2, at2);
           else if (is_puts2) {
-            int ts2 = ++g_tmp;
-            buf_printf(b, "sp_File_puts(_t%d, ({ const char *_t%d = %s; _t%d ? _t%d : \"\"; })); ",
-                       tio2, ts2, at2, ts2, ts2);
+            if (bin2) buf_printf(b, "sp_File_puts_bin(_t%d, %s); ", tio2, at2);
+            else {
+              int ts2 = ++g_tmp;
+              buf_printf(b, "sp_File_puts(_t%d, ({ const char *_t%d = %s; _t%d ? _t%d : \"\"; })); ",
+                         tio2, ts2, at2, ts2, ts2);
+            }
           }
-          else buf_printf(b, "sp_File_write(_t%d, %s); ", tio2, at2);
+          else buf_printf(b, "%s(_t%d, %s); ",
+                          bin2 ? "sp_File_write_bin" : "sp_File_write", tio2, at2);
           free(ab2.p);
         }
         if (is_puts2 && argc == 0) buf_printf(b, "sp_File_write(_t%d, \"\\n\"); ", tio2);
