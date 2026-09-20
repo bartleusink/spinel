@@ -458,6 +458,8 @@ const char *conv_cls_name_of(Compiler *c, TyKind t);
 TyKind obj_container_conv(Compiler *c, TyKind t, const char *conv, int *def);
 void emit_str_pattern_expr(Compiler *c, int node, Buf *b);
 void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b);
+int hold_recv_open(Compiler *c, int recv, int boxed, const char *ctype, const char *rootm,
+                   Buf *b, Buf *rb);
 int emit_iter_bind_rest(Compiler *c, int block, int np, TyKind elem_t, const char *elem_src, Buf *b, int indent);
 void emit_frozen_obj_guard(Compiler *c, int cid, const char *selfexpr, Buf *b);
 /* For a reference-backed builtin type (a genuinely nilable C pointer that can

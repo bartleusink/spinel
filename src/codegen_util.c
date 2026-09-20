@@ -124,6 +124,35 @@ static const char *unsup_pos(Compiler *c, int id, int *line) {
   return file;
 }
 
+/* A receiver an arm passes straight into a C call beside an argument is held
+   by nothing while that argument runs, nor while the call itself allocates.
+   This opens a statement expression that binds the receiver to a rooted temp
+   and names that temp in rb; the caller emits the call reading rb and closes
+   with "; })" when this returns 1. When this receiver node is in the
+   override table (g_argov_node), the operand-order rewrite or an arm that
+   re-dispatches through a temp has already declared and rooted the temp in
+   front of the call, so rb receives the receiver as rendered and nothing is
+   opened. boxed renders through emit_boxed. The caller frees rb. */
+int hold_recv_open(Compiler *c, int recv, int boxed, const char *ctype, const char *rootm,
+                   Buf *b, Buf *rb) {
+  memset(rb, 0, sizeof *rb);
+  int bound = 0;
+  for (int i = 0; i < g_n_argov; i++)
+    if (g_argov_node[i] == recv) bound = 1;
+  if (bound) {
+    if (boxed) emit_boxed(c, recv, rb); else emit_expr(c, recv, rb);
+    if (!rb->p) buf_putn(rb, "", 0);
+    return 0;
+  }
+  Buf rx; memset(&rx, 0, sizeof rx);
+  if (boxed) emit_boxed(c, recv, &rx); else emit_expr(c, recv, &rx);
+  int t = ++g_tmp;
+  buf_printf(b, "({ %s _t%d = %s; %s(_t%d); ", ctype, t, rx.p ? rx.p : "", rootm, t);
+  buf_printf(rb, "_t%d", t);
+  free(rx.p);
+  return 1;
+}
+
 void buf_putn(Buf *b, const char *s, size_t n) {
   if (b->len + n + 1 > b->cap) {
     size_t nc = b->cap ? b->cap * 2 : 256;
