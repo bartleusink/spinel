@@ -600,10 +600,8 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       { *out = TY_INT; return 1; }
     if (nt_ref(nt, id, "block") >= 0 &&
         (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat") ||
-         sp_streq(name, "filter_map") || sp_streq(name, "partition")))
+         sp_streq(name, "filter_map")))
       { *out = TY_POLY_ARRAY; return 1; }
-    if (nt_ref(nt, id, "block") >= 0 && sp_streq(name, "group_by"))
-      { *out = TY_POLY_POLY_HASH; return 1; }
     {
       if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {
         int body = nt_ref(nt, block, "body");
@@ -875,7 +873,6 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
           sp_streq(name, "find") || sp_streq(name, "detect"))
         { *out = ty_array_elem(rt); return 1; }  /* returns an element */
       if (sp_streq(name, "minmax_by")) { *out = TY_POLY_ARRAY; return 1; }  /* [min, max], or [nil, nil] when empty */
-      if (sp_streq(name, "partition")) { *out = TY_POLY_ARRAY; return 1; }  /* [[truthy...],[falsy...]] */
       if (sp_streq(name, "filter_map")) { *out = TY_POLY_ARRAY; return 1; }  /* map then drop falsy */
     }
     /* grep/grep_v without a block filter by `pattern === e`, preserving the
@@ -1211,8 +1208,6 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     }
     if (sp_streq(name, "tally") && argc == 1)   /* tally(hash) returns the accumulator, boxed (#2533) */
       { *out = TY_POLY; return 1; }
-    if (sp_streq(name, "group_by") && block >= 0 && ty_is_array(rt))
-      { *out = TY_POLY_POLY_HASH; return 1; }
     if ((sp_streq(name, "first") || sp_streq(name, "last")) && argc == 1) { *out = rt; return 1; }  /* first(n)/last(n) -> subarray */
     /* `arr.take(n)`/`drop(n)` is a subarray, but `arr.lazy.take(n)` stays a lazy
        stage -- let the lazy pipeline (below) type the forced chain, not this
@@ -1747,8 +1742,6 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (!has_blk && sp_streq(name, "product")) { *out = TY_POLY_ARRAY; return 1; }
     if (!has_blk && (sp_streq(name, "combination") || sp_streq(name, "permutation")))
       { *out = TY_POLY_ARRAY; return 1; }
-    if (has_blk && sp_streq(name, "group_by")) { *out = TY_POLY_POLY_HASH; return 1; }
-    if (has_blk && sp_streq(name, "partition")) { *out = TY_POLY_ARRAY; return 1; }
     /* the runs only when a `.to_a` terminal materializes them; on its own the
        call answers an Enumerator, exactly as it does for a typed receiver.
        Answering the array either way declared the slot sp_PolyArray * and put

@@ -17102,7 +17102,6 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (emit_lazy_size_expr(c, id, b)) return;
   if (emit_lazy_class_expr(c, id, b)) return;
   if (emit_lazy_pipeline_expr(c, id, b)) return;
-  if (emit_partition_expr(c, id, b)) return;
   if (emit_with_index_expr(c, id, b)) return;
   if (emit_enum_with_index_expr(c, id, b)) return;
   if (emit_enum_find_expr(c, id, b)) return;
@@ -17137,7 +17136,6 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (emit_reduce_block_expr(c, id, b)) return;
   if (emit_sortby_expr(c, id, b)) return;
   if (emit_tap_then_expr(c, id, b)) return;
-  if (emit_group_by_expr(c, id, b)) return;
   }
   if (emit_inline_expr(c, id, b)) return;  /* value-returning yield method */
   const char *name = nt_str(nt, id, "name");

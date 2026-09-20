@@ -14059,10 +14059,12 @@ void analyze_program(Compiler *c) {
          interning it by strlen registers the short name codegen then emits */
       if (v) comp_sym_intern_n(c, v, nt_str_len(c->nt, id, "value"));
     }
-    /* a def in value position evaluates to :name */
+    /* a def in value position evaluates to :name. A builtin's definition
+       (`__enum_<m>`, and its per-site copies) is never in value position:
+       its name would only add a string per call site to the symbol table */
     else if (ty && sp_streq(ty, "DefNode")) {
       const char *dn = nt_str(c->nt, id, "name");
-      if (dn) comp_sym_intern(c, dn);
+      if (dn && strncmp(dn, "__enum_", 7) != 0) comp_sym_intern(c, dn);
     }
     /* __method__ / __callee__ yield the enclosing method's name as a symbol;
        intern it now so the id table is sized before the codegen prologue */

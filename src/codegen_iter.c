@@ -381,6 +381,14 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   const char *saved_lbn = g_lowered_blk_name;
   g_yield_lowered_fallback = g_current_scope_is_lowered;
   g_yield_lowered_blk_fallback = g_lowered_blk_name;
+  /* and the enclosing inline's forwarded-proc block: a `yield` in the
+     spliced caller code binds that proc, not this inline's block. Without
+     it a block `{ |x| yield x }` handed to an inlined callee from a method
+     itself called with `&proc` found no block at all. */
+  const char *saved_ypr_fb = g_yield_proc_ref_fallback;
+  TyKind saved_yslot_fb = g_yield_slot_ty_fallback;
+  g_yield_proc_ref_fallback = g_yield_proc_ref;
+  g_yield_slot_ty_fallback = g_yield_slot_ty;
   g_current_scope_is_lowered = 0;
   g_lowered_blk_name = NULL;
   g_yield_self_fallback = g_self;
@@ -747,6 +755,8 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_yield_block_fallback = saved_yfb;
   g_block_nren = saved_bnren;
   g_yield_block_fallback_nren = saved_yfbn;
+  g_yield_proc_ref_fallback = saved_ypr_fb;
+  g_yield_slot_ty_fallback = saved_yslot_fb;
   g_yield_self_fallback = saved_self_fb;
   g_yield_self_deref_fallback = saved_deref_fb;
   g_yield_emitting_class_fallback = saved_emcls_fb;
@@ -862,6 +872,11 @@ static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
 static int call_targets_yielding_method(Compiler *c, int id);
 static int block_tail_needs_value_form(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
+  /* a tail `yield` whose block is a forwarded proc: the statement form is a
+     bare sp_proc_yield call whose value is dropped, and the splice is read
+     for it (`{ |x| yield x }` handed to an inlined callee from a method
+     called with `&proc`) */
+  if (nt_kind(nt, id) == NK_YieldNode) return g_yield_proc_ref != NULL || g_yield_proc_ref_fallback != NULL;
   if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) return 0;
   const char *nm = nt_str(nt, id, "name");
   if (!nm) return 0;
@@ -1386,6 +1401,9 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   const char *sv_blbn = g_lowered_blk_name;
   g_current_scope_is_lowered = g_yield_lowered_fallback;
   g_lowered_blk_name = g_yield_lowered_blk_fallback;
+  const char *sv_bypr = g_yield_proc_ref; TyKind sv_byslot = g_yield_slot_ty;
+  g_yield_proc_ref = g_yield_proc_ref_fallback;
+  g_yield_slot_ty = g_yield_slot_ty_fallback;
   /* A `next` in a yielded block leaves the BLOCK with its value -- but this
      body is spliced inline (no _proc_ function, no loop), so a bare
      `continue` is invalid C. Only when the body owns a `next`, wrap the
@@ -1463,8 +1481,13 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
         c->blk_body_map[bbody] >= 0)
       emit_block_locals_reset(c, c->blk_body_map[bbody], b, 0);
     for (int k3 = 0; k3 < bn3 - 1; k3++) emit_stmt(c, bd3[k3], b, 0);
-    if (want_poly && ty_is_object(comp_ntype(c, bd3[bn3 - 1]))) emit_boxed(c, bd3[bn3 - 1], b);
-    else emit_expr(c, bd3[bn3 - 1], b);
+    /* the tail's own prelude stays INSIDE the splice, after the parameter
+       bindings above it: hoisted to the enclosing statement, a forwarded
+       proc's yield read the block parameter before it was bound */
+    { Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
+      if (want_poly && ty_is_object(comp_ntype(c, bd3[bn3 - 1]))) emit_boxed(c, bd3[bn3 - 1], b);
+      else emit_expr(c, bd3[bn3 - 1], b);
+      g_pre = svp3; g_indent = svi3; }
     buf_puts(b, "; ");
   }
   else if (as_expr && !nx_own && want_poly && bn3 > 0 &&
@@ -1475,7 +1498,14 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
                expression is what makes the splice's value the block's value
                (#3781). */
             (nt_type(nt, bd3[bn3 - 1]) && sp_streq(nt_type(nt, bd3[bn3 - 1]), "CallNode") &&
-             comp_ntype(c, bd3[bn3 - 1]) == TY_POLY)) &&
+             comp_ntype(c, bd3[bn3 - 1]) == TY_POLY) ||
+            /* a scalar tail into the poly slot the yield was typed for (a
+               block answering an Integer where another site's answers a
+               String): boxed, or the splice handed the raw sp_int to an
+               sp_RbVal (`groups[yield(x)] ||= []` under two block kinds) */
+            comp_ntype(c, bd3[bn3 - 1]) == TY_INT || comp_ntype(c, bd3[bn3 - 1]) == TY_FLOAT ||
+            comp_ntype(c, bd3[bn3 - 1]) == TY_STRING || comp_ntype(c, bd3[bn3 - 1]) == TY_BOOL ||
+            comp_ntype(c, bd3[bn3 - 1]) == TY_SYMBOL) &&
            nt_type(nt, bd3[bn3 - 1]) &&
            !sp_streq(nt_type(nt, bd3[bn3 - 1]), "ReturnNode")) {
     /* concrete-typed bare tail into a poly slot: box it (#3278) */
@@ -1514,6 +1544,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   g_emitting_class_id = sv_bemcls;
   g_current_scope_is_lowered = sv_blow;
   g_lowered_blk_name = sv_blbn;
+  g_yield_proc_ref = sv_bypr; g_yield_slot_ty = sv_byslot;
   g_method_pr_label = sv_bl; g_method_pr_var = sv_bv; g_ret_type = sv_bt;
   g_method_pr_exc_depth = sv_bexc;
   g_brk_ser_var = svser; g_brk_ensure_base = svebase; g_brk_exc_base = svbexc;

@@ -1770,22 +1770,53 @@ static int fwd_poly_recv_one_param_iter(const char *name) {
 static void fwd_drop_spent_anon_block_param(Compiler *c, int id, int n0) {
   NodeTable *nt = (NodeTable *)c->nt;
   Scope *ms = comp_scope_of(c, id);
-  if (!ms || !ms->blk_param || ms->blk_param[0] || ms->def_node < 0) return;
+  if (!ms || !ms->blk_param || ms->def_node < 0) return;
+  int named = ms->blk_param[0] != 0;
   for (int j = 0; j < n0; j++) {
-    if (!nt_type(nt, j) || !sp_streq(nt_type(nt, j), "CallNode")) continue;
-    int b = nt_ref(nt, j, "block");
-    if (b < 0 || !nt_type(nt, b) || !sp_streq(nt_type(nt, b), "BlockArgumentNode")) continue;
-    if (nt_ref(nt, b, "expression") >= 0) continue;
-    if (comp_scope_of(c, j) == ms) return;   /* another forward still needs it */
+    if (comp_scope_of(c, j) != ms) continue;
+    NodeKind k = nt_kind(nt, j);
+    if (k == NK_CallNode) {
+      int b = nt_ref(nt, j, "block");
+      if (b < 0 || nt_kind(nt, b) != NK_BlockArgumentNode) continue;
+      int ex = nt_ref(nt, b, "expression");
+      if (ex < 0 && !named) return;   /* another anonymous forward still needs it */
+      if (ex >= 0 && named && nt_kind(nt, ex) == NK_LocalVariableReadNode &&
+          nt_str(nt, ex, "name") && sp_streq(nt_str(nt, ex, "name"), ms->blk_param)) return;
+    }
+    /* a named parameter read as a value anywhere keeps it */
+    else if (named && (k == NK_LocalVariableReadNode || k == NK_LocalVariableWriteNode) &&
+             nt_str(nt, j, "name") && sp_streq(nt_str(nt, j, "name"), ms->blk_param)) return;
   }
   int pn = nt_ref(nt, ms->def_node, "parameters");
   if (pn < 0) return;
   int bp = nt_ref(nt, pn, "block");
   if (bp < 0 || !nt_type(nt, bp) || !sp_streq(nt_type(nt, bp), "BlockParameterNode")) return;
-  if (nt_str(nt, bp, "name")) return;
+  if (named ? !nt_str(nt, bp, "name") : nt_str(nt, bp, "name") != NULL) return;
   nt_node_set_ref(nt, pn, "block", -1);
+  /* the named parameter's slot was registered as a Proc parameter: it is
+     neither now, or the function prologue rooted a parameter it no longer
+     declares */
+  if (named) {
+    LocalVar *plv = scope_local(ms, ms->blk_param);
+    if (plv) { plv->is_param = 0; plv->is_block_param = 0; plv->type = TY_UNKNOWN; plv->is_cell = 0; }
+  }
   free(ms->blk_param);
   ms->blk_param = NULL;
+}
+
+/* Is the method's `&blk` name read anywhere in scope `ms` other than as the
+   BlockArgumentNode expression `only`? A `blk.call`, a `blk` handed on as a
+   value, or a second forward keeps the parameter a value. */
+static int fwd_blk_param_read_elsewhere(Compiler *c, Scope *ms, const char *name, int only) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    if (id == only || comp_scope_of(c, id) != ms) continue;
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_LocalVariableReadNode && k != NK_LocalVariableWriteNode) continue;
+    const char *n = nt_str(nt, id, "name");
+    if (n && sp_streq(n, name)) return 1;
+  }
+  return 0;
 }
 
 int desugar_value_callable_forwards(Compiler *c) {
@@ -1808,9 +1839,24 @@ int desugar_value_callable_forwards(Compiler *c) {
        `{ |__fwd..| blk.call(__fwd..) }` below, and the yield does the rest. */
     int anon = ex < 0;
     TyKind ct = TY_UNKNOWN;
+    /* A named `&blk` forwarded from the method that declared it is the
+       method's own block just as an anonymous `&` is: `blk.call(x)` inside a
+       block the callee splices at its yield had no `lv_blk` to read (the
+       block parameter of an inlined method is not a value), where a
+       `yield x` there is connected the way every nested yield is. Only when
+       the name is used for nothing else, so the parameter can be dropped
+       with the forward (fwd_drop_spent_anon_block_param). */
+    if (!anon && nt_kind(nt, ex) == NK_LocalVariableReadNode) {
+      Scope *ms = comp_scope_of(c, id);
+      const char *xn = nt_str(nt, ex, "name");
+      if (ms && ms->name && ms->blk_param && ms->blk_param[0] && xn && sp_streq(xn, ms->blk_param) &&
+          !ms->blk_param_value_use && !fwd_blk_param_read_elsewhere(c, ms, xn, ex))
+        anon = 1;
+    }
     if (anon) {
       Scope *ms = comp_scope_of(c, id);
-      if (!ms || !ms->name || !ms->blk_param || ms->blk_param[0]) continue;
+      if (!ms || !ms->name || !ms->blk_param) continue;
+      if (ms->blk_param[0] && ex < 0) continue;
     }
     else {
     const char *exty = nt_type(nt, ex);
@@ -1980,6 +2026,9 @@ int desugar_value_callable_forwards(Compiler *c) {
     nt_node_set_ref(nt, blocknode, "body", body);
 
     nt_node_set_ref(nt, id, "block", blocknode);  /* call now takes a literal block */
+    /* a named `&blk` forward that became a yield: its read is orphaned, and
+       must not count as a use of the parameter */
+    if (anon && ex >= 0) nt_node_set_str(nt, ex, "name", "__orphaned__");
 
     comp_grow_node_arrays(c);
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
@@ -2634,6 +2683,12 @@ int desugar_builtin_enum_calls(Compiler *c) {
     if (!gn || comp_method_index(c, gn) < 0) continue;
     int args = nt_ref(nt, id, "arguments");
     int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    /* the builtin's own arity: `str.partition(sep)` on a value that is a
+       String at run time is String's method, not Enumerable's */
+    { int cpn = nt_ref(nt, copy, "parameters");
+      int crn = 0; if (cpn >= 0) nt_arr(nt, cpn, "requireds", &crn);
+      int con = 0; if (cpn >= 0) nt_arr(nt, cpn, "optionals", &con);
+      if (an + 1 < crn || an + 1 > crn + con) continue; }
     int base = nt->count;
     int encl = c->nscope[id];
     /* A receiver known only at run time may be an instance of a class that
@@ -2646,10 +2701,14 @@ int desugar_builtin_enum_calls(Compiler *c) {
       for (int k = 0; k < c->nclasses && ndef < 64; k++)
         if (!c->classes[k].is_native_class && comp_poly_arm_defines_n(c, k, name, an)) defcls[ndef++] = k;
     }
+    /* `v&.m { }`: the receiver is bound once and a nil answers nil, the
+       same dispatch shape with a nil test for the class test */
+    const char *cop = nt_str(nt, id, "call_operator");
+    int safe_nav = cop && sp_streq(cop, "&.");
     int blk = nt_ref(nt, id, "block");
     int recv_read = recv;
     int generic = id;
-    if (ndef > 0) {
+    if (ndef > 0 || safe_nav) {
       char rn[64]; snprintf(rn, sizeof rn, "__enumrecv_%d", id);
       int w = nt_new_node(nt, "LocalVariableWriteNode");
       int own = nt_new_node(nt, "CallNode");
@@ -2666,9 +2725,19 @@ int desugar_builtin_enum_calls(Compiler *c) {
       nt_node_set_ref(nt, w, "value", recv);
       nt_node_set_str(nt, ownr, "name", rn); nt_node_set_int(nt, ownr, "depth", 0);
       nt_node_set_str(nt, genr, "name", rn); nt_node_set_int(nt, genr, "depth", 0);
-      /* the class test, one is_a? per defining class, or-ed */
+      /* the class test, one is_a? per defining class, or-ed; a safe
+         navigation tests nil instead (and dispatches its classes after) */
       int pred = -1;
-      for (int k = 0; k < ndef; k++) {
+      if (safe_nav) {
+        int nr = nt_new_node(nt, "LocalVariableReadNode");
+        int nq = nt_new_node(nt, "CallNode");
+        if (nr < 0 || nq < 0) { free(chained); return changed; }
+        nt_node_set_str(nt, nr, "name", rn); nt_node_set_int(nt, nr, "depth", 0);
+        nt_node_set_str(nt, nq, "name", "nil?");
+        nt_node_set_ref(nt, nq, "receiver", nr);
+        pred = nq;
+      }
+      for (int k = 0; !safe_nav && k < ndef; k++) {
         int pr = nt_new_node(nt, "LocalVariableReadNode");
         int cr = nt_new_node(nt, "ConstantReadNode");
         int ia = nt_new_node(nt, "CallNode");
@@ -2689,14 +2758,61 @@ int desugar_builtin_enum_calls(Compiler *c) {
           pred = orn;
         }
       }
-      /* the class's own method, on the same receiver, with the block */
-      nt_node_set_str(nt, own, "name", name);
-      nt_node_set_ref(nt, own, "receiver", ownr);
-      if (args >= 0) nt_node_set_ref(nt, own, "arguments", args);
-      if (blk >= 0) nt_node_set_ref(nt, own, "block", blk);
-      nt_node_set_arr(nt, ts, "body", &own, 1);
+      /* the class's own method, on the same receiver, with the block; under
+         a safe navigation the nil arm answers nil and the class arm, when
+         there is one, sits inside it */
+      if (safe_nav && ndef == 0) {
+        nt_node_set_type(nt, own, "NilNode");
+        nt_node_set_arr(nt, ts, "body", &own, 1);
+      }
+      else if (safe_nav) {
+        int nil_n = nt_new_node(nt, "NilNode");
+        int ifc = nt_new_node(nt, "IfNode");
+        int cts = nt_new_node(nt, "StatementsNode");
+        int ces = nt_new_node(nt, "StatementsNode");
+        int celse = nt_new_node(nt, "ElseNode");
+        if (nil_n < 0 || ifc < 0 || cts < 0 || ces < 0 || celse < 0) { free(chained); return changed; }
+        /* pred so far is `__r.nil?`; the class test becomes the inner if */
+        int cpred = -1;
+        for (int k = 0; k < ndef; k++) {
+          int pr2 = nt_new_node(nt, "LocalVariableReadNode");
+          int cr2 = nt_new_node(nt, "ConstantReadNode");
+          int ia2 = nt_new_node(nt, "CallNode");
+          int iaa2 = nt_new_node(nt, "ArgumentsNode");
+          if (pr2 < 0 || cr2 < 0 || ia2 < 0 || iaa2 < 0) { free(chained); return changed; }
+          nt_node_set_str(nt, pr2, "name", rn); nt_node_set_int(nt, pr2, "depth", 0);
+          nt_node_set_str(nt, cr2, "name", c->classes[defcls[k]].name);
+          nt_node_set_arr(nt, iaa2, "arguments", &cr2, 1);
+          nt_node_set_str(nt, ia2, "name", "is_a?");
+          nt_node_set_ref(nt, ia2, "receiver", pr2);
+          nt_node_set_ref(nt, ia2, "arguments", iaa2);
+          if (cpred < 0) cpred = ia2;
+          else { int o2 = nt_new_node(nt, "OrNode"); if (o2 < 0) { free(chained); return changed; }
+                 nt_node_set_ref(nt, o2, "left", cpred); nt_node_set_ref(nt, o2, "right", ia2); cpred = o2; }
+        }
+        nt_node_set_str(nt, own, "name", name);
+        nt_node_set_ref(nt, own, "receiver", ownr);
+        if (args >= 0) nt_node_set_ref(nt, own, "arguments", args);
+        if (blk >= 0) nt_node_set_ref(nt, own, "block", blk);
+        nt_node_set_arr(nt, cts, "body", &own, 1);
+        nt_node_set_arr(nt, ces, "body", &gen, 1);
+        nt_node_set_ref(nt, celse, "statements", ces);
+        nt_node_set_ref(nt, ifc, "predicate", cpred);
+        nt_node_set_ref(nt, ifc, "statements", cts);
+        nt_node_set_ref(nt, ifc, "subsequent", celse);
+        /* outer: nil? ? nil : (class ? own : generic) */
+        nt_node_set_arr(nt, ts, "body", &nil_n, 1);
+        nt_node_set_arr(nt, es, "body", &ifc, 1);
+      }
+      else {
+        nt_node_set_str(nt, own, "name", name);
+        nt_node_set_ref(nt, own, "receiver", ownr);
+        if (args >= 0) nt_node_set_ref(nt, own, "arguments", args);
+        if (blk >= 0) nt_node_set_ref(nt, own, "block", blk);
+        nt_node_set_arr(nt, ts, "body", &own, 1);
+      }
       /* the builtin's copy, with a copy of the block */
-      nt_node_set_arr(nt, es, "body", &gen, 1);
+      if (!(safe_nav && ndef > 0)) nt_node_set_arr(nt, es, "body", &gen, 1);
       nt_node_set_ref(nt, eln, "statements", es);
       nt_node_set_ref(nt, ifn, "predicate", pred);
       nt_node_set_ref(nt, ifn, "statements", ts);
@@ -2705,6 +2821,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
       nt_node_set_arr(nt, body, "body", stmts, 2);
       nt_node_set_type(nt, id, "ParenthesesNode");
       nt_node_set_ref(nt, id, "body", body);
+      if (safe_nav) nt_node_set_str(nt, id, "call_operator", ".");
       nt_node_set_ref(nt, id, "receiver", -1);
       nt_node_set_ref(nt, id, "arguments", -1);
       nt_node_set_ref(nt, id, "block", -1);

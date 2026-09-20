@@ -1546,9 +1546,9 @@ const char *poly_enum_op_for(const char *name) {
     {"find_all","SP_PENUM_SELECT"}, {"reject","SP_PENUM_REJECT"},
     {"find","SP_PENUM_FIND"}, {"detect","SP_PENUM_FIND"},
     {"find_index","SP_PENUM_FIND_INDEX"},
-    {"group_by","SP_PENUM_GROUP_BY"}, {"sort_by","SP_PENUM_SORT_BY"},
+    {"sort_by","SP_PENUM_SORT_BY"},
     {"min_by","SP_PENUM_MIN_BY"}, {"max_by","SP_PENUM_MAX_BY"},
-    {"partition","SP_PENUM_PARTITION"}, {"count","SP_PENUM_COUNT"},
+    {"count","SP_PENUM_COUNT"},
     {"sum","SP_PENUM_SUM"}, {"any?","SP_PENUM_ANY"}, {"all?","SP_PENUM_ALL"},
     {"none?","SP_PENUM_NONE"}, {"take_while","SP_PENUM_TAKE_WHILE"},
     {"drop_while","SP_PENUM_DROP_WHILE"}, {NULL,NULL}

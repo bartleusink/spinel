@@ -30,4 +30,25 @@ module Enumerable
       map { |x| [x, memo] }.each
     end
   end
+
+  def partition
+    if block_given?
+      yes = []
+      no = []
+      each { |x| (yield(x) ? yes : no) << x }
+      [yes, no]
+    else
+      each
+    end
+  end
+
+  def group_by
+    if block_given?
+      groups = {}
+      each { |x| (groups[yield(x)] ||= []) << x }
+      groups
+    else
+      each
+    end
+  end
 end

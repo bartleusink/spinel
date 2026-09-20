@@ -1868,10 +1868,28 @@ void emit_expr(Compiler *c, int id, Buf *b) {
          boxing helper instead, which asks for the poly form. */
       { /* the node's OWN type is what this expression position wants -- the
            inline's return slot is only the right answer when the yield IS the
-           tail (a yield nested in a literal wants the element type, #3688) */
+           tail (a yield nested in a literal wants the element type, #3688).
+           A yield the analyzer typed boxed that is NOT the tail keeps the
+           boxed answer: unboxing it to the return slot read the key of
+           `h[yield(x)] ||= []` as the hash the method returns. */
         TyKind _ynt = comp_ntype(c, id);
+        int _ytail = 1;
+        if (_ynt == TY_POLY && !g_pf_emitting) {
+          Scope *_ys = comp_scope_of(c, id);
+          int _last = _ys ? scope_body_last(c, (int)(_ys - c->scopes)) : -1;
+          if (_last >= 0 && _last != id) {
+            /* the tail may be an `if block_given?` whose block arm ends here */
+            int _tl = -1;
+            if (nt_kind(nt, _last) == NK_IfNode) {
+              int _ts = nt_ref(nt, _last, "statements");
+              int _tn = 0; const int *_tb = _ts >= 0 ? nt_arr(nt, _ts, "body", &_tn) : NULL;
+              if (_tn > 0) _tl = _tb[_tn - 1];
+            }
+            if (_tl != id) _ytail = 0;
+          }
+        }
         emit_yield_proc_call(c, nt_ref(nt, id, "arguments"),
-                             (g_pf_emitting || (_ynt != TY_UNKNOWN && _ynt != TY_POLY))
+                             (g_pf_emitting || (_ynt != TY_UNKNOWN && _ynt != TY_POLY) || (_ynt == TY_POLY && !_ytail))
                                ? _ynt : g_yield_slot_ty,
                              b, 0, 1); }
       return;

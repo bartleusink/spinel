@@ -499,6 +499,8 @@ int g_yblk_celled = 0;
    restores it around spliced CALLER code (whose yields do belong to the
    lowered method) -- the same discipline as g_yield_self_fallback. */
 int g_yield_lowered_fallback = 0;
+const char *g_yield_proc_ref_fallback = NULL;
+TyKind g_yield_slot_ty_fallback = TY_UNKNOWN;
 const char *g_yield_lowered_blk_fallback = NULL;
 /* When a yielding method is inlined and its block is a forwarded REAL proc
    (the caller nil-checks its &block, so the block can't be an inlined literal),

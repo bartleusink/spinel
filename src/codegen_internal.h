@@ -261,6 +261,10 @@ extern int g_ret_seeded;
 extern const char *g_lowered_blk_name;
 extern int g_yblk_celled;
 extern int g_yield_lowered_fallback;
+/* the enclosing inline's forwarded proc block (g_yield_proc_ref) and its
+   slot type, parked for the spliced caller block the same way */
+extern const char *g_yield_proc_ref_fallback;
+extern TyKind g_yield_slot_ty_fallback;
 extern const char *g_yield_lowered_blk_fallback;
 extern const char *g_yield_proc_ref;
 extern TyKind g_yield_slot_ty;
@@ -757,7 +761,6 @@ int emit_sortby_expr(Compiler *c, int id, Buf *b);
 int emit_sort_cmp_expr(Compiler *c, int id, Buf *b);
 void emit_block_param_assign(Compiler *c, int scope_id, const char *nm, int tidx, TyKind et, Buf *b);
 int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b);
-int emit_partition_expr(Compiler *c, int id, Buf *b);
 int emit_lazy_class_expr(Compiler *c, int id, Buf *b);
 int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b);
 int lazy_alias_write_suppressible(Compiler *c, int write);  /* lazy-alias write whose uses all force it */
@@ -820,7 +823,6 @@ void emit_rest_from_splat_and_argv(int tmp, TyKind at, int from_idx, Compiler *c
 int is_descendant(Compiler *c, int k, int anc);
 int dispatch_impl_count(Compiler *c, int cid, const char *name);
 void emit_dispatch(Compiler *c, int cid, const char *name, const char *selfptr, int argsNode, int blk_node, Buf *b);
-int emit_group_by_expr(Compiler *c, int id, Buf *b);
 int emit_tap_then_expr(Compiler *c, int id, Buf *b);
 int recv_is_const(const NodeTable *nt, int recv, const char *name);
 int sp_is_fiber_storage_recv(const NodeTable *nt, int recv);

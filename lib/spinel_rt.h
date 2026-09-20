@@ -12045,9 +12045,9 @@ static sp_float sp_poly_Float_ex(sp_RbVal v, int raise) {
    second argument (each_with_object, inject) is not dispatched this way. */
 enum {
   SP_PENUM_EACH, SP_PENUM_MAP, SP_PENUM_SELECT, SP_PENUM_REJECT,
-  SP_PENUM_FIND, SP_PENUM_GROUP_BY, SP_PENUM_SORT_BY, SP_PENUM_MIN_BY,
+  SP_PENUM_FIND, SP_PENUM_SORT_BY, SP_PENUM_MIN_BY,
   SP_PENUM_MAX_BY, SP_PENUM_FLAT_MAP, SP_PENUM_COUNT, SP_PENUM_SUM,
-  SP_PENUM_ANY, SP_PENUM_ALL, SP_PENUM_NONE, SP_PENUM_PARTITION,
+  SP_PENUM_ANY, SP_PENUM_ALL, SP_PENUM_NONE,
   SP_PENUM_FIND_INDEX, SP_PENUM_TAKE_WHILE, SP_PENUM_DROP_WHILE,
   SP_PENUM_EACH_WITH_INDEX, SP_PENUM_FILTER_MAP
 };
@@ -12152,16 +12152,6 @@ static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
       }
       return sp_box_poly_array(out);
     }
-    case SP_PENUM_PARTITION: {
-      sp_PolyArray *yes = sp_PolyArray_new(); SP_GC_ROOT(yes);
-      sp_PolyArray *no = sp_PolyArray_new(); SP_GC_ROOT(no);
-      for (sp_int i = 0; i < n; i++)
-        sp_PolyArray_push(sp_poly_truthy(sp_penum_call1(blk, src->data[i])) ? yes : no, src->data[i]);
-      sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
-      sp_PolyArray_push(out, sp_box_poly_array(yes));
-      sp_PolyArray_push(out, sp_box_poly_array(no));
-      return sp_box_poly_array(out);
-    }
     case SP_PENUM_FIND:
       for (sp_int i = 0; i < n; i++)
         if (sp_poly_truthy(sp_penum_call1(blk, src->data[i]))) return src->data[i];
@@ -12188,18 +12178,6 @@ static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
       sp_RbVal acc = sp_box_int(0);
       for (sp_int i = 0; i < n; i++) acc = sp_poly_add(acc, sp_penum_call1(blk, src->data[i]));
       return acc;
-    }
-    case SP_PENUM_GROUP_BY: {
-      sp_PolyPolyHash *h = sp_PolyPolyHash_new(); SP_GC_ROOT(h);
-      for (sp_int i = 0; i < n; i++) {
-        sp_RbVal k = sp_penum_call1(blk, src->data[i]);
-        sp_RbVal cur = sp_PolyPolyHash_get(h, k);
-        sp_PolyArray *bucket;
-        if (cur.tag == SP_TAG_OBJ && cur.cls_id == SP_BUILTIN_POLY_ARRAY) bucket = (sp_PolyArray *)cur.v.p;
-        else { bucket = sp_PolyArray_new(); sp_PolyPolyHash_set(h, k, sp_box_poly_array(bucket)); }
-        sp_PolyArray_push(bucket, src->data[i]);
-      }
-      return sp_box_obj(h, SP_BUILTIN_POLY_POLY_HASH);
     }
     case SP_PENUM_MIN_BY: case SP_PENUM_MAX_BY: {
       sp_RbVal best = sp_box_nil(), bestk = sp_box_nil();
