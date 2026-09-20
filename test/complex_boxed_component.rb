@@ -23,3 +23,17 @@ p Complex(f, x).real.class
 p Complex(f, 4)
 p Complex(3, f)
 
+# Ruby evaluates the real operand before the imaginary one. Holding only the
+# boxed operand in a temp put the imaginary operand's side effects ahead of
+# the real one's wherever the surrounding order rewrite could not bind them.
+$log = []
+def re_side; $log << "re"; 3; end
+def im_side; $log << "im"; [2.0, nil][0]; end
+p Complex(re_side, im_side)
+p $log
+$log = []
+def re_boxed; $log << "re"; [3, nil][0]; end
+def im_plain; $log << "im"; 4; end
+p Complex(re_boxed, im_plain)
+p $log
+
