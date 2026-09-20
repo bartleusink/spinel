@@ -1013,6 +1013,27 @@ int desugar_binding_lvget(Compiler *c) {
    earlier (spinel_parse.c / desugar_implicit_send); this covers a name known only
    at runtime but drawn from the program's closed set of symbol literals. The arm
    node ids are stashed on the send under "dyn_send_arms" for codegen. */
+/* A literal that could be a method name: an identifier with an optional
+   `?`/`!`/`=` tail, or one of the operator methods. */
+static int dsend_method_name_shaped(const char *v) {
+  static const char *const ops[] = { "+", "-", "*", "/", "%", "**", "==", "!=", "<", "<=", ">", ">=",
+    "<=>", "===", "=~", "!~", "<<", ">>", "&", "|", "^", "~", "!", "[]", "[]=", "+@", "-@", "call", NULL };
+  for (int k = 0; ops[k]; k++) if (sp_streq(v, ops[k])) return 1;
+  unsigned char ch = (unsigned char)v[0];
+  if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || ch >= 0x80)) return 0;
+  size_t i = 1;
+  for (; v[i]; i++) {
+    ch = (unsigned char)v[i];
+    if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch >= 0x80) continue;
+    break;
+  }
+  /* the tail: `?` or `!`, then `=` (a Struct member `verbose?` has the
+     writer `verbose?=`), each optional */
+  if (v[i] == '?' || v[i] == '!') i++;
+  if (v[i] == '=') i++;
+  return v[i] == 0;
+}
+
 int desugar_dynamic_send(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count;
@@ -1040,14 +1061,16 @@ int desugar_dynamic_send(Compiler *c) {
     if (!any) return 0;
   }
   /* collect distinct symbol/string-literal names = candidate method names (send
-     accepts either; a string name interns to the same symbol at the call). */
+     accepts either; a string name interns to the same symbol at the call).
+     Only names shaped like a method name: a log message or a label with a
+     space in it is not one. */
   char **cand = NULL; int ncand = 0, candcap = 0;
   for (int id = 0; id < n0; id++) {
     const char *ty = nt_type(nt, id);
     const char *v = NULL;
     if (ty && sp_streq(ty, "SymbolNode")) v = nt_str(nt, id, "value");
     else if (ty && sp_streq(ty, "StringNode")) v = nt_str(nt, id, "content");
-    if (!v || !*v) continue;
+    if (!v || !*v || !dsend_method_name_shaped(v)) continue;
     int skip = 0;
     for (int k = 0; sends[k]; k++) if (sp_streq(v, sends[k])) { skip = 1; break; }  /* avoid send-of-send recursion */
     for (int k = 0; !skip && k < ncand; k++) if (sp_streq(cand[k], v)) skip = 1;
@@ -1055,7 +1078,40 @@ int desugar_dynamic_send(Compiler *c) {
     if (ncand == candcap) { candcap = candcap ? candcap * 2 : 16; cand = (char **)realloc(cand, sizeof(char *) * candcap); }
     cand[ncand++] = strdup(v);
   }
-  if (ncand == 0 || ncand > 128) { for (int k = 0; k < ncand; k++) free(cand[k]); free(cand); return 0; }
+  if (ncand == 0) { free(cand); return 0; }
+  /* The arms are one synthesized call per candidate per send, each typed by
+     the fixpoint, so the set is capped. The cap used to be a hard 128 over
+     EVERY literal in the program, and a program with 129 unrelated strings
+     lost the lowering entirely, with the refusal blaming a runtime name
+     (#4649). Rank the candidates instead -- a name the program defines, then
+     one it calls somewhere, then the rest -- and cut the tail, so the names
+     that can be meant survive whatever else the program spells. */
+  if (ncand > 1) {
+    int *score = (int *)calloc((size_t)ncand, sizeof(int));
+    for (int k = 0; k < ncand; k++) {
+      for (int s = 0; s < c->nscopes && score[k] < 2; s++)
+        if (c->scopes[s].name && sp_streq(c->scopes[s].name, cand[k])) score[k] = 2;
+      for (int ci = 0; ci < c->nclasses && score[k] < 2; ci++) {
+        ClassInfo *cl = &c->classes[ci];
+        if (comp_is_reader(cl, cand[k]) || comp_is_writer(cl, cand[k])) score[k] = 2;
+      }
+      if (score[k] < 2 && !((cand[k][0] >= 'a' && cand[k][0] <= 'z') || cand[k][0] == '_')) score[k] = 1;   /* an operator */
+    }
+    for (int id = 0; id < n0; id++) {
+      if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm) continue;
+      for (int k = 0; k < ncand; k++) if (score[k] < 1 && sp_streq(cand[k], nm)) score[k] = 1;
+    }
+    /* stable sort by score, descending */
+    for (int i = 1; i < ncand; i++) {
+      char *cv = cand[i]; int cs = score[i]; int j = i - 1;
+      while (j >= 0 && score[j] < cs) { cand[j + 1] = cand[j]; score[j + 1] = score[j]; j--; }
+      cand[j + 1] = cv; score[j + 1] = cs;
+    }
+    free(score);
+  }
+  if (ncand > 256) { for (int k = 256; k < ncand; k++) free(cand[k]); ncand = 256; }
   for (int id = 0; id < n0; id++) {
     if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
     const char *nm = nt_str(nt, id, "name");
@@ -1075,7 +1131,7 @@ int desugar_dynamic_send(Compiler *c) {
     if (nrest > 64) continue;
     int rest[64]; for (int k = 0; k < nrest; k++) rest[k] = argv[k + 1];  /* copy before realloc */
     int base = nt->count;
-    int arms[128]; int narm = 0;
+    int arms[256]; int narm = 0;
     for (int k = 0; k < ncand; k++) {
       int na = nt_new_node(nt, "ArgumentsNode"); if (na < 0) break;
       if (nrest) nt_node_set_arr(nt, na, "arguments", rest, nrest);
