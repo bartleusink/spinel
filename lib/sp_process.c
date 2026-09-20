@@ -390,6 +390,10 @@ sp_PolyArray *sp_process_waitpid2(sp_int pid) {
     }
     sp_raise_cls("SystemCallError", sp_errf_errno("waitpid failed", errno));
   }
+  /* $? follows the child this wait reaped, as it does after Kernel#system
+     and a backtick; before this a waitpid2 left $? at whatever the last
+     system call or backtick stored. */
+  sp_last_status = status;
   sp_PolyArray *pa = sp_PolyArray_new(); SP_GC_ROOT(pa);   /* the status object below is an allocation */
   sp_PolyArray_push(pa, sp_box_int((sp_int)r));
   /* Second element is a Process::Status instance wrapping (pid, status),
