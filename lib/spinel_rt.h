@@ -4746,7 +4746,7 @@ static sp_RbVal sp_poly_arr_range(sp_RbVal recv, sp_Range r) {
    no-op (the call sites that reach a nil poly are dead-guarded in Ruby). */
 /* sp_poly_replace: moved to lib/sp_cold.c */
 sp_RbVal sp_poly_replace(sp_RbVal recv, sp_RbVal src);
-static sp_PolyArray *sp_PolyArray_slice_bang(sp_PolyArray *a, sp_int from, sp_int n) {sp_gc_wb((void*)a); 
+static sp_PolyArray *sp_PolyArray_slice_bang(sp_PolyArray *a, sp_int from, sp_int n) {SP_GC_ROOT(a); sp_gc_wb((void*)a);
   if (!a) return sp_PolyArray_new();
   if (a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return sp_PolyArray_new(); }
   /* a start past the end is nil, not an empty slice (#3607) */
