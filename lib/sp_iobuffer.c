@@ -393,6 +393,13 @@ sp_int sp_IOBuffer_set_i(sp_IOBuffer *b, sp_int ty, sp_int off, sp_int v) {
 sp_int sp_IOBuffer_set_f(sp_IOBuffer *b, sp_int ty, sp_int off, double v) {
   return iob_set_core(b, ty, off, sp_box_float(v));
 }
+/* The typed lowering with a BOXED value: the generic path minus the symbol
+   decode. A boxed value cannot go through set_i -- an integer type takes a
+   Float (truncating, as CRuby does) and u64/s64 take a Bignum -- so it
+   reaches iob_set_core unexamined, exactly as set_value leaves it. */
+sp_int sp_IOBuffer_set_v(sp_IOBuffer *b, sp_int ty, sp_int off, sp_RbVal v) {
+  return iob_set_core(b, ty, off, v);
+}
 
 /* ---- strings ---- */
 

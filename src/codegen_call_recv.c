@@ -10024,14 +10024,18 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
     if (c->classes[cid].is_native_class) {
       /* IO::Buffer fast path: get_value/set_value with a LITERAL type symbol
          lowers to the typed accessor (sp_IOBuffer_get_i and friends) --
-         no symbol decode, no boxing on the argument or the result. The
+         no symbol decode, and no boxing the typed slot can hold. The
          wasm-memory / binary-protocol access pattern this class exists for
-         is exactly this shape, in a hot loop. Conditions mirror the
-         analyzer's special-case (analyze_infer_recv.c); any declined shape
-         falls through to the generic boxed binding below. */
+         is exactly this shape, in a hot loop. The OFFSET need not be
+         statically int: emit_int_expr routes a boxed one through
+         sp_poly_arg_int_chk, and under --int-overflow=promote every int
+         local is boxed, so requiring it lost the lowering everywhere.
+         Conditions mirror the analyzer's special-case
+         (analyze_infer_recv.c); any declined shape falls through to the
+         generic boxed binding below. */
       if (c->classes[cid].c_struct && sp_streq(c->classes[cid].c_struct, "sp_IOBuffer") &&
           argc >= 2 && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "SymbolNode") &&
-          comp_ntype(c, argv[1]) == TY_INT) {
+          (comp_ntype(c, argv[1]) == TY_INT || comp_ntype(c, argv[1]) == TY_POLY)) {
         int it = comp_iob_sym_type(nt_str(nt, argv[0], "value"));
         if (it >= 0 && sp_streq(name, "get_value") && argc == 2) {
           if (comp_iob_ty_is_64(it)) {
@@ -10059,6 +10063,20 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
             buf_puts(b, ", ");
             if (f) emit_float_expr(c, argv[2], b);
             else emit_int_expr(c, argv[2], b);
+            buf_puts(b, ")");
+            return 1;
+          }
+          /* A boxed value keeps the lowering but not the typed setter: an
+             integer type takes a Float, and u64/s64 take a Bignum, neither of
+             which survives sp_int. sp_IOBuffer_set_v hands the value to the
+             same core the generic binding would, without the symbol decode. */
+          if (vt == TY_POLY) {
+            buf_puts(b, "sp_IOBuffer_set_v(");
+            emit_expr(c, recv, b);
+            buf_printf(b, ", %d, ", it);
+            emit_int_expr(c, argv[1], b);
+            buf_puts(b, ", ");
+            emit_boxed(c, argv[2], b);
             buf_puts(b, ")");
             return 1;
           }
