@@ -5608,19 +5608,39 @@ sp_Bigint *sp_bigint_xor(sp_Bigint *a, sp_Bigint *b) { return sp_bigint_bitwise(
 
 sp_Bigint *sp_bigint_shr(sp_Bigint *a, int64_t n);  /* forward decl for mutual recursion */
 
+/* Is any of the low `e` bits of |x| set? The question a floored right shift
+   has to ask: it is what separates -7 >> 1 from -6 >> 1. */
+static int mpz_low_bits_set(const mpz_t *x, int64_t e) {
+  size_t digs = (size_t)(e / DIG_SIZE), bs = (size_t)(e % DIG_SIZE);
+  size_t whole = digs < x->sz ? digs : x->sz;
+  for (size_t i = 0; i < whole; i++) if (x->p[i]) return 1;
+  if (bs && digs < x->sz && (x->p[digs] & ((((mp_limb)1) << bs) - 1))) return 1;
+  return 0;
+}
+
 sp_Bigint *sp_bigint_shl(sp_Bigint *a, int64_t n) {
   if (n < 0) return sp_bigint_shr(a, -n);
-  /* x << n == x * 2^n at arbitrary precision (the old `to_int << n` truncated
-     the bigint to 64 bits and overflowed the shift). */
-  return sp_bigint_mul(a, sp_bigint_pow(sp_bigint_new_int(2), n));
+  /* x << n == x * 2^n, but moving limbs rather than building 2^n and running
+     a general multiply over it: the old form cost a pow and an O(len^2)
+     multiply where the answer is a memmove and a bit rotate. */
+  sp_Bigint *r = sp_bigint_alloc();
+  mpz_init(sp_mpz_ctx, &r->mpz);
+  mpz_mul_2exp(sp_mpz_ctx, &r->mpz, &a->mpz, (mrb_int)n);
+  return r;
 }
 
 sp_Bigint *sp_bigint_shr(sp_Bigint *a, int64_t n) {
   if (n < 0) return sp_bigint_shl(a, -n);
-  /* x >> n == floor(x / 2^n) at arbitrary precision (the old `to_int >> n`
-     truncated the bigint to 64 bits). sp_bigint_div floors toward -inf, which
-     matches Ruby's arithmetic right shift for negative values too. */
-  return sp_bigint_div(a, sp_bigint_pow(sp_bigint_new_int(2), n));
+  /* Likewise a limb shift instead of building 2^n and dividing by it. But
+     mpz_div_2exp shifts the MAGNITUDE and keeps the sign, so it truncates
+     toward zero where Ruby's >> floors: a negative value that lost a set bit
+     is one lower (-7 >> 1 is -4, not -3). */
+  sp_Bigint *r = sp_bigint_alloc();
+  mpz_init(sp_mpz_ctx, &r->mpz);
+  mpz_div_2exp(sp_mpz_ctx, &r->mpz, &a->mpz, (mrb_int)n);
+  if (a->mpz.sn < 0 && mpz_low_bits_set(&a->mpz, n))
+    return sp_bigint_sub(r, sp_bigint_new_int(1));
+  return r;
 }
 
 sp_Bigint *sp_bigint_not(sp_Bigint *a) {
