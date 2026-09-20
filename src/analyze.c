@@ -6476,11 +6476,21 @@ static int desugar_method_block_arg(Compiler *c) {
    no definition (#3766). */
 /* `module_function` makes each method BOTH a module method and a private
    instance method of every includer. Spinel models it as the module method
-   alone -- and that is enough: such a body cannot depend on the receiver (its
-   self is the module in one spelling and the instance in the other), so the
-   one emitted function serves both. A receiverless call inside a class that
-   includes the module is therefore rewritten onto the module call the emitter
-   already serves, rather than cloning the method into the includer (#3734). */
+   alone wherever it can, and rewrites a receiverless call inside an includer
+   onto the module call the emitter already serves rather than cloning the
+   method in (#3734).
+
+   That holds only for a body which does not depend on its receiver. This
+   comment used to claim no such body can -- "its self is the module in one
+   spelling and the instance in the other" -- which is the reason the two
+   spellings differ, not a reason they agree: through the includer CRuby runs
+   the method on the INSTANCE, so `@x` is the instance's ivar, `self` is the
+   instance, and a receiverless sibling call dispatches on the instance's
+   class (#4603). A body that does any of those is cloned into the includer
+   by the include transplant (module_function_self_dependent), which gives it
+   a real entry in the includer's chain -- and the comp_method_in_chain test
+   at the top of the loop below then declines to rewrite its call. The
+   rewrite still serves every body that genuinely does not care. */
 static int desugar_module_function_call(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
