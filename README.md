@@ -559,6 +559,33 @@ anything open is fair game; the most useful entry points are
 reproducer-shaped bug reports (a 5-line Ruby that fails in Spinel but
 passes in CRuby) and codegen fixes that close one such report.
 
+For a bug report, start from `spinel diff`: it runs the same program
+under CRuby and under Spinel, folds what cannot be compared (addresses,
+paths, times, the backtrace) and says what differs, under one label:
+
+```
+$ spinel diff app.rb -- arg1 arg2
+spinel diff: exception-diff
+  program: app.rb 'arg1' 'arg2'
+  ruby:    exit 0
+  spinel:  exit 1
+  exception (ruby):   (none)
+  exception (spinel): FrozenError: can't modify frozen String: "lit"
+```
+
+The labels are `compile-error`, `link-error`, `crash`, `timeout`,
+`nondeterministic`, `exception-diff`, `output-diff` and `same`; the exit
+status is 0 for no difference, 1 for a difference, 2 when Spinel could not
+build the program, 3 when its binary crashed, 4 for the tool's own error
+(CI can read it). `--emit-issue PATH` writes the report to a file,
+`--timeout SEC` bounds each run (default 30), `--ruby PATH` picks the
+reference ruby, `--keep-tmp` leaves the C and the binary. Paste the report
+into the issue. Two cautions: the program runs twice, with the arguments
+you give, so do not point it at code you would not run; and a program
+whose output carries a per-run value (`rand`, a pid, `object_id`, a time
+not on a line of its own) reads as `nondeterministic` or as a difference,
+since Spinel's generator is not CRuby's.
+
 Workflow:
 
 - Open a focused PR. Small and contained merges faster than sweeping
@@ -583,8 +610,9 @@ Adjacent ecosystem (community-built, not part of this repo):
   tooling for debugging Spinel builds (a CRuby-vs-Spinel value bisector
   for silent miscompiles, a ruby-lsp type addon, and perf/flamegraph
   analysis). The zero-dependency tools -- `spinel-doctor` (health check),
-  `spinel-reduce` (minimal-repro reducer), and `spinel-flatten` -- now
-  ship in the box; see [`tools/`](tools/).
+  `spinel-reduce` (minimal-repro reducer), `spinel-flatten` and
+  `spinel diff` (CRuby-vs-Spinel comparison) -- now ship in the box; see
+  [`tools/`](tools/).
 - [spin packages](https://github.com/OriPekelman/spinelgems): a survey of
   which RubyGems compile and run under Spinel, plus bundler-spinel, a
   Bundler plugin that vendors and compatibility-gates `Gemfile`

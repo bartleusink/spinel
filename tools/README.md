@@ -10,6 +10,7 @@ dependency is `cc` -- the same as the compiler. `make` builds them
 spinel-doctor app.rb
 spinel-reduce app.rb
 spinel-flatten app.rb
+spinel diff app.rb        # = spinel-diff app.rb; the compiler dispatches it
 ```
 
 They locate the compiler at run time via, in order: `$SPINEL` (an
@@ -74,3 +75,31 @@ Drop `tools/<name>.rb` (subset Ruby, `require_relative "tool_common"`
 for the shared helpers); `make` compiles it to `build/spinel-<name>` and
 `make install` installs it. Keep it within the subset -- a tool that
 stops compiling breaks the build.
+
+## spinel diff
+
+The same program under CRuby and under Spinel, compared mechanically:
+stdout, the uncaught exception (as `Class: message`, without the
+backtrace) and the exit status, after the parts no two processes share
+are folded (`#<Foo:0x...>` addresses, the program's and the scratch
+directory, wall-clock times) and, under a ruby older than 3.4, the
+spellings Spinel writes the 3.4 way (`{"a" => 1}`, `undefined method 'x'
+for nil`). A difference is confirmed against a second Spinel run before
+it is reported: a program whose output changes per run is
+`nondeterministic`, not a bug in either runtime. The rules live in
+`diff_normalize.rb` and the labels in `diff_classify.rb`, each with a
+corpus test (`test/tools_diff_*.rb`); the end-to-end leg is
+`make diff-test`.
+
+```
+spinel diff FILE.rb [--no-minimize] [--emit-issue PATH] [--timeout SEC]
+                    [--ruby PATH] [--keep-tmp] [-- ARGS...]
+```
+
+Exit status: 0 same, 1 a difference (`output-diff`, `exception-diff`,
+`timeout`, `nondeterministic`), 2 `compile-error` / `link-error`,
+3 `crash`, 4 the tool's own error. This is a contract for CI.
+`--no-minimize` is accepted ahead of the minimizer, which does not exist
+yet. Not normalized on purpose: Hash order (the language defines it),
+`object_id` values (indistinguishable from data) and `rand` (Spinel's
+generator is not CRuby's).

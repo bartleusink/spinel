@@ -306,6 +306,22 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+  /* `spinel diff FILE.rb ...`: the companion tool beside the compiler runs
+     it (tools/diff.rb, built to bin/spinel-diff); the arguments pass through
+     untouched, its exit status is the answer. */
+  if (argc >= 2 && sp_streq(argv[1], "diff")) {
+    char dir[4096];
+    exe_dir(argv[0], dir, sizeof dir);
+    char tool[4200];
+    snprintf(tool, sizeof tool, "%s/spinel-diff", dir);
+    char self[4200];
+    snprintf(self, sizeof self, "%s/spinel", dir);
+    setenv("SPINEL", self, 0);
+    argv[1] = tool;
+    execv(tool, argv + 1);
+    fprintf(stderr, "spinel: cannot run %s (build it with `make tools`)\n", tool);
+    return 4;
+  }
   const char *source = NULL;
   const char *output = NULL;
   const char *link_extra[64]; int n_link_extra = 0;

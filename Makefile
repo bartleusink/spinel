@@ -595,7 +595,7 @@ regexp: $(SP_RT_LIB) $(SP_RT_MT_LIB)
 # cc -- the same as the compiler. Each tools/<name>.rb becomes bin/spinel-<name>,
 # beside the compiler, so the `spinel-<name>` command is found next to `spinel`.
 # A tool that no longer fits the subset breaks the build, which keeps them honest.
-TOOL_NAMES = doctor reduce flatten
+TOOL_NAMES = doctor reduce flatten diff
 TOOL_BINS  = $(addprefix bin/spinel-,$(TOOL_NAMES))
 
 tools: $(TOOL_BINS) bin/spin
@@ -2176,6 +2176,29 @@ gate-props:
 	+@$(MAKE) --no-print-directory infer-test
 	+@$(MAKE) --no-print-directory collect-errors-test
 	+@$(MAKE) --no-print-directory spin-check
+	+@$(MAKE) --no-print-directory diff-test
+
+# `spinel diff`, end to end, on the three answers the tool has to give: a
+# program both runtimes agree on (exit 0), a documented divergence (exit 1,
+# exception-diff) and a refusal (exit 2, compile-error). The normalization
+# and the classifier have their own corpus tests (test/tools_diff_*.rb);
+# this leg is the plumbing: the dispatch from `spinel diff`, the two runs,
+# the report, and the scratch cleanup.
+diff-test: $(SPINEL) bin/spinel-diff
+	@ok=1; \
+	if ! command -v ruby >/dev/null 2>&1; then echo "diff-test: skipped (needs ruby)"; exit 0; fi; \
+	out=$$($(SPINEL) diff test/fixtures/diff/same.rb); rc=$$?; \
+	[ $$rc -eq 0 ] && echo "$$out" | grep -q '^spinel diff: same$$' || { echo "diff-test: FAIL (same.rb: rc=$$rc)"; echo "$$out"; ok=0; }; \
+	out=$$($(SPINEL) diff test/fixtures/diff/frozen_literal.rb); rc=$$?; \
+	[ $$rc -eq 1 ] && echo "$$out" | grep -q '^spinel diff: exception-diff$$' && echo "$$out" | grep -q 'FrozenError' || { echo "diff-test: FAIL (frozen_literal.rb: rc=$$rc)"; echo "$$out"; ok=0; }; \
+	out=$$($(SPINEL) diff test/fixtures/diff/refused.rb); rc=$$?; \
+	[ $$rc -eq 2 ] && echo "$$out" | grep -q '^spinel diff: compile-error$$' || { echo "diff-test: FAIL (refused.rb: rc=$$rc)"; echo "$$out"; ok=0; }; \
+	$(SPINEL) diff --emit-issue "$${TMPDIR:-/tmp}/spinel-diff-test.md" test/fixtures/diff/frozen_literal.rb >/dev/null; \
+	grep -q '^spinel diff: exception-diff$$' "$${TMPDIR:-/tmp}/spinel-diff-test.md" || { echo "diff-test: FAIL (--emit-issue wrote no report)"; ok=0; }; \
+	rm -f "$${TMPDIR:-/tmp}/spinel-diff-test.md"; \
+	ls "$${TMPDIR:-/tmp}"/spinel-diff-*.rb.* >/dev/null 2>&1 && { echo "diff-test: FAIL (scratch files left behind)"; ls "$${TMPDIR:-/tmp}"/spinel-diff-*; ok=0; }; \
+	$(SPINEL) diff /nonexistent.rb >/dev/null 2>&1; [ $$? -eq 4 ] || { echo "diff-test: FAIL (a missing file is the tool's own error, exit 4)"; ok=0; }; \
+	[ $$ok -eq 1 ] && echo "diff-test: pass" || exit 1
 gate-bench:
 	+@$(MAKE) --no-print-directory bench
 gate-optcarrot:
