@@ -799,7 +799,8 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       /* Evaluate the receiver once into a temp: it feeds both the frozen-mutability
          check and the concatenation, and a chained `s << a << b` receiver has a
          side effect that must not run twice. */
-      buf_printf(b, "({ const char *_t%d = ", trc); emit_expr(c, recv, b); buf_puts(b, "; ");
+      /* rooted across the arguments, which may allocate */
+      buf_printf(b, "({ const char *_t%d = ", trc); emit_recv_rooted(c, recv, trc, "SP_GC_ROOT_STR", b);
       buf_printf(b, "const char *_t%d = ", tn2);
       if (sp_streq(name, "prepend")) {
         /* args first (in order), then the receiver */
@@ -828,8 +829,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       int lvw = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
                          sp_streq(rvt2, "InstanceVariableReadNode"));
       int to = ++g_tmp, ti2 = ++g_tmp, tn2 = ++g_tmp;
-      buf_printf(b, "({ const char *_t%d = ", to); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
+      /* rooted across the index and the text, which may allocate */
+      buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);
+      buf_printf(b, "sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
       buf_printf(b, " sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
       buf_printf(b, "; if (_t%d < 0) _t%d += (sp_int)sp_str_length(_t%d) + 1;", ti2, ti2, to);
       buf_printf(b, " const char *_t%d = sp_str_splice_at(_t%d, _t%d, 0, ", tn2, to, ti2);
@@ -919,8 +921,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       /* slice!(i) / slice!(range): the removed part (or nil), reassigning an
          lvalue receiver; a literal receiver just yields the removed part. */
       int to = ++g_tmp, tb2 = ++g_tmp, tl2 = ++g_tmp, tn2 = ++g_tmp, tr2 = ++g_tmp;
-      buf_printf(b, "({ const char *_t%d = ", to); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
+      /* rooted across the index or range, which may allocate */
+      buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);
+      buf_printf(b, "sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
       buf_printf(b, " sp_int _t%d = (sp_int)sp_str_length(_t%d); sp_int _t%d, _t%d;",
                  tn2, to, tb2, tl2);
       if (comp_ntype(c, argv[0]) == TY_RANGE) {
@@ -1699,8 +1702,10 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       const char *an = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
       if (an) {
         int tr = ++g_tmp, to = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", an, tr); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_%sArray *_t%d = sp_%sArray_new(); ", an, to, an);
+        /* the receiver and the result are rooted across the indices, as
+           fetch_values roots its result */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", an, tr); emit_recv_rooted(c, recv, tr, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d); ", an, to, an, to);
         for (int a = 0; a < argc; a++) {
           TyKind at = comp_ntype(c, argv[a]);
           if (nt_type(nt, argv[a]) && sp_streq(nt_type(nt, argv[a]), "SplatNode")) {
@@ -1786,8 +1791,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       const char *an = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
       if (an) {
         int tr = ++g_tmp, to = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", an, tr); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d); ", an, to, an, to);
+        /* the receiver is rooted across the indices, as the result already is */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", an, tr); emit_recv_rooted(c, recv, tr, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d); ", an, to, an, to);
         for (int a = 0; a < argc; a++) {
           int ti = ++g_tmp;
           buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[a], b);
@@ -2665,8 +2671,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
            (slice() itself would return the empty array), and so is a start
            outside [-len, len] (start == len is the empty slice) */
         int ta = ++g_tmp, ts = ++g_tmp, tl = ++g_tmp, tn = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = ", ts); emit_int_expr(c, argv[0], b);
+        /* rooted across the start and the length, as the slice arm is */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_int _t%d = ", ts); emit_int_expr(c, argv[0], b);
         buf_printf(b, "; sp_int _t%d = ", tl); emit_int_expr(c, argv[1], b);
         buf_printf(b, "; sp_int _t%d = sp_%sArray_length(_t%d)", tn, k, ta);
         buf_printf(b, "; (_t%d < 0 || _t%d > _t%d || _t%d < -_t%d) ? (sp_%sArray *)0 : sp_%sArray_slice(_t%d, _t%d, _t%d); })",
@@ -2679,8 +2686,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
            and negative endpoints against the length, then slice -- a start
            outside [-len, len] is nil, matching Array#[]. */
         int ta = ++g_tmp, tr = ++g_tmp, tf = ++g_tmp, tl = ++g_tmp, tn = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
+        /* rooted across the range, whose bounds may allocate */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
         buf_printf(b, "; sp_int _t%d = sp_%sArray_length(_t%d);", tn, k, ta);
         buf_printf(b, " sp_int _t%d = _t%d.first == INTPTR_MIN ? 0 :"
                       " (_t%d.first < 0 ? _t%d.first + _t%d : _t%d.first);",
@@ -2930,8 +2938,9 @@ else {
         /* pop(n)/shift(n): the removed subarray, via the slice! splice
            (pop takes the tail, shift the head; n clamps to the length) */
         int t = ++g_tmp, tn2 = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = ", tn2); emit_int_expr(c, argv[0], b);
+        /* rooted across the count, as the poly arm roots its receiver */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_int _t%d = ", tn2); emit_int_expr(c, argv[0], b);
         buf_printf(b, "; if (_t%d < 0) sp_raise_cls(\"ArgumentError\", \"negative array size\");", tn2);
         buf_printf(b, " if (_t%d > _t%d->len) _t%d = _t%d->len;", tn2, t, tn2, t);
         if (sp_streq(name, "pop"))
@@ -3308,8 +3317,9 @@ else {
       }
       if (sp_streq(name, "rotate!") && argc <= 1) {
         int t = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_%sArray_rotate_bang(_t%d, ", k, t);
+        /* rooted across the count */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_%sArray_rotate_bang(_t%d, ", k, t);
         if (argc == 1) emit_int_expr(c, argv[0], b); else buf_puts(b, "1");
         buf_printf(b, "); _t%d; })", t);
         return 1;
@@ -3466,8 +3476,9 @@ else {
       if (sp_streq(name, "slice!") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
         /* slice!(range): normalize begin/length against the live length */
         int ta = ++g_tmp, tr = ++g_tmp, tf = ++g_tmp, tn = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
+        /* rooted across the range, whose bounds may allocate */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
         /* a beginless bound starts at 0 and an endless one runs to the end,
            the same sentinels Array#[] resolves (#3835) */
         buf_printf(b, "; sp_int _t%d = _t%d.first == INTPTR_MIN ? 0"
@@ -4193,8 +4204,9 @@ else {
         /* a negative length or a start outside [-len, len] is nil in CRuby
            (start == len is the empty slice) */
         int ta2 = ++g_tmp, ts2 = ++g_tmp, tl2 = ++g_tmp, tn2 = ++g_tmp;
-        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta2); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = ", ts2); emit_int_expr(c, argv[0], b);
+        /* rooted across the start and the length */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta2); emit_recv_rooted(c, recv, ta2, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_int _t%d = ", ts2); emit_int_expr(c, argv[0], b);
         buf_printf(b, "; sp_int _t%d = ", tl2); emit_int_expr(c, argv[1], b);
         buf_printf(b, "; sp_int _t%d = sp_%sArray_length(_t%d)", tn2, k, ta2);
         buf_printf(b, "; (_t%d < 0 || _t%d > _t%d || _t%d < -_t%d) ? (sp_%sArray *)0 : sp_%sArray_slice(_t%d, _t%d, _t%d); })",
@@ -4364,8 +4376,9 @@ else {
         /* a negative length is nil in CRuby (slice() would return []), and
            so is a start outside [-len, len] (start == len: empty slice) */
         int ta = ++g_tmp, ts = ++g_tmp, tl = ++g_tmp, tn = ++g_tmp;
-        buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = ", ts); emit_int_expr(c, argv[0], b);
+        /* rooted across the start and the length, as the typed arm is */
+        buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_int _t%d = ", ts); emit_int_expr(c, argv[0], b);
         buf_printf(b, "; sp_int _t%d = ", tl); emit_int_expr(c, argv[1], b);
         buf_printf(b, "; sp_int _t%d = sp_PolyArray_length(_t%d)", tn, ta);
         buf_printf(b, "; (_t%d < 0 || _t%d > _t%d || _t%d < -_t%d) ? (sp_PolyArray *)0 : sp_PolyArray_slice(_t%d, _t%d, _t%d); })",
@@ -4828,8 +4841,9 @@ else {
       }
       if (sp_streq(name, "slice!") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
         int ta = ++g_tmp, tr = ++g_tmp, tf = ++g_tmp, tn = ++g_tmp;
-        buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
+        /* rooted across the range, as the typed arm is */
+        buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
         buf_printf(b, "; sp_int _t%d = _t%d.first < 0 ? _t%d.first + (_t%d ? _t%d->len : 0) : _t%d.first;",
                    tf, tr, tr, ta, ta, tr);
         buf_printf(b, " sp_int _t%d = (_t%d.last < 0 ? _t%d.last + (_t%d ? _t%d->len : 0) : _t%d.last) - _t%d + (_t%d.excl ? 0 : 1);",
@@ -4913,8 +4927,9 @@ else {
       }
       if (sp_streq(name, "rotate!") && argc <= 1) {
         int t = ++g_tmp;
-        buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_PolyArray_rotate_bang(_t%d, ", t);
+        /* rooted across the count, as the typed arm is */
+        buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_PolyArray_rotate_bang(_t%d, ", t);
         if (argc == 1) emit_int_expr(c, argv[0], b); else buf_puts(b, "1");
         buf_printf(b, "); _t%d; })", t);
         return 1;
@@ -5470,8 +5485,9 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
         int is_fetch = sp_streq(name, "fetch_values");
         TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
         int th = ++g_tmp, tr = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        /* the table is rooted across the keys, as the result already is */
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_recv_rooted(c, recv, th, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
         for (int a = 0; a < argc; a++) {
           int tk = ++g_tmp;
           int is_splat = nt_type(nt, argv[a]) && sp_streq(nt_type(nt, argv[a]), "SplatNode");

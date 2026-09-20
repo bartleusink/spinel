@@ -2275,3 +2275,21 @@ void emit_gc_root_tmp(Compiler *c, TyKind t, int tmp, Buf *b) {
   if (comp_ty_value_obj(c, t)) return;
   buf_printf(b, t == TY_POLY ? "SP_GC_ROOT_RBVAL(_t%d);" : "SP_GC_ROOT(_t%d);", tmp);
 }
+
+/* An arm that hoists its receiver into `_tN` and then evaluates arguments
+   holds the receiver in nothing while they run, nor while the call itself
+   allocates. This renders the receiver as the initialiser of `_tN` and
+   follows it with a root on `_tN`, so the receiver is held until the arm's
+   statement expression ends. When this receiver node is in the override
+   table (g_argov_node), the operand-order rewrite or an arm that
+   re-dispatches through a temp has already declared and rooted the temp the
+   receiver renders as, in front of the call, and a second root would only
+   repeat it. */
+void emit_recv_rooted(Compiler *c, int recv, int t, const char *rootm, Buf *b) {
+  emit_expr(c, recv, b);
+  int bound = 0;
+  for (int i = 0; i < g_n_argov; i++)
+    if (g_argov_node[i] == recv) bound = 1;
+  if (bound) buf_puts(b, "; ");
+  else buf_printf(b, "; %s(_t%d); ", rootm, t);
+}
