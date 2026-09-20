@@ -2823,21 +2823,40 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
          clear for a boxed one, so `Complex([3.0, nil][0])` came out
          Integer-classed -- (3+0i), with #real answering an Integer -- while
          the same literal written plainly is (3.0+0i). Hold each component in
-         a temp, take the flag from its tag, and convert that same temp. */
+         a temp, take the flag from its tag, and convert that same temp.
+
+         Both operands are held, in source order, whether or not they are
+         boxed: Ruby evaluates the real one first, and emitting only the
+         boxed one into a temp put the imaginary operand's side effects (and
+         its exceptions) ahead of the real one's wherever the surrounding
+         order rewrite could not bind them. */
       int tre = ++g_tmp, tim = ++g_tmp;
-      buf_printf(b, "({ sp_RbVal _t%d = ", tre);
+      TyKind ret0 = comp_ntype(c, argv[0]);
+      TyKind imt0 = argc >= 2 ? comp_ntype(c, argv[1]) : TY_INT;
+      buf_puts(b, "({ ");
+      if (re_poly) buf_puts(b, "sp_RbVal ");
+      else emit_ctype(c, ret0, b), buf_puts(b, " ");
+      buf_printf(b, "_t%d = ", tre);
       if (re_poly) emit_boxed(c, argv[0], b);
-      else { buf_puts(b, "sp_box_nil()"); }
-      buf_printf(b, "; sp_RbVal _t%d = ", tim);
-      if (im_poly) emit_boxed(c, argv[1], b);
-      else { buf_puts(b, "sp_box_nil()"); }
-      buf_puts(b, "; (sp_Complex){");
+      else emit_expr(c, argv[0], b);
+      buf_puts(b, "; ");
+      if (argc >= 2) {
+        if (im_poly) buf_puts(b, "sp_RbVal ");
+        else emit_ctype(c, imt0, b), buf_puts(b, " ");
+        buf_printf(b, "_t%d = ", tim);
+        if (im_poly) emit_boxed(c, argv[1], b);
+        else emit_expr(c, argv[1], b);
+        buf_puts(b, "; ");
+      }
+      buf_puts(b, "(sp_Complex){");
       if (re_poly) buf_printf(b, "sp_poly_to_f(_t%d)", tre);
-      else { buf_puts(b, re_rat ? "sp_rational_to_f(" : "(sp_float)("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (re_rat) buf_printf(b, "sp_rational_to_f(_t%d)", tre);
+      else buf_printf(b, "(sp_float)(_t%d)", tre);
       buf_puts(b, ", ");
-      if (im_poly) buf_printf(b, "sp_poly_to_f(_t%d)", tim);
-      else if (argc >= 2) { buf_puts(b, im_rat ? "sp_rational_to_f(" : "(sp_float)("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
-      else buf_puts(b, "0");
+      if (argc < 2) buf_puts(b, "0");
+      else if (im_poly) buf_printf(b, "sp_poly_to_f(_t%d)", tim);
+      else if (im_rat) buf_printf(b, "sp_rational_to_f(_t%d)", tim);
+      else buf_printf(b, "(sp_float)(_t%d)", tim);
       buf_printf(b, ", (unsigned char)(%d", fl);
       if (re_poly) buf_printf(b, " | (_t%d.tag == SP_TAG_FLT ? 1 : 0)", tre);
       if (im_poly) buf_printf(b, " | (_t%d.tag == SP_TAG_FLT ? 2 : 0)", tim);
