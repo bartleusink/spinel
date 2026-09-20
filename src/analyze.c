@@ -15412,6 +15412,9 @@ void analyze_program(Compiler *c) {
          `sp_box_str(sp_int)` over that raw carrier and mismatch the per-call
          casts; keep it as the carrier, exactly as default/wrap mode does. */
       if (sc->ret == TY_INT && !is_spaceship && !sc->is_lowered_yield) sc->ret = TY_POLY;
+      /* the blockless answer of an `if block_given?` tail (#4659) widens
+         with the rest: its else arm is emitted on the widened locals */
+      if (sc->ret_noblock == TY_INT && !is_spaceship && !sc->is_lowered_yield) sc->ret_noblock = TY_POLY;
       for (int i = 0; i < sc->nlocals; i++) {
         /* Skip block params: they are typed by the iterated collection's
            element type (an IntArray yields int elements), and the block
