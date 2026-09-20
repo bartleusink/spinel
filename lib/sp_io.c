@@ -1211,7 +1211,11 @@ sp_int sp_File_seek(sp_File *f, sp_int off, sp_int whence) {
      take off_t rather than fseek's long, so offsets past 2GB survive even
      where long is 32-bit. */
   int w = (whence == 1) ? SEEK_CUR : (whence == 2) ? SEEK_END : SEEK_SET;
-  return (sp_int)fseeko(f->fp, (off_t)off, w);
+  /* a refused seek is the descriptor's error, not a -1 return: a negative
+     absolute offset is Errno::EINVAL in CRuby, and a caller that rescues
+     Errno read the -1 as a successful seek (#4623) */
+  if (fseeko(f->fp, (off_t)off, w) != 0) sp_file_raise_errno("seek", f->path ? f->path : "");
+  return 0;
 }
 
 sp_int sp_File_tell(sp_File *f) {
@@ -1420,13 +1424,23 @@ sp_int sp_File_fcntl(sp_File *f, sp_int cmd, sp_int arg) {SP_GC_ROOT(f);
   return (sp_int)r;
 }
 /* IO#pwrite(str, offset): write without moving the file position. */
-sp_int sp_File_pwrite(sp_File *f, const char *s, sp_int off) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
+static sp_int sp_File_pwrite_n(sp_File *f, const char *s, size_t n, sp_int off) {
   SP_IO_OPEN(f);
-  size_t n = s ? strlen(s) : 0;
   fflush(f->fp);
   ssize_t put = pwrite(fileno(f->fp), s ? s : "", n, (off_t)off);
   if (put < 0) sp_file_raise_errno("pwrite", f->path ? f->path : "");
   return (sp_int)put;
+}
+sp_int sp_File_pwrite(sp_File *f, const char *s, sp_int off) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
+  return sp_File_pwrite_n(f, s, s ? strlen(s) : 0, off);
+}
+/* Binary-safe pwrite, the pair of sp_File_write_bin: sizes the operand with
+   the header length, so an embedded NUL reaches the descriptor instead of
+   cutting the write short. Reads s[-1], so it is for CODEGEN-emitted String
+   values only -- the emitter picks it exactly where the write arm picks
+   sp_File_write_bin. */
+sp_int sp_File_pwrite_bin(sp_File *f, const char *s, sp_int off) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
+  return sp_File_pwrite_n(f, s, s ? sp_str_byte_len(s) : 0, off);
 }
 /* IO#advise(sym, offset=0, len=0): a hint, and nil either way. POSIX
    fadvise is Linux-ish; where it is absent the hint is simply dropped. */
