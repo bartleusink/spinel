@@ -3909,16 +3909,22 @@ int fiber_body_uses_self(Compiler *c, int id) {
       sp_streq(ty, "InstanceVariableOrWriteNode") || sp_streq(ty, "InstanceVariableAndWriteNode") ||
       sp_streq(ty, "SelfNode")) return 1;
   if (sp_streq(ty, "CallNode") && nt_ref(c->nt, id, "receiver") < 0) return 1;
+  /* A nested block is not skipped: its locals are its own, but its self is
+     this body's. Spliced in place it reads self here; lifted to a fiber of
+     its own (a Thread inside a Thread) its capture is filled from self
+     here. Stopping at the block left the outer fiber without self and the
+     inner's `_t->self_ptr = self` naming a variable the outer never had
+     (#4620). proc_body_uses_self has always walked through. */
   int nr = nt_num_refs(c->nt, id);
   for (int i = 0; i < nr; i++) {
     int ch = nt_ref_at(c->nt, id, i);
-    if (ch >= 0 && !is_nested_block(nt_type(c->nt, ch)) && fiber_body_uses_self(c, ch)) return 1;
+    if (ch >= 0 && fiber_body_uses_self(c, ch)) return 1;
   }
   int na = nt_num_arrs(c->nt, id);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *ids = nt_arr_at(c->nt, id, i, &n);
     for (int k = 0; k < n; k++)
-      if (ids[k] >= 0 && !is_nested_block(nt_type(c->nt, ids[k])) && fiber_body_uses_self(c, ids[k])) return 1;
+      if (ids[k] >= 0 && fiber_body_uses_self(c, ids[k])) return 1;
   }
   return 0;
 }
