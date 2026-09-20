@@ -4052,6 +4052,12 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
   sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with nil failed", cls));
 }
 
+SP_NORETURN void sp_raise_nil_float_op(int left_nil, const char *op) {SP_GC_ROOT_STR(op);
+  if (left_nil)
+    sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for nil", op));
+  sp_raise_cls("TypeError", "nil can't be coerced into Float");
+}
+
 /* `Queue#freeze` raises rather than freezing: a frozen queue could never be
    pushed to again, so Ruby refuses it outright. Names the receiver the way
    CRuby's message does, so a SizedQueue reports as one. */

@@ -209,6 +209,13 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
   if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_cmp((a) == SP_INT_NIL, op, "Integer")
 #define SP_FLOAT_NIL_CMP_CK(a, b, op) \
   if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_cmp(sp_float_is_nil(a), op, "Float")
+/* The Float twin of SP_INT_NIL_CK: a nullable Float slot's nil is a NaN
+   payload the hardware carries through every arithmetic operator, so
+   `nil + 1.0` computed a NaN that read back as nil instead of raising.
+   Emitted only for an operand the #3505 marking says can be the sentinel. */
+SP_NORETURN void sp_raise_nil_float_op(int left_nil, const char *op);
+#define SP_FLOAT_NIL_CK(a, b, op) \
+  if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_float_op(sp_float_is_nil(a), op)
 
 static inline sp_int sp_idiv(sp_int a, sp_int b) {
   SP_INT_NIL_CK(a, b, "/");

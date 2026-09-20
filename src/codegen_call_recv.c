@@ -6923,6 +6923,40 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       emit_strbuf_read_ref(c, recv, &rs);
     if (!rs.p) emit_expr(c, recv, &rs);
     const char *r = rs.p ? rs.p : "";
+    /* A Float receiver that can be its nil sentinel (a NaN payload) is nil,
+       and nil answers a Float's methods only where NilClass has the name:
+       to_s/inspect/nil?/to_i/to_f and the identity family. The rest raise
+       NoMethodError, where the payload used to ride through (`nil.nan?` was
+       true, `nil.abs` read back as nil, `nil.round` a FloatDomainError).
+       Only where the #3505 marking says the slot can hold it. */
+    Buf rfg; memset(&rfg, 0, sizeof rfg);
+    if (rt == TY_FLOAT && name && nullable_int_value(c, recv) &&
+        !(sp_streq(name, "to_s") || sp_streq(name, "inspect") || sp_streq(name, "nil?") ||
+          sp_streq(name, "to_i") || sp_streq(name, "to_f") || sp_streq(name, "==") ||
+          sp_streq(name, "!=") || sp_streq(name, "eql?") || sp_streq(name, "equal?") ||
+          sp_streq(name, "hash") || sp_streq(name, "frozen?") || sp_streq(name, "class") ||
+          sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") || sp_streq(name, "instance_of?") ||
+          sp_streq(name, "respond_to?") || sp_streq(name, "object_id") || sp_streq(name, "dup") ||
+          sp_streq(name, "clone") || sp_streq(name, "itself") || sp_streq(name, "!") ||
+          sp_streq(name, "&") || sp_streq(name, "|") || sp_streq(name, "^") ||
+          sp_streq(name, "to_a") || sp_streq(name, "to_h") || sp_streq(name, "<=>") ||
+          sp_streq(name, "<") || sp_streq(name, ">") || sp_streq(name, "<=") || sp_streq(name, ">="))) {
+      int tfr = ++g_tmp;
+      buf_printf(&rfg, "({ sp_float _t%d = (%s); if (SP_UNLIKELY(sp_float_is_nil(_t%d))) sp_nil_recv(\"%s\"); _t%d; })",
+                 tfr, r, tfr, name, tfr);
+      r = rfg.p;
+    }
+    else if (rt == TY_FLOAT && name && nullable_int_value(c, recv) &&
+             (sp_streq(name, "to_i") || sp_streq(name, "to_f")) && argc == 0) {
+      /* nil answers these itself: nil.to_i is 0, nil.to_f is 0.0 */
+      int tfr = ++g_tmp;
+      if (sp_streq(name, "to_i"))
+        buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? (sp_int)0 : sp_float_to_i_checked(_t%d); })", tfr, r, tfr, tfr);
+      else
+        buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? 0.0 : _t%d; })", tfr, r, tfr, tfr);
+      free(rs.p);
+      return 1;
+    }
     /* A String-typed receiver that resolved to a poly nil -- e.g. an
        unresolvable chain like `Rails.application.class.to_s` in a method that
        is compiled but never called -- emits sp_box_nil(); coerce it to a
@@ -8798,6 +8832,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       free(gbody.p);
     }
     free(rs.p);
+    free(rfg.p);
     if (handled) return 1;
   }
   return 0;

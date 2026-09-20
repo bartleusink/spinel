@@ -10634,17 +10634,27 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
          pair; left raw it was a C pointer in a float expression and the
          build stopped (a promoted accumulator meeting `+ 1.0`). */
       TyKind lft9 = comp_ntype(c, recv), rgt9 = comp_ntype(c, argv[0]);
-      buf_puts(b, "(");
+      /* A Float operand that can be its nil sentinel (a NaN payload the
+         hardware carries through the operator, so `nil + 1.0` read back as
+         nil) is tested first, as every int helper tests SP_INT_NIL; only
+         where the #3505 marking says the slot can hold it. */
+      int fguard = (lft9 == TY_FLOAT && cmp_operand_may_be_nil(c, recv)) ||
+                   (rgt9 == TY_FLOAT && cmp_operand_may_be_nil(c, argv[0]));
+      int tfg = fguard ? ++g_tmp : 0;
+      if (fguard) buf_printf(b, "({ sp_float _t%d = ", tfg);
+      else buf_puts(b, "(");
       if (lft9 == TY_INT) buf_puts(b, "(double)(");
       else if (lft9 == TY_BIGINT) buf_puts(b, "sp_bigint_to_double(");
       emit_scalar_operand(c, recv, "0.0", b);
       if (lft9 == TY_INT || lft9 == TY_BIGINT) buf_puts(b, ")");
-      buf_printf(b, " %s ", name);
+      if (fguard) buf_printf(b, ", _t%d_r = ", tfg);
+      else buf_printf(b, " %s ", name);
       if (rgt9 == TY_INT) buf_puts(b, "(double)(");
       else if (rgt9 == TY_BIGINT) buf_puts(b, "sp_bigint_to_double(");
       emit_scalar_operand(c, argv[0], "0.0", b);
       if (rgt9 == TY_INT || rgt9 == TY_BIGINT) buf_puts(b, ")");
-      buf_puts(b, ")");
+      if (fguard) buf_printf(b, "; SP_FLOAT_NIL_CK(_t%d, _t%d_r, \"%s\"); _t%d %s _t%d_r; })", tfg, tfg, name, tfg, name, tfg);
+      else buf_puts(b, ")");
       return 1;
     }
     /* Time + int/float, Time - int/float, Time - Time */
@@ -29394,7 +29404,16 @@ else {
          the common `-x` keeps its tight spelling (#4008). */
       Buf ub; memset(&ub, 0, sizeof ub); emit_expr(c, recv, &ub);
       const char *ut = ub.p ? ub.p : "";
-      buf_printf(b, "(%c%s%s)", name[0], ut[0] == name[0] ? " " : "", ut);
+      /* a nullable Integer or Float slot's nil has no -@: negating the Float
+         sentinel flipped its sign bit into a NaN that was no longer nil, and
+         the int sentinel is INTPTR_MIN, whose negation overflows */
+      if (name[0] == '-' && (rt == TY_FLOAT || rt == TY_INT) && cmp_operand_may_be_nil(c, recv)) {
+        int tn = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = %s; if (SP_UNLIKELY(%s(_t%d))) sp_nil_recv(\"%s\"); %c_t%d; })",
+                   rt == TY_FLOAT ? "sp_float" : "sp_int", tn, ut,
+                   rt == TY_FLOAT ? "sp_float_is_nil" : "SP_INT_NIL ==", tn, name, name[0], tn);
+      }
+      else buf_printf(b, "(%c%s%s)", name[0], ut[0] == name[0] ? " " : "", ut);
       free(ub.p); }
     return;
   }
