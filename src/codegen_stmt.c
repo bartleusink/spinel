@@ -1358,6 +1358,7 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
        String#+ raises TypeError on a non-string, so this only reaches a value
        that is a String at run time. */
     if (comp_ntype(c, v) == TY_POLY) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else if (comp_ntype(c, v) == TY_UNKNOWN) emit_unresolved_coerced(c, v, TY_STRING, b);   /* the raise token */
     else emit_expr(c, v, b);
     buf_puts(b, ");\n");
     return;
@@ -1372,6 +1373,9 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
       buf_printf(b, "%s = %s(%s, ", lval, fn, lval);
       if (isdivmod) emit_int_divisor(c, v, b);
       else if (vt == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, v, b); buf_puts(b, ")"); }
+      /* an unresolved call (`t += f.weight` with no such method) lowers to
+         the gate's raise token, an sp_RbVal; coerce it as a plain write does */
+      else if (vt == TY_UNKNOWN) emit_unresolved_coerced(c, v, TY_INT, b);
       else emit_expr(c, v, b);
       buf_puts(b, ");\n"); return;
     }
@@ -1410,6 +1414,7 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     TyKind vt = comp_ntype(c, v);
     buf_printf(b, "%s %s= ", lval, op);
     if (vt == TY_POLY) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else if (vt == TY_UNKNOWN) emit_unresolved_coerced(c, v, TY_FLOAT, b);   /* the raise token */
     else emit_expr(c, v, b);
     buf_puts(b, ";\n");
     return;
