@@ -2330,7 +2330,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (rt == TY_POLY_ARRAY && sp_streq(name, "delete_at") && argc == 1) {
-      buf_puts(b, "sp_PolyArray_delete_at("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+      /* the receiver is held across the index, which may allocate */
+      Buf rda;
+      int cda = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rda);
+      buf_printf(b, "sp_PolyArray_delete_at(%s, ", rda.p); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+      free(rda.p);
+      if (cda) buf_puts(b, "; })");
       return 1;
     }
     /* Array#delete(v) (value-based, not index-based) on TY_POLY_ARRAY --
@@ -3384,7 +3389,13 @@ else {
         return 1;
       }
       if (sp_streq(name, "delete_at") && argc == 1) {
-        buf_printf(b, "sp_%sArray_delete_at(", k); emit_expr(c, recv, b); buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        /* held across the index, as the poly arm holds it */
+        Buf rdc; char tyc[32];
+        snprintf(tyc, sizeof tyc, "sp_%sArray *", k);
+        int cdc = hold_recv_open(c, recv, 0, tyc, "SP_GC_ROOT", b, &rdc);
+        buf_printf(b, "sp_%sArray_delete_at(%s, ", k, rdc.p); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        free(rdc.p);
+        if (cdc) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "delete") && argc == 1 &&
@@ -3468,9 +3479,15 @@ else {
       }
       if (sp_streq(name, "slice!") && argc == 2) {
         /* slice!(start, len): remove and return the subarray (raises
-           FrozenError inside the runtime helper when the array is frozen) */
-        buf_printf(b, "sp_%sArray_slice_bang(", k); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
+           FrozenError inside the runtime helper when the array is frozen);
+           the receiver is held across the start and the length */
+        Buf rsb; char tys[32];
+        snprintf(tys, sizeof tys, "sp_%sArray *", k);
+        int csb = hold_recv_open(c, recv, 0, tys, "SP_GC_ROOT", b, &rsb);
+        buf_printf(b, "sp_%sArray_slice_bang(%s, ", k, rsb.p);
+        emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
+        free(rsb.p);
+        if (csb) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "slice!") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
@@ -3491,9 +3508,14 @@ else {
         return 1;
       }
       if (sp_streq(name, "slice!") && argc == 1) {
-        /* slice!(i): remove and return the element (nil sentinel on miss) */
-        buf_printf(b, "sp_%sArray_delete_at(", k); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        /* slice!(i): remove and return the element (nil sentinel on miss);
+           the receiver is held across the index */
+        Buf rsi; char tyi[32];
+        snprintf(tyi, sizeof tyi, "sp_%sArray *", k);
+        int csi = hold_recv_open(c, recv, 0, tyi, "SP_GC_ROOT", b, &rsi);
+        buf_printf(b, "sp_%sArray_delete_at(%s, ", k, rsi.p); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        free(rsi.p);
+        if (csi) buf_puts(b, "; })");
         return 1;
       }
       int block = nt_ref(nt, id, "block");
@@ -3905,7 +3927,14 @@ else {
         return 1;
       }
       if (sp_streq(name, "join") && argc <= 1) {
-        buf_printf(b, "sp_%sArray_join(", k); emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* with a separator the receiver is held across it, since it may
+           allocate; without one nothing runs between the two */
+        Buf rjn; memset(&rjn, 0, sizeof rjn); char tyj[32];
+        snprintf(tyj, sizeof tyj, "sp_%sArray *", k);
+        int cjn = argc == 1 && hold_recv_open(c, recv, 0, tyj, "SP_GC_ROOT", b, &rjn);
+        buf_printf(b, "sp_%sArray_join(", k);
+        if (argc == 1) buf_puts(b, rjn.p); else emit_expr(c, recv, b);
+        buf_puts(b, ", ");
         if (argc == 1 && comp_ntype(c, argv[0]) == TY_POLY) {
           buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")");
         }
@@ -3915,6 +3944,8 @@ else {
         else if (argc == 1) emit_str_expr_nilable(c, argv[0], b);
         else buf_puts(b, "sp_str_empty");
         buf_puts(b, ")");
+        free(rjn.p);
+        if (cjn) buf_puts(b, "; })");
         return 1;
       }
       if ((sp_streq(name, "inspect") || sp_streq(name, "to_s")) && argc == 0) {
@@ -4802,7 +4833,12 @@ else {
         return 1;
       }
       if (sp_streq(name, "join") && argc <= 1) {
-        buf_puts(b, "sp_PolyArray_join("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* held across the separator, as the typed arm holds it */
+        Buf rjp; memset(&rjp, 0, sizeof rjp);
+        int cjp = argc == 1 && hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rjp);
+        buf_puts(b, "sp_PolyArray_join(");
+        if (argc == 1) buf_puts(b, rjp.p); else emit_expr(c, recv, b);
+        buf_puts(b, ", ");
         /* the separator must be a const char*; a poly separator (e.g. a reader
            whose ivar widened to poly) is converted with sp_poly_to_s. */
         if (argc == 1 && comp_ntype(c, argv[0]) == TY_POLY) {
@@ -4811,6 +4847,8 @@ else {
         else if (argc == 1) emit_str_expr_nilable(c, argv[0], b);   /* nil ok, false not */
         else buf_puts(b, "sp_str_empty");
         buf_puts(b, ")");
+        free(rjp.p);
+        if (cjp) buf_puts(b, "; })");
         return 1;
       }
       if ((sp_streq(name, "inspect") || sp_streq(name, "to_s")) && argc == 0) {
@@ -4818,8 +4856,13 @@ else {
         return 1;
       }
       if (sp_streq(name, "slice!") && argc == 2) {
-        buf_puts(b, "sp_PolyArray_slice_bang("); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+        /* the receiver is held across the start and the length, as the typed arm holds it */
+        Buf rsp;
+        int csp = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rsp);
+        buf_printf(b, "sp_PolyArray_slice_bang(%s, ", rsp.p);
+        emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+        free(rsp.p);
+        if (csp) buf_puts(b, "; })");
         return 1;
       }
       if ((sp_streq(name, "repeated_combination") || sp_streq(name, "combination") ||
@@ -4852,8 +4895,12 @@ else {
         return 1;
       }
       if (sp_streq(name, "slice!") && argc == 1) {
-        buf_puts(b, "sp_PolyArray_delete_at("); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        /* held across the index, as the typed arm holds it */
+        Buf rsq;
+        int csq = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rsq);
+        buf_printf(b, "sp_PolyArray_delete_at(%s, ", rsq.p); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        free(rsq.p);
+        if (csq) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "replace") && argc == 1 && a0 == TY_POLY_ARRAY) {
