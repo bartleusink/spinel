@@ -14,10 +14,22 @@ module Digest
     # :cbinstr return: raw digest bytes, whose length comes from
     # sp_ffi_bin_len rather than strlen (a binary digest contains NULs).
     native_func :digest, [:string], :cbinstr, "sp_crypto_sha256_bin"
+    # base64digest: strict base64 of the raw digest, as Digest::Class defines
+    # it for every digest.
+    native_func :base64digest, [:string], :cstring, "sp_crypto_sha256_b64"
   end
   module SHA1
     native_lib "digest"
     native_func :hexdigest, [:string], :cstring, "sp_crypto_sha1_hex"
     native_func :digest, [:string], :cbinstr, "sp_crypto_sha1_bin"
+    native_func :base64digest, [:string], :cstring, "sp_crypto_sha1_b64"
+  end
+  # MD5: a legacy hash, kept because Active Storage's direct-upload protocol
+  # checks a blob by the base64 MD5 of its bytes (#4631). Not for new designs.
+  module MD5
+    native_lib "digest"
+    native_func :hexdigest, [:string], :cstring, "sp_crypto_md5_hex"
+    native_func :digest, [:string], :cbinstr, "sp_crypto_md5_bin"
+    native_func :base64digest, [:string], :cstring, "sp_crypto_md5_b64"
   end
 end

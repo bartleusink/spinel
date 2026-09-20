@@ -73,6 +73,18 @@ const char *sp_crypto_sha256_hex(const char *msg);
 const char *sp_crypto_sha256_bin(const char *msg);
 const char *sp_crypto_sha1_bin(const char *msg);
 
+/* MD5(msg) -> 32-char lowercase hex / the raw 16 digest bytes. Legacy hash,
+ * bound for Digest::MD5 (Active Storage's direct-upload checksum). Do NOT
+ * use for new security designs. */
+const char *sp_crypto_md5_hex(const char *msg);
+const char *sp_crypto_md5_bin(const char *msg);
+
+/* Digest::X.base64digest: strict base64 of the raw digest (24, 28 and 44
+ * chars, `=` padded). */
+const char *sp_crypto_md5_b64(const char *msg);
+const char *sp_crypto_sha1_b64(const char *msg);
+const char *sp_crypto_sha256_b64(const char *msg);
+
 /* Sec-WebSocket-Accept = base64(SHA-1(client_key + GUID)) per
  * RFC 6455 §1.3. Returns a 28-char string ending in `=`. The
  * only modern use case for SHA-1 in this codebase; sugars the

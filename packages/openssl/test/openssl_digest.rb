@@ -2,10 +2,11 @@
 # below is diffed against CRuby's, which is the point: these must be the same
 # bytes, not merely the same shape.
 #
-# The last case is a subset boundary rather than a diff: CRuby carries MD5 and
-# the runtime's crypto does not, so it raises where CRuby answers. It raises
-# the class CRuby raises for an algorithm it does not have, so a program that
-# rescues OpenSSL::Digest::DigestError catches the same thing.
+# The HMAC-MD5 case is a subset boundary rather than a diff: CRuby carries it
+# and the runtime's crypto does not (its MD5 is the digest alone), so it
+# raises where CRuby answers. It raises the class CRuby raises for an
+# algorithm it does not have, so a program that rescues
+# OpenSSL::Digest::DigestError catches the same thing.
 require "openssl"
 
 p OpenSSL::Digest::SHA256.hexdigest("hi")
@@ -13,6 +14,8 @@ p OpenSSL::Digest::SHA1.hexdigest("hi")
 p OpenSSL::Digest::SHA256.hexdigest("")
 p OpenSSL::Digest::SHA256.digest("hi").bytesize
 p OpenSSL::Digest::SHA1.digest("hi").bytesize
+p OpenSSL::Digest::MD5.hexdigest("hi")
+p OpenSSL::Digest::MD5.digest("hi").bytesize
 p OpenSSL::HMAC.hexdigest("SHA256", "key", "msg")
 p OpenSSL::HMAC.hexdigest("sha256", "key", "msg")
 p OpenSSL::HMAC.hexdigest("SHA1", "key", "msg")

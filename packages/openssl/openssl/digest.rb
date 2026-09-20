@@ -21,6 +21,8 @@ module OpenSSL
     native_func :sha256_bin,      [:string],          :cbinstr, "sp_crypto_sha256_bin"
     native_func :sha1_hex,        [:string],          :cstring, "sp_crypto_sha1_hex"
     native_func :sha1_bin,        [:string],          :cbinstr, "sp_crypto_sha1_bin"
+    native_func :md5_hex,         [:string],          :cstring, "sp_crypto_md5_hex"
+    native_func :md5_bin,         [:string],          :cbinstr, "sp_crypto_md5_bin"
     native_func :hmac_sha256_hex, [:string, :string], :cstring, "sp_crypto_hmac_sha256_hex"
     native_func :hmac_sha1_hex,   [:string, :string], :cstring, "sp_crypto_hmac_sha1_hex"
     native_func :hmac_sha256_bin, [:string, :string], :cbinstr, "sp_crypto_hmac_sha256_bin"
@@ -44,6 +46,13 @@ module OpenSSL
       def self.hexdigest(data) = Crypto.sha1_hex(data)
       def self.digest(data)    = Crypto.sha1_bin(data)
     end
+
+    # A legacy hash, carried because Active Storage's direct upload checks a
+    # blob by its MD5 (#4631). Not for new designs.
+    module MD5
+      def self.hexdigest(data) = Crypto.md5_hex(data)
+      def self.digest(data)    = Crypto.md5_bin(data)
+    end
   end
 
   module HMAC
@@ -51,8 +60,9 @@ module OpenSSL
     # the String form is here, and only for the two the runtime carries: an
     # algorithm that is not one of them raises DigestError -- the class CRuby
     # raises, so `rescue OpenSSL::Digest::DigestError` catches the same thing
-    # -- rather than answering a hash from the wrong function. MD5 is one of
-    # those: CRuby has it, the runtime's crypto does not.
+    # -- rather than answering a hash from the wrong function. HMAC-MD5 is one
+    # of those: CRuby has it, the runtime's crypto does not (its MD5 is the
+    # digest alone).
     def self.hexdigest(algo, key, data)
       case algo.to_s.upcase
       when "SHA256" then Crypto.hmac_sha256_hex(key, data)
