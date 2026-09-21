@@ -186,6 +186,22 @@ module Enumerable
     end
   end
 
+  def count
+    if block_given?
+      n = 0
+      each { |x| n += 1 if yield(x) }
+      n
+    else
+      # unreached by the rewrite (desugar_builtin_enum_calls keeps a
+      # blockless, argumentless `count` on its typed size emitter), kept
+      # correct here for the same reason Enumerable#count itself walks
+      # `each` rather than assuming a `size` method exists.
+      n = 0
+      each { |x| n += 1 }
+      n
+    end
+  end
+
   def take_while
     if block_given?
       out = []

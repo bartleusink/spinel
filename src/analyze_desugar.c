@@ -2818,6 +2818,12 @@ int desugar_builtin_enum_calls(Compiler *c) {
                      sp_streq(name, "first") || sp_streq(name, "last") || sp_streq(name, "include?") ||
                      sp_streq(name, "member?"));
     if (range_own && nt_ref(nt, id, "block") < 0) continue;
+    /* `count` with neither a block nor an argument is a size query -- the
+       Array/Hash/Range/Enumerator typed emitters answer it in O(1), and a
+       plain Enumerable-includer with no `size` of its own still needs the
+       O(n) walk CRuby's Enumerable#count itself does, which the definition
+       below does not special-case; both stay on the existing emitter. */
+    if (sp_streq(name, "count") && nt_ref(nt, id, "block") < 0) continue;
     if (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE || rt == TY_FLOAT_RANGE ||
         rt == TY_STR_RANGE || (rt == TY_ENUMERATOR && !lazy_driven)) ok = 1;
     /* an empty `[]` / `{}` receiver has no type until its use decides one,
