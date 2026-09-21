@@ -2871,6 +2871,18 @@ int desugar_builtin_enum_calls(Compiler *c) {
                      sp_streq(name, "first") || sp_streq(name, "last") || sp_streq(name, "include?") ||
                      sp_streq(name, "member?"));
     if (range_own && nt_ref(nt, id, "block") < 0) continue;
+    /* minmax's blockless form on an Array or a Hash keeps its dedicated
+       C routine (sp_XArray_min/_max, called once each, no per-element
+       nullable-int/GC-root bookkeeping): measured ~80% slower as a
+       hand-written Ruby loop on a 1000-element Int array x 200000 rounds
+       (0.15s -> 0.27s), well past the ~10% bound, while the block-
+       comparator form (which has no such dedicated routine to lose, only
+       ever a fused single-pass scan either way) measured at parity. Only a
+       receiver with no such routine (an Enumerable includer with its own
+       #each, or a value known only at run time) still needs the Ruby
+       computation for its blockless form. */
+    if (sp_streq(name, "minmax") && nt_ref(nt, id, "block") < 0 &&
+        (ty_is_array(rt) || ty_is_hash(rt))) continue;
     /* `count` with neither a block nor an argument is a size query -- the
        Array/Hash/Range/Enumerator typed emitters answer it in O(1), and a
        plain Enumerable-includer with no `size` of its own still needs the

@@ -3643,7 +3643,7 @@ static int is_array_enum_method(const char *nm) {
     "any?", "all?", "none?", "one?", "take", "drop", "take_while", "drop_while",
     "filter_map", "partition", "group_by", "each_with_object", "tally",
     "find_all", "zip", "grep", "grep_v", "to_h", "uniq", "reverse",
-    "member?", "minmax", "join", "index", "each",
+    "member?", "join", "index", "each",
     "each_cons", "each_slice", "chunk", "chunk_while", "slice_when",
     "minmax_by", "cycle", "lazy", "each_entry", "reverse_each", "compact",
     "chain", "slice_before", "slice_after", NULL };
