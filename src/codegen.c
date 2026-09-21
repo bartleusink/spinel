@@ -1943,9 +1943,45 @@ static TyKind pf_yield_ty(Compiler *c, int id, int *found) {
 static int  g_mih_limit_override = 0;  /* the force pass raises the body budget */
 static int  g_mih_callers_override = 0;
 static int *g_mih_nodes = NULL;      /* AST nodes per scope */
+static int *g_mih_calls = NULL;      /* call sites naming the scope's method */
 static int  g_mih_nscopes = 0;
 static const NodeTable *g_mih_nt = NULL;
 static int  g_mih_ntcount = 0;
+/* the per-name call count, built once: counting the calls by walking every
+   CallNode per method was a scan of the whole table per scope, and on a
+   program with thousands of methods (campfire) that was 80% of the front
+   end (#4662) */
+static unsigned mih_hash(const char *s) { unsigned h = 2166136261u; for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u; return h; }
+static void mih_count_calls(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int ns = c->nscopes;
+  free(g_mih_calls);
+  g_mih_calls = (int *)calloc((size_t)(ns > 0 ? ns : 1), sizeof(int));
+  if (!g_mih_calls) return;
+  /* name -> first scope of that name; scopes sharing a name chain through next */
+  int cap = 1; while (cap < ns * 2 + 8) cap <<= 1;
+  int *head = (int *)malloc(sizeof(int) * (size_t)cap);
+  int *next = (int *)malloc(sizeof(int) * (size_t)(ns > 0 ? ns : 1));
+  if (!head || !next) { free(head); free(next); return; }
+  for (int i = 0; i < cap; i++) head[i] = -1;
+  for (int si = 0; si < ns; si++) {
+    next[si] = -1;
+    const char *nm = c->scopes[si].name;
+    if (!nm) continue;
+    unsigned h = mih_hash(nm) & (unsigned)(cap - 1);
+    while (head[h] >= 0 && !sp_streq(c->scopes[head[h]].name, nm)) h = (h + 1) & (unsigned)(cap - 1);
+    if (head[h] < 0) head[h] = si;
+    else { int t = head[h]; while (next[t] >= 0) t = next[t]; next[t] = si; }
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    unsigned h = mih_hash(nm) & (unsigned)(cap - 1);
+    while (head[h] >= 0 && !sp_streq(c->scopes[head[h]].name, nm)) h = (h + 1) & (unsigned)(cap - 1);
+    for (int si = head[h]; si >= 0; si = next[si]) g_mih_calls[si]++;
+  }
+  free(head); free(next);
+}
 static int method_inline_hint(Compiler *c, Scope *s) {
   if (g_debug) return 0;                      /* debug builds want real frames */
   if (!s->name || s->body < 0 || s->yields) return 0;
@@ -1959,8 +1995,9 @@ static int method_inline_hint(Compiler *c, Scope *s) {
       int sc = c->nscope[id];
       if (sc >= 0 && sc < c->nscopes) g_mih_nodes[sc]++;
     }
+    mih_count_calls(c);
   }
-  if (!g_mih_nodes) return 0;
+  if (!g_mih_nodes || !g_mih_calls) return 0;
   int si = (int)(s - c->scopes);
   if (si < 0 || si >= g_mih_nscopes) return 0;
   int limit = 90;
@@ -1971,11 +2008,8 @@ static int method_inline_hint(Compiler *c, Scope *s) {
   /* few enough call sites that expanding it cannot multiply the program */
   int callmax = 12;
   if (g_mih_callers_override > 0) callmax = g_mih_callers_override;
-  int calls = 0;
-  NT_FOREACH_KIND(nt, NK_CallNode, id) {
-    const char *nm = nt_str(nt, id, "name");
-    if (nm && sp_streq(nm, s->name) && ++calls > callmax) return 0;
-  }
+  int calls = g_mih_calls[si];
+  if (calls > callmax) return 0;
   return calls > 0;
 }
 
