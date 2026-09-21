@@ -12310,7 +12310,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       ((argc == 0 && sp_streq(name, "pred")) ||
        ((argc == 1 || argc == 2) && sp_streq(name, "pow")) ||
        (argc == 1 && (sp_streq(name, "ceildiv") || sp_streq(name, "gcd") || sp_streq(name, "lcm") ||
-                      sp_streq(name, "gcdlcm"))) ||
+                      sp_streq(name, "gcdlcm") || sp_streq(name, "allbits?") ||
+                      sp_streq(name, "anybits?") || sp_streq(name, "nobits?"))) ||
        (argc <= 1 && sp_streq(name, "digits")))) {
     int has_user = 0;
     for (int kk = 0; kk < c->nclasses && !has_user; kk++)
@@ -12322,6 +12323,11 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "pow")) {
         buf_puts(b, "sp_poly_int_powmod("); emit_boxed(c, recv, b);
         buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+      }
+      else if (sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) {
+        buf_puts(b, "sp_poly_int_bits_test("); emit_boxed(c, recv, b); buf_puts(b, ", ");
+        emit_boxed(c, argv[0], b);
+        buf_printf(b, ", %d)", sp_streq(name, "allbits?") ? 0 : sp_streq(name, "anybits?") ? 1 : 2);
       }
       else if (sp_streq(name, "digits")) {
         buf_puts(b, "sp_poly_int_digits("); emit_boxed(c, recv, b); buf_puts(b, ", ");

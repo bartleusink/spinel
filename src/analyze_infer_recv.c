@@ -1672,6 +1672,8 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if ((sp_streq(name, "ceildiv") || sp_streq(name, "gcd") || sp_streq(name, "lcm")) && argc == 1)
       { *out = TY_POLY; return 1; }
     if (sp_streq(name, "pow") && (argc == 1 || argc == 2)) { *out = TY_POLY; return 1; }
+    if ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1)
+      { *out = TY_BOOL; return 1; }
   }
   /* The Enumerable names a boxed receiver shares with Array: the emitter
      materializes the elements and re-dispatches, so the answer is the
