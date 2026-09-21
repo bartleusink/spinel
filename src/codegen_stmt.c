@@ -1070,7 +1070,7 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   /* `x = y = nil`: emit the inner writes as their own statements (each target
      renders nil for its own slot type), then write nil here too. */
   {
-    int ncb = comp_nil_chain_bottom(c->nt, v);
+    int ncb = comp_scalar_literal_chain_bottom(c->nt, v);
     if (ncb >= 0) { emit_stmt_inner(c, v, b, indent); v = ncb; }
   }
   emit_indent(b, indent);

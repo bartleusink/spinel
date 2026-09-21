@@ -1265,6 +1265,24 @@ void detect_bigint_loop_vars(Compiler *c) {
   }
 }
 
+/* The value a write actually CARRIES, looking through a chain. infer_type of
+   a write node answers the target's slot type, which is right for the
+   expression's value (`a = (b = x)` evaluates to b's slot) but wrong as
+   evidence about this assignment: `a = b = 0` puts 0 in both, and b widening
+   to Bignum later says nothing about a. Reading the slot promoted a through
+   the chain, and a return of `[a]` then declared a typed array while the body
+   built a poly one -- a C function whose result type is not what it returns
+   (#4686). */
+static int bigint_cascade_value_node(const NodeTable *nt, int id) {
+  int v = nt_ref(nt, id, "value");
+  for (int guard = 0; v >= 0 && guard < 64; guard++) {
+    NodeKind k = nt_kind(nt, v);
+    if (k != NK_LocalVariableWriteNode) break;
+    v = nt_ref(nt, v, "value");
+  }
+  return v;
+}
+
 /* After detect_bigint_loop_vars promotes some locals to TY_BIGINT, cascade
    the promotion to variables assigned from bigint-typed expressions. */
 void propagate_bigint_cascade(Compiler *c) {
@@ -1280,7 +1298,7 @@ void propagate_bigint_cascade(Compiler *c) {
         Scope *s = comp_scope_of(c, id);
         LocalVar *lv = nm ? scope_local(s, nm) : NULL;
         if (!lv || lv->type != TY_INT || lv->rbs_seeded) continue;
-        TyKind vt = infer_type(c, nt_ref(nt, id, "value"));
+        TyKind vt = infer_type(c, bigint_cascade_value_node(nt, id));
         if (vt == TY_BIGINT) { lv->type = TY_BIGINT; changed = 1; }
       }
       else if (sp_streq(ty, "LocalVariableOperatorWriteNode")) {
