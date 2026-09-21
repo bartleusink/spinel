@@ -1608,6 +1608,10 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     else if (sp_streq(op, "*")) pfn = "sp_poly_mul";
     else if (sp_streq(op, "/")) pfn = "sp_poly_div";
     else if (sp_streq(op, "%")) pfn = "sp_poly_mod";
+    /* `**=` too: the binary `**` and the index op-assign already spell it
+       sp_poly_pow, only this arm lacked the row, so `f **= 3` on a boxed
+       local was refused where `f = f ** 3` built (#4766) */
+    else if (sp_streq(op, "**")) pfn = "sp_poly_pow";
     if (pfn) {
       buf_printf(b, "%s = %s(%s, ", lval, pfn, lval);
       emit_boxed(c, v, b);
@@ -11593,8 +11597,10 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       buf_puts(b, ", 1); }\n");
       return 1;
     }
-    /* s[start, len] = v */
-    if (assignable && sp_streq(name, "[]=") && argc == 3 && comp_ntype(c, argv[0]) == TY_INT) {
+    /* s[start, len] = v; a boxed start goes through the checked unbox like
+       the single-index form's (#4060) -- the arm refused it (#4766) */
+    if (assignable && sp_streq(name, "[]=") && argc == 3 &&
+        (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY)) {
       emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       emit_indent(b, indent);
       emit_expr(c, recv, b); buf_puts(b, " = sp_str_splice_at("); emit_expr(c, recv, b);
