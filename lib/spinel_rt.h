@@ -2246,17 +2246,36 @@ static sp_PolyArray *sp_PolyArray_concat(sp_PolyArray *a, sp_PolyArray *b); /* d
 static sp_PolyArray *sp_PolyArray_difference(sp_PolyArray *a, sp_PolyArray *b); /* defined below */
 static sp_PolyArray *sp_PolyArray_intersect(sp_PolyArray *a, sp_PolyArray *b);  /* defined below */
 static sp_PolyArray *sp_PolyArray_union(sp_PolyArray *a, sp_PolyArray *b);      /* defined below */
-/* int+int that auto-promotes to bigint on overflow in --int-overflow=promote;
-   plain (wrapping) C arithmetic otherwise, matching the sp_int_* macro policy. */
+/* int+int in a BOXED slot. This follows the same three-way policy the typed
+   sp_int_* macros above follow, because the same program means the same
+   thing whichever slot its numbers went through: promote boxes a bigint,
+   wrap wraps, and the default raises.
+   It used to read "plain (wrapping) C arithmetic otherwise, matching the
+   sp_int_* macro policy" -- but those macros do NOT wrap outside wrap mode,
+   they check and raise. So raise mode answered `n * 2` for a boxed 2**62
+   with the wrapped low word, and where that word lands on INTPTR_MIN the
+   answer was the nil SENTINEL: `[2**62, nil][0] * 2` was nil, and the
+   program failed later somewhere that never mentions arithmetic. */
+#define SP_POLY_OP_SYM_add "+"
+#define SP_POLY_OP_SYM_sub "-"
+#define SP_POLY_OP_SYM_mul "*"
 #ifdef SP_INT_OVERFLOW_MODE_PROMOTE
 #  define SP_POLY_INT_OP(op, x, y) ({ sp_int _r; sp_int_##op##_overflow_p((x), (y), &_r) \
      ? sp_box_bigint(sp_bigint_##op(sp_bigint_new_int(x), sp_bigint_new_int(y))) : sp_box_int(_r); })
-#else
+#elif defined(SP_INT_OVERFLOW_MODE_WRAP)
 #  define SP_POLY_INT_OP(op, x, y) sp_box_int(sp_int_c_##op((x), (y)))
+#else
+#  define SP_POLY_INT_OP(op, x, y) ({ sp_int _r; \
+     if (sp_int_##op##_overflow_p((x), (y), &_r)) \
+       sp_raise_cls("RangeError", "integer overflow in " SP_POLY_OP_SYM_##op); \
+     sp_box_int(_r); })
 #endif
-static inline sp_int sp_int_c_add(sp_int x, sp_int y) { return x + y; }
-static inline sp_int sp_int_c_sub(sp_int x, sp_int y) { return x - y; }
-static inline sp_int sp_int_c_mul(sp_int x, sp_int y) { return x * y; }
+/* wrap mode's arithmetic, computed in the unsigned counterpart: signed
+   overflow is undefined behaviour, and wrap mode is a promise ABOUT the
+   overflow, so it cannot be spelled with the operation that has none. */
+static inline sp_int sp_int_c_add(sp_int x, sp_int y) { return (sp_int)((uintptr_t)x + (uintptr_t)y); }
+static inline sp_int sp_int_c_sub(sp_int x, sp_int y) { return (sp_int)((uintptr_t)x - (uintptr_t)y); }
+static inline sp_int sp_int_c_mul(sp_int x, sp_int y) { return (sp_int)((uintptr_t)x * (uintptr_t)y); }
 /* big Rational arithmetic (#2469): coerce every numeric operand to a num/den
    sp_Bigint* pair, run the cross-multiplied formula, and reduce via sp_box_brat.
    Used when one operand is already a big Rational. */
