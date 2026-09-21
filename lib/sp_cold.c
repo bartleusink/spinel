@@ -1465,7 +1465,10 @@ static int sp_bt_is_runtime(const char *n) {
     "dup", "new", "pack", "unpack", "regex", "re_",
     /* arithmetic/runtime helpers that can raise and sit between the raise
        and the user frame (ZeroDivisionError via sp_idiv/sp_imod, etc.) */
-    "idiv", "imod", "gcd", "fdiv", "ipow", "iclamp", "div_", "mod_", 0
+    "idiv", "imod", "gcd", "fdiv", "ipow", "iclamp", "div_", "mod_",
+    /* the trampoline that puts the body on its own stack: runtime, not a
+       Ruby frame, and it sits below every frame of the program */
+    "main_stack", 0
   };
   for (int i = 0; pfx[i]; i++) {
     size_t l = strlen(pfx[i]);
@@ -1505,7 +1508,12 @@ else {                                        /* macOS: "<idx> <image> <addr> <s
     if (len == 0 || len > 250) return 0;
     memcpy(sym, p, len); sym[len] = 0;
   }
-  if (strcmp(sym, "main") == 0) return strdup("<main>");
+  /* The top level runs in the emitted body function, which the compiler
+     hands to sp_main_stack_run (see lib/sp_fiber.c). That frame IS `<main>`;
+     the C `main` beside it is the trampoline, on the other stack, and an
+     unwinder that reaches it would name the same Ruby frame twice. */
+  if (strcmp(sym, "main") == 0 || strcmp(sym, "_sp_main_body") == 0)
+    return strdup("<main>");
   if (strncmp(sym, "sp_", 3) != 0) return 0;     /* skip non-Spinel frames */
   const char *name = sym + 3;
   if (sp_bt_is_runtime(name)) return 0;
