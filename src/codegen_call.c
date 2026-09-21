@@ -3821,8 +3821,12 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
                        : name[0] == 'f' ? "floor" : "ceil";
         int tr = ++g_tmp, tn = ++g_tmp;
         buf_printf(b, "({ sp_Rational _t%d = ", tr); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = (sp_int)(", tn); emit_expr(c, argv[0], b);
-        buf_printf(b, "); _t%d > 0 ? sp_box_rational(sp_rational_%s_prec(_t%d, _t%d))"
+        /* A boxed precision is an sp_RbVal struct, which cannot be C-cast to
+           an integer at all -- the generated C stopped compiling the moment
+           the argument widened to poly (the same cast Rational()'s own
+           constructor had to give up, #3184). */
+        buf_printf(b, "; sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b);
+        buf_printf(b, "; _t%d > 0 ? sp_box_rational(sp_rational_%s_prec(_t%d, _t%d))"
                       " : sp_box_int(sp_rational_%s_prec(_t%d, _t%d).num); })",
                    tn, fn, tr, tn, fn, tr, tn);
         return 1;
@@ -30276,6 +30280,22 @@ else {
     else if (sp_streq(name, "/")) pfn = "sp_poly_div";
     else if (sp_streq(name, "%")) pfn = "sp_poly_mod";
     else if (sp_streq(name, "**")) pfn = "sp_poly_pow";
+    /* The named divisions belong here too -- but only for a receiver that has
+       no arm of its own. A Rational answered NoMethodError for `quo` the
+       moment the other operand was boxed, for a name its own `/` already
+       served; a typed Integer or Float, by contrast, already reaches a
+       direct scalar helper (`17.remainder(x)` is sp_iremainder over an
+       unboxed argument), and routing it through the boxed dispatch instead
+       would box the receiver, call the generic helper and unbox the result
+       -- correct, and three operations worse, on a path that was fine. */
+    else if (rt != TY_INT && rt != TY_FLOAT && rt != TY_BIGINT) {
+      if (sp_streq(name, "quo")) pfn = "sp_poly_quo";
+      else if (sp_streq(name, "fdiv")) pfn = "sp_poly_fdiv";
+      else if (sp_streq(name, "div")) pfn = "sp_poly_div_m";
+      else if (sp_streq(name, "divmod")) pfn = "sp_poly_divmod";
+      else if (sp_streq(name, "modulo")) pfn = "sp_poly_mod";
+      else if (sp_streq(name, "remainder")) pfn = "sp_poly_remainder";
+    }
 
     if (pfn) {
       /* The receiver's value is a C temporary until the call runs, and the
@@ -30307,6 +30327,24 @@ else {
         buf_puts(&pcall, ", "); emit_boxed(c, argv[0], &pcall); buf_puts(&pcall, ")");
       }
       if (ty_is_object(pres)) emit_unbox_text(c, pres, pcall.p ? pcall.p : "sp_box_nil()", b);
+      /* The named divisions all answer boxed, while inference gives the call
+         whatever class the receiver's own arm promises -- an Integer for
+         `div` and for `remainder` on an Integer receiver, a pair for
+         `divmod`, a Float where a Float operand decides it. Coerce the boxed
+         answer to that, or the generated C is handed an sp_RbVal where a
+         scalar belongs. The operators above never needed this: they are
+         typed poly wherever they reach here. */
+      else if (sp_streq(name, "div") || sp_streq(name, "divmod") ||
+               sp_streq(name, "modulo") || sp_streq(name, "remainder")) {
+        const char *unbox = pres == TY_INT ? "sp_poly_to_i("
+                          : pres == TY_FLOAT ? "sp_poly_to_f("
+                          : pres == TY_POLY_ARRAY ? "sp_poly_to_poly_array("
+                          : NULL;
+        if (unbox) {
+          buf_puts(b, unbox); buf_puts(b, pcall.p ? pcall.p : "sp_box_nil()"); buf_puts(b, ")");
+        }
+        else buf_puts(b, pcall.p ? pcall.p : "sp_box_nil()");
+      }
       else buf_puts(b, pcall.p ? pcall.p : "sp_box_nil()");
       free(pcall.p);
       return;

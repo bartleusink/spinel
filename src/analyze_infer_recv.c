@@ -478,7 +478,8 @@ int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (argc == 2 && sp_streq(name, "clamp")) { *out = TY_POLY; return 1; }
     if (argc == 1 && (sp_streq(name, "%") || sp_streq(name, "modulo") ||
                       sp_streq(name, "remainder")))
-      { *out = infer_type(c, argv[0]) == TY_FLOAT ? TY_FLOAT : TY_RATIONAL; return 1; }
+      { TyKind _a0 = infer_type(c, argv[0]);
+        *out = _a0 == TY_FLOAT ? TY_FLOAT : _a0 == TY_POLY ? TY_POLY : TY_RATIONAL; return 1; }
     if (argc == 1 && sp_streq(name, "divmod")) { *out = TY_POLY_ARRAY; return 1; }
   }
   return 0;
