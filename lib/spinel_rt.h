@@ -5459,9 +5459,9 @@ static sp_PolyArray *sp_PolyArray_sum_concat(sp_PolyArray *a, sp_RbVal init) {
    without it `a = [1, 2].freeze` followed by any call that widens a -- push of
    a String, replace by another kind -- quietly mutated a frozen array. The
    flag is set AFTER the pushes, which would otherwise raise on it. */
-static sp_PolyArray *sp_PolyArray_from_int_array(sp_IntArray *a) { sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (sp_int i = 0; i < a->len; i++) { sp_int v = a->data[a->start+i]; sp_PolyArray_push(p, v == SP_INT_NIL ? sp_box_nil() : sp_box_int(v)); } p->frozen = a->frozen; return p; }
-static sp_PolyArray *sp_PolyArray_from_str_array(sp_StrArray *a) { sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(p, sp_box_str(a->data[i])); p->frozen = a->frozen; return p; }
-static sp_PolyArray *sp_PolyArray_from_float_array(sp_FloatArray *a) { sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(p, sp_box_float(a->data[i])); p->frozen = a->frozen; return p; }
+static sp_PolyArray *sp_PolyArray_from_int_array(sp_IntArray *a) { SP_GC_ROOT(a); sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (sp_int i = 0; i < a->len; i++) { sp_int v = a->data[a->start+i]; sp_PolyArray_push(p, v == SP_INT_NIL ? sp_box_nil() : sp_box_int(v)); } p->frozen = a->frozen; return p; }
+static sp_PolyArray *sp_PolyArray_from_str_array(sp_StrArray *a) { SP_GC_ROOT(a); sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(p, sp_box_str(a->data[i])); p->frozen = a->frozen; return p; }
+static sp_PolyArray *sp_PolyArray_from_float_array(sp_FloatArray *a) { SP_GC_ROOT(a); sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (sp_int i = 0; i < a->len; i++) sp_PolyArray_push(p, sp_box_float(a->data[i])); p->frozen = a->frozen; return p; }
 /* Reverse coercions: materialize a concrete typed array from a poly array by
    unboxing each element to the declared element type. Used to honor a typed-array
    return annotation (e.g. RBS `-> Array[String]`) when the body produced a poly
