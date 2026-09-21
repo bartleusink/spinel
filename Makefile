@@ -1746,7 +1746,7 @@ if [ $$? -eq 0 ]; then \
     fi; \
     LC_ALL=C sed 's/\r$$//' "$$exp" >"$$exp.n"; \
   fi; \
-  $(TIMEOUT10) "$$bin" $$args <"$$stdinf" >"$$act" 2>"$$acterr"; \
+  $(TIMEOUT10) "$$bin" $$args <"$$stdinf" >"$$act" 2>"$$acterr"; run_rc=$$?; \
   LC_ALL=C sed 's/\r$$//' "$$act" >"$$act.n"; \
   LC_ALL=C sed 's/\r$$//' "$$acterr" >"$$acterr.n"; \
   if [ -f "$<.err.expected" ]; then \
@@ -1759,7 +1759,8 @@ if [ $$? -eq 0 ]; then \
     if [ -t 1 ]; then printf .; fi; \
   else \
     echo FAIL > "$@"; \
-    { echo "=== stdout diff (expected vs actual) ==="; diff -u "$$exp.n" "$$act.n" || true; \
+    { if [ "$$run_rc" -eq 124 ]; then echo "=== timed out after 10s (the output below is partial) ==="; fi; \
+      echo "=== stdout diff (expected vs actual) ==="; diff -u "$$exp.n" "$$act.n" || true; \
       echo "=== stderr diff (expected vs actual) ==="; diff -u "$$experr.n" "$$acterr.n" || true; } > "$@.diff" 2>&1; \
     if [ -t 1 ]; then printf F; fi; \
   fi; \
