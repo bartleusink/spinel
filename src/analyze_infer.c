@@ -1255,10 +1255,12 @@ static TyKind infer_call_inner(Compiler *c, int id) {
      guarded its table: a user class owning the name answers for itself. */
   if (recv >= 0 && nt_ref(nt, id, "block") < 0 && !an_user_defines_or_reads(c, name) &&
       infer_type(c, recv) == TY_POLY) {
-    /* to_i is the one row promote mode answers wider than the raw scalar: the
-       value can be an Integer past sp_int, which that mode promotes rather
-       than refuses, and the slot is boxed anyway (#4688). */
-    if (g_promote_mode && argc == 0 && sp_streq(name, "to_i")) return TY_POLY;
+    /* to_i is the one row answered wider than the raw scalar, in BOTH modes.
+       A boxed receiver is already in boxed land, and #4665 settled that its
+       Integer surface answers the Ruby value there whatever the overflow
+       mode -- pred, pow, gcd, lcm and ceildiv are all TY_POLY ungated. The
+       mode governs TYPED slots, which is where the RangeError stays (#4688). */
+    if (argc == 0 && sp_streq(name, "to_i")) return TY_POLY;
     for (int q = 0; AN_POLY_RAW[q].n; q++)
       if (AN_POLY_RAW[q].ac == argc && sp_streq(name, AN_POLY_RAW[q].n)) return AN_POLY_RAW[q].t;
   }
@@ -6018,9 +6020,10 @@ else {
 
   if (sp_streq(name, "to_s") || sp_streq(name, "inspect") ||
       sp_streq(name, "chr") || sp_streq(name, "to_str")) return TY_STRING;
-  /* a boxed receiver's to_i in promote mode: the slot has room for a Bignum,
-     and a Float past sp_int is one in CRuby (#4688) */
-  if (g_promote_mode && recv >= 0 && rt == TY_POLY && argc == 0 &&
+  /* a boxed receiver's to_i/to_int: the slot has room for a Bignum and a
+     Float past sp_int is one in CRuby, in both modes (see the universal-table
+     note above and #4665's ungated boxed Integer surface) (#4688) */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 &&
       (sp_streq(name, "to_i") || sp_streq(name, "to_int"))) return TY_POLY;
   if (sp_streq(name, "to_i") || sp_streq(name, "to_int") ||
       sp_streq(name, "length") || sp_streq(name, "size") ||
