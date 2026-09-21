@@ -3671,16 +3671,20 @@ else {
   }
 }
 
-/* min / max / minmax { |a, b| a <=> b } as an expression: a single scan
-   tracking the extreme(s) under the comparator block. min/max yield one
-   element; minmax yields a fresh [min, max]. Returns 1 if handled. */
+/* min / max { |a, b| a <=> b } as an expression: a single scan tracking the
+   extreme under the comparator block. minmax's own block form is written in
+   Ruby (builtins/enumerable.rb): every receiver desugar_builtin_enum_calls
+   accepts (Array, Hash, an Enumerable includer, and a Range even though its
+   BLOCKLESS form stays here, since a custom comparator forces an each-walk
+   CRuby's own Range#minmax cannot avoid either) is rewritten to a generic
+   clone before codegen ever sees a "minmax" node. Returns 1 if handled. */
 int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   int block = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
   if (block < 0) return 0;
   const char *name = nt_str(nt, id, "name");
-  int is_min = sp_streq(name, "min"), is_max = sp_streq(name, "max"), is_mm = sp_streq(name, "minmax");
-  if (!is_min && !is_max && !is_mm) return 0;
+  int is_min = sp_streq(name, "min"), is_max = sp_streq(name, "max");
+  if (!is_min && !is_max) return 0;
   /* This lowers only the no-argument comparator form (one extreme element).
      `min(n)`/`max(n)` with a block takes the n extremes by the comparator and
      is not lowered; let it fall through to a clean reject rather than emitting
@@ -3736,13 +3740,6 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
      blockless arm run without it, and the block vanished from the C. */
   const char *p0 = block_param_name(c, block, 0);
   const char *p1 = block_param_name(c, block, 1);
-  /* minmax is not min and max side by side: CRuby's yields its elements in
-     pairs, so a block that sees only the first value answers differently
-     than it does under min or max, and this scan cannot say what it would */
-  if (is_mm && (!p0 || !p1)) {
-    unsupported_feature(c, id, "minmax with a comparator block of fewer than two parameters");
-    return 1;
-  }
   if (p0) p0 = rename_local(p0);
   if (p1) p1 = rename_local(p1);
   int body = nt_ref(nt, block, "body");
@@ -3753,7 +3750,7 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   TyKind cmp_ty = comp_ntype(c, bb[bn - 1]);
   if (cmp_ty != TY_INT && cmp_ty != TY_POLY) return 0;
   const char *cmp_o = cmp_ty == TY_POLY ? "sp_poly_to_i(" : "(";
-  int trv = ++g_tmp, tn = ++g_tmp, tmin = ++g_tmp, tmax = ++g_tmp, ti = ++g_tmp, te = ++g_tmp, tres = ++g_tmp;
+  int trv = ++g_tmp, tn = ++g_tmp, tmin = ++g_tmp, tmax = ++g_tmp, ti = ++g_tmp, te = ++g_tmp;
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", trv); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
   /* the length is hoisted once, but every turn takes its element out of this
@@ -3785,7 +3782,7 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   if (lv_p1) lv_p1->type = et;
   for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]);  /* refresh cache */
   int save = g_indent; g_indent++;
-  if (is_min || is_mm) {
+  if (is_min) {
     /* Open C shadow scope with et-typed block param vars */
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "{\n"); g_indent++;
     emit_indent(g_pre, g_indent);
@@ -3798,7 +3795,7 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "if (%s%s) < 0) _t%d = _t%d;\n", cmp_o, cm.p ? cm.p : "0", tmin, te); free(cm.p);
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   }
-  if (is_max || is_mm) {
+  if (is_max) {
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "{\n"); g_indent++;
     emit_indent(g_pre, g_indent);
     if (p0) { emit_ctype(c, et, g_pre); buf_printf(g_pre, " lv_%s = _t%d; ", p0, te); }
@@ -3814,11 +3811,7 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   if (lv_p1) lv_p1->type = saved_p1;
   g_indent = save;
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-  if (is_min) { buf_printf(b, "_t%d", tmin); return 1; }
-  if (is_max) { buf_printf(b, "_t%d", tmax); return 1; }
-  emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = sp_%sArray_new();\n", tres, k);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "if (_t%d > 0) { sp_%sArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, _t%d); }\n", tn, k, tres, tmin, k, tres, tmax);
-  buf_printf(b, "_t%d", tres);
+  buf_printf(b, "_t%d", is_min ? tmin : tmax);
   return 1;
 }
 

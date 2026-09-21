@@ -4402,6 +4402,22 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
 
   int ncap = caps.n;
 
+  /* Resolve each capture's actual (possibly renamed) source-side identifier
+     NOW, while this call site's own rename table is still the active one:
+     emitting the fiber body below resets g_nren to 0 for the body's OWN
+     locals (a nested inline inside it, e.g. an `each { }` the body itself
+     calls, pushes its renames starting at that same index 0), overwriting
+     g_ren_from/g_ren_to at the very slots this call site's names occupy.
+     g_nren itself is saved and restored around the body, so the COUNT is
+     right afterward, but the array CONTENTS at those low indices are not --
+     a rename_local() lookup for a capture done only after the body is
+     emitted can answer the body's own unrelated renamed name, or the bare
+     source name once the body pushed fewer entries (`_cell_recv` instead of
+     `_cell__y6_recv`, an undeclared identifier at the C level). */
+  char (*cap_rn)[112] = ncap > 0 ? (char (*)[112])malloc(sizeof(char[112]) * (size_t)ncap) : NULL;
+  for (int i = 0; i < ncap; i++)
+    snprintf(cap_rn[i], sizeof cap_rn[0], "%s", rename_local(caps.v[i]));
+
   /* Capture self if the body accesses ivars or dispatches to self implicitly */
   int cap_self = 0;
   const char *cap_self_class = NULL;
@@ -4769,14 +4785,16 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
       if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i]))
         buf_printf(g_pre, "_t%d->c_%s = ((%s *)_cap)->c_%s;\n", tc, caps.v[i], g_cap_struct, caps.v[i]);
       else if (lv && lv->is_cell)
-        /* rename_local, like the lv_ arm below: an INLINED callee's locals are
-           renamed (`only` -> `_y1234_only`) and the cell is DECLARED under the
-           renamed name by emit_scope_decls, so capturing under the source name
-           emits a reference to an identifier that does not exist. */
-        buf_printf(g_pre, "_t%d->c_%s = _cell_%s;\n", tc, caps.v[i], rename_local(caps.v[i]));   /* the shared cell pointer */
+        /* the rename resolved above, before the fiber body's own emission
+           could clobber the table: an INLINED callee's locals are renamed
+           (`only` -> `_y1234_only`) and the cell is DECLARED under the
+           renamed name by emit_scope_decls, so capturing under the source
+           name emits a reference to an identifier that does not exist. */
+        buf_printf(g_pre, "_t%d->c_%s = _cell_%s;\n", tc, caps.v[i], cap_rn[i]);   /* the shared cell pointer */
       else
-        buf_printf(g_pre, "_t%d->c_%s = lv_%s;\n", tc, caps.v[i], rename_local(caps.v[i]));
+        buf_printf(g_pre, "_t%d->c_%s = lv_%s;\n", tc, caps.v[i], cap_rn[i]);
     }
+    free(cap_rn);
     if (as_gen) {
       buf_printf(b, "sp_Enumerator_new_gen(%s, _t%d, ", fname, tc);
       emit_enum_size_arg(c, size_node, b);

@@ -2871,6 +2871,18 @@ int desugar_builtin_enum_calls(Compiler *c) {
                      sp_streq(name, "first") || sp_streq(name, "last") || sp_streq(name, "include?") ||
                      sp_streq(name, "member?"));
     if (range_own && nt_ref(nt, id, "block") < 0) continue;
+    /* minmax's blockless form on an Array or a Hash keeps its dedicated
+       C routine (sp_XArray_min/_max, called once each, no per-element
+       nullable-int/GC-root bookkeeping): measured ~80% slower as a
+       hand-written Ruby loop on a 1000-element Int array x 200000 rounds
+       (0.15s -> 0.27s), well past the ~10% bound, while the block-
+       comparator form (which has no such dedicated routine to lose, only
+       ever a fused single-pass scan either way) measured at parity. Only a
+       receiver with no such routine (an Enumerable includer with its own
+       #each, or a value known only at run time) still needs the Ruby
+       computation for its blockless form. */
+    if (sp_streq(name, "minmax") && nt_ref(nt, id, "block") < 0 &&
+        (ty_is_array(rt) || ty_is_hash(rt))) continue;
     /* `count` with neither a block nor an argument is a size query -- the
        Array/Hash/Range/Enumerator typed emitters answer it in O(1), and a
        plain Enumerable-includer with no `size` of its own still needs the
@@ -2894,6 +2906,26 @@ int desugar_builtin_enum_calls(Compiler *c) {
        (undefined reference at link time). Only the block form is a
        rewrite target. */
     if (sp_streq(name, "find_index") && nt_ref(nt, id, "block") < 0) continue;
+    /* each_with_index without a block, on an Array/Hash/Range/Enumerator, is
+       the existing typed emitter's Enumerator-of-pairs (a real receiver+size,
+       #next-replayable, matches each_with_index_enumerator.rb and
+       each_with_index_struct_present.rb exactly, including `#size`, which the
+       definition's own generator block cannot answer). An OBJECT receiver has
+       no such emitter arm at all (the __enum_to_a bridge is declined for this
+       name, see is_array_enum_method), so it falls through to the definition's
+       `Enumerator.new` else-arm instead. */
+    if (sp_streq(name, "each_with_index") && nt_ref(nt, id, "block") < 0 &&
+        !ty_is_object(rt)) continue;
+    /* each_with_index on an Enumerator receiver (`arr.each.each_with_index
+       { }`, `5.downto(3).each_with_index { }`) is CRuby's native
+       Enumerator#each_with_index, not Enumerable#each_with_index: it answers
+       the enumerator's UNDERLYING object (`[1,2,3].each.each_with_index{}`
+       answers the array itself, not the enumerator, verified against CRuby),
+       which this definition's plain `self` cannot reproduce (self here is
+       the enumerator __enum_each_with_index__N was called with). Stays on
+       the existing typed emitter, which already gets this right
+       (enumerator_block_returns_self.rb, issue_3315_int_enum_with_index_block.rb). */
+    if (sp_streq(name, "each_with_index") && rt == TY_ENUMERATOR) continue;
     /* find/detect reachable from an optional/keyword parameter's default
        value: see find_calls_in_param_defaults. */
     if (in_default && in_default[id] &&

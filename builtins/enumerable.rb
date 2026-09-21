@@ -156,6 +156,62 @@ module Enumerable
     end
   end
 
+  def minmax
+    # Unlike minmax_by (whose blockless arm has no key function to apply, so
+    # it answers an Enumerator), minmax always computes immediately: with a
+    # block, the block IS the comparator (`yield(a, b)`, not `a <=> b`);
+    # without one, `<=>` is. Neither arm can be `each` (an Enumerator).
+    if block_given?
+      min = first
+      if min.nil?
+        [nil, nil]
+      else
+        max = min
+        skip = true
+        each do |x|
+          if skip
+            skip = false
+          else
+            c = yield(x, min)
+            raise ArgumentError, "comparison of #{min.class} with #{(x.nil? || x == true || x == false || x.is_a?(Numeric) || x.is_a?(Symbol)) ? x.inspect : x.class} failed" if c.nil?
+            min = x if c < 0
+            c = yield(x, max)
+            raise ArgumentError, "comparison of #{max.class} with #{(x.nil? || x == true || x == false || x.is_a?(Numeric) || x.is_a?(Symbol)) ? x.inspect : x.class} failed" if c.nil?
+            max = x if c > 0
+          end
+        end
+        [min, max]
+      end
+    else
+      min = first
+      if min.nil?
+        [nil, nil]
+      else
+        max = min
+        skip = true
+        each do |x|
+          if skip
+            skip = false
+          else
+            c = x <=> min
+            # CRuby's own message names the ACCUMULATOR's class unconditionally
+            # first, the new element's class or inspect second (the mirror of
+            # min_by/max_by's message, which names the new element first) --
+            # verified against `[1, "a"].minmax` ("comparison of Integer with
+            # String failed") and `["a", 1].minmax` ("comparison of String
+            # with 1 failed").
+            raise ArgumentError, "comparison of #{min.class} with #{(x.nil? || x == true || x == false || x.is_a?(Numeric) || x.is_a?(Symbol)) ? x.inspect : x.class} failed" if c.nil?
+            min = x if c < 0
+            c = x <=> max
+            raise ArgumentError, "comparison of #{max.class} with #{(x.nil? || x == true || x == false || x.is_a?(Numeric) || x.is_a?(Symbol)) ? x.inspect : x.class} failed" if c.nil?
+            max = x if c > 0
+          end
+        end
+        [min, max]
+      end
+    end
+  end
+
   def filter_map
     if block_given?
       out = []
@@ -343,6 +399,36 @@ module Enumerable
         i += 1
       end
       idx
+    end
+  end
+
+  def each_with_index
+    if block_given?
+      i = 0
+      each do |x|
+        yield x, i
+        i += 1
+      end
+      self
+    else
+      # A fresh `recv`/`j`, not the `if` arm's `self`/`i`: CRuby scopes a
+      # method's locals across its whole body, not per `if`/`else` branch, so
+      # reusing those names here would make this branch's Enumerator.new
+      # capture the SAME method-level locals the `if` arm also assigns --
+      # one shared clone scope, one is_cell decision per name, so the capture
+      # this branch needs (a heap cell, read through a pointer) would leak
+      # into the `if` arm's plain, uncaptured use of them too, even though
+      # the two arms never both run for one call. Measured: with the names
+      # shared, a typed Array's block form (the hot arm) cost 2-3x an
+      # ordinary loop (a fresh GC-allocated cell per outer iteration).
+      recv = self
+      Enumerator.new do |y|
+        j = 0
+        recv.each do |x|
+          y << [x, j]
+          j += 1
+        end
+      end
     end
   end
 
