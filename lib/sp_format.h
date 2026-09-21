@@ -60,6 +60,8 @@ sp_int sp_rational_round_i_down(sp_Rational a);         /* Rational#round(half: 
 sp_int sp_rational_idiv(sp_Rational a, sp_Rational b);  /* Rational#div (floor) */
 sp_int sp_rational_floor_i(sp_Rational a);              /* Rational#floor (no digits) */
 sp_int sp_rational_ceil_i(sp_Rational a);               /* Rational#ceil (no digits) */
+sp_int sp_rational_round_i_mode(sp_Rational a, int md);    /* 0 even / 1 up / 2 down */
+sp_Rational sp_rational_round_prec_mode(sp_Rational a, sp_int nd, int md);
 sp_Rational sp_rational_round_prec(sp_Rational a, sp_int nd);
 sp_Rational sp_rational_truncate_prec(sp_Rational a, sp_int nd);
 sp_Rational sp_rational_mod(sp_Rational a, sp_Rational b);   /* Rational#% (floor) */

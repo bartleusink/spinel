@@ -3605,31 +3605,61 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
       if ((sp_streq(name, "to_i") || sp_streq(name, "to_int") ||
            (sp_streq(name, "truncate") && argc == 0))) { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ").num / ("); emit_expr(c, recv, b); buf_puts(b, ").den)"); return 1; }
       if (sp_streq(name, "round") && argc == 0) { buf_puts(b, "sp_rational_round_i("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1; }
-      /* round(half: :even/:down/:up) with no digits: nearest integer with the
-         given tie-breaking (#3047) */
-      if (sp_streq(name, "round") && argc == 1 && nt_type(nt, argv[0]) &&
-          sp_streq(nt_type(nt, argv[0]), "KeywordHashNode")) {
-        int hv = kwh_lookup(nt, argv[0], "half");
-        const char *hm = (hv >= 0 && nt_type(nt, hv) && sp_streq(nt_type(nt, hv), "SymbolNode"))
-                           ? nt_str(nt, hv, "value") : NULL;
-        const char *fn = (hm && sp_streq(hm, "even")) ? "sp_rational_round_i_even"
-                       : (hm && sp_streq(hm, "down")) ? "sp_rational_round_i_down"
-                       : "sp_rational_round_i";
-        buf_printf(b, "%s(", fn); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
-      }
-      /* round(0, half: ...) is the same integer rounding: a zero digit count
-         changes nothing (#3047) */
-      if (sp_streq(name, "round") && argc == 2 && nt_type(nt, argv[1]) &&
-          sp_streq(nt_type(nt, argv[1]), "KeywordHashNode") &&
-          nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "IntegerNode") &&
-          nt_int(nt, argv[0], "value", -1) == 0) {
-        int hv2 = kwh_lookup(nt, argv[1], "half");
-        const char *hm2 = (hv2 >= 0 && nt_type(nt, hv2) && sp_streq(nt_type(nt, hv2), "SymbolNode"))
-                            ? nt_str(nt, hv2, "value") : NULL;
-        const char *fn2 = (hm2 && sp_streq(hm2, "even")) ? "sp_rational_round_i_even"
-                        : (hm2 && sp_streq(hm2, "down")) ? "sp_rational_round_i_down"
-                        : "sp_rational_round_i";
-        buf_printf(b, "%s(", fn2); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
+      /* `round(half: mode)` on a Rational, with or without a digit count.
+         The mode used to be read as a literal `:even` / `:down` / `:up` and
+         nothing else, so a String, a Symbol out of a variable and a `**`
+         source were all silently the half-up default, and a digit count
+         alongside the keyword had no arm at all (#3047). One reader, shared
+         with the Float, Integer and boxed arms, settles what the call said;
+         the mode reaches the runtime as the value it was written as. */
+      if ((argc == 1 || argc == 2) && nt_type(nt, argv[argc - 1]) &&
+          sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode") &&
+          (sp_streq(name, "round") || sp_streq(name, "floor") ||
+           sp_streq(name, "ceil") || sp_streq(name, "truncate"))) {
+        RoundKw kw; round_kw_read(c, argv[argc - 1], &kw);
+        /* the class the call answers, chosen exactly as infer_type's Rational
+           rule chooses it once the keyword hash is peeled off */
+        int nd_lit = (argc == 2 && nt_type(nt, argv[0]) &&
+                      sp_streq(nt_type(nt, argv[0]), "IntegerNode"));
+        int nd_val = nd_lit ? (int)nt_int(nt, argv[0], "value", 0) : 0;
+        const char *fn = argc == 1  ? "sp_rational_round_half_i"
+                       : !nd_lit    ? "sp_rational_round_half_v"
+                       : nd_val > 0 ? "sp_rational_round_half_r"
+                                    : "sp_rational_round_half_i";
+        const char *zero = argc == 1  ? "(sp_int)0"
+                         : !nd_lit    ? "sp_box_nil()"
+                         : nd_val > 0 ? "sp_rational_new(0, 1)"
+                                      : "(sp_int)0";
+        int tr = ++g_tmp, tn = -1;
+        buf_printf(b, "({ sp_Rational _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+        if (argc == 2) {
+          tn = ++g_tmp;
+          buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+        }
+        /* only #round takes a tie-break mode. CRuby's words for a Rational
+           are its own -- `not an integer`, not the Float and Integer paths'
+           "no implicit conversion of Hash into Integer" -- and with a digit
+           count as well it is the arity it complains about first. The
+           receiver, the digit count and the keyword values are all evaluated
+           before that: the hash is built before the call rejects it. */
+        if (!sp_streq(name, "round")) {
+          buf_printf(b, "(void)_t%d; ", tr);
+          for (int e = 0; e < kw.nelem; e++) {
+            buf_puts(b, "(void)("); emit_boxed(c, kw.elem[e], b); buf_puts(b, "); ");
+          }
+          if (argc == 2)
+            buf_puts(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
+                        " (given 2, expected 0..1)\"); ");
+          else buf_puts(b, "sp_raise_cls(\"TypeError\", \"not an integer\"); ");
+          buf_printf(b, "%s; })", zero);
+          return 1;
+        }
+        int tm = emit_round_kw_binds(c, &kw, b);
+        buf_printf(b, "%s(_t%d, ", fn, tr);
+        if (tn >= 0) buf_printf(b, "_t%d", tn); else buf_puts(b, "0");
+        if (tm >= 0) buf_printf(b, ", _t%d); })", tm);
+        else buf_puts(b, ", sp_box_nil()); })");
+        return 1;
       }
       if (sp_streq(name, "floor") && argc == 0) { buf_puts(b, "sp_rational_floor_i("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1; }
       if (sp_streq(name, "ceil") && argc == 0)  { buf_puts(b, "sp_rational_ceil_i(");  emit_expr(c, recv, b); buf_puts(b, ")"); return 1; }
