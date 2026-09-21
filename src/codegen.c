@@ -8503,6 +8503,11 @@ void emit_regex_section(Compiler *c, Buf *b) {
   buf_puts(b, "  }\n");
   if (g_uses_symbols)
     buf_puts(b, "  sp_sym_name_fn = sp_sym_to_s;\n");
+  /* A C stack that ran out becomes a catchable SystemStackError: the fault
+     handler in the runtime archive cannot reach this TU's exception stack,
+     so hand it the raise (see sp_raise_stack_overflow). */
+  buf_puts(b, "  sp_stack_overflow_raise_fn = sp_raise_stack_overflow;\n");
+  buf_puts(b, "  sp_stack_guard_init();\n");
   if (g_has_user_cmp)
     buf_puts(b, "  sp_obj_cmp_hook = sp_obj_cmp_dispatch;\n");
   if (g_has_user_binop)
