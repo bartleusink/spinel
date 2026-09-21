@@ -1495,6 +1495,53 @@ static int block_given_tail_then_last(Compiler *c, int last) {
   return tn > 0 ? tb[tn - 1] : -1;
 }
 
+/* Whether the calls of method `mi` give it a block: 1 when every call site
+   does (a literal block, a forwarded `&b`, a `...`), 0 when none does, -1 when
+   they differ or there is no site to read. A forwarded block is counted as
+   present here; a forward from a method whose own answer is mixed is mixed
+   too, one level up (recursion bounded like yield_value_type's). */
+static int method_block_presence(Compiler *c, int mi) {
+  for (int i = 0; i < g_yvt_depth; i++)
+    if (g_yvt_mi[i] == mi) return -1;
+  if (g_yvt_depth >= MAX_YVT_DEPTH) return -1;
+  g_yvt_mi[g_yvt_depth++] = mi;
+  const NodeTable *nt = c->nt;
+  const char *mn = c->scopes[mi].name;
+  int with = 0, without = 0, mixed = 0;
+  for (int cid = 0; cid < nt->count && !mixed; cid++) {
+    if (nt_kind(nt, cid) != NK_CallNode) continue;
+    const char *cn = nt_str(nt, cid, "name");
+    if (!cn || !mn || !sp_streq(cn, mn)) continue;
+    if ((int)(comp_scope_of(c, cid) - c->scopes) == mi) continue;
+    if (yvt_callee_index(c, cid) != mi) continue;
+    int blk = nt_ref(nt, cid, "block");
+    if (blk < 0 && !yvt_call_forwards_block(nt, cid)) { without++; continue; }
+    if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode) {
+      /* `m(&b)`: b is the enclosing method's own block, or a value that may
+         be nil at run time */
+      int ex = nt_ref(nt, blk, "expression");
+      Scope *encl = comp_scope_of(c, cid);
+      const char *xn = ex >= 0 && nt_kind(nt, ex) == NK_LocalVariableReadNode ? nt_str(nt, ex, "name") : NULL;
+      if (encl && encl->blk_param && encl->blk_param[0] && xn && sp_streq(xn, encl->blk_param)) {
+        int up = method_block_presence(c, (int)(encl - c->scopes));
+        if (up == 1) with++; else if (up == 0) without++; else mixed = 1;
+      }
+      else mixed = 1;
+      continue;
+    }
+    if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && nt_int(nt, blk, "fwd_yield", 0)) {
+      Scope *encl = comp_scope_of(c, cid);
+      int up = encl ? method_block_presence(c, (int)(encl - c->scopes)) : -1;
+      if (up == 1) with++; else if (up == 0) without++; else mixed = 1;
+      continue;
+    }
+    with++;
+  }
+  g_yvt_depth--;
+  if (mixed || (with && without) || (!with && !without)) return -1;
+  return with ? 1 : 0;
+}
+
 TyKind method_call_ret(Compiler *c, int mi, int call_id) {
   int last = scope_body_last(c, mi);
   /* `if block_given? ... yield ... else ... end`: the call with a block
@@ -1575,6 +1622,24 @@ TyKind method_call_ret(Compiler *c, int mi, int call_id) {
        build (a boxed receiver's `filter_map(&f)`). */
     if (blk >= 0 && nt_kind(c->nt, blk) == NK_BlockArgumentNode)
       return ty_unify(c->scopes[mi].ret, c->scopes[mi].ret_noblock);
+  }
+  /* the `{ |__fwd| yield __fwd }` a forwarded `&b` became: the enclosing
+     method's own calls decide which arm runs, and when they differ the call
+     answers the union (`def g(&b) = a.take_while(&b)` called both ways
+     answers an Array or an Enumerator). A node's type only ever derives
+     from unknown, so until the else arm is typed the answer waits rather
+     than settling on the block arm's. */
+  if (c->scopes[mi].yields) {
+    int blk = nt_ref(c->nt, call_id, "block");
+    if (blk >= 0 && nt_kind(c->nt, blk) == NK_BlockNode && nt_int(c->nt, blk, "fwd_yield", 0)) {
+      Scope *encl = comp_scope_of(c, call_id);
+      int up = encl ? method_block_presence(c, (int)(encl - c->scopes)) : -1;
+      if (up != 1) {
+        if (c->scopes[mi].ret_noblock == TY_UNKNOWN) return TY_UNKNOWN;
+        if (up == 0) return c->scopes[mi].ret_noblock;
+        return ty_unify(c->scopes[mi].ret, c->scopes[mi].ret_noblock);
+      }
+    }
   }
   return c->scopes[mi].ret;
 }

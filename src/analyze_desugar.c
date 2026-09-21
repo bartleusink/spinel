@@ -2024,6 +2024,10 @@ int desugar_value_callable_forwards(Compiler *c) {
       continue;  /* node-table OOM: a -1 id is an out-of-bounds node index below */
     nt_node_set_ref(nt, blocknode, "parameters", bparams);
     nt_node_set_ref(nt, blocknode, "body", body);
+    /* the block stands for the enclosing method's own block, which a call
+       of that method may not have given: codegen's block_given? in the
+       callee answers from the outer block, not from this literal */
+    if (anon) nt_node_set_int(nt, blocknode, "fwd_yield", 1);
 
     nt_node_set_ref(nt, id, "block", blocknode);  /* call now takes a literal block */
     /* a named `&blk` forward that became a yield: its read is orphaned, and

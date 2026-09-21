@@ -1829,7 +1829,17 @@ static int static_block_given_cond(Compiler *c, int pred) {
   if (!nm || !sp_streq(nm, "block_given?")) return -1;
   int r = nt_ref(nt, pred, "receiver");
   if (r >= 0 && !(nt_type(nt, r) && sp_streq(nt_type(nt, r), "SelfNode"))) return -1;
-  if (g_block_id >= 0) return 1;
+  if (g_block_id >= 0) {
+    /* the `{ |__fwd| yield __fwd }` a forwarded `&b` became stands for the
+       ENCLOSING method's block: the answer is whether that one exists at
+       this expansion (a lowered enclosing method asks at run time) */
+    if (nt_int(nt, g_block_id, "fwd_yield", 0)) {
+      if (g_yield_block_fallback >= 0 || g_yield_proc_ref_fallback) return 1;
+      if (g_yield_lowered_fallback) return -1;
+      return 0;
+    }
+    return 1;
+  }
   if (g_current_scope_is_lowered || g_yield_proc_ref) return -1;
   return 0;
 }

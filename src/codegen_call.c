@@ -22333,7 +22333,18 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        (g_block_id >= 0) statically has a block, so fold to 1 even when the
        enclosing method is lowered; only a genuinely lowered scope inspects its
        runtime __yblk__ parameter. */
-    if (g_block_id >= 0) {
+    if (g_block_id >= 0 && nt_int(nt, g_block_id, "fwd_yield", 0)) {
+      /* the literal a forwarded `&b` became: ask about the enclosing
+         method's block (see static_block_given_cond) */
+      if (g_yield_block_fallback >= 0 || g_yield_proc_ref_fallback) buf_puts(b, "1");
+      else if (g_yield_lowered_fallback) {
+        const char *sv = g_lowered_blk_name; g_lowered_blk_name = g_yield_lowered_blk_fallback;
+        buf_puts(b, "("); emit_yblk_ref(b); buf_puts(b, " != NULL)");
+        g_lowered_blk_name = sv;
+      }
+      else buf_puts(b, "0");
+    }
+    else if (g_block_id >= 0) {
       buf_puts(b, "1");
     }
     else if (g_current_scope_is_lowered) {
