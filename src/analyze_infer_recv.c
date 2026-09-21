@@ -1509,11 +1509,9 @@ int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       TyKind r = method_call_ret(c, mi, id);
       /* Unify with descendant direct overrides: codegen dispatch emits a
          cls_id switch over all overrides, so the result type must cover all. */
-      for (int k = 0; k < c->nclasses; k++) {
-        int is_desc = 0;
-        for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-          if (p == cid) { is_desc = 1; break; }
-        if (!is_desc) continue;
+      int nd = 0; const int *ds = comp_descendants(c, cid, &nd);
+      for (int di = 0; di < nd; di++) {
+        int k = ds[di];
         int dmi = comp_method_in_class(c, k, name);
         if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
       }

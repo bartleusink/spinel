@@ -1327,6 +1327,44 @@ const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n) {
   *n = e->n; return e->cands;
 }
 
+/* ---- Descendants of a class ----
+   Five passes ask "which classes descend from X" by walking every class's
+   parent chain, for every call node they visit, every fixpoint round:
+   (call nodes x classes x chain depth). Parent links are set while classes
+   are collected and never after, so the answer is fixed for the whole of
+   inference; it is computed once per class -- every proper descendant, in
+   ascending order, the order the loops it replaces visited them in -- and
+   rebuilt only when the class count changes. */
+static int **desc_lists; static int *desc_counts; static int desc_nclasses = -1;
+const int *comp_descendants(Compiler *c, int cid, int *n) {
+  if (cid < 0 || cid >= c->nclasses) { *n = 0; return NULL; }
+  if (desc_nclasses != c->nclasses) {
+    for (int i = 0; i < desc_nclasses; i++) free(desc_lists[i]);
+    free(desc_lists); free(desc_counts);
+    desc_lists = calloc((size_t)c->nclasses, sizeof *desc_lists);
+    desc_counts = calloc((size_t)c->nclasses, sizeof *desc_counts);
+    desc_nclasses = c->nclasses;
+  }
+  if (!desc_lists[cid]) {
+    int *v = NULL, cnt = 0, cap = 0;
+    for (int k = 0; k < c->nclasses; k++) {
+      int is_desc = 0;
+      for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
+        if (p == cid) { is_desc = 1; break; }
+      if (!is_desc) continue;
+      if (cnt == cap) { cap = cap ? cap * 2 : 8; v = realloc(v, sizeof *v * (size_t)cap); }
+      v[cnt++] = k;
+    }
+    if (!v) v = malloc(sizeof *v);   /* a non-NULL sentinel for "computed, empty" */
+    desc_lists[cid] = v; desc_counts[cid] = cnt;
+  }
+  *n = desc_counts[cid]; return desc_lists[cid];
+}
+void comp_descendants_reset(void) {
+  for (int i = 0; i < desc_nclasses; i++) free(desc_lists[i]);
+  free(desc_lists); free(desc_counts); desc_lists = NULL; desc_counts = NULL; desc_nclasses = -1;
+}
+
 Scope *comp_scope_of(Compiler *c, int node_id) {
   if (node_id < 0 || node_id >= c->nt->count) return &c->scopes[0];
   int idx = c->nscope[node_id];

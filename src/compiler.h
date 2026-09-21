@@ -890,6 +890,10 @@ typedef struct { int cls; int mi; int rdcls; int native; } PolyCand;
 const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n);
 extern unsigned comp_table_gen;
 void comp_poly_candidates_reset(void);
+/* Every proper descendant of class `cid`, ascending; fixed once classes are
+   collected. See comp_descendants. */
+const int *comp_descendants(Compiler *c, int cid, int *n);
+void comp_descendants_reset(void);
 /* Walk the chain for an attr reader/writer; returns 1 and the owning class. */
 int        comp_reader_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
 int        comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_class);

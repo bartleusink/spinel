@@ -13368,6 +13368,7 @@ static void expand_static_splat_args(Compiler *c) {
 
 void analyze_program(Compiler *c) {
   comp_poly_candidates_reset();
+  comp_descendants_reset();
   comp_scope_index_set_frozen(0);  /* scope shape changes during the passes below */
   /* scope 0 = top level */
   Scope *top = comp_scope_new(c, NULL, -1);

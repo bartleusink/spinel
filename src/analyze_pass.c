@@ -4089,12 +4089,9 @@ int infer_param_types(Compiler *c) {
       if (caller_cid >= 0) {
         Scope *caller_sc = comp_scope_of(c, id);
         int is_cm = caller_sc ? caller_sc->is_cmethod : 0;
-        for (int k = 0; k < c->nclasses; k++) {
-          if (k == caller_cid) continue;
-          int is_desc = 0;
-          for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-            if (p == caller_cid) { is_desc = 1; break; }
-          if (!is_desc) continue;
+        int nd = 0; const int *ds = comp_descendants(c, caller_cid, &nd);
+        for (int di = 0; di < nd; di++) {
+          int k = ds[di];
           int dmi = is_cm ? comp_cmethod_in_class(c, k, name) :
                             comp_method_in_class(c, k, name);
           if (dmi >= 0) changed |= bind_call_params(c, id, dmi);
@@ -4292,12 +4289,9 @@ int infer_param_types(Compiler *c) {
       /* Also propagate to descendant overrides: codegen will emit a cls_id
          switch that calls each override, so each must have the right param
          types. */
-      for (int k = 0; k < c->nclasses; k++) {
-        int is_desc = 0;
-        for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-          if (p == cid3) { is_desc = 1; break; }
-        if (!is_desc) continue;
-        int dmi3 = comp_method_in_class(c, k, name);
+      int nd3 = 0; const int *ds3 = comp_descendants(c, cid3, &nd3);
+      for (int di = 0; di < nd3; di++) {
+        int dmi3 = comp_method_in_class(c, ds3[di], name);
         if (dmi3 >= 0) changed |= bind_call_params(c, id, dmi3);
       }
     }
