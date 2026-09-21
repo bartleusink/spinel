@@ -855,6 +855,14 @@ int main(int argc, char **argv) {
   s_add(&cmd, cc_width_flag);
   snprintf(tmp, sizeof tmp, "-O%s ", opt_level); s_add(&cmd, tmp);
   s_add(&cmd, "-Wno-all -ffunction-sections -fdata-sections ");
+  /* A Float `a * b - c` is two IEEE operations in Ruby, each rounded to
+     double. clang's default (-ffp-contract=on; gcc's is =fast) fuses the
+     pair written in one C expression into a single fused multiply-add
+     that rounds once, and the program answers a double a few ULP from
+     CRuby's with nothing to say so. common.mk's SEC_FLAGS carries the same
+     flag for the runtime and the test harness. */
+  s_add(&cmd, "-ffp-contract=off ");
+  bi_put(&bi, "cflag", "-ffp-contract=off");
   /* A 32-bit target gets what common.mk gives the runtime there: 64-bit
      time_t and file offsets, and SSE arithmetic on i386 (the x87 unit rounds
      every intermediate at 80 bits, and 3.7.round(1) came out 3.8). */
