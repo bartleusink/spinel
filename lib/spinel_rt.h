@@ -5598,8 +5598,13 @@ static sp_PolyArray *sp_PolyArray_from_float_array(sp_FloatArray *a) { SP_GC_ROO
    array -- the element boxes carry the runtime values, so this is a per-element
    unbox, not a reinterpret. */
 static sp_StrArray *sp_StrArray_from_poly_array(sp_PolyArray *a) { sp_StrArray *r = sp_StrArray_new(); if (!a) return r; SP_GC_ROOT(a); SP_GC_ROOT(r); for (sp_int i = 0; i < a->len; i++) sp_StrArray_push(r, sp_poly_to_s(a->data[i])); return r; }
-static sp_IntArray *sp_IntArray_from_poly_array(sp_PolyArray *a) { sp_IntArray *r = sp_IntArray_new(); if (!a) return r; SP_GC_ROOT(a); SP_GC_ROOT(r); for (sp_int i = 0; i < a->len; i++) sp_IntArray_push(r, sp_poly_to_i(a->data[i])); return r; }
-static sp_FloatArray *sp_FloatArray_from_poly_array(sp_PolyArray *a) { sp_FloatArray *r = sp_FloatArray_new(); if (!a) return r; SP_GC_ROOT(a); SP_GC_ROOT(r); for (sp_int i = 0; i < a->len; i++) sp_FloatArray_push(r, sp_poly_to_f(a->data[i])); return r; }
+/* ..._or_nil, not the plain conversion: a typed array carries its nil as the
+   slot's sentinel, and sp_poly_to_i answers 0 for nil (sp_poly_to_f, 0.0).
+   A method returning [a] where a is a nullable local reaches here under
+   --int-overflow=promote -- the elements are boxed, the declared return is
+   the typed array -- and printed [0] for CRuby's [nil] (#4686). */
+static sp_IntArray *sp_IntArray_from_poly_array(sp_PolyArray *a) { sp_IntArray *r = sp_IntArray_new(); if (!a) return r; SP_GC_ROOT(a); SP_GC_ROOT(r); for (sp_int i = 0; i < a->len; i++) sp_IntArray_push(r, sp_poly_to_i_or_nil(a->data[i])); return r; }
+static sp_FloatArray *sp_FloatArray_from_poly_array(sp_PolyArray *a) { sp_FloatArray *r = sp_FloatArray_new(); if (!a) return r; SP_GC_ROOT(a); SP_GC_ROOT(r); for (sp_int i = 0; i < a->len; i++) sp_FloatArray_push(r, sp_poly_to_f_or_nil(a->data[i])); return r; }
 static void sp_PolyArray_reverse_bang(sp_PolyArray *a) {sp_gc_wb((void*)a);  if (!a || a->frozen) { if (a && a->frozen) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return; } for (sp_int i = 0, j = a->len - 1; i < j; i++, j--) { sp_RbVal t = a->data[i]; a->data[i] = a->data[j]; a->data[j] = t; } }
 static void sp_PolyArray_shuffle_bang(sp_PolyArray *a) {sp_gc_wb((void*)a);  if (!a || a->frozen) { if (a && a->frozen) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return; } for (sp_int i = a->len - 1; i > 0; i--) { sp_int j = sp_krand_below(i + 1); sp_RbVal t = a->data[i]; a->data[i] = a->data[j]; a->data[j] = t; } }
 /* poly.reverse: `reverse` is both Array#reverse and String#reverse, so a poly
