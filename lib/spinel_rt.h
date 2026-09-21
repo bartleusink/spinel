@@ -2217,6 +2217,15 @@ static inline sp_Rational sp_poly_kernel_rational(sp_RbVal v) {
   if (sp_poly_is_rational(v) && v.v.p) return *(sp_Rational *)v.v.p;
   if (v.tag == SP_TAG_FLT) return sp_float_to_rational(v.v.f);
   if (v.tag == SP_TAG_STR) return sp_str_to_r(v.v.s ? v.v.s : sp_str_empty);
+  /* An sp_Rational is a pair of sp_ints and cannot hold a big one, so a
+     Bignum operand read through here was truncated to its low word:
+     `Rational([2**70, nil][0], 1)` answered (0/1), where the same call with
+     the literal builds the big Rational exactly. Say so instead. Answering
+     it needs the call to type itself poly, which the return-type derivation
+     refuses to widen to (g_ret_no_new_poly) -- see #2024. */
+  if (v.tag == SP_TAG_BIGINT ||
+      (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL))
+    sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   return sp_rational_new(sp_poly_to_i(v), 1);
 }
 /* Unbox a boxed Complex (a real number becomes re+0i). Used to keep a Complex
