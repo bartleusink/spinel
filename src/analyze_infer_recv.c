@@ -1659,16 +1659,21 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (sp_streq(name, "match")) { *out = TY_MATCHDATA; return 1; }
     if (sp_streq(name, "=~")) { *out = TY_POLY; return 1; }
   }
-  /* The names Integer alone owns, on a boxed receiver: the emitter unboxes and
-     re-dispatches, so the answer is the typed one. */
+  /* The Integer surface on a boxed value that may hold a Bignum (#4665):
+     an answer that can itself be a Bignum stays boxed (pred, pow, ceildiv,
+     gcd, lcm; gcdlcm is a pair of them), one that fits an Integer is one
+     (bit_length; digits is an array of them). The runtime helpers of the
+     same names answer by the box's tag; #[] is the boxed index, which
+     answers a bit for an Integer receiver. */
   if (recv >= 0 && rt == TY_POLY && nt_ref(nt, id, "block") < 0 &&
       !an_user_defines_or_reads(c, name)) {
     if (sp_streq(name, "digits") && argc <= 1) { *out = TY_INT_ARRAY; return 1; }
-    if (sp_streq(name, "gcdlcm") && argc == 1) { *out = TY_INT_ARRAY; return 1; }
-    if ((sp_streq(name, "pred") || sp_streq(name, "bit_length")) && argc == 0)
-      { *out = TY_INT; return 1; }
-    if (sp_streq(name, "ceildiv") && argc == 1) { *out = TY_INT; return 1; }
-    if (sp_streq(name, "pow") && (argc == 1 || argc == 2)) { *out = TY_INT; return 1; }
+    if (sp_streq(name, "gcdlcm") && argc == 1) { *out = TY_POLY_ARRAY; return 1; }
+    if (sp_streq(name, "bit_length") && argc == 0) { *out = TY_INT; return 1; }
+    if (sp_streq(name, "pred") && argc == 0) { *out = TY_POLY; return 1; }
+    if ((sp_streq(name, "ceildiv") || sp_streq(name, "gcd") || sp_streq(name, "lcm")) && argc == 1)
+      { *out = TY_POLY; return 1; }
+    if (sp_streq(name, "pow") && (argc == 1 || argc == 2)) { *out = TY_POLY; return 1; }
   }
   /* The Enumerable names a boxed receiver shares with Array: the emitter
      materializes the elements and re-dispatches, so the answer is the
@@ -1930,11 +1935,7 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       name[0] && name[strlen(name) - 1] != '?' && name[strlen(name) - 1] != '!' &&
       !poly_builtin_zero_arg_name(name))
     { *out = TY_POLY; return 1; }
-  /* Integer#gcd / #lcm on a poly value (destructured pair): int. */
-  if (recv >= 0 && rt == TY_POLY && argc == 1 && nt_ref(nt, id, "block") < 0 &&
-      !an_user_defines_method(c, name) &&
-      (sp_streq(name, "gcd") || sp_streq(name, "lcm")))
-    { *out = TY_INT; return 1; }
+
   /* #clear on a poly value returns the (emptied) receiver, itself poly. */
   if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
       !an_user_defines_method(c, name) && sp_streq(name, "clear"))

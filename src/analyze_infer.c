@@ -2071,7 +2071,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
        sp_streq(name, "reduce")) &&
       infer_type(c, recv) == TY_POLY) {
     if (sp_streq(name, "cover?")) return TY_BOOL;
-    if (sp_streq(name, "gcdlcm")) return TY_INT_ARRAY;
+    if (sp_streq(name, "gcdlcm")) return TY_POLY_ARRAY;   /* a Bignum pair stays boxed (#4665) */
     if (sp_streq(name, "sum") && nt_ref(nt, id, "block") < 0) return TY_POLY;
     if ((sp_streq(name, "inject") || sp_streq(name, "reduce")) &&
         nt_ref(nt, id, "block") < 0 && infer_type(c, argv[0]) == TY_SYMBOL) return TY_POLY;

@@ -3022,6 +3022,10 @@ static sp_RbVal sp_poly_succ_m(sp_RbVal v, sp_bool allow_enum) {
    it its own arm), and a builtin receiver carries a negative cls_id. */
 static sp_int sp_poly_to_i_meth(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
+  /* The call answers an sp_int, and a Bignum is one Integer that does not
+     fit it: say so rather than hand back its low word (#4665). Promoting
+     the slot is the wider question of #2024. */
+  if (v.tag == SP_TAG_BIGINT) sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   return sp_poly_to_i(v);
 }
 
@@ -3145,7 +3149,91 @@ static sp_RbVal sp_poly_floor(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_f
    sp_poly_to_i / sp_poly_eq): bytesize 0, ord raises CRuby's ArgumentError. */
 static sp_int sp_poly_bytesize(sp_RbVal v) { if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_bytesize_m(v.v.s) : 0; sp_raise_poly_nomethod("bytesize", v); }
 static sp_int sp_poly_ord(sp_RbVal v) { if (v.tag == SP_TAG_STR) { if (!v.v.s) sp_raise_cls("ArgumentError", "empty string"); return sp_str_ord(v.v.s); } if (v.tag == SP_TAG_INT) return v.v.i; sp_raise_poly_nomethod("ord", v); }
-static sp_int sp_poly_bit_length(sp_RbVal v) { if (v.tag == SP_TAG_INT) return sp_int_bit_length(v.v.i); sp_raise_poly_nomethod("bit_length", v); }
+/* The Integer surface on a boxed receiver that may hold a Bignum (#4665).
+   Each name below used to narrow the box to sp_int and run the typed arm,
+   which truncated a Bignum to int64 and answered on the wrong number
+   (bit_length 0, pow 1), or accepted only SP_TAG_INT and raised
+   NoMethodError for an Integer it had (gcd, lcm, []). A boxed result is
+   answered where the answer can itself be a Bignum; sp_box_bigint hands a
+   result that fits back as a plain Integer. */
+static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b);   /* fwd: defined with the arithmetic below */
+static sp_RbVal sp_poly_neg(sp_RbVal a);
+sp_Bigint *sp_bigint_powmod(sp_Bigint *base, sp_int exp, sp_Bigint *mod);
+sp_Bigint *sp_bigint_shr(sp_Bigint *a, int64_t n);
+static sp_int sp_poly_bit_length(sp_RbVal v) { if (v.tag == SP_TAG_INT) return sp_int_bit_length(v.v.i); if (v.tag == SP_TAG_BIGINT) return sp_bigint_bit_length((sp_Bigint *)v.v.p); sp_raise_poly_nomethod("bit_length", v); }
+static sp_RbVal sp_poly_int_pred(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT) return SP_POLY_INT_OP(sub, v.v.i, (sp_int)1);
+  if (v.tag == SP_TAG_BIGINT) { sp_Bigint *b = (sp_Bigint *)v.v.p; SP_GC_ROOT(b); return sp_box_bigint(sp_bigint_sub(b, sp_bigint_new_int(1))); }
+  sp_raise_poly_nomethod("pred", v);
+}
+static sp_Bigint *sp_poly_int_operand(sp_RbVal v, const char *m) {
+  if (v.tag == SP_TAG_INT) return sp_bigint_new_int(v.v.i);
+  if (v.tag == SP_TAG_BIGINT) return (sp_Bigint *)v.v.p;
+  sp_raise_cls("TypeError", sp_sprintf("%s can't be coerced into Integer", sp_convert_src_name(v)));
+  (void)m; return NULL;
+}
+static sp_RbVal sp_poly_int_powmod(sp_RbVal v, sp_RbVal e, sp_RbVal m) {
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("pow", v);
+  if (v.tag == SP_TAG_INT && e.tag == SP_TAG_INT && m.tag == SP_TAG_INT) return sp_box_int(sp_powmod(v.v.i, e.v.i, m.v.i));
+  sp_int ei = sp_poly_to_i(e);
+  if (ei < 0) sp_raise_cls("RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified");
+  sp_Bigint *base = sp_poly_int_operand(v, "pow"); SP_GC_ROOT(base);
+  sp_Bigint *mod = sp_poly_int_operand(m, "pow"); SP_GC_ROOT(mod);
+  if (sp_bigint_sign(mod) == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  return sp_box_bigint(sp_bigint_powmod(base, ei, mod));
+}
+static sp_RbVal sp_poly_int_ceildiv(sp_RbVal v, sp_RbVal d) {
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("ceildiv", v);
+  if (v.tag == SP_TAG_INT && d.tag == SP_TAG_INT) return sp_box_int(sp_ceildiv(v.v.i, d.v.i));
+  /* CRuby: -div(-other) */
+  SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(d);
+  sp_RbVal nd = sp_poly_neg(d); SP_GC_ROOT_RBVAL(nd);
+  sp_RbVal q = sp_poly_div(v, nd); SP_GC_ROOT_RBVAL(q);
+  return sp_poly_neg(q);
+}
+static sp_RbVal sp_poly_int_gcd(sp_RbVal v, sp_RbVal o) {
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("gcd", v);
+  if (v.tag == SP_TAG_INT && o.tag == SP_TAG_INT) return sp_box_int(sp_gcd(v.v.i, o.v.i));
+  sp_Bigint *a = sp_poly_int_operand(v, "gcd"); SP_GC_ROOT(a);
+  sp_Bigint *b = sp_poly_int_operand(o, "gcd"); SP_GC_ROOT(b);
+  return sp_box_bigint(sp_bigint_gcd(a, b));
+}
+static sp_RbVal sp_poly_int_lcm(sp_RbVal v, sp_RbVal o) {
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("lcm", v);
+  if (v.tag == SP_TAG_INT && o.tag == SP_TAG_INT) return sp_box_int(sp_lcm(v.v.i, o.v.i));
+  sp_Bigint *a = sp_poly_int_operand(v, "lcm"); SP_GC_ROOT(a);
+  sp_Bigint *b = sp_poly_int_operand(o, "lcm"); SP_GC_ROOT(b);
+  return sp_box_bigint(sp_bigint_lcm(a, b));
+}
+static sp_PolyArray *sp_poly_int_gcdlcm(sp_RbVal v, sp_RbVal o) {
+  SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(o);
+  sp_RbVal g = sp_poly_int_gcd(v, o); SP_GC_ROOT_RBVAL(g);
+  sp_RbVal l = sp_poly_int_lcm(v, o); SP_GC_ROOT_RBVAL(l);
+  sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r);
+  sp_PolyArray_push(r, g); sp_PolyArray_push(r, l);
+  return r;
+}
+static sp_IntArray *sp_poly_int_digits(sp_RbVal v, sp_int base) {
+  if (v.tag == SP_TAG_INT) return sp_int_digits(v.v.i, base);
+  if (v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("digits", v);
+  if (base < 2) sp_raise_cls("ArgumentError", "invalid radix");
+  sp_int *buf = NULL;
+  sp_int n = sp_bigint_digits_buf((sp_Bigint *)v.v.p, base, &buf);
+  if (n < 0) sp_raise_cls("Math::DomainError", "out of domain");
+  sp_IntArray *r = sp_IntArray_new(); SP_GC_ROOT(r);
+  for (sp_int i = 0; i < n; i++) sp_IntArray_push(r, buf[i]);
+  free(buf);
+  return r;
+}
+static sp_int sp_poly_int_bit(sp_RbVal v, sp_int i) {
+  if (v.tag == SP_TAG_INT) return sp_int_bit(v.v.i, i);
+  if (v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("[]", v);
+  if (i < 0) return 0;
+  sp_Bigint *b = (sp_Bigint *)v.v.p; SP_GC_ROOT(b);
+  sp_Bigint *sh = sp_bigint_shr(b, i); SP_GC_ROOT(sh);
+  sp_Bigint *bit = sp_bigint_and(sh, sp_bigint_new_int(1));
+  return (sp_int)sp_bigint_to_int(bit);
+}
 /* Rational#numerator / #denominator on a boxed value: a Rational reports its
    reduced parts; an Integer is n/1. Both commit to sp_int (analyze's TY_INT),
    matching the typed Rational path. */
@@ -4278,6 +4366,9 @@ static sp_PolyArray *sp_poly_set_operand(sp_RbVal v) {
    to some number and running the loop anyway. */
 static sp_int sp_poly_int_recv(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_INT) return v.v.i;
+  /* a Bignum has the method, but this loop counts in an sp_int: say what
+     cannot be done rather than deny the method (#4665) */
+  if (v.tag == SP_TAG_BIGINT) sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   sp_raise_nomethod(sp_nomethod_msg(m, v));
   return 0;  /* unreachable: sp_raise_nomethod does not return */
 }
@@ -7431,7 +7522,8 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
       return sh->vals[sh->order[k]];
     }
   }
-  if (a.tag == SP_TAG_INT) return sp_box_int((a.v.i >> i) & 1);
+  /* Integer#[]: one bit, a Bignum's included; the shift is clamped (#4665) */
+  if (a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT) return sp_box_int(sp_poly_int_bit(a, i));
   /* ...and a shared-string handle is a String, so it takes the same arm: it
      is a non-mutating read, and without this it fell past the arm below and
      returned nil exactly as that comment describes (#4279). */
@@ -7626,6 +7718,9 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
     }
     return sp_box_nil();
   }
+  /* Integer#[]: one bit of the receiver, a Bignum's included (#4665) */
+  if (idx.tag == SP_TAG_INT && (recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT))
+    return sp_box_int(sp_poly_int_bit(recv, idx.v.i));
   return sp_poly_arr_get_hash(recv, i);
 }
 

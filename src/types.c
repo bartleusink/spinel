@@ -25,8 +25,9 @@ static const PolyFace ty_poly_face_tbl[] = {
   {"crypt", PF_STRING, 1, 1, 0}, {"casecmp", PF_STRING, 1, 1, 0}, {"casecmp?", PF_STRING, 1, 1, 0},
   /* The names Integer alone owns. step is left out: a Float receiver owns it
      too, so unboxing to an sp_int would truncate a legitimate `2.5.step(9, 3)`. */
-  {"digits", PF_INT, 0, 1, 0}, {"pred", PF_INT, 0, 0, 0}, {"bit_length", PF_INT, 0, 0, 0},
-  {"ceildiv", PF_INT, 1, 1, 0}, {"pow", PF_INT, 1, 2, 0}, {"gcdlcm", PF_INT, 1, 1, 0},
+  /* digits, pred, bit_length, ceildiv, pow and gcdlcm were rows here: the
+     narrowing to sp_int truncated a Bignum; they answer by the box's tag now
+     (sp_poly_int_*, #4665) */
   {"times", PF_INT, 0, 0, 1}, {"upto", PF_INT, 1, 1, 1}, {"downto", PF_INT, 1, 1, 1},
   /* The Enumerable names a boxed receiver shares with Array: its elements
      (a hash's [key, value] pairs) materialize into a poly array once. */

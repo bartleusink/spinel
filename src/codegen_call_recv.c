@@ -12429,6 +12429,41 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, "; })");
     return 1;
   }
+  /* The Integer surface on a boxed receiver that may hold a Bignum: the
+     runtime helpers answer by the box's tag, where the face re-entry below
+     narrowed the box to sp_int and computed on a truncated number (#4665).
+     The inference answered these boxed (pred, pow, ceildiv, gcd, lcm) or as
+     the fitting kind (digits, gcdlcm) in infer_poly_call. */
+  if (recv >= 0 && rt == TY_POLY && nt_ref(nt, id, "block") < 0 && !user_defines_or_reads(c, name) &&
+      ((argc == 0 && sp_streq(name, "pred")) ||
+       ((argc == 1 || argc == 2) && sp_streq(name, "pow")) ||
+       (argc == 1 && (sp_streq(name, "ceildiv") || sp_streq(name, "gcd") || sp_streq(name, "lcm") ||
+                      sp_streq(name, "gcdlcm"))) ||
+       (argc <= 1 && sp_streq(name, "digits")))) {
+    int has_user = 0;
+    for (int kk = 0; kk < c->nclasses && !has_user; kk++)
+      if (comp_poly_arm_defines_n(c, kk, name, argc)) has_user = 1;
+    if (!has_user) {
+      if (sp_streq(name, "pow") && argc == 1) {
+        buf_puts(b, "sp_poly_pow("); emit_boxed(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      }
+      else if (sp_streq(name, "pow")) {
+        buf_puts(b, "sp_poly_int_powmod("); emit_boxed(c, recv, b);
+        buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+      }
+      else if (sp_streq(name, "digits")) {
+        buf_puts(b, "sp_poly_int_digits("); emit_boxed(c, recv, b); buf_puts(b, ", ");
+        if (argc == 1) emit_int_expr(c, argv[0], b); else buf_puts(b, "10");
+        buf_puts(b, ")");
+      }
+      else if (argc == 0) { buf_printf(b, "sp_poly_int_%s(", name); emit_boxed(c, recv, b); buf_puts(b, ")"); }
+      else {
+        buf_printf(b, "sp_poly_int_%s(", name); emit_boxed(c, recv, b);
+        buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      }
+      return 1;
+    }
+  }
   /* The face table (types.h): unbox the receiver to the kind that owns the
      name, retype the receiver node and re-enter the same call, so the typed
      emitter IS the implementation and the inference, which answered under

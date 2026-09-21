@@ -4038,7 +4038,13 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
     if (argc != 1) return 0;
     Buf lo; memset(&lo, 0, sizeof lo); emit_expr(c, recv, &lo);
-    Buf hi; memset(&hi, 0, sizeof hi); emit_expr(c, argv[0], &hi);
+    /* a boxed limit (the receiver reached this arm through the poly face,
+       and its limit is boxed too) is unboxed to the counter's sp_int; it did
+       not compile against it (#4665). A typed limit stays as it is: a Float
+       one compares as a Float (`-5.upto(-1.3)` stops at -2). */
+    Buf hi; memset(&hi, 0, sizeof hi);
+    if (comp_ntype(c, argv[0]) == TY_POLY) emit_int_expr(c, argv[0], &hi);
+    else emit_expr(c, argv[0], &hi);
     int ti = ++g_tmp;
     /* the limit sits in the loop condition, so a side-effecting one would be
        re-evaluated every round: it is computed once in Ruby */
