@@ -152,7 +152,7 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      raised by the thunk in CRuby's words. The generated call arms try their
      stamped casts first and reach this trampoline only when those decline,
      so the thunk is the general lane, not the hot one. */
-  if (m->thunk && !m->unbound && argc <= 16)
+  if (m->thunk && !m->unbound && argc <= SP_PROC_ARG_SLOTS)
     return ((sp_int (*)(void *, sp_int, sp_int *))(uintptr_t)m->thunk)(cap, argc, args);
   /* A poly-ABI target (every slot an sp_RbVal; stamped at bind time) takes
      the boxed side-channel values directly -- the same values the scalar

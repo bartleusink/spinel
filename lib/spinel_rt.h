@@ -1346,7 +1346,7 @@ static void sp_mark_at_exit_hooks(void);
    needed because sp_fiber_root is defined further down in the
    Fiber runtime block. */
 /* External linkage: lib/sp_gc.c's sp_gc_mark_all reaches this by name. */
-extern SP_TLS sp_RbVal _sp_proc_poly_args[16];   /* the proc calling convention's side channel, defined below */
+extern SP_TLS sp_RbVal _sp_proc_poly_args[SP_PROC_ARG_SLOTS];   /* the proc calling convention's side channel, defined below */
 extern SP_TLS sp_RbVal _sp_proc_poly_ret;
 static void sp_re_mark_globals(void) {
   /* The sub-markers below are static and inline away, so a fault in one of
@@ -1392,7 +1392,7 @@ static void sp_re_mark_globals(void) {
      of its own carries no marker and no startup hook at all. */
   SP_GLB_PHASE("globals:proc-channel");
   sp_mark_rbval_scratch(_sp_proc_poly_ret);
-  for (int i = 0; i < 16; i++) sp_mark_rbval_scratch(_sp_proc_poly_args[i]);
+  for (int i = 0; i < SP_PROC_ARG_SLOTS; i++) sp_mark_rbval_scratch(_sp_proc_poly_args[i]);
   SP_GLB_PHASE("globals");
 #undef SP_GLB_PHASE
 }
@@ -11773,9 +11773,9 @@ SP_TLS const char *sp_callee_name = NULL;
    sp_int[] slot. Declared here so the compose/curry/to_proc trampolines
    below can publish through it like every generated call site does. */
 #ifdef SPINEL_EXT_HOST
-extern SP_TLS sp_RbVal _sp_proc_poly_args[16];
+extern SP_TLS sp_RbVal _sp_proc_poly_args[SP_PROC_ARG_SLOTS];
 #else
-SP_TLS sp_RbVal _sp_proc_poly_args[16];
+SP_TLS sp_RbVal _sp_proc_poly_args[SP_PROC_ARG_SLOTS];
 #endif
 /* The block passed to a first-class proc's .call { }: the caller publishes it
    here just before sp_proc_call, and the callee's &block-param prologue
@@ -12662,8 +12662,10 @@ static sp_RbVal sp_poly_callable_spread(sp_RbVal v, sp_RbVal arr) {
   }
   if (v.tag == SP_TAG_OBJ && v.v.p && v.cls_id == SP_BUILTIN_METHOD) {
     sp_int n = sp_poly_length(arr);
-    if (n > 16) sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
-    sp_int slots[16];
+    /* the Method lane publishes into the boxed side channel, so its ceiling
+       is that channel's -- a 17-argument call was refused outright */
+    if (n > SP_PROC_ARG_SLOTS) sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
+    sp_int slots[SP_PROC_ARG_SLOTS];
     for (sp_int i = 0; i < n; i++) {
       sp_RbVal e = sp_poly_arr_get(arr, i);
       /* The trampoline rejects an argument whose scalar kind does not match
