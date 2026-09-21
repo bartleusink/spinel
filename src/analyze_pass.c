@@ -4339,9 +4339,12 @@ int infer_param_types(Compiler *c) {
           if (at2 == TY_UNKNOWN || at2 == TY_POLY || ty_is_object(at2)) op_scalar = 0;
         }
       }
-      if (!op_scalar)
-        for (int k = 0; k < c->nclasses; k++)
-          changed |= bind_call_params(c, id, comp_method_in_chain(c, k, name, NULL));
+      if (!op_scalar) {
+        int npc = 0;
+        const PolyCand *pcs = comp_poly_candidates(c, name, &npc);
+        for (int pi = 0; pi < npc; pi++)
+          changed |= bind_call_params(c, id, pcs[pi].mi);
+      }
     }
   }
   return changed;
