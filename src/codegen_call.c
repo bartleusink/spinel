@@ -22446,7 +22446,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       const int *els = nt_arr(nt, recv, "elements", &en);
       int t = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); ", t);
+      /* the fresh array is held by nothing else while the boxed elements
+         and arguments run, so it is rooted, as the array-literal emitters
+         root theirs */
+      buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", t, t);
       for (int j = 0; j < en; j++) {
         Buf el; memset(&el, 0, sizeof el);
         emit_boxed(c, els[j], &el);
