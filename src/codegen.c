@@ -348,6 +348,20 @@ int obj_conv_method(Compiler *c, TyKind t, const char *conv, TyKind want, int *d
   return mi;
 }
 
+/* The same protocol read STRICTLY: only a conversion whose static return is
+   the slot's own type. Two emitters need that narrower question, because a
+   boxed answer is not a fall-through for them but an arm they already have.
+   emit_str_cmp_conv routes it to sp_str_cmp_conv -- which is what raises the
+   TypeError naming the class -- and the #to_path site wraps the call in
+   sp_poly_arg_str_chk itself. Asking the widened question there took both
+   arms away: the comparison assigned an sp_RbVal to a `const char *` and the
+   generated C stopped compiling. */
+static int obj_conv_method_typed(Compiler *c, TyKind t, const char *conv, TyKind want, int *def_out) {
+  int mi = obj_conv_method(c, t, conv, want, def_out);
+  if (mi < 0) return -1;
+  return c->scopes[mi].ret == want ? mi : -1;
+}
+
 /* The container half of the protocol: a class whose #to_ary / #to_hash is a
    no-parameter method returning a static Array (or Hash) kind converts
    through a direct call, typed as that container (Array#zip, #product,
@@ -427,8 +441,8 @@ static void emit_obj_conv_call_inline(Compiler *c, int node, TyKind t, int def, 
   const char *unbox = NULL;
   if (mi_c >= 0 && c->scopes[mi_c].ret == TY_POLY)
     unbox = sp_streq(conv, "to_int") ? "sp_poly_arg_int_chk("
-          : (sp_streq(conv, "to_str") || sp_streq(conv, "to_path")) ? "sp_poly_arg_str("
-          : NULL;
+          : sp_streq(conv, "to_str") ? "sp_poly_arg_str("
+          : NULL;  /* #to_path is wrapped by its own site, not here */
   if (unbox) buf_puts(b, unbox);
   buf_printf(b, "sp_%s_%s(", c->classes[def].c_name, mc(conv));
   if (!comp_ty_value_obj(c, t)) buf_printf(b, "(sp_%s *)", c->classes[def].c_name);
@@ -773,7 +787,7 @@ void emit_path_expr(Compiler *c, int node, Buf *b) {
   int cid = ty_is_object(t) ? ty_object_class(t) : -1;
   if (cid >= 0 && cid < c->nclasses && !c->classes[cid].is_native_class) {
     int def = -1;
-    if (obj_conv_method(c, t, "to_path", TY_STRING, &def) >= 0) {
+    if (obj_conv_method_typed(c, t, "to_path", TY_STRING, &def) >= 0) {
       emit_obj_conv_call(c, node, t, def, "to_path", b);
       return;
     }
@@ -859,7 +873,7 @@ void emit_str_cmp_conv(Compiler *c, int node, int tmp, Buf *b) {
   if (t == TY_POLY) { buf_printf(b, "sp_poly_check_str(_t%d)", tmp); return; }
   if (!str_cmp_conv_shape(c, node)) { buf_puts(b, "NULL"); return; }
   int def = -1;
-  int poly = obj_conv_method(c, t, "to_str", TY_STRING, &def) < 0;
+  int poly = obj_conv_method_typed(c, t, "to_str", TY_STRING, &def) < 0;
   if (poly) comp_method_in_chain(c, ty_object_class(t), "to_str", &def);
   buf_printf(b, "(_t%d.tag == SP_TAG_OBJ ? ", tmp);
   if (poly) buf_puts(b, "sp_str_cmp_conv(");
