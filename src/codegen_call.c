@@ -10670,6 +10670,16 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
         return 1;
       }
     }
+    /* --int-overflow=promote: an int `**` the inference could not prove
+       exact is typed TY_POLY (the `<<` rule): sp_poly_pow promotes past the
+       word and boxes the rest. Keyed on the cached node type, as `<<` is, so
+       the two halves of the compiler cannot drift; the re-derivation below
+       would otherwise hand the pair back to the raising int helper. */
+    if (g_promote_mode && sp_streq(name, "**") && rt == TY_INT && res == TY_POLY) {
+      buf_puts(b, "sp_poly_pow("); emit_boxed(c, recv, b);
+      buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      return 1;
+    }
     /* Re-derive result type when cache may be stale due to block-param widening */
     TyKind eff_res = res;
     if (eff_res != TY_INT && eff_res != TY_FLOAT && eff_res != TY_BIGINT) {
