@@ -3107,6 +3107,15 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "sp_complex_div_int("); emit_expr(c, recv, b); buf_puts(b, ", (sp_int)("); emit_expr(c, argv[0], b); buf_puts(b, "))");
         return 1;
       }
+      /* A divisor out of a container carries its kind at run time, so the
+         choice above is made there: coerced to c+0i and run through the
+         conjugate formula, a boxed zero answered (NaN+NaN*i) where the same
+         zero written as a literal raises. */
+      if (argc == 1 && sp_streq(name, "/") && cxa == TY_POLY) {
+        buf_puts(b, "sp_complex_div_poly("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
       if (cx_ok && argc == 1 && (sp_streq(name, "+") || sp_streq(name, "-") ||
                                  sp_streq(name, "*") || sp_streq(name, "/") ||
                                  sp_streq(name, "quo"))) {
