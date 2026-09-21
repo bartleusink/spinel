@@ -2906,6 +2906,26 @@ int desugar_builtin_enum_calls(Compiler *c) {
        (undefined reference at link time). Only the block form is a
        rewrite target. */
     if (sp_streq(name, "find_index") && nt_ref(nt, id, "block") < 0) continue;
+    /* each_with_index without a block, on an Array/Hash/Range/Enumerator, is
+       the existing typed emitter's Enumerator-of-pairs (a real receiver+size,
+       #next-replayable, matches each_with_index_enumerator.rb and
+       each_with_index_struct_present.rb exactly, including `#size`, which the
+       definition's own generator block cannot answer). An OBJECT receiver has
+       no such emitter arm at all (the __enum_to_a bridge is declined for this
+       name, see is_array_enum_method), so it falls through to the definition's
+       `Enumerator.new` else-arm instead. */
+    if (sp_streq(name, "each_with_index") && nt_ref(nt, id, "block") < 0 &&
+        !ty_is_object(rt)) continue;
+    /* each_with_index on an Enumerator receiver (`arr.each.each_with_index
+       { }`, `5.downto(3).each_with_index { }`) is CRuby's native
+       Enumerator#each_with_index, not Enumerable#each_with_index: it answers
+       the enumerator's UNDERLYING object (`[1,2,3].each.each_with_index{}`
+       answers the array itself, not the enumerator, verified against CRuby),
+       which this definition's plain `self` cannot reproduce (self here is
+       the enumerator __enum_each_with_index__N was called with). Stays on
+       the existing typed emitter, which already gets this right
+       (enumerator_block_returns_self.rb, issue_3315_int_enum_with_index_block.rb). */
+    if (sp_streq(name, "each_with_index") && rt == TY_ENUMERATOR) continue;
     /* find/detect reachable from an optional/keyword parameter's default
        value: see find_calls_in_param_defaults. */
     if (in_default && in_default[id] &&

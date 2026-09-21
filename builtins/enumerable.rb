@@ -402,6 +402,36 @@ module Enumerable
     end
   end
 
+  def each_with_index
+    if block_given?
+      i = 0
+      each do |x|
+        yield x, i
+        i += 1
+      end
+      self
+    else
+      # A fresh `recv`/`j`, not the `if` arm's `self`/`i`: CRuby scopes a
+      # method's locals across its whole body, not per `if`/`else` branch, so
+      # reusing those names here would make this branch's Enumerator.new
+      # capture the SAME method-level locals the `if` arm also assigns --
+      # one shared clone scope, one is_cell decision per name, so the capture
+      # this branch needs (a heap cell, read through a pointer) would leak
+      # into the `if` arm's plain, uncaptured use of them too, even though
+      # the two arms never both run for one call. Measured: with the names
+      # shared, a typed Array's block form (the hot arm) cost 2-3x an
+      # ordinary loop (a fresh GC-allocated cell per outer iteration).
+      recv = self
+      Enumerator.new do |y|
+        j = 0
+        recv.each do |x|
+          y << [x, j]
+          j += 1
+        end
+      end
+    end
+  end
+
   def take_while
     if block_given?
       out = []

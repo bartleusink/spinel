@@ -3639,11 +3639,11 @@ static int is_array_enum_method(const char *nm) {
     "map", "collect", "select", "filter", "reject", "to_a", "entries",
     "find", "detect", "find_index", "count", "sum", "min", "max",
     "include?", "first", "sort", "sort_by", "min_by", "max_by",
-    "reduce", "inject", "each_with_index", "flat_map", "collect_concat",
+    "reduce", "inject", "flat_map", "collect_concat",
     "any?", "all?", "none?", "one?", "take", "drop", "take_while", "drop_while",
     "filter_map", "partition", "group_by", "each_with_object", "tally",
     "find_all", "zip", "grep", "grep_v", "to_h", "uniq", "reverse",
-    "member?", "join", "index", "each",
+    "member?", "each_with_index", "join", "index", "each",
     "each_cons", "each_slice", "chunk", "chunk_while", "slice_when",
     "minmax_by", "cycle", "lazy", "each_entry", "reverse_each", "compact",
     "chain", "slice_before", "slice_after", NULL };
@@ -6148,6 +6148,16 @@ int desugar_enum_method_recv(Compiler *c) {
       }
     }
     if (!ty_is_object(rt)) continue;
+    /* each_with_index keeps its own object-receiver clone (builtins/
+       enumerable.rb, via desugar_builtin_enum_calls's ty_is_object arm),
+       which walks the TRUE receiver's own #each directly: this bridge's
+       to_a materialization answered the MATERIALIZED ARRAY as the block
+       form's `self` tail instead of the receiver itself (Nums.new(1,2,3)
+       .each_with_index{}.class -> Array, not Nums). The TY_ENUMERATOR arm
+       above this one still needs the name (`arr.each.each_with_index{}`,
+       Enumerator's own native override), so it stays in
+       is_array_enum_method; only THIS object-receiver wrap declines it. */
+    if (sp_streq(nm, "each_with_index")) continue;
     int cid = ty_object_class(rt);
     if (comp_method_in_chain(c, cid, "__enum_to_a", NULL) < 0) continue;  /* not an #each class */
     /* A Struct's blockless #each returns an Enumerator over its members (CRuby),
