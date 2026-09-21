@@ -7214,7 +7214,11 @@ static int conv_bridge_callee(Compiler *c, int i, const char *mname, TyKind want
       c->scopes[tmi].yields) return -1;
   /* the Kernel#Integer / #Float bridge takes the method whatever it answers
      (`any_shape`), and a value-type class's too, called on the boxed copy */
-  if (!any_shape && c->scopes[tmi].ret != want) return -1;
+  /* The answer's static type may be the wanted one or boxed: a boxed answer
+     is unwrapped (and judged) by the bridge row itself, so it is eligible
+     too. Anything else -- a #to_int answering a String -- is not a
+     conversion the protocol can use. */
+  if (!any_shape && c->scopes[tmi].ret != want && c->scopes[tmi].ret != TY_POLY) return -1;
   int ddn = c->classes[tdef].def_node;
   const char *ddt = ddn >= 0 ? nt_type(c->nt, ddn) : NULL;
   *out_mi = tmi;
@@ -7240,8 +7244,10 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
     int tmi = -1;
     int callee = conv_bridge_callee(c, i, mname, want, 0, &tmi);
     if (callee != i) continue;   /* an ancestor's own row declares it */
+    int poly_ret = c->scopes[tmi].ret == TY_POLY;
     buf_printf(b, "%s%s sp_%s_%s(sp_%s *self%s);\n", g_debug ? "" : "static ",
-               rett, c->classes[callee].c_name, mc(c->scopes[tmi].name),
+               poly_ret ? "sp_RbVal" : rett,
+               c->classes[callee].c_name, mc(c->scopes[tmi].name),
                c->classes[callee].c_name, bridge_blk_param(c, tmi));
   }
   buf_printf(b, "%s {\n  switch (cls_id) {\n", sig);
@@ -7249,6 +7255,28 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
     int tmi = -1;
     int callee = conv_bridge_callee(c, i, mname, want, 0, &tmi);
     if (callee < 0) continue;
+    /* A conversion whose answer is BOXED is still a conversion. Its static
+       type is the analysis's business and changes with the mode -- under
+       --int-overflow=promote a method returning a plain `1` can be poly --
+       but the protocol is CRuby's: call it, and judge the answer. Judged
+       here rather than refused at compile time, a class whose #to_int the
+       analysis happened to widen kept its conversion, where before the row
+       was dropped and every boxed use of the object raised "no implicit
+       conversion" (#4747). An answer of the wrong kind is not-ok, which is
+       the TypeError CRuby raises for exactly that. */
+    if (c->scopes[tmi].ret == TY_POLY) {
+      buf_printf(b, "    case %d: { sp_RbVal _cv = sp_%s_%s((sp_%s *)p%s);\n",
+                 i, c->classes[callee].c_name, mc(c->scopes[tmi].name),
+                 c->classes[callee].c_name, bridge_blk_arg(c, tmi));
+      if (want == TY_INT)
+        buf_printf(b, "      if (_cv.tag == SP_TAG_INT && _cv.v.i != SP_INT_NIL) { %sreturn _cv.v.i; }\n",
+                   with_ok ? "*ok = 1; " : "");
+      else
+        buf_printf(b, "      if (_cv.tag == SP_TAG_STR && _cv.v.s) { %sreturn _cv.v.s; }\n",
+                   with_ok ? "*ok = 1; " : "");
+      buf_printf(b, "      %s }\n", dflt);
+      continue;
+    }
     buf_printf(b, "    case %d: %sreturn sp_%s_%s((sp_%s *)p%s);\n",
                i, with_ok ? "*ok = 1; " : "",
                c->classes[callee].c_name, mc(c->scopes[tmi].name),
