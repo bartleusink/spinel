@@ -6212,7 +6212,7 @@ static sp_RbVal sp_MatchData_match_length_name(sp_MatchData *m, const char *name
   if (g < 0) sp_raise_cls("IndexError", sp_sprintf("undefined group name reference: %s", name));
   return sp_MatchData_match_length(m, g);
 }
-static sp_StrPolyHash*sp_StrPolyHash_from_str_int_hash(sp_StrIntHash*h){sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;r->default_v=sp_box_int(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_int(sp_StrIntHash_get(h,k)));}return r;}
+static sp_StrPolyHash*sp_StrPolyHash_from_str_int_hash(sp_StrIntHash*h){sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;/* the int hash's nil default (the sentinel) and a sentinel element are nil in the boxed hash, not the sentinel as an Integer: read as a number, a missing key answered SP_INT_NIL + 100 through `h[k] &&= h[k] + 100` */ r->default_v=sp_box_int_or_nil(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_int_or_nil(sp_StrIntHash_get(h,k)));}return r;}
 
 /* SymPolyHash: symbol keys, sp_RbVal values -- same shape as SymStrHash but with poly values. */
 /* Named struct so lib/sp_fiber.c can forward-declare it for sp_Fiber's

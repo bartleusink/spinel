@@ -405,6 +405,7 @@ const char *rename_local(const char *nm);
 
 void emit_expr(Compiler *c, int id, Buf *b);
 void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b);
+void emit_typed_sink_text(Compiler *c, int node, TyKind slot, const char *text, Buf *b);
 
 /* ---- forward decls ---- */
 

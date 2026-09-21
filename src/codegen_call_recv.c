@@ -1919,7 +1919,11 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
                  buf_puts(g_pre, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); }
           buf_puts(g_pre, ");\n");
         }
-        else buf_printf(g_pre, "sp_%sArray_set(_t%d, _t%d, %s);\n", fk, trecv, ti, vb.p ? vb.p : "");
+        else {
+          buf_printf(g_pre, "sp_%sArray_set(_t%d, _t%d, ", fk, trecv, ti);
+          emit_typed_sink_text(c, fbb[fbn - 1], sp_streq(fk, "Int") ? TY_INT : sp_streq(fk, "Float") ? TY_FLOAT : TY_UNKNOWN, vb.p ? vb.p : "", g_pre);
+          buf_puts(g_pre, ");\n");
+        }
         free(vb.p);
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
         buf_printf(b, "_t%d", trecv);
@@ -3565,7 +3569,9 @@ else {
           int sv = g_indent; g_indent++;
           Buf vb = expr_buf(c, bb[bn - 1]); g_indent = sv;
           emit_indent(g_pre, g_indent + 1);
-          buf_printf(g_pre, "sp_%sArray_set(_t%d, _t%d, %s);\n", k, trecv, ti, vb.p ? vb.p : "0");
+          buf_printf(g_pre, "sp_%sArray_set(_t%d, _t%d, ", k, trecv, ti);
+          emit_typed_sink_text(c, bb[bn - 1], et, vb.p ? vb.p : "0", g_pre);
+          buf_puts(g_pre, ");\n");
           free(vb.p);
           emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
           if (mlv) mlv->type = msaved;
@@ -4162,9 +4168,29 @@ else {
         buf_printf(b, ", %d)", hi >= 0 ? excl : 0);
         return 1;
       }
+      if (sp_streq(name, "[]") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
+        /* arr[range] with a range VALUE (a variable, a parenthesised
+           expression): the typed arrays resolve the endpoints against the
+           length and slice; the boxed array had only the literal arm and
+           handed the sp_Range to the element read */
+        int ta = ++g_tmp, tr = ++g_tmp, tf = ++g_tmp, tl = ++g_tmp, tn = ++g_tmp;
+        buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_Range _t%d = ", tr); emit_expr(c, argv[0], b);
+        buf_printf(b, "; sp_int _t%d = sp_PolyArray_length(_t%d);", tn, ta);
+        buf_printf(b, " sp_int _t%d = _t%d.first == INTPTR_MIN ? 0 :"
+                      " (_t%d.first < 0 ? _t%d.first + _t%d : _t%d.first);",
+                   tf, tr, tr, tr, tn, tr);
+        buf_printf(b, " sp_int _t%d = _t%d.last == INTPTR_MAX ? _t%d - _t%d :"
+                      " ((_t%d.last < 0 ? _t%d.last + _t%d : _t%d.last) - _t%d + (_t%d.excl ? 0 : 1));",
+                   tl, tr, tn, tf, tr, tr, tn, tr, tf, tr);
+        buf_printf(b, " (_t%d < 0 || _t%d > _t%d) ? (sp_PolyArray *)0 : sp_PolyArray_slice(_t%d, _t%d, _t%d); })",
+                   tf, tf, tn, ta, tf, tl);
+        return 1;
+      }
       if (sp_streq(name, "[]") && argc == 1) {
         buf_puts(b, "sp_PolyArray_get("); emit_expr(c, recv, b); buf_puts(b, ", ");
         if (a0 == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+        else if (a0 == TY_BIGINT) emit_int_expr(c, argv[0], b);   /* a widened counter used as an index */
         else emit_expr(c, argv[0], b);
         buf_puts(b, ")");
         return 1;
@@ -4498,7 +4524,8 @@ else {
           buf_puts(b, "; }); })");
         }
         else {
-          buf_printf(b, " (sp_raise_cls(\"IndexError\", \"index out of bounds\"), sp_box_nil()); })");
+          /* CRuby's wording, the one the typed arrays and the boxed fetch use */
+          buf_printf(b, " (sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld outside of array bounds: %%lld...%%lld\", (long long)_t%d, (long long)-_t%d, (long long)_t%d)), sp_box_nil()); })", ti, tn, tn);
         }
         return 1;
       }

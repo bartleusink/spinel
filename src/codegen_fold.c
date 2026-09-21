@@ -2790,6 +2790,24 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
      a root and none of them is a value-type object, so the root and its
      separator are always wanted. */
   emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, " ");
+  /* --int-overflow=promote: the body is re-inferred under the parameter
+     shadow below, and an Integer `+` / `*` in it is typed poly then (it may
+     promote), so a numeric accumulator has to be boxed to take it back.
+     Look ahead with the same shadow and widen before the slot is declared. */
+  if (g_promote_mode && ty_is_numeric(acc_ty) && acc_ty != TY_BIGINT) {
+    Scope *lsc = comp_scope_of(c, block);
+    LocalVar *l0 = lsc ? scope_local(lsc, p0_orig) : NULL;
+    LocalVar *l1 = (lsc && p1_orig) ? scope_local(lsc, p1_orig) : NULL;
+    TyKind s0 = l0 ? l0->type : TY_UNKNOWN, s1 = l1 ? l1->type : TY_UNKNOWN;
+    if (l0) l0->type = acc_ty;
+    if (l1) l1->type = et;
+    for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]);
+    TyKind bt9 = comp_ntype(c, bb[bn - 1]);
+    if (l0) l0->type = s0;
+    if (l1) l1->type = s1;
+    if (bt9 == TY_POLY || bt9 == TY_BIGINT) acc_ty = TY_POLY;
+    for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]);
+  }
   emit_ctype(c, acc_ty, b); buf_printf(b, " _t%d = ", tacc);
   int start;
   if (init_empty_arr) {
@@ -3066,9 +3084,30 @@ int emit_each_with_index_chain(Compiler *c, int id, Buf *b) {
   TyKind acc_ty = elem_t;
   if (init >= 0) { TyKind it = comp_ntype(c, init); if (it != TY_UNKNOWN) acc_ty = it; }
   { TyKind bt = comp_ntype(c, bb[bn - 1]); if (ty_is_numeric(bt)) acc_ty = ty_promote_numeric(acc_ty, bt); }
-
   const char *p0 = rename_local(p0o);
   TyKind pair_ty = (elem_t == TY_INT) ? TY_INT_ARRAY : TY_POLY_ARRAY;
+  /* --int-overflow=promote: the body is re-inferred under the parameter
+     shadow below, where an Integer `+` / `*` types poly (it may promote), so
+     a numeric accumulator has to be boxed to take it back: look ahead with
+     the same shadow before the slot is declared (see the array inject). */
+  if (g_promote_mode && ty_is_numeric(acc_ty) && acc_ty != TY_BIGINT) {
+    Scope *lsc = comp_scope_of(c, block);
+    LocalVar *l0 = lsc ? scope_local(lsc, p0o) : NULL;
+    TyKind s0 = l0 ? l0->type : TY_UNKNOWN; if (l0) l0->type = acc_ty;
+    LocalVar *lv9 = NULL, *li9 = NULL, *lp9 = NULL; TyKind sv9 = TY_UNKNOWN, si9 = TY_UNKNOWN, sp9 = TY_UNKNOWN;
+    if (multi) {
+      lv9 = lsc ? scope_local(lsc, vo) : NULL; li9 = lsc ? scope_local(lsc, io) : NULL;
+      sv9 = lv9 ? lv9->type : TY_UNKNOWN; si9 = li9 ? li9->type : TY_UNKNOWN;
+      if (lv9) lv9->type = elem_t; if (li9) li9->type = TY_INT;
+    }
+    else { lp9 = lsc ? scope_local(lsc, pairo) : NULL; sp9 = lp9 ? lp9->type : TY_UNKNOWN; if (lp9) lp9->type = pair_ty; }
+    for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]);
+    TyKind bt9 = comp_ntype(c, bb[bn - 1]);
+    if (l0) l0->type = s0;
+    if (lv9) lv9->type = sv9; if (li9) li9->type = si9; if (lp9) lp9->type = sp9;
+    if (bt9 == TY_POLY || bt9 == TY_BIGINT) acc_ty = TY_POLY;
+    for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]);
+  }
   const char *pk = (elem_t == TY_INT) ? "Int" : "Poly";
 
   int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp, tidx = ++g_tmp;
@@ -3079,7 +3118,9 @@ int emit_each_with_index_chain(Compiler *c, int id, Buf *b) {
      every turn, with the block running in between */
   emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, " ");
   emit_ctype(c, acc_ty, b); buf_printf(b, " _t%d = ", tacc);
-  if (init >= 0) emit_expr(c, init, b); else buf_puts(b, "0");
+  if (init >= 0 && acc_ty == TY_POLY && comp_ntype(c, init) != TY_POLY) emit_boxed(c, init, b);
+  else if (init >= 0) emit_expr(c, init, b);
+  else buf_puts(b, acc_ty == TY_POLY ? "sp_box_nil()" : "0");
   buf_puts(b, "; ");
   /* and the accumulator, for the reason emit_reduce_block_expr gives: it is
      rebound to the block's fresh answer every turn, and the next block body
@@ -4189,7 +4230,10 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
               else emit_expr(c, bb_wi[bn_wi - 1], &vb_wi);
               g_indent = saveInd_wi;
               emit_indent(g_pre, g_indent + 1);
-              buf_printf(g_pre, "sp_%sArray_push(_t%d, %s);\n", rk_wi, tres_wi, vb_wi.p ? vb_wi.p : "");
+              buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk_wi, tres_wi);
+              if (res_poly_wi) buf_puts(g_pre, vb_wi.p ? vb_wi.p : "");
+              else emit_typed_sink_text(c, bb_wi[bn_wi - 1], sp_streq(rk_wi, "Int") ? TY_INT : sp_streq(rk_wi, "Float") ? TY_FLOAT : TY_UNKNOWN, vb_wi.p ? vb_wi.p : "", g_pre);
+              buf_puts(g_pre, ");\n");
               free(vb_wi.p);
               emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
               buf_printf(b, "_t%d", tres_wi);
@@ -4629,6 +4673,7 @@ int emit_with_index_expr(Compiler *c, int id, Buf *b) {
         Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, body_ty, vb.p ? vb.p : "", &bx);
         buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
       }
+      else if (!res_poly) emit_typed_sink_text(c, bb[bn - 1], sp_streq(rk, "Int") ? TY_INT : sp_streq(rk, "Float") ? TY_FLOAT : TY_UNKNOWN, vb.p ? vb.p : "", g_pre);
       else buf_puts(g_pre, vb.p ? vb.p : "");
       buf_puts(g_pre, ");\n");
     }

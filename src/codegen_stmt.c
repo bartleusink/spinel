@@ -8314,6 +8314,9 @@ else {
       else if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
       else emit_expr(c, v, b);
     }
+    /* a boxed constant slot (widened under promote, or a union) takes the
+       value boxed, as the plain ConstantWriteNode does */
+    else if (cv->type == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
     else emit_expr(c, v, b);
     buf_puts(b, ";\n");
     return;
@@ -9898,15 +9901,20 @@ else {
          ensure bodies run (accepting the catch/throw-class register hazard). */
       int bargs = nt_ref(nt, id, "arguments");
       int bvargc = 0; const int *bvargs = bargs >= 0 ? nt_arr(nt, bargs, "arguments", &bvargc) : NULL;
+      int light = strncmp(g_brk_ser_var, "_brklt", 6) == 0;   /* a wrapper with no setjmp scope */
       int brk_goto = (g_ensure_depth == g_brk_ensure_base) &&
                      (g_exc_frame_depth == g_brk_exc_base) &&
-                     strncmp(g_brk_ser_var, "_brkser", 7) == 0;
-      const char *sfx = brk_goto ? g_brk_ser_var + 7 : NULL;   /* wrapper temp id */
+                     (strncmp(g_brk_ser_var, "_brkser", 7) == 0 || light);
+      const char *sfx = brk_goto ? g_brk_ser_var + (light ? 6 : 7) : NULL;   /* wrapper temp id */
       emit_indent(b, indent);
       /* leaving the block pops the handler for every rescue body opened inside
          it; the throw longjmps, so pop before it (the value persists). */
       if (!brk_goto) emit_cur_exc_restore(b, g_brk_exc_base);
-      if (brk_goto) buf_printf(b, "sp_brk_val[_brkslot%s - 1] = ", sfx);
+      /* a light wrapper (no serial-addressed scope) takes the value in its
+         own temp; a throw has no scope to address there, which is what the
+         wrapper's gate guarantees cannot be needed */
+      if (brk_goto && light) buf_printf(b, "_brkv%s = ", sfx);
+      else if (brk_goto) buf_printf(b, "sp_brk_val[_brkslot%s - 1] = ", sfx);
       else buf_printf(b, "sp_brk_throw(%s, ", g_brk_ser_var);
       if (bvargc == 0) buf_puts(b, "sp_box_nil()");
       else if (bvargc == 1) emit_boxed(c, bvargs[0], b);
@@ -12124,13 +12132,15 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
          nil, &&= when present. Compare with == / != to avoid `!x != NIL`. */
       buf_printf(b, "if (sp_IntArray_get(_t%d, _t%d) %s SP_INT_NIL) sp_IntArray_set(_t%d, _t%d, ",
                  ta, tb, is_or ? "==" : "!=", ta, tb);
-      emit_expr(c, v, b);
+      { Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, v, &vb);
+        emit_typed_sink_text(c, v, TY_INT, vb.p ? vb.p : "0", b); free(vb.p); }
       buf_puts(b, ")");
     }
     else if (rt == TY_FLOAT_ARRAY) {
       buf_printf(b, "if (%ssp_float_is_nil(sp_FloatArray_get(_t%d, _t%d))) sp_FloatArray_set(_t%d, _t%d, ",
                  is_or ? "" : "!", ta, tb, ta, tb);
-      emit_expr(c, v, b);
+      { Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, v, &vb);
+        emit_typed_sink_text(c, v, TY_FLOAT, vb.p ? vb.p : "0.0", b); free(vb.p); }
       buf_puts(b, ")");
     }
     else if (rt == TY_STR_ARRAY) {

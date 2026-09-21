@@ -4280,7 +4280,16 @@ else {
         if (blk >= 0) {
           int body = nt_ref(nt, blk, "body");
           int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-          if (bn > 0) { TyKind bt = infer_type(c, bb[bn - 1]); if (ty_is_numeric(bt)) acc = ty_promote_numeric(acc, bt); }
+          if (bn > 0) {
+            TyKind bt = infer_type(c, bb[bn - 1]);
+            if (ty_is_numeric(bt)) acc = ty_promote_numeric(acc, bt);
+            /* a boxed body (a fold that may promote under
+               --int-overflow=promote, a Rational) cannot fold back into a
+               numeric seed slot: the accumulator is boxed, as the array
+               inject rule has it */
+            else if (ty_is_numeric(acc) && (bt == TY_POLY || bt == TY_BIGINT || bt == TY_RATIONAL || bt == TY_COMPLEX))
+              acc = TY_POLY;
+          }
         }
         return acc;
       }
@@ -5814,6 +5823,20 @@ else {
     if (ty_is_numeric(rt) && ty_is_numeric(a0)) {
       if (rt == TY_FLOAT || a0 == TY_FLOAT) return TY_FLOAT;
       if (rt == TY_BIGINT || a0 == TY_BIGINT) return TY_BIGINT;
+      /* --int-overflow=promote: an int `+`, `-` or `*` whose operands are
+         not both known constants can escape the word at run time and
+         promote to a Bignum (codegen lowers it to sp_poly_add / sub / mul),
+         the `<<` and `**` rule. Promotion is otherwise decided per SLOT,
+         and a value that never passes through one -- a block parameter, an
+         element read, a size -- was typed sp_int at the expression and took
+         the raising int helper in the mode whose contract is to promote
+         (#4681). `/` and `%` cannot leave the word. */
+      if (g_promote_mode && rt == TY_INT && a0 == TY_INT &&
+          (sp_streq(name, "+") || sp_streq(name, "-") || sp_streq(name, "*"))) {
+        long long pa, pb;
+        if (!(infer_const_int_node(nt, recv, &pa) && infer_const_int_node(nt, argv[0], &pb)))
+          return TY_POLY;
+      }
       return TY_INT;
     }
     /* numeric receiver <op> a coercing user object: the result is what the
