@@ -46,3 +46,4 @@ iceil: no implicit conversion of Hash into Integer
 probe i_pos
 probe i_kw2
 iceil2: wrong number of arguments (given 2, expected 0..1)
+many: unknown keywords: :k1, :
