@@ -2181,6 +2181,11 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
        invalid C (#3978). The do{}while(0) wrapper it emits makes the
        continue exit exactly this block. */
     char destbuf[24]; snprintf(destbuf, sizeof destbuf, "_t%d", tres);
+    /* The slot is the poly array a `next` arm of another kind widened the
+       value to while the tail is still typed: say so, or the substrate keys
+       the arms and the tail on the tail's kind (#4747). */
+    TyKind tailt = comp_ntype(c, bb[bn - 1]);
+    g_bv_dest_ty = (rett == TY_POLY_ARRAY && tailt != rett && array_to_poly_fn(tailt)) ? rett : TY_UNKNOWN;
     emit_block_value_into(c, block, destbuf, rett == TY_POLY, din);
   }
   else {

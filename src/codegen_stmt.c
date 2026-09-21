@@ -10187,8 +10187,14 @@ else {
           }
         }
         emit_indent(b, indent); buf_printf(b, "%s = ", g_ie_next_var);
+        /* A typed-array arm into a poly-array slot converts: the slot took
+           that kind from the tail, or from an arm of another kind, and the
+           arm's own struct does not fit it (#4747). */
+        TyKind at9 = g_ie_next_ty == TY_POLY_ARRAY ? comp_ntype(c, nv[0]) : TY_UNKNOWN;
+        const char *apf9 = at9 != TY_POLY_ARRAY ? array_to_poly_fn(at9) : NULL;
         if (g_ie_res_poly) emit_boxed(c, nv[0], b);
         else if (g_ie_next_ty == TY_INT || g_ie_next_ty == TY_FLOAT) emit_expr_slot(c, nv[0], g_ie_next_ty, b);
+        else if (apf9) { buf_printf(b, "%s(", apf9); emit_expr(c, nv[0], b); buf_puts(b, ")"); }
         else emit_expr(c, nv[0], b);
         buf_puts(b, ";\n");
       }

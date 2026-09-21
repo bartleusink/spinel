@@ -1736,6 +1736,20 @@ void emit_poly_sum_seed(Compiler *c, int recv, int seed, Buf *b) {
   buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tr, ts); emit_boxed(c, seed, b);
   buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_sum_seed(_t%d, _t%d); })", ts, tr, ts);
 }
+/* The runtime conversion of a typed array to the poly array; NULL for a kind
+   that has none. */
+const char *array_to_poly_fn(TyKind t) {
+  switch (t) {
+    case TY_INT_ARRAY:   return "sp_IntArray_to_poly";
+    case TY_FLOAT_ARRAY: return "sp_FloatArray_to_poly";
+    case TY_STR_ARRAY:   return "sp_StrArray_to_poly_fmt";
+    default:             return NULL;
+  }
+}
+/* The kind of the slot the next emit_block_value_into writes, when it is not
+   the tail's own (a `then` whose value joined a `next` arm of another array
+   kind, #4747); that one call consumes it. */
+TyKind g_bv_dest_ty = TY_UNKNOWN;
 const char *array_kind(TyKind t) {
   switch (t) {
     case TY_INT_ARRAY:   return "Int";
