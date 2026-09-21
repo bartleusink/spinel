@@ -8347,7 +8347,12 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
     TyKind at = comp_ntype(c, argv[0]);
     if (at == TY_INT || at == TY_BIGINT) { emit_boxed(c, argv[0], b); return 1; }
     /* a Float converts via to_int (truncates; Inf/NaN raises FloatDomainError) */
-    if (at == TY_FLOAT) { buf_puts(b, "sp_box_int(sp_float_to_i_checked("); emit_expr(c, argv[0], b); buf_puts(b, "))"); return 1; }
+    if (at == TY_FLOAT) {
+      buf_puts(b, g_promote_mode ? "sp_box_f_to_int(" : "sp_box_int(sp_float_to_i_checked(");
+      emit_expr(c, argv[0], b);
+      buf_puts(b, g_promote_mode ? ")" : "))");
+      return 1;
+    }
     buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), sp_box_nil())");
     return 1;
   }
@@ -22567,7 +22572,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       else if (at == TY_FLOAT) {
         int tf = ++g_tmp;
         buf_printf(b, "({ sp_float _t%d = ", tf); emit_expr(c, av[0], b);
-        buf_printf(b, "; sp_poly_flo_domain_ck(_t%d); sp_float_fit_i(_t%d); })", tf, tf);
+        buf_printf(b, comp_ntype(c, id) == TY_POLY
+                        ? "; sp_poly_flo_domain_ck(_t%d); sp_box_f_to_int(_t%d); })"
+                        : "; sp_poly_flo_domain_ck(_t%d); sp_float_fit_i(_t%d); })", tf, tf);
       }
       else if (at == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_raise_cls(\"TypeError\", \"can't convert nil into Integer\"), (sp_int)0)"); }  /* #2514 */
       else if (at == TY_POLY) { buf_puts(b, "sp_poly_Integer("); emit_expr(c, av[0], b); buf_puts(b, ")"); }

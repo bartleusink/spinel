@@ -1493,6 +1493,7 @@ int64_t sp_bigint_to_int(sp_Bigint *b);
 double sp_bigint_to_double(sp_Bigint *b);
 int sp_bigint_cmp(sp_Bigint *a, sp_Bigint *b);
 sp_Bigint *sp_bigint_new_int(int64_t v);
+sp_Bigint *sp_bigint_new_double(double d);
 sp_Bigint *sp_bigint_add(sp_Bigint *a, sp_Bigint *b);
 sp_Bigint *sp_bigint_sub(sp_Bigint *a, sp_Bigint *b);
 sp_Bigint *sp_bigint_mul(sp_Bigint *a, sp_Bigint *b);
@@ -2458,9 +2459,13 @@ static SP_NOINLINE sp_int sp_poly_to_i_cold(sp_RbVal v);
    line. Inlining those too put a strtoll call, the bigint reader and the
    BigRational conversion inside PPU#render_pixel, 1.7KB of code the pixel
    loop walks past on its way through. */
+static inline sp_int sp_float_fit_i(sp_float v);   /* fwd: defined with the domain checks */
 static SP_INLINE sp_int sp_poly_to_i(sp_RbVal v) {
   if (v.tag == SP_TAG_INT || v.tag == SP_TAG_SYM) return v.v.i;
-  if (v.tag == SP_TAG_FLT) return (sp_int)v.v.f;
+  /* Not a bare cast: a Float past sp_int's range makes that undefined, which
+     is what #4657 removed from the statically-typed sites -- this boxed one
+     was out of its reach and saturated silently (#4688). */
+  if (v.tag == SP_TAG_FLT) return sp_float_fit_i(v.v.f);
   return sp_poly_to_i_cold(v);
 }
 static SP_NOINLINE sp_int sp_poly_arg_int_obj(sp_RbVal v);   /* the object arm, below */
@@ -3073,6 +3078,15 @@ static inline void sp_poly_flo_domain_ck(sp_float f) {
    promise and deleted the statement around it, so `p (2.0**70).floor` printed
    nothing at all. Until the promotion plan covers statically-int results
    (#2024), raise -- the same RangeError Float#to_i already raises. */
+/* A finite Float's integer value as an Integer, for a slot that is already
+   BOXED: inline where it fits sp_int, a Bignum where it does not. Answering
+   the wide value costs nothing here, so sp_float_fit_i's RangeError is left
+   to the sp_int slots that have no room for it (#4688). */
+static sp_RbVal sp_box_f_to_int(sp_float v) {
+  /* the same bound sp_float_fit_i uses, exact at either sp_int width */
+  if (v < -(sp_float)INTPTR_MIN && v >= (sp_float)INTPTR_MIN) return sp_box_int((sp_int)v);
+  return sp_box_bigint(sp_bigint_new_double(v));
+}
 static inline sp_int sp_float_fit_i(sp_float v) {
   /* (double)INTPTR_MIN is exact at either width: -2^63 on 64-bit, -2^31 on
      the 32-bit build, so the same test bounds whichever sp_int this is. */
@@ -3148,7 +3162,7 @@ static sp_RbVal sp_poly_abs2(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id =
 /* No-arg floor/ceil/round/truncate return Integer in Ruby: an int/bigint tag
    is already its own floor (returned unchanged, lossless for bigints), a
    float converts through the matching libm rounding. */
-static sp_RbVal sp_poly_floor(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_int(sp_float_fit_i(floor(v.v.f))); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_floor_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("floor", v); }
+static sp_RbVal sp_poly_floor(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(floor(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_floor_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("floor", v); }
 /* a NULL char* carried under SP_TAG_STR is the empty string (as in
    sp_poly_to_i / sp_poly_eq): bytesize 0, ord raises CRuby's ArgumentError. */
 static sp_int sp_poly_bytesize(sp_RbVal v) { if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_bytesize_m(v.v.s) : 0; sp_raise_poly_nomethod("bytesize", v); }
@@ -3263,8 +3277,8 @@ static sp_int sp_poly_denominator(sp_RbVal v) { if (sp_poly_is_rational(v)) retu
 /* String#getbyte on a poly value; nil (not 0) for an out-of-range index, per
    CRuby, so the result is boxed. */
 static sp_RbVal sp_poly_getbyte(sp_RbVal v, sp_int i) { if (v.tag != SP_TAG_STR) sp_raise_poly_nomethod("getbyte", v); const char *s = v.v.s; if (!s) return sp_box_nil(); sp_int bl = (sp_int)sp_str_byte_len(s); if (i < 0) i += bl; if (i < 0 || i >= bl) return sp_box_nil(); return sp_box_int((sp_int)(unsigned char)s[i]); }
-static sp_RbVal sp_poly_ceil(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_int(sp_float_fit_i(ceil(v.v.f))); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_ceil_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("ceil", v); }
-static sp_RbVal sp_poly_round(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_int(sp_float_fit_i(round(v.v.f))); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_round_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("round", v); }
+static sp_RbVal sp_poly_ceil(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(ceil(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_ceil_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("ceil", v); }
+static sp_RbVal sp_poly_round(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(round(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_round_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("round", v); }
 /* Numeric#round(ndigits): a Float stays Float when n > 0 (rounded to n decimal
    places) and becomes Integer when n <= 0; an Integer is unchanged for n >= 0
    and rounded to a power of ten for n < 0. Mirrors the scalar Float#round(n)
@@ -3276,7 +3290,7 @@ static sp_RbVal sp_poly_round_n(sp_RbVal v, sp_int n) {
       double r = round(x * f) / f; return sp_box_float((x != 0.0 && r == 0.0) ? 0.0 : r); }  /* +0.0 normalize (#3235) */
     sp_poly_flo_domain_ck(x);
     double f = pow(10, (double)(-n));
-    return sp_box_int(isinf(f) ? 0 : sp_float_fit_i(round(x / f) * f));
+    return isinf(f) ? sp_box_int(0) : sp_box_f_to_int(round(x / f) * f);
   }
   if (v.tag == SP_TAG_INT) {
     if (n >= 0) return v;
@@ -3324,7 +3338,7 @@ static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
   }
   sp_raise_poly_nomethod(nm, v);
 }
-static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_int(sp_float_fit_i(trunc(v.v.f))); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } sp_raise_poly_nomethod("truncate", v); }
+static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } sp_raise_poly_nomethod("truncate", v); }
 /* forward: generic array length/element (defined later in this header) and
    the array-kind predicate for cross-kind value equality. */
 static sp_int sp_poly_length(sp_RbVal v);

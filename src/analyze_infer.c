@@ -3924,8 +3924,12 @@ else {
                 ((krt == TY_NIL || krt == TY_POLY || krt == TY_UNKNOWN) &&
                  comp_method_index(c, name) < 0);
     if (kdisp) {
-      if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2))
+      if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) {
+        /* a Float argument converts to an Integer that promote mode lets be a
+           Bignum, as Float#to_i does there (#4688) */
+        if (g_promote_mode && infer_type(c, argv[0]) == TY_FLOAT) return TY_POLY;
         return kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv));
+      }
       if (kw_argc == 1) {
         if (sp_streq(name, "Float"))    return TY_FLOAT;
         if (sp_streq(name, "String"))   return TY_STRING;
@@ -3954,8 +3958,10 @@ else {
     if (mi < 0) mi = comp_included_method_index(c, name);
     if (mi >= 0) return method_call_ret(c, mi, id);
     /* Kernel conversions */
-    if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2))
-        return kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv));
+    if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) {
+      if (g_promote_mode && infer_type(c, argv[0]) == TY_FLOAT) return TY_POLY;   /* see above (#4688) */
+      return kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv));
+    }
     if (sp_streq(name, "Float") && kw_argc == 1) return TY_FLOAT;
     if (sp_streq(name, "String") && argc == 1) return TY_STRING;
     if (sp_streq(name, "Array") && argc == 1) {
@@ -5615,6 +5621,27 @@ else {
   }
   /* float receiver methods */
   if (recv >= 0 && rt == TY_FLOAT) {
+    /* promote mode promises that an integer result too wide for a machine
+       word widens instead of failing, and a Float conversion asks the same
+       question: (2.0**70).floor is a Bignum in CRuby, where raise mode
+       answers RangeError (#4688). Only the forms whose result IS an Integer
+       widen; `round(2)` stays a Float, and raise/wrap keep their sp_int so
+       no hot loop boxes for this. */
+    if (g_promote_mode) {
+      int pv_argc = argc;
+      if (pv_argc >= 1 && nt_type(nt, argv[pv_argc - 1]) &&
+          sp_streq(nt_type(nt, argv[pv_argc - 1]), "KeywordHashNode")) pv_argc--;
+      if ((sp_streq(name, "to_i") || sp_streq(name, "to_int")) && argc == 0) return TY_POLY;
+      if (sp_streq(name, "floor") || sp_streq(name, "ceil") ||
+          sp_streq(name, "round") || sp_streq(name, "truncate")) {
+        if (pv_argc == 0) return TY_POLY;
+        if (pv_argc == 1) {
+          const char *pv_aty = nt_type(nt, argv[0]);
+          if (pv_aty && sp_streq(pv_aty, "IntegerNode") &&
+              nt_int(nt, argv[0], "value", 0) <= 0) return TY_POLY;
+        }
+      }
+    }
     if ((sp_streq(name, "arg") || sp_streq(name, "angle") || sp_streq(name, "phase")) && argc == 0)
       return TY_POLY;  /* Integer 0 or Float PI (#2316) */
     if (sp_streq(name, "to_c") && argc == 0) return TY_COMPLEX;
