@@ -3,7 +3,6 @@
  * in the generated TU and are reached by name; fiber-local storage is
  * self-contained here. */
 #include "sp_fiber.h"
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -256,6 +255,10 @@ SP_TLS sp_Fiber *sp_fiber_current = &sp_fiber_root;    /* extern: read by the ge
    verifier's fault reporter, for one). */
 #include <signal.h>
 #include <stdio.h>
+#include <sys/resource.h>
+#ifdef SP_THREADS
+#include <pthread.h>    /* only where the build has it: see sp_thread_stack_bounds */
+#endif
 static void sp_fiber_fault_write(const char *s) { size_t n = strlen(s); while (n) { ssize_t w = write(2, s, n); if (w <= 0) break; s += w; n -= (size_t)w; } }
 static void sp_fiber_fault_write_num(size_t v) { char b[24]; int i = (int)sizeof b; b[--i] = 0; do { b[--i] = (char)('0' + v % 10); v /= 10; } while (v); sp_fiber_fault_write(b + i); }
 static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
@@ -273,7 +276,11 @@ static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
        was entered with would otherwise stay blocked in the frame we jump to
        (on Linux longjmp does not restore it) */
     sigset_t m; sigemptyset(&m); sigaddset(&m, SIGSEGV); sigaddset(&m, SIGBUS);
+#ifdef SP_THREADS
     pthread_sigmask(SIG_UNBLOCK, &m, 0);
+#else
+    sigprocmask(SIG_UNBLOCK, &m, 0);   /* one thread: the same mask */
+#endif
     sp_stack_overflow_raise_fn();   /* returns only if no handler is armed */
     /* Nothing to rescue it: report it as the uncaught exception it is and
        leave, rather than letting the default disposition kill the process on
@@ -304,10 +311,19 @@ SP_TLS char *sp_thread_stack_hi = 0;
 
 /* The running thread's stack bounds. A fault just below the low end is this
    stack growing past it -- the OS puts its own guard page there, which is
-   what the fault is. pthread answers for the main thread too (on macOS the
-   address it returns is the HIGH end; on Linux the attr pair gives base and
-   size), so one path covers both and no /proc reading is needed. */
-static void sp_thread_stack_bounds(void) {
+   what the fault is.
+
+   With threads, pthread answers for every stack including the main one (on
+   macOS the address it returns is the HIGH end; on Linux the attr pair gives
+   base and size). A program built without them has one stack, the process's
+   own: arming happens at startup, so a local here is within a frame or two of
+   its high end, and the soft RLIMIT_STACK is its size. That is asked of
+   <sys/resource.h> rather than of pthread, because a target may have no
+   pthread at all -- a pack of an unthreaded program is built with whatever
+   compiler its recipient has, and <pthread.h> there may not even compile. */
+static void sp_thread_stack_bounds(char *here) {
+#ifdef SP_THREADS
+  (void)here;
   pthread_t self = pthread_self();
 #if defined(__APPLE__)
   char *hi = (char *)pthread_get_stackaddr_np(self);
@@ -324,13 +340,29 @@ static void sp_thread_stack_bounds(void) {
   sp_thread_stack_lo = (char *)base;
   sp_thread_stack_hi = (char *)base + sz;
 #endif
+#else
+  struct rlimit rl;
+  size_t sz = 8u << 20;   /* the common default, when the limit says nothing */
+  if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+      rl.rlim_cur > (rlim_t)(64u << 10))
+    sz = (size_t)rl.rlim_cur;
+  /* `here` is a frame or two below the true top, not at it, and the low end is
+     derived by subtracting the size -- so under-estimating the top would put
+     the computed low end BELOW the real one, and the real guard page would sit
+     above the band the handler tests rather than in it. Over-estimate instead:
+     64 KB of startup frames is far more than the few hundred bytes actually
+     used, and the computed low end then sits just inside the stack, which is
+     where the handler's window wants it. */
+  sp_thread_stack_hi = here + (64u << 10);
+  sp_thread_stack_lo = sp_thread_stack_hi - sz;
+#endif
 }
 
 static SP_TLS int sp_fiber_fault_armed = 0;
 static void sp_fiber_fault_arm(void) {
   if (sp_fiber_fault_armed) return;
   sp_fiber_fault_armed = 1;
-  sp_thread_stack_bounds();
+  { char here; sp_thread_stack_bounds(&here); }
   /* the alternate stack is per OS thread; workers live as long as the process */
   size_t asz = 64 * 1024;
   void *as = malloc(asz);
