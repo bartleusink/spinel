@@ -2602,7 +2602,21 @@ static char *sp_splice_builtins(char *source, const char *exe_path,
     snprintf(gp, sizeof gp, "%.*s/builtins/enumerable.rb", base_len, lib_dir);
     char *content = read_file(gp);
     if (!content) { snprintf(gp, sizeof gp, "%.*s/../builtins/enumerable.rb", base_len, lib_dir); content = read_file(gp); }
-    if (content) { sp_builtin_names_from(content); free(content); }
+    if (!content) {
+      /* The C emitters for these methods are gone: a compiler that cannot
+         find the file has no Enumerable#partition at all, and a program
+         calling one compiled to an unconditional NoMethodError whose
+         carrier then failed the C build two files away from the cause. A
+         toolchain staged by hand (binary + lib/ + packages/, the list that
+         was complete before this directory existed) is the way to get
+         here; say so, where the binary looked. */
+      fprintf(stderr,
+              "spinel: builtins/enumerable.rb not found beside the compiler (looked under %.*s and its parent);\n"
+              "        the toolchain is incomplete -- it ships with `make install`. SPINEL_NO_BUILTINS=1 compiles without it.\n",
+              base_len, lib_dir);
+      exit(1);
+    }
+    sp_builtin_names_from(content); free(content);
     if (sp_builtin_enum_names_n == 0) return source;
   }
   if (strstr(source, "module Enumerable")) return source;   /* the program reopens it itself: leave that alone for now */
