@@ -31,3 +31,19 @@ class Base
 end
 p [Base.new.method(:untyped)][0].call("hello")
 p [Base.new.method(:untyped)][0].call(7)
+
+# A Method whose target the call site cannot resolve, called WITHOUT a splat
+# and with an argument the legacy classifier cannot place in an sp_int slot.
+# No legacy signature can be built for such a site at all, so there is nothing
+# to test at run time -- falling through to the cast anyway read a Float's
+# bits as an integer and `m.call(3.5)` answered false.
+class K
+  def fi(a) = a
+  def pick(n) = n.zero? ? method(:fi) : method(:fi)
+  def go
+    m = pick(0)
+    [m.call(3.5), m.call("s"), m.call(7), m.call(:sym), m.call(nil), m.call([1, 2])]
+  end
+end
+p K.new.go
+

@@ -20202,7 +20202,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       else {
         TyKind pk = comp_ntype(c, argv[k]);
-        if (bm_want_boxed && pk != TY_UNKNOWN && pk != TY_VOID) {
+        if (bm_want_boxed && pk != TY_UNKNOWN && pk != TY_VOID && pk != TY_NIL) {
           bxtmp[k] = ++g_tmp;
           emit_ctype(c, pk, b); buf_printf(b, " _t%d = ", bxtmp[k]); emit_expr(c, argv[k], b); buf_puts(b, "; ");
           emit_named_root(c, pk, "_t", bxtmp[k], b); buf_puts(b, " ");
@@ -20210,7 +20210,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           if (pk == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", bxtmp[k]);
           else buf_printf(b, "(sp_int)(_t%d)", bxtmp[k]);
         }
-        else { buf_printf(b, "sp_int _t%d = ", atmp[k]); emit_expr(c, argv[k], b); }
+        else {
+          /* `nil` has no C value to hold in a typed temp -- its C type is
+             void -- so it keeps the plain sp_int slot. The boxed channel
+             still has everything it needs: the slot is the single
+             evaluation, and the boxed form of nil is a constant. */
+          buf_printf(b, "sp_int _t%d = ", atmp[k]); emit_expr(c, argv[k], b);
+          if (bm_want_boxed && pk == TY_NIL) bxtmp[k] = atmp[k];
+        }
       }
       buf_puts(b, "; ");
     }
@@ -20273,6 +20280,24 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         }
         else buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_obj(_t%d, SP_BUILTIN_METHOD))), sp_box_nil()", name, tr);
         buf_puts(b, ") : ");
+      }
+      else if (bm_boxed_ok) {
+        /* No legacy signature could be built for this site at all: an
+           argument the classifier cannot place in an sp_int slot -- a Float,
+           a poly value -- means the legacy cast is not merely unlikely to
+           fit, it is certainly wrong. Falling through to it read a Float's
+           bits as an integer and `m.call(3.5)` answered false. There is
+           nothing to test at run time here: go straight to the boxed lane. */
+        for (int k = 0; k < eargc; k++) {
+          buf_printf(b, "_sp_proc_poly_args[%d] = ", k);
+          emit_boxed_text(c, comp_ntype(c, argv[k]), bxref[k], b);
+          buf_puts(b, ", ");
+        }
+        buf_printf(b, "sp_bm_call_boxed(_t%d, %d); })", tr, eargc);
+        g_nren = pd_base;
+        free(atmp); free(bxtmp); free(bxref);
+        free(psrc);
+        return;
       }
       buf_printf(b, "_t%d->legacy_ret == SP_BM_RET_POLY ? (", tr);
     }
