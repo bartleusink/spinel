@@ -123,13 +123,53 @@ static void sp_ssl_release(int i) {
   memset(c, 0, sizeof *c);
 }
 
+/* ---- X509::Store ---- */
+/* Ruby-side handle over an OpenSSL X509_STORE, so a program can load a
+   trust store of its own (typically the system CAs) and hand it to
+   sp_ssl_connect / sp_ssl_connect_nb. SSL_CTX_set1_cert_store increments
+   the reference count, so the caller retains ownership and the handle
+   remains reusable. */
+struct sp_X509_Store_s {
+  sp_int cls_id;
+  X509_STORE *store;
+};
+typedef struct sp_X509_Store_s sp_X509_Store;
+
+void sp_X509_Store_free(void *p) {
+  sp_X509_Store *s = (sp_X509_Store *)p;
+  if (s && s->store) {
+    X509_STORE_free(s->store);
+    s->store = NULL;
+  }
+}
+
+sp_X509_Store *sp_X509_Store_new(sp_int cls_id) {
+  sp_X509_Store *s = (sp_X509_Store *)sp_gc_alloc(sizeof(sp_X509_Store),
+                                                  sp_X509_Store_free, NULL);
+  if (!s) return NULL;
+  s->cls_id = cls_id;
+  s->store = X509_STORE_new();
+  if (!s->store) {
+    return NULL;
+  }
+  return s;
+}
+
+/* store.set_default_paths() - loads system CA certificates */
+int sp_X509_Store_set_default_paths(sp_X509_Store *s) {
+  if (!s || !s->store) return -1;
+  return X509_STORE_set_default_paths(s->store);
+}
+
 /* Everything a client connection needs EXCEPT the handshake: the slot, the
    context, the SSL object and the descriptor. Split out because the blocking
    and the non-blocking connect differ only in how they drive the handshake,
    and a second copy of the verify and SNI setup would be a second place for
    a security default to drift out of step. Answers the slot index with the
-   slot claimed, or -1 with the reason in sp_ssl_last_error. */
-static int sp_ssl_setup(sp_int fd, const char *hostname, sp_int verify) {
+   slot claimed, or -1 with the reason in sp_ssl_last_error.
+   `cert_store` is an optional Ruby X509::Store object; if non-NIL, its
+   native X509_STORE is referenced by the SSL_CTX (SSL_CTX_set1_cert_store, so the store stays the handle's and is reusable). */
+static int sp_ssl_setup(sp_int fd, const char *hostname, sp_int verify, sp_RbVal cert_store) {
   int i = sp_ssl_slot();
   if (i < 0) { sp_ssl_note("too many TLS connections"); return -1; }
   sp_ssl_errbuf[0] = 0;
@@ -151,6 +191,17 @@ static int sp_ssl_setup(sp_int fd, const char *hostname, sp_int verify) {
   }
 else {
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+  }
+
+  /* Apply custom cert store if provided (Ruby X509::Store object) */
+  if (cert_store.tag != SP_TAG_NIL) {
+    sp_X509_Store *store = (sp_X509_Store *)cert_store.v.p;
+    if (store && store->store) {
+      /* SSL_CTX_set1_cert_store increments the reference count,
+       * so the caller (SSLContext#cert_store) retains ownership and
+       * remains reusable. */
+      SSL_CTX_set1_cert_store(ctx, store->store);
+    }
   }
 
   SSL *ssl = SSL_new(ctx);
@@ -184,9 +235,12 @@ else {
 /* Open a client connection over an already-connected fd, handshake included.
    `hostname` drives both SNI and the certificate's name check; verify != 0
    asks OpenSSL to validate the chain against the OS trust store. Returns a
-   handle, or -1 with the reason in sp_ssl_last_error. */
-sp_int sp_ssl_connect(sp_int fd, const char *hostname, sp_int verify) {
-  int i = sp_ssl_setup(fd, hostname, verify);
+   handle, or -1 with the reason in sp_ssl_last_error.
+   `cert_store` is an optional Ruby X509::Store object; if non-NIL, its
+   native X509_STORE is referenced by the SSL_CTX via SSL_CTX_set1_cert_store;
+   the handle retains ownership and remains reusable. */
+sp_int sp_ssl_connect(sp_int fd, const char *hostname, sp_int verify, sp_RbVal cert_store) {
+  int i = sp_ssl_setup(fd, hostname, verify, cert_store);
   if (i < 0) return -1;
   if (SSL_connect(sp_ssl_tab[i].ssl) != 1) {
     sp_ssl_note("TLS handshake failed");
@@ -256,8 +310,11 @@ static void sp_ssl_handshake_step(sp_ssl_conn *c) {
    the kernel, which is the whole point of the call. Answers the handle as
    soon as the connection exists -- the handshake may well be unfinished, and
    sp_ssl_want says so -- or -1 when the connection could not be built. */
-sp_int sp_ssl_connect_nb(sp_int fd, const char *hostname, sp_int verify) {
-  int i = sp_ssl_setup(fd, hostname, verify);
+/* Non-blocking connect: same parameters as sp_ssl_connect, but starts the
+   handshake and returns :wait_readable/:wait_writable if it needs more I/O.
+   The handle is kept across calls so the handshake can be resumed. */
+sp_int sp_ssl_connect_nb(sp_int fd, const char *hostname, sp_int verify, sp_RbVal cert_store) {
+  int i = sp_ssl_setup(fd, hostname, verify, cert_store);
   if (i < 0) { sp_ssl_want_state = 4; return -1; }
   sp_ssl_conn *c = &sp_ssl_tab[i];
   int fl = fcntl(c->fd, F_GETFL, 0);

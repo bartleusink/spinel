@@ -177,6 +177,7 @@ extern const char *g_ie_next_var;
    at its own default, which the destination then reads as the wrong struct
    (#3978). TY_UNKNOWN when unknown or not a container. */
 extern TyKind g_ie_next_ty;
+extern TyKind g_bv_dest_ty;
 extern int g_c_loop_depth;   /* C-loop nesting inside the current fn body */
 extern int g_in_proc_body;   /* emitting a _proc_N function body */
 /* Set while the wrapped splice's result temp is poly, so a value-carrying
@@ -699,6 +700,7 @@ const char *ptr_array_stamp(Compiler *c, TyKind t);   /* "SP_PTR_ELEM_x, cls" fo
 void emit_box_close(Compiler *c, TyKind t, Buf *b);
 /* "Int" / "Str" / "Float" for the sp_<K>Array_* runtime family. */
 const char *array_kind(TyKind t);
+const char *array_to_poly_fn(TyKind t);
 /* comp_ntype for a fold seed, with an empty `[]` / `{}` literal resolved to
    its container kind rather than left TY_UNKNOWN (see types.c). */
 TyKind fold_seed_ntype(Compiler *c, int node);

@@ -30,7 +30,7 @@ module OpenSSL
   module Native
     native_lib "openssl"
     native_obj "packages/openssl/sp_openssl.o"
-    native_func :connect,      [:int, :string, :int], :int,    "sp_ssl_connect"
+    native_func :connect,      [:int, :string, :int, :any], :int,    "sp_ssl_connect"
     native_func :read,         [:int, :int],          :string, "sp_ssl_read"
     native_func :write,        [:int, :string, :int], :int,    "sp_ssl_write"
     native_func :pending,      [:int],                :int,    "sp_ssl_pending"
@@ -39,7 +39,7 @@ module OpenSSL
     native_func :peer_subject, [:int],                :string, "sp_ssl_peer_subject"
     native_func :version,      [:int],                :string, "sp_ssl_version"
     native_func :cipher,       [:int],                :string, "sp_ssl_cipher"
-    native_func :connect_nb,   [:int, :string, :int], :int,    "sp_ssl_connect_nb"
+    native_func :connect_nb,   [:int, :string, :int, :any], :int,    "sp_ssl_connect_nb"
     native_func :connect_cont, [:int],                :int,    "sp_ssl_connect_cont"
     native_func :read_nb,      [:int, :int],          :string, "sp_ssl_read_nb"
     native_func :want,         [],                    :int,    "sp_ssl_want"
@@ -66,10 +66,15 @@ module OpenSSL
     native_func :ecdsa_sign,    [:string, :string, :string],          :cbinstr, "sp_ecdsa_sign"
     native_func :ecdsa_verify,  [:string, :string, :string, :string], :int,     "sp_ecdsa_verify"
     native_func :ec_check_point, [:string, :string],                  :int,     "sp_ec_check_point"
+
     ffi_lib "ssl"
     ffi_lib "crypto"
-  end
 
+    # X509::Store - for system CA cert loading
+    native_struct "X509::Store", "sp_X509_Store", "sp_X509_Store_free"
+    native_new [], "sp_X509_Store_new"
+    native_method :set_default_paths, [], :int, "sp_X509_Store_set_default_paths"
+  end
   module SSL
     VERIFY_NONE = 0
     VERIFY_PEER = 1
@@ -102,10 +107,12 @@ module OpenSSL
     class SSLContext
       attr_accessor :verify_mode
       attr_accessor :verify_hostname
+      attr_accessor :cert_store
 
       def initialize
         @verify_mode = VERIFY_PEER
         @verify_hostname = true
+        @cert_store = nil
       end
 
       def set_params(params = nil)
@@ -149,7 +156,8 @@ module OpenSSL
 
       def connect
         h = Native.connect(@io.fileno, @hostname,
-                           @context.verify_mode == VERIFY_NONE ? 0 : 1)
+                           @context.verify_mode == VERIFY_NONE ? 0 : 1,
+                           @context.cert_store)
         if h < 0
           raise SSLError, "SSL_connect returned an error: #{Native.last_error}"
         end
@@ -175,7 +183,8 @@ module OpenSSL
       def connect_nonblock(exception: true)
         if @handle < 0
           h = Native.connect_nb(@io.fileno, @hostname,
-                                @context.verify_mode == VERIFY_NONE ? 0 : 1)
+                                @context.verify_mode == VERIFY_NONE ? 0 : 1,
+                                @context.cert_store)
           if h < 0
             raise SSLError, "SSL_connect returned an error: #{Native.last_error}"
           end

@@ -1608,6 +1608,10 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     else if (sp_streq(op, "*")) pfn = "sp_poly_mul";
     else if (sp_streq(op, "/")) pfn = "sp_poly_div";
     else if (sp_streq(op, "%")) pfn = "sp_poly_mod";
+    /* `**=` too: the binary `**` and the index op-assign already spell it
+       sp_poly_pow, only this arm lacked the row, so `f **= 3` on a boxed
+       local was refused where `f = f ** 3` built (#4766) */
+    else if (sp_streq(op, "**")) pfn = "sp_poly_pow";
     if (pfn) {
       buf_printf(b, "%s = %s(%s, ", lval, pfn, lval);
       emit_boxed(c, v, b);
@@ -8384,6 +8388,20 @@ else {
     /* a poly-typed global/const slot boxes a scalar value (`$g = 42` where $g
        elsewhere holds a string/array, so its slot is sp_RbVal) */
     else if (lv->type == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
+    else if (lv->type == TY_POLY_ARRAY && ty_is_array(comp_ntype(c, v)) &&
+             comp_ntype(c, v) != TY_POLY_ARRAY) {
+      /* a typed array into a poly-array global: rebuilt with its elements
+         boxed, the conversion the local and ivar writes make (a slot that
+         widened on a write the node never saw -- under --int-overflow=promote
+         every array built from widened Integers, #4738) */
+      TyKind vt2 = comp_ntype(c, v);
+      if (conv_reads_shared_storage(c, v))
+        unsupported(c, v, "widening a typed array READ into a poly global (the conversion copies, so writes would not be shared)");
+      if (vt2 == TY_INT_ARRAY) { buf_puts(b, "sp_PolyArray_from_int_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+      else if (vt2 == TY_STR_ARRAY) { buf_puts(b, "sp_PolyArray_from_str_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+      else if (vt2 == TY_FLOAT_ARRAY) { buf_puts(b, "sp_PolyArray_from_float_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+      else emit_expr(c, v, b);
+    }
     else emit_expr(c, v, b);
     buf_puts(b, ";\n");
     if (!isg && lv->init_guarded) {
@@ -9311,13 +9329,13 @@ else {
         if (rest_var || rn > 0) {
           int tn = ++g_tmp;
           emit_indent(b, indent);
-          buf_printf(b, "sp_int _t%d = sp_poly_arr_len(_t%d);\n", tn, tarr);
+          buf_printf(b, "sp_int _t%d = sp_poly_massign_len(_t%d);\n", tn, tarr);
           if (rest_var) {
             int tr = ++g_tmp, ti = ++g_tmp;
             emit_indent(b, indent);
             buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tr, tr);
             emit_indent(b, indent);
-            buf_printf(b, "for (sp_int _t%d = %dLL; _t%d < _t%d - %dLL; _t%d++) sp_PolyArray_push(_t%d, sp_poly_arr_get(_t%d, _t%d));\n",
+            buf_printf(b, "for (sp_int _t%d = %dLL; _t%d < _t%d - %dLL; _t%d++) sp_PolyArray_push(_t%d, sp_poly_massign_get(_t%d, _t%d));\n",
                        ti, ln, ti, tn, rn, ti, tr, tarr, ti);
             emit_indent(b, indent);
             emit_local_ref(c, id, rest_var, b); buf_printf(b, " = _t%d;\n", tr);
@@ -10204,8 +10222,14 @@ else {
           }
         }
         emit_indent(b, indent); buf_printf(b, "%s = ", g_ie_next_var);
+        /* A typed-array arm into a poly-array slot converts: the slot took
+           that kind from the tail, or from an arm of another kind, and the
+           arm's own struct does not fit it (#4747). */
+        TyKind at9 = g_ie_next_ty == TY_POLY_ARRAY ? comp_ntype(c, nv[0]) : TY_UNKNOWN;
+        const char *apf9 = at9 != TY_POLY_ARRAY ? array_to_poly_fn(at9) : NULL;
         if (g_ie_res_poly) emit_boxed(c, nv[0], b);
         else if (g_ie_next_ty == TY_INT || g_ie_next_ty == TY_FLOAT) emit_expr_slot(c, nv[0], g_ie_next_ty, b);
+        else if (apf9) { buf_printf(b, "%s(", apf9); emit_expr(c, nv[0], b); buf_puts(b, ")"); }
         else emit_expr(c, nv[0], b);
         buf_puts(b, ";\n");
       }
@@ -11573,8 +11597,10 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       buf_puts(b, ", 1); }\n");
       return 1;
     }
-    /* s[start, len] = v */
-    if (assignable && sp_streq(name, "[]=") && argc == 3 && comp_ntype(c, argv[0]) == TY_INT) {
+    /* s[start, len] = v; a boxed start goes through the checked unbox like
+       the single-index form's (#4060) -- the arm refused it (#4766) */
+    if (assignable && sp_streq(name, "[]=") && argc == 3 &&
+        (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY)) {
       emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       emit_indent(b, indent);
       emit_expr(c, recv, b); buf_puts(b, " = sp_str_splice_at("); emit_expr(c, recv, b);

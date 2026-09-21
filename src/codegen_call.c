@@ -3107,6 +3107,15 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "sp_complex_div_int("); emit_expr(c, recv, b); buf_puts(b, ", (sp_int)("); emit_expr(c, argv[0], b); buf_puts(b, "))");
         return 1;
       }
+      /* A divisor out of a container carries its kind at run time, so the
+         choice above is made there: coerced to c+0i and run through the
+         conjugate formula, a boxed zero answered (NaN+NaN*i) where the same
+         zero written as a literal raises. */
+      if (argc == 1 && sp_streq(name, "/") && cxa == TY_POLY) {
+        buf_puts(b, "sp_complex_div_poly("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
       if (cx_ok && argc == 1 && (sp_streq(name, "+") || sp_streq(name, "-") ||
                                  sp_streq(name, "*") || sp_streq(name, "/") ||
                                  sp_streq(name, "quo"))) {
@@ -3821,8 +3830,12 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
                        : name[0] == 'f' ? "floor" : "ceil";
         int tr = ++g_tmp, tn = ++g_tmp;
         buf_printf(b, "({ sp_Rational _t%d = ", tr); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_int _t%d = (sp_int)(", tn); emit_expr(c, argv[0], b);
-        buf_printf(b, "); _t%d > 0 ? sp_box_rational(sp_rational_%s_prec(_t%d, _t%d))"
+        /* A boxed precision is an sp_RbVal struct, which cannot be C-cast to
+           an integer at all -- the generated C stopped compiling the moment
+           the argument widened to poly (the same cast Rational()'s own
+           constructor had to give up, #3184). */
+        buf_printf(b, "; sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b);
+        buf_printf(b, "; _t%d > 0 ? sp_box_rational(sp_rational_%s_prec(_t%d, _t%d))"
                       " : sp_box_int(sp_rational_%s_prec(_t%d, _t%d).num); })",
                    tn, fn, tr, tn, fn, tr, tn);
         return 1;
@@ -17630,17 +17643,23 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int left = nt_ref(c->nt, rid, "left");
       int right = nt_ref(c->nt, rid, "right");
       int excl = (int)(nt_int(c->nt, rid, "flags", 0) & 4) ? 1 : 0;
+      TyKind lty = left >= 0 ? comp_ntype(c, left) : TY_UNKNOWN;
+      TyKind rty = right >= 0 ? comp_ntype(c, right) : TY_UNKNOWN;
+      /* A boxed endpoint (a value out of a poly slot; under
+         --int-overflow=promote every Integer local and method answer)
+         is read through the checked unbox, which raises CRuby's TypeError
+         for a non-Integer, where the gate refused the program (#4766). */
       if (left >= 0 && right >= 0 &&
-          comp_ntype(c, left) == TY_INT && comp_ntype(c, right) == TY_INT) {
+          (lty == TY_INT || lty == TY_POLY) && (rty == TY_INT || rty == TY_POLY)) {
         /* Evaluate left and right into temps in source order so a
            side-effecting endpoint (e.g. caller(foo()..bar())) runs each
            call exactly once, left before right. */
         int lt = ++g_tmp, rt = ++g_tmp;
-        Buf lb = expr_buf(c, left);
+        Buf lb; memset(&lb, 0, sizeof lb); emit_int_expr(c, left, &lb);
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_int _t%d = %s;\n", lt, lb.p ? lb.p : "0");
         free(lb.p);
-        Buf rb = expr_buf(c, right);
+        Buf rb; memset(&rb, 0, sizeof rb); emit_int_expr(c, right, &rb);
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_int _t%d = %s;\n", rt, rb.p ? rb.p : "0");
         free(rb.p);
@@ -30275,6 +30294,22 @@ else {
     else if (sp_streq(name, "/")) pfn = "sp_poly_div";
     else if (sp_streq(name, "%")) pfn = "sp_poly_mod";
     else if (sp_streq(name, "**")) pfn = "sp_poly_pow";
+    /* The named divisions belong here too -- but only for a receiver that has
+       no arm of its own. A Rational answered NoMethodError for `quo` the
+       moment the other operand was boxed, for a name its own `/` already
+       served; a typed Integer or Float, by contrast, already reaches a
+       direct scalar helper (`17.remainder(x)` is sp_iremainder over an
+       unboxed argument), and routing it through the boxed dispatch instead
+       would box the receiver, call the generic helper and unbox the result
+       -- correct, and three operations worse, on a path that was fine. */
+    else if (rt != TY_INT && rt != TY_FLOAT && rt != TY_BIGINT) {
+      if (sp_streq(name, "quo")) pfn = "sp_poly_quo";
+      else if (sp_streq(name, "fdiv")) pfn = "sp_poly_fdiv";
+      else if (sp_streq(name, "div")) pfn = "sp_poly_div_m";
+      else if (sp_streq(name, "divmod")) pfn = "sp_poly_divmod";
+      else if (sp_streq(name, "modulo")) pfn = "sp_poly_mod";
+      else if (sp_streq(name, "remainder")) pfn = "sp_poly_remainder";
+    }
 
     if (pfn) {
       /* The receiver's value is a C temporary until the call runs, and the
@@ -30306,6 +30341,24 @@ else {
         buf_puts(&pcall, ", "); emit_boxed(c, argv[0], &pcall); buf_puts(&pcall, ")");
       }
       if (ty_is_object(pres)) emit_unbox_text(c, pres, pcall.p ? pcall.p : "sp_box_nil()", b);
+      /* The named divisions all answer boxed, while inference gives the call
+         whatever class the receiver's own arm promises -- an Integer for
+         `div` and for `remainder` on an Integer receiver, a pair for
+         `divmod`, a Float where a Float operand decides it. Coerce the boxed
+         answer to that, or the generated C is handed an sp_RbVal where a
+         scalar belongs. The operators above never needed this: they are
+         typed poly wherever they reach here. */
+      else if (sp_streq(name, "div") || sp_streq(name, "divmod") ||
+               sp_streq(name, "modulo") || sp_streq(name, "remainder")) {
+        const char *unbox = pres == TY_INT ? "sp_poly_to_i("
+                          : pres == TY_FLOAT ? "sp_poly_to_f("
+                          : pres == TY_POLY_ARRAY ? "sp_poly_to_poly_array("
+                          : NULL;
+        if (unbox) {
+          buf_puts(b, unbox); buf_puts(b, pcall.p ? pcall.p : "sp_box_nil()"); buf_puts(b, ")");
+        }
+        else buf_puts(b, pcall.p ? pcall.p : "sp_box_nil()");
+      }
       else buf_puts(b, pcall.p ? pcall.p : "sp_box_nil()");
       free(pcall.p);
       return;

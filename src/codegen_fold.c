@@ -3835,9 +3835,13 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
   /* The destination holds whatever the block answers, and the TAIL is what the
      inference typed for that -- so an empty `[]` reached through `next` is
      built at the same kind rather than its own untyped default (#3978). */
+  /* A `then` whose value joined a `next` arm of another array kind names the
+     slot's kind itself: the poly array, which the tail converts to below
+     (#4747). */
+  TyKind dest_ty = g_bv_dest_ty; g_bv_dest_ty = TY_UNKNOWN;
   g_ie_next_ty = TY_UNKNOWN;
   if (!want_poly && bn > 0) {
-    TyKind dt = comp_ntype(c, bb[bn - 1]);
+    TyKind dt = dest_ty != TY_UNKNOWN ? dest_ty : comp_ntype(c, bb[bn - 1]);
     if (ty_is_array(dt) || ty_is_hash(dt)) g_ie_next_ty = dt;
     /* an Integer or Float slot: a `next nil` spells the slot's sentinel */
     else if (dt == TY_INT || dt == TY_FLOAT) g_ie_next_ty = dt;
@@ -3868,7 +3872,10 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
          than splicing into it. */
       TyKind tt = comp_ntype(c, tail);
       Buf vb; memset(&vb, 0, sizeof vb);
+      /* a typed-array tail into the poly-array slot a `next` arm widened */
+      const char *apf = (g_ie_next_ty == TY_POLY_ARRAY && tt != TY_POLY_ARRAY) ? array_to_poly_fn(tt) : NULL;
       if (want_poly && tt != TY_POLY) emit_boxed(c, tail, &vb);
+      else if (apf) { buf_printf(&vb, "%s(", apf); emit_expr(c, tail, &vb); buf_puts(&vb, ")"); }
       else emit_expr(c, tail, &vb);
       emit_indent(g_pre, bi);
       buf_printf(g_pre, "%s = %s;\n", dest, vb.p ? vb.p : "");

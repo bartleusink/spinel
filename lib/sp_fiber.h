@@ -120,6 +120,11 @@ SP_NORETURN void sp_fiber_raise_kill_self(void);
    NULL (nothing installed, or no handler armed) keeps the old report. */
 extern void (*sp_stack_overflow_raise_fn)(void);
 void sp_stack_guard_init(void);
+/* Run the program body on a stack this library maps (see sp_main_stack_run);
+   sp_main_stack_hint asks for a size, SPINEL_MAIN_STACK in the environment
+   wins over it. */
+void sp_main_stack_hint(size_t bytes);
+void sp_main_stack_run(void (*body)(void));
 
 /* The running thread's own stack, for the fault handler's overflow test: a
    fault just below `lo` is this stack growing past its end. Recorded per

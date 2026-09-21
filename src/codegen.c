@@ -1080,6 +1080,20 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
       if (depth == 0 && g_yield_block_fallback >= 0 && nt_type(c->nt, tail) &&
           sp_streq(nt_type(c->nt, tail), "YieldNode")) { tblk = g_yield_block_fallback; continue; }
       bt = comp_ntype(c, tail);
+      /* The tail is not the only value the block can produce: `next v` leaves
+         it early with one, and that value is as much this site's answer as
+         the tail is. Read from the tail alone, a block whose tail is `nil`
+         typed the whole splice TY_NIL, and the nil arm below throws the
+         splice's value away and hands back a constant -- so
+         `{ |i| next 7 if i == 1; nil }` answered nil for the 7 as well.
+
+         `next` only, through the very helper yield_value_type joins with the
+         tail for the analysis. A `break` leaves the ITERATOR rather than the
+         block, so its value belongs to the iterator call and not to this
+         splice; counting it widened blocks that carry one and put an sp_int
+         where the slot was an sp_RbVal. */
+      { TyKind nx = block_next_value_ty(c, bbody);
+        if (nx != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? nx : ty_unify(bt, nx); }
       break;
     }
     if (bt != t && bt != TY_UNKNOWN) {
@@ -7200,7 +7214,11 @@ static int conv_bridge_callee(Compiler *c, int i, const char *mname, TyKind want
       c->scopes[tmi].yields) return -1;
   /* the Kernel#Integer / #Float bridge takes the method whatever it answers
      (`any_shape`), and a value-type class's too, called on the boxed copy */
-  if (!any_shape && c->scopes[tmi].ret != want) return -1;
+  /* The answer's static type may be the wanted one or boxed: a boxed answer
+     is unwrapped (and judged) by the bridge row itself, so it is eligible
+     too. Anything else -- a #to_int answering a String -- is not a
+     conversion the protocol can use. */
+  if (!any_shape && c->scopes[tmi].ret != want && c->scopes[tmi].ret != TY_POLY) return -1;
   int ddn = c->classes[tdef].def_node;
   const char *ddt = ddn >= 0 ? nt_type(c->nt, ddn) : NULL;
   *out_mi = tmi;
@@ -7226,8 +7244,10 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
     int tmi = -1;
     int callee = conv_bridge_callee(c, i, mname, want, 0, &tmi);
     if (callee != i) continue;   /* an ancestor's own row declares it */
+    int poly_ret = c->scopes[tmi].ret == TY_POLY;
     buf_printf(b, "%s%s sp_%s_%s(sp_%s *self%s);\n", g_debug ? "" : "static ",
-               rett, c->classes[callee].c_name, mc(c->scopes[tmi].name),
+               poly_ret ? "sp_RbVal" : rett,
+               c->classes[callee].c_name, mc(c->scopes[tmi].name),
                c->classes[callee].c_name, bridge_blk_param(c, tmi));
   }
   buf_printf(b, "%s {\n  switch (cls_id) {\n", sig);
@@ -7235,6 +7255,28 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
     int tmi = -1;
     int callee = conv_bridge_callee(c, i, mname, want, 0, &tmi);
     if (callee < 0) continue;
+    /* A conversion whose answer is BOXED is still a conversion. Its static
+       type is the analysis's business and changes with the mode -- under
+       --int-overflow=promote a method returning a plain `1` can be poly --
+       but the protocol is CRuby's: call it, and judge the answer. Judged
+       here rather than refused at compile time, a class whose #to_int the
+       analysis happened to widen kept its conversion, where before the row
+       was dropped and every boxed use of the object raised "no implicit
+       conversion" (#4747). An answer of the wrong kind is not-ok, which is
+       the TypeError CRuby raises for exactly that. */
+    if (c->scopes[tmi].ret == TY_POLY) {
+      buf_printf(b, "    case %d: { sp_RbVal _cv = sp_%s_%s((sp_%s *)p%s);\n",
+                 i, c->classes[callee].c_name, mc(c->scopes[tmi].name),
+                 c->classes[callee].c_name, bridge_blk_arg(c, tmi));
+      if (want == TY_INT)
+        buf_printf(b, "      if (_cv.tag == SP_TAG_INT && _cv.v.i != SP_INT_NIL) { %sreturn _cv.v.i; }\n",
+                   with_ok ? "*ok = 1; " : "");
+      else
+        buf_printf(b, "      if (_cv.tag == SP_TAG_STR && _cv.v.s) { %sreturn _cv.v.s; }\n",
+                   with_ok ? "*ok = 1; " : "");
+      buf_printf(b, "      %s }\n", dflt);
+      continue;
+    }
     buf_printf(b, "    case %d: %sreturn sp_%s_%s((sp_%s *)p%s);\n",
                i, with_ok ? "*ok = 1; " : "",
                c->classes[callee].c_name, mc(c->scopes[tmi].name),
@@ -11718,7 +11760,27 @@ char *codegen_program(const NodeTable *nt) {
     if (g_uses_program_name) buf_puts(body, "    sp_program_name = sp_str_empty;\n");
   }
   else {
-  buf_puts(body, "int main(int argc,char**argv){\n");
+  /* The body runs on a stack this compiler chose, not the one the loader
+     gave the process (sp_main_stack_run). It is emitted as its own function
+     so the context switch has something to enter, and `main` shrinks to the
+     trampoline that hands it over and returns what it left behind. argc/argv
+     move to file scope with it: they belong to the frame main keeps.
+
+     The names carry a leading underscore because a Ruby method compiles to
+     `sp_<name>`: `def main_body` would otherwise collide with the body
+     itself. The backtrace demangler knows _sp_main_body as `<main>` -- it is
+     where the top level runs now, and the frame the walk used to find as
+     `main`. */
+  buf_puts(body, "static int _sp_main_argc; static char **_sp_main_argv;"
+                 " static int _sp_main_rc;\n");
+  /* NOT static: on ELF, backtrace_symbols names a frame through the dynamic
+     symbol table (--debug links with -rdynamic), where a static function does
+     not appear -- so the demangler never saw the name it knows as `<main>`
+     and the rescued backtrace lost its outermost frame. macOS symbolises from
+     the full table, which is why only the Linux lanes showed it. The `_sp_`
+     spelling is already reserved, so nothing can collide with it as an
+     external. */
+  buf_puts(body, "void _sp_main_body(void){\n");
   buf_puts(body, "    SP_GC_SAVE();\n");
   main_frame_ins = body->len;
   if (g_re_init_needed) buf_puts(body, "    sp_tu_init();\n");
@@ -11727,12 +11789,12 @@ char *codegen_program(const NodeTable *nt) {
   if (g_uses_threads) buf_puts(body, "    sp_sched_init();\n");
   /* The ARGV copy loop only matters if the program reads ARGV / ARGF / $*. */
   if (g_uses_argv)
-    buf_puts(body, "    { sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
+    buf_puts(body, "    { int argc = _sp_main_argc; char **argv = _sp_main_argv; sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
   if (g_uses_program_name)
     /* argv[0] lives in the process's argument block, not the string heap, so it
      carries no marker byte -- and `$0` is an ordinary Ruby String the caller
      roots. Copy it in. */
-    buf_puts(body, "    sp_program_name = argc > 0 ? sp_str_dup_external(argv[0]) : sp_str_empty;\n");
+    buf_puts(body, "    sp_program_name = _sp_main_argc > 0 ? sp_str_dup_external(_sp_main_argv[0]) : sp_str_empty;\n");
   /* Enable the backtrace substrate (Exception#backtrace, Kernel#caller) in
      debug builds only: --debug compiles at -O0 with non-inlined methods, so
      the captured frames demangle to Class#method. Optimized/release builds
@@ -11813,8 +11875,19 @@ char *codegen_program(const NodeTable *nt) {
      ext-init form is a void function, so there it just runs them. */
   if (g_needs_at_exit && g_ext_init_name) buf_puts(body, "  sp_at_exit_run(0);\n");
   if (g_ext_init_name) buf_puts(body, "}\n");
-  else if (g_needs_at_exit) buf_puts(body, "  return sp_at_exit_run(0);\n}\n");
-  else buf_puts(body, "  return 0;\n}\n");
+  else {
+    if (g_needs_at_exit) buf_puts(body, "  _sp_main_rc = sp_at_exit_run(0);\n}\n");
+    else buf_puts(body, "  _sp_main_rc = 0;\n}\n");
+    buf_puts(body, "int main(int argc,char**argv){\n"
+                   "  _sp_main_argc = argc; _sp_main_argv = argv;\n");
+    /* an unoptimised build's frames are several times an -O2 one's, so the
+       same Ruby depth costs several times the bytes; SPINEL_MAIN_STACK in the
+       environment still wins over this */
+    if (g_opt_level < 2)
+      buf_puts(body, "  sp_main_stack_hint((size_t)1024 << 20);\n");
+    buf_puts(body, "  sp_main_stack_run(_sp_main_body);\n"
+                   "  return _sp_main_rc;\n}\n");
+  }
   if (!g_no_root_frame) gc_frame_build(body, main_frame_ins);
 
   emit_regex_section(c, &b);

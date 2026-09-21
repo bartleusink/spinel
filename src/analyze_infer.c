@@ -285,6 +285,67 @@ TyKind ie_block_break_next_ty(Compiler *c, int node) {
   return r;
 }
 
+/* The array kind a `next <v>` arm hands a `then` block's value slot, joined
+   over every arm that binds to this block (one inside a nested loop, block or
+   def binds there). Two kinds widen to the poly array, the one both convert
+   to. An empty `[]` names no kind: it is built at the slot's kind (#3978). A
+   splat delivers the array it builds. Anything but an array is left to the
+   tail, as before. TY_UNKNOWN when no arm answers an array. */
+static int then_array_kind_joins(TyKind t) {
+  return t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY || t == TY_POLY_ARRAY;
+}
+static TyKind then_next_array_ty(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return TY_UNKNOWN;
+  const char *ty = nt_type(nt, node);
+  if (!ty) return TY_UNKNOWN;
+  if (sp_streq(ty, "NextNode")) {
+    int a = nt_ref(nt, node, "arguments"); int an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (an != 1) return TY_UNKNOWN;
+    const char *aty = nt_type(nt, av[0]);
+    if (aty && sp_streq(aty, "SplatNode")) return TY_POLY_ARRAY;
+    if (aty && sp_streq(aty, "ArrayNode")) {
+      int en = 0; nt_arr(nt, av[0], "elements", &en);
+      if (en == 0) return TY_UNKNOWN;
+    }
+    TyKind t = infer_type(c, av[0]);
+    return then_array_kind_joins(t) ? t : TY_UNKNOWN;
+  }
+  if (sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "ForNode") ||
+      sp_streq(ty, "BlockNode") || sp_streq(ty, "LambdaNode") || sp_streq(ty, "DefNode") ||
+      sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode")) return TY_UNKNOWN;
+  TyKind r = TY_UNKNOWN;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) {
+    TyKind s = then_next_array_ty(c, nt_ref_at(nt, node, i));
+    if (s != TY_UNKNOWN) r = (r == TY_UNKNOWN || r == s) ? s : TY_POLY_ARRAY;
+  }
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int k = 0; k < n; k++) {
+      TyKind s = then_next_array_ty(c, ids[k]);
+      if (s != TY_UNKNOWN) r = (r == TY_UNKNOWN || r == s) ? s : TY_POLY_ARRAY;
+    }
+  }
+  return r;
+}
+
+/* The value of a `then` block is its tail, widened to the poly array when a
+   `next` arm leaves the block with an array of another kind: the arm's value
+   lands in the slot the tail is typed for, and only the poly array holds
+   both. Under --int-overflow=promote the tail `[v, v * 2]` is a poly array
+   while `next [v]` over the block parameter (an Integer, not widened) is an
+   Integer array, so the slot took the tail's kind and the arm did not build.
+   The codegen converts the odd one out at its assignment (#4747). */
+TyKind then_block_value_ty(Compiler *c, int body, TyKind tail) {
+  if (!then_array_kind_joins(tail)) return tail;
+  TyKind a = then_next_array_ty(c, body);
+  if (a == TY_UNKNOWN || a == tail) return tail;
+  return TY_POLY_ARRAY;
+}
+
 int g_infer_ignore_brk = 0;
 
 /* Post-backstop return re-derivation must not newly widen a return to poly
@@ -1746,7 +1807,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       int bd9 = nt_ref(nt, blk9, "body");
       int bn9 = 0; const int *bb9 = bd9 >= 0 ? nt_arr(nt, bd9, "body", &bn9) : NULL;
       if (bn9 >= 1) {
-        TyKind bt9 = infer_type(c, bb9[bn9 - 1]);
+        TyKind bt9 = then_block_value_ty(c, bd9, infer_type(c, bb9[bn9 - 1]));
         return bt9 == TY_NIL ? TY_POLY : bt9;
       }
     }
@@ -6100,7 +6161,7 @@ else {
       TyKind saved_blv = blv ? blv->type : TY_UNKNOWN;
       if (blv && rt != TY_UNKNOWN) blv->type = rt;
       g_infer_blv_pin++;
-      TyKind result = infer_type(c, bbb[bbn - 1]);
+      TyKind result = then_block_value_ty(c, bdy, infer_type(c, bbb[bbn - 1]));
       g_infer_blv_pin--;
       if (blv) blv->type = saved_blv;
       return result;

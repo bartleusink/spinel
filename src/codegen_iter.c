@@ -2079,6 +2079,16 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   int sv_lens = g_loop_ensure_base;
   g_loop_ensure_base = g_ensure_depth;
   g_c_loop_depth++;
+  /* A `next <v>` in this body leaves THIS loop's iteration, so the value slot
+     an enclosing collecting block opened (g_ie_next_var, a `then` / `map` /
+     inject body's destination) is not its target: left set, the inner next
+     assigned the outer block's slot before its continue, which built only
+     when the two kinds agreed and was then right by accident, the tail
+     overwriting it (#4748). The slot's kind goes with it. g_ie_res_poly
+     stays: the while-as-value emitter sets it for its own `break` value, which
+     the break emitter reads inside this body. */
+  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
+  g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
   int has_redo = subtree_has_own_redo(c->nt, body);
   int lbl = 0;
   if (has_redo) {
@@ -2099,6 +2109,7 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   emit_stmts(c, body, b, indent);
   if (has_redo) g_redo_depth--;
   g_c_loop_depth--;
+  g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
   g_loop_exc_base = sv_lexc;
   g_loop_ensure_base = sv_lens;
 }
@@ -2235,6 +2246,11 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
        invalid C (#3978). The do{}while(0) wrapper it emits makes the
        continue exit exactly this block. */
     char destbuf[24]; snprintf(destbuf, sizeof destbuf, "_t%d", tres);
+    /* The slot is the poly array a `next` arm of another kind widened the
+       value to while the tail is still typed: say so, or the substrate keys
+       the arms and the tail on the tail's kind (#4747). */
+    TyKind tailt = comp_ntype(c, bb[bn - 1]);
+    g_bv_dest_ty = (rett == TY_POLY_ARRAY && tailt != rett && array_to_poly_fn(tailt)) ? rett : TY_UNKNOWN;
     emit_block_value_into(c, block, destbuf, rett == TY_POLY, din);
   }
   else {

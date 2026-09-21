@@ -3775,7 +3775,17 @@ static void sp_sort_idx_by_poly(sp_int *idx, const sp_RbVal *keys, sp_int n) {
   if (src != idx) for (sp_int x = 0; x < n; x++) idx[x] = src[x];   /* odd #levels: result is in tmp */
   free(tmp);
 }
-static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984): none of the checks below can match either tag, and this is what a boxed arithmetic loop actually holds. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_idiv(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f / b.v.f); /* before the tower branches, which match on the receiver kind and would convert a user object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("/", a, b); if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_div(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("/", a, b); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
+/* Complex / a divisor whose kind is only known at run time. A REAL divisor
+   divides each component, which is what the typed arms do and what MRI does:
+   a Float 0.0 gives Infinity where the conjugate formula gives NaN, and an
+   Integer 0 owes a ZeroDivisionError the formula swallows. Anything else --
+   another Complex, a Rational -- keeps the full division it had. */
+static sp_Complex sp_complex_div_poly(sp_Complex a, sp_RbVal b) {
+  if (b.tag == SP_TAG_INT && b.v.i != SP_INT_NIL) return sp_complex_div_int(a, b.v.i);
+  if (b.tag == SP_TAG_FLT) return sp_complex_div_real(a, b.v.f);
+  return sp_complex_div(a, sp_poly_as_complex(b));
+}
+static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984): none of the checks below can match either tag, and this is what a boxed arithmetic loop actually holds. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_idiv(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f / b.v.f); /* before the tower branches, which match on the receiver kind and would convert a user object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("/", a, b); if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_div(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("/", a, b); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); /* A Complex divided by a REAL divides each component, and the typed arms have done that since #3616: boxing the real into c+0i and running the conjugate formula answers NaN where MRI answers Infinity for a Float divisor, and swallows the ZeroDivisionError an Integer 0 owes (integer division rules). The boxed path still boxed, so `Complex(20, 40) / z` with a zero z out of a container answered (NaN+NaN*i) in both modes instead of raising. Complex / Complex keeps the full formula. */ if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) return sp_box_complex(sp_complex_div_poly(sp_poly_as_complex(a), b)); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
 static sp_RbVal sp_poly_str_mod(sp_RbVal a, sp_RbVal b);  /* fwd: defined beside the format helper */
 static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984). */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_imod(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(a.v.f, b.v.f)); if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); /* the user-object arm has to come before the float one: a Float on either side otherwise converted the object to a number (0.0) and answered a division by zero where CRuby coerces. */ if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); /* a strbuf RECEIVER already returned through sp_poly_str_mod above */ if (SP_UNLIKELY(sp_poly_is_strbuf(b))) return sp_poly_mod(a, sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("%", a, b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
 /* divmod / quo on a boxed receiver. The typed paths build these inline per
@@ -3788,14 +3798,23 @@ static void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v);      /* fwd */
 /* Numeric#fdiv: both operands as Floats, always a Float result (#3767). */
 static sp_float sp_poly_fdiv(sp_RbVal a, sp_RbVal b) {
   { sp_RbVal _u; if (sp_poly_coerce_binop("fdiv", a, b, &_u)) return sp_poly_to_f(_u); }
-  if (!sp_poly_numeric_p(a)) sp_raise_poly_nomethod("fdiv", a);
+  /* sp_poly_numeric_p is int/float/bigint only, so a Rational receiver was
+     turned away from a method it has -- by the guard of a function whose
+     very next line knows how to divide one (sp_poly_to_f_with_rational). */
+  if (!sp_poly_numeric_p(a) && !sp_poly_is_rat_kind(a)) sp_raise_poly_nomethod("fdiv", a);
   return sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b);
 }
 static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("divmod");
   sp_PolyArray *out = sp_PolyArray_new();
   SP_GC_ROOT(out);
-  if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) {
+  /* A Float operand is answered by the Float arm below, not read as a
+     Rational: sp_poly_as_rational has no Float case, so 0.5 arrived as 0/1
+     and `Rational(3,4).divmod(0.5)` raised ZeroDivisionError on a divisor
+     that is not zero. The sibling helpers (mod, div_m, remainder) all test
+     for a Float ahead of their Rational arm; this one did not. */
+  if (!(a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) &&
+      (sp_poly_is_rational(a) || sp_poly_is_rational(b))) {
     sp_Rational ra = sp_poly_as_rational(a), rb = sp_poly_as_rational(b);
     sp_int q = sp_rational_floor_i(sp_rational_div(ra, rb));
     sp_Rational rem = sp_rational_sub(ra, sp_rational_mul(sp_rational_new(q, 1), rb));
@@ -3854,6 +3873,15 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("remainder");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("remainder", a);
+  /* Two exact operands answer exactly, as the typed path does: reading a
+     Rational through a double turned `Rational(3,4).remainder(2)` into 0.75
+     where CRuby (and spinel's own typed arm) answer (3/4). */
+  if (!(a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) &&
+      (sp_poly_is_rational(a) || sp_poly_is_rational(b))) {
+    sp_Rational ra = sp_poly_as_rational(a), rb = sp_poly_as_rational(b);
+    if (rb.num == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+    return sp_box_rational(sp_rational_rem(ra, rb));
+  }
   if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT ||
       sp_poly_is_rational(a) || sp_poly_is_rational(b)) {
     sp_float fa = sp_poly_to_f_with_rational(a), fb = sp_poly_to_f_with_rational(b);
@@ -4763,10 +4791,11 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
      `start` -- the two-argument form of the bit read, which the typed arms
      have had all along. A boxed receiver fell past this to the nil default
      below, so `[255, nil][0][0, 4]` was nil where CRuby says 15, and the
-     value went on being used as a number (#4738). The int-typed nil keeps
+     value went on being used as a number (#4742). The int-typed nil keeps
      the default: `nil[0, 4]` is a missing method, not a bit field. */
   if (a.tag == SP_TAG_INT) {
-    if (a.v.i == SP_INT_NIL) return sp_box_nil();
+    /* the sentinel IS nil, and nil has no `[]` */
+    if (a.v.i == SP_INT_NIL) sp_raise_poly_nomethod("[]", sp_box_nil());
     return sp_box_int(sp_int_bit_range(a.v.i, start, len));
   }
   if (a.tag == SP_TAG_BIGINT) {
@@ -4778,7 +4807,18 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
                                    sp_bigint_new_int(1));
       return sp_box_int(sp_bigint_to_int(sp_bigint_and(sh, m))); }
   }
-  if (a.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* A Symbol has `[]`: it answers its NAME sliced, as a String. Falling to
+     the default below made `[:sym, nil][0][0, 4]` nil, which then went on
+     being used as one. */
+  if (a.tag == SP_TAG_SYM)
+    return sp_box_nullable_str(sp_str_sub_range(sp_sym_to_s((sp_sym)a.v.i), start, len));
+  /* Everything else here -- nil, a Float, true, false -- simply has no `[]`,
+     and CRuby says so. The default used to answer nil for all of them, so a
+     receiver that was never sliceable produced a value indistinguishable
+     from an in-range miss, and the program carried it forward. (The Integer
+     arm above notes the same thing about nil: a missing method, not a bit
+     field.) */
+  if (a.tag != SP_TAG_OBJ) sp_raise_poly_nomethod("[]", a);
   /* arr[start, negative] is nil in CRuby (the slice helpers would return []) */
   if (len < 0 && sp_poly_is_array_kind(a.cls_id)) return sp_box_nil();
   /* bm[a, b]: a boxed bound Method called with two int arguments (optcarrot's
@@ -7619,6 +7659,21 @@ static sp_StrArray *sp_poly_as_str_array(sp_RbVal v) {
    scalar -- the first target takes the whole value, the rest nil-fill.
    sp_poly_arr_get_hash is NOT that (Integer#[i] reads a bit, String#[i] a
    char, Hash#[i] a lookup). */
+/* The count a multiple assignment destructures a boxed source into: an
+   array's length, and one for anything else, which stands for itself (nil
+   included: `*d = nil` is `[nil]`, the to_ary protocol, not nil.to_a) --
+   `*a, b = x` with a boxed Integer x is `a = [], b = x`. sp_poly_arr_len
+   answered 0 for the scalar (and a Hash's pair count), so a leading splat
+   dropped the value on the floor and every post-splat target read nil. */
+static sp_int sp_poly_massign_len(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ) switch (v.cls_id) {
+    case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY:
+    case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_PTR_ARRAY:
+      return sp_poly_arr_len(v);
+    default: break;
+  }
+  return 1;
+}
 static sp_RbVal sp_poly_massign_get(sp_RbVal v, sp_int i) {
   if (v.tag == SP_TAG_OBJ) switch (v.cls_id) {
     case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY:
@@ -7870,6 +7925,28 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE &&
       recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
     return sp_poly_arr_range(recv, *(sp_Range *)idx.v.p);
+  /* Integer#[range]: the bit field the range names. lo..hi is hi-lo+1 bits
+     from lo (an exclusive end one fewer), an endless range is everything
+     above lo, and a beginless one is CRuby's ArgumentError -- the field below
+     bit 0 has no end. The typed arms have answered this all along; a boxed
+     receiver matched nothing here and left by the trailing hash read, so
+     `b[..3]` was 1 where it should raise and `b[0..3]` was a wrong number. */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && idx.v.p &&
+      (recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT)) {
+    sp_Range rg = *(sp_Range *)idx.v.p;
+    if (rg.first == INTPTR_MIN)
+      sp_raise_cls("ArgumentError",
+                   "The beginless range for Integer#[] results in infinity");
+    { sp_int lo = rg.first;
+      sp_int len = (rg.last == INTPTR_MAX) ? 64 : (rg.last - lo + (rg.excl ? 0 : 1));
+      if (recv.tag == SP_TAG_INT) return sp_box_int(sp_int_bit_range(recv.v.i, lo, len));
+      /* a Bignum has no word to shift: read the field a bit at a time, which
+         is at most 64 of them and only on this cold path */
+      { sp_int out = 0, n = (len <= 0 || len > 64) ? 64 : len;
+        for (sp_int k = 0; k < n; k++)
+          if (sp_poly_int_bit(recv, lo + k)) out |= (sp_int)((uint64_t)1 << k);
+        return sp_box_int(out); } }
+  }
   sp_int i = (idx.tag == SP_TAG_INT) ? idx.v.i : 0;
   /* Struct#[n] is the nth MEMBER, in declaration order -- the order #to_h
      preserves -- not an array index (#3369). */

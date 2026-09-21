@@ -57,6 +57,13 @@ void infer_subtree(Compiler *c, int id);
    collecting emitter widen its element type past the tail expression so a
    `next <other-type>` is boxed rather than assigned to a mismatched temp. */
 TyKind ie_block_break_next_ty(Compiler *c, int node);
+TyKind then_block_value_ty(Compiler *c, int body, TyKind tail);
+/* The value type of every `next` that leaves the block whose body is `node`.
+   Only `next`: a `break` leaves the ITERATOR, so its value is the iterator
+   call's, not the block's. The analysis joins this with the block's tail to
+   type a yield, and the emitter joins it with the same tail to type the
+   splice the yield reads -- one answer for one question. */
+TyKind block_next_value_ty(Compiler *c, int node);
 
 /* True if CallNode `id` is an Enumerable method on a Range that spinel does not
    handle natively but supports on arrays -- served by materializing the range
