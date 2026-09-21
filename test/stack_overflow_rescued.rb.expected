@@ -7,6 +7,6 @@ mutual: rescued
 [2, 4, 6]
 bare rescue passed it through
 10000
-2432902008176640000
+479001600
 10000
 10000

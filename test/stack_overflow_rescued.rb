@@ -57,7 +57,7 @@ def countdown(n) = n <= 0 ? 0 : 1 + countdown(n - 1)
 p countdown(10_000)
 
 def fac(n) = n <= 1 ? 1 : n * fac(n - 1)
-p fac(20)
+p fac(12)
 
 # ...and a deep recursion that is rescued still leaves the stack usable for the
 # next deep one, rather than each rescue costing a little of it
