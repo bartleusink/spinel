@@ -3083,6 +3083,11 @@ static inline void sp_poly_flo_domain_ck(sp_float f) {
    the wide value costs nothing here, so sp_float_fit_i's RangeError is left
    to the sp_int slots that have no room for it (#4688). */
 static sp_RbVal sp_box_f_to_int(sp_float v) {
+  /* NaN and the infinities have no integer value at any width: CRuby's
+     FloatDomainError, named as it names it. The helper checks rather than
+     the callers, since frexp on an infinity would hand back a number. */
+  if (!isfinite(v))
+    sp_raise_cls("FloatDomainError", isnan(v) ? "NaN" : v > 0 ? "Infinity" : "-Infinity");
   /* the same bound sp_float_fit_i uses, exact at either sp_int width */
   if (v < -(sp_float)INTPTR_MIN && v >= (sp_float)INTPTR_MIN) return sp_box_int((sp_int)v);
   return sp_box_bigint(sp_bigint_new_double(v));

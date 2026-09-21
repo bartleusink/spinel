@@ -6927,7 +6927,10 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       /* nil answers these itself: nil.to_i is 0, nil.to_f is 0.0 */
       int tfr = ++g_tmp;
       if (sp_streq(name, "to_i"))
-        buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? (sp_int)0 : sp_float_to_i_checked(_t%d); })", tfr, r, tfr, tfr);
+        if (comp_ntype(c, id) == TY_POLY)
+          buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? sp_box_int(0) : sp_box_f_to_int(_t%d); })", tfr, r, tfr, tfr);
+        else
+          buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? (sp_int)0 : sp_float_to_i_checked(_t%d); })", tfr, r, tfr, tfr);
       else
         buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? 0.0 : _t%d; })", tfr, r, tfr, tfr);
       free(rs.p);

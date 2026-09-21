@@ -1255,12 +1255,13 @@ static TyKind infer_call_inner(Compiler *c, int id) {
      guarded its table: a user class owning the name answers for itself. */
   if (recv >= 0 && nt_ref(nt, id, "block") < 0 && !an_user_defines_or_reads(c, name) &&
       infer_type(c, recv) == TY_POLY) {
-    /* to_i is the one row answered wider than the raw scalar, in BOTH modes.
-       A boxed receiver is already in boxed land, and #4665 settled that its
-       Integer surface answers the Ruby value there whatever the overflow
-       mode -- pred, pow, gcd, lcm and ceildiv are all TY_POLY ungated. The
-       mode governs TYPED slots, which is where the RangeError stays (#4688). */
-    if (argc == 0 && sp_streq(name, "to_i")) return TY_POLY;
+    /* to_i widens in promote only. #4665 answers the boxed Integer surface
+       ungated (pred, pow, gcd, lcm, ceildiv), but deliberately left to_i
+       raising -- test/poly_bignum_integer_surface.rb pins
+       `poly(2**64-1).to_i` to RangeError and the commit calls promoting that
+       slot "the wider question of #2024". promote mode is where the answer
+       is already promised, so it widens there and nowhere else (#4688). */
+    if (g_promote_mode && argc == 0 && sp_streq(name, "to_i")) return TY_POLY;
     for (int q = 0; AN_POLY_RAW[q].n; q++)
       if (AN_POLY_RAW[q].ac == argc && sp_streq(name, AN_POLY_RAW[q].n)) return AN_POLY_RAW[q].t;
   }
@@ -5634,17 +5635,23 @@ else {
        widen; `round(2)` stays a Float, and raise/wrap keep their sp_int so
        no hot loop boxes for this. */
     if (g_promote_mode) {
-      int pv_argc = argc;
-      if (pv_argc >= 1 && nt_type(nt, argv[pv_argc - 1]) &&
-          sp_streq(nt_type(nt, argv[pv_argc - 1]), "KeywordHashNode")) pv_argc--;
-      if ((sp_streq(name, "to_i") || sp_streq(name, "to_int")) && argc == 0) return TY_POLY;
-      if (sp_streq(name, "floor") || sp_streq(name, "ceil") ||
-          sp_streq(name, "round") || sp_streq(name, "truncate")) {
-        if (pv_argc == 0) return TY_POLY;
-        if (pv_argc == 1) {
-          const char *pv_aty = nt_type(nt, argv[0]);
-          if (pv_aty && sp_streq(pv_aty, "IntegerNode") &&
-              nt_int(nt, argv[0], "value", 0) <= 0) return TY_POLY;
+      /* Only the shapes whose emitter this PR widened. A `half:` keyword is
+         served by a different arm that answers a Float or a raw int, so a
+         call carrying one is left exactly where it was -- peeling the keyword
+         off and treating the call as argument-less made the inference
+         disagree with that arm and the C stopped building. */
+      int pv_kw = argc >= 1 && nt_type(nt, argv[argc - 1]) &&
+                  sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode");
+      if (!pv_kw) {
+        if ((sp_streq(name, "to_i") || sp_streq(name, "to_int")) && argc == 0) return TY_POLY;
+        if (sp_streq(name, "floor") || sp_streq(name, "ceil") ||
+            sp_streq(name, "round") || sp_streq(name, "truncate")) {
+          if (argc == 0) return TY_POLY;
+          if (argc == 1) {
+            const char *pv_aty = nt_type(nt, argv[0]);
+            if (pv_aty && sp_streq(pv_aty, "IntegerNode") &&
+                nt_int(nt, argv[0], "value", 0) <= 0) return TY_POLY;
+          }
         }
       }
     }
@@ -6020,10 +6027,9 @@ else {
 
   if (sp_streq(name, "to_s") || sp_streq(name, "inspect") ||
       sp_streq(name, "chr") || sp_streq(name, "to_str")) return TY_STRING;
-  /* a boxed receiver's to_i/to_int: the slot has room for a Bignum and a
-     Float past sp_int is one in CRuby, in both modes (see the universal-table
-     note above and #4665's ungated boxed Integer surface) (#4688) */
-  if (recv >= 0 && rt == TY_POLY && argc == 0 &&
+  /* a boxed receiver's to_i/to_int in promote: see the universal-table note
+     above for why this is the mode-gated one (#4688) */
+  if (g_promote_mode && recv >= 0 && rt == TY_POLY && argc == 0 &&
       (sp_streq(name, "to_i") || sp_streq(name, "to_int"))) return TY_POLY;
   if (sp_streq(name, "to_i") || sp_streq(name, "to_int") ||
       sp_streq(name, "length") || sp_streq(name, "size") ||
