@@ -3788,14 +3788,23 @@ static void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v);      /* fwd */
 /* Numeric#fdiv: both operands as Floats, always a Float result (#3767). */
 static sp_float sp_poly_fdiv(sp_RbVal a, sp_RbVal b) {
   { sp_RbVal _u; if (sp_poly_coerce_binop("fdiv", a, b, &_u)) return sp_poly_to_f(_u); }
-  if (!sp_poly_numeric_p(a)) sp_raise_poly_nomethod("fdiv", a);
+  /* sp_poly_numeric_p is int/float/bigint only, so a Rational receiver was
+     turned away from a method it has -- by the guard of a function whose
+     very next line knows how to divide one (sp_poly_to_f_with_rational). */
+  if (!sp_poly_numeric_p(a) && !sp_poly_is_rat_kind(a)) sp_raise_poly_nomethod("fdiv", a);
   return sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b);
 }
 static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("divmod");
   sp_PolyArray *out = sp_PolyArray_new();
   SP_GC_ROOT(out);
-  if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) {
+  /* A Float operand is answered by the Float arm below, not read as a
+     Rational: sp_poly_as_rational has no Float case, so 0.5 arrived as 0/1
+     and `Rational(3,4).divmod(0.5)` raised ZeroDivisionError on a divisor
+     that is not zero. The sibling helpers (mod, div_m, remainder) all test
+     for a Float ahead of their Rational arm; this one did not. */
+  if (!(a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) &&
+      (sp_poly_is_rational(a) || sp_poly_is_rational(b))) {
     sp_Rational ra = sp_poly_as_rational(a), rb = sp_poly_as_rational(b);
     sp_int q = sp_rational_floor_i(sp_rational_div(ra, rb));
     sp_Rational rem = sp_rational_sub(ra, sp_rational_mul(sp_rational_new(q, 1), rb));
@@ -3854,6 +3863,15 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("remainder");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("remainder", a);
+  /* Two exact operands answer exactly, as the typed path does: reading a
+     Rational through a double turned `Rational(3,4).remainder(2)` into 0.75
+     where CRuby (and spinel's own typed arm) answer (3/4). */
+  if (!(a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) &&
+      (sp_poly_is_rational(a) || sp_poly_is_rational(b))) {
+    sp_Rational ra = sp_poly_as_rational(a), rb = sp_poly_as_rational(b);
+    if (rb.num == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+    return sp_box_rational(sp_rational_rem(ra, rb));
+  }
   if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT ||
       sp_poly_is_rational(a) || sp_poly_is_rational(b)) {
     sp_float fa = sp_poly_to_f_with_rational(a), fb = sp_poly_to_f_with_rational(b);
