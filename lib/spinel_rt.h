@@ -2820,10 +2820,30 @@ static sp_int sp_poly_length_m(sp_RbVal v) {
 /* `size` on a boxed receiver: a collection answers its length, but an Integer
    answers the bytes of its machine representation, which sp_poly_length has no
    arm for and reported as 0. nil and a user object have no size at all. */
+sp_int sp_File_size(sp_File *f);
+sp_int sp_File_truncate(sp_File *f, sp_int n);
+/* A boxed handle: File#size and #truncate are File's, not IO's, and the
+   class is decided at run time by how the handle was opened (is_file) --
+   a File out of a Hash that also holds the standard streams answers as a
+   File, a pipe end or IO.for_fd out of the same Hash raises CRuby's
+   NoMethodError. `n == SP_INT_NIL` is the blockless #truncate, which CRuby
+   answers with the arity error for a File. */
+static sp_bool sp_poly_io_owns(sp_RbVal v) {
+  return v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO && v.v.p && ((sp_File *)v.v.p)->is_file;
+}
+static sp_RbVal sp_poly_io_truncate(sp_RbVal v, sp_int n) {
+  if (!sp_poly_io_owns(v)) sp_raise_poly_nomethod("truncate", v);
+  if (n == SP_INT_NIL) sp_raise_cls("ArgumentError", "wrong number of arguments (given 0, expected 1)");
+  return sp_box_int(sp_File_truncate((sp_File *)v.v.p, n));
+}
 static sp_int sp_poly_size(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_BOOL || v.tag == SP_TAG_FLT ||
       sp_poly_is_user_obj(v))
     sp_raise_poly_nomethod("size", v);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) {
+    if (!sp_poly_io_owns(v)) sp_raise_poly_nomethod("size", v);
+    return sp_File_size((sp_File *)v.v.p);
+  }
   if (v.tag == SP_TAG_INT) return (sp_int)sizeof(sp_int);
   if (v.tag == SP_TAG_BIGINT) {
     sp_Bigint *bg = (sp_Bigint *)v.v.p;
@@ -3329,6 +3349,7 @@ static sp_RbVal sp_poly_round_n(sp_RbVal v, sp_int n) {
    own helper above for the half-up tie rule and the Rational arm. */
 static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
   const char *nm = op == SP_PREC_FLOOR ? "floor" : op == SP_PREC_CEIL ? "ceil" : "truncate";
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO && op == SP_PREC_TRUNC) return sp_poly_io_truncate(v, n);
   if (v.tag == SP_TAG_FLT) {
     double x = v.v.f;
     if (n > 0) return sp_box_float(sp_float_prec_op(x, n, op));
@@ -3352,7 +3373,7 @@ static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
   }
   sp_raise_poly_nomethod(nm, v);
 }
-static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } sp_raise_poly_nomethod("truncate", v); }
+static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return sp_poly_io_truncate(v, SP_INT_NIL); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } sp_raise_poly_nomethod("truncate", v); }
 /* forward: generic array length/element (defined later in this header) and
    the array-kind predicate for cross-kind value equality. */
 static sp_int sp_poly_length(sp_RbVal v);
@@ -10807,6 +10828,7 @@ sp_int sp_stat_size(sp_File *f);
 sp_int sp_stat_field(sp_File *f, sp_int which);   /* uid/gid/nlink/dev/ino/blksize/blocks/rdev */
 sp_int sp_stat_pred(sp_File *f, sp_int kind);     /* pipe?/zero?/readable?/... /size? */
 sp_int sp_File_truncate(sp_File *f, sp_int n);   /* File#truncate: ftruncate(2) on the handle */
+sp_int sp_File_size(sp_File *f);                 /* File#size: fstat(2) of the handle */
 sp_int sp_stat_type_pred(sp_File *f, sp_int kind);  /* file?/directory?/symlink?/... honouring the handle's stat mode */
 sp_Time sp_stat_handle_time(sp_File *f, sp_int kind);  /* mtime/atime/ctime, likewise */
 sp_int sp_stat_mode(sp_File *f);
