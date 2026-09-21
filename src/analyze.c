@@ -15196,7 +15196,20 @@ void analyze_program(Compiler *c) {
      recovered on the next iteration and this loop never did. */
   for (int it = 0; it < 8; it++) {
     reassert_rbs_param_seeds(c);
-    if (!infer_param_types(c)) break;
+    int ch = infer_param_types(c);
+    /* A binding here is a type change after the fixpoint too: a parameter
+       just typed feeds the callee's locals and its return, and those feed
+       the arguments of the calls that follow, so the round is not settled
+       until the writes and returns are -- and a round that bound nothing
+       may still be carrying a return the previous one changed. Binding
+       alone, the second `m64(l3 + l2)` in a method reachable only through
+       `method(:f)` kept binding from an UNKNOWN `l3` while the first call
+       had typed the parameter int, and codegen then derived the Bignum both
+       sides in fact carry and passed it to the int parameter (the C did not
+       build, #4684). */
+    ch |= infer_write_types(c);
+    ch |= infer_return_types(c);
+    if (!ch) break;
   }
   reassert_rbs_param_seeds(c);
 
