@@ -8480,10 +8480,8 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ double _t%d = (%s);"
                         " if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
                         " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
-                        " double _f = pow(10, %d); %s(%s(_t%d / _f) * _f); })",
-                     tg, r, tg, tg, tg, -ndig,
-                     comp_ntype(c, id) == TY_POLY ? "sp_box_f_to_int" : "sp_float_fit_i",
-                     cfn, tg);
+                        " double _f = pow(10, %d); sp_float_fit_i(%s(_t%d / _f) * _f); })",
+                     tg, r, tg, tg, tg, -ndig, cfn, tg);
         }
         else {
           int tg = ++g_tmp;

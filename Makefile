@@ -640,6 +640,10 @@ TESTS := $(filter-out test/regexp_unicode_ctype.rb,$(TESTS))
 endif
 # Mode-incompatible: int_overflow_raises pins raise-mode semantics; under
 # --int-overflow=promote the same code auto-promotes and output diverges.
+# float_to_int_out_of_range and float_to_int_boundary are the same case for
+# the Float -> Integer conversions: they pin the RangeError raise mode keeps,
+# which promote answers as a Bignum instead (#4688). The promote answers are
+# pinned by promote_float_to_int.rb.
 # poly_call_legacy_abi_gate / poly_call_fast_abi_gate pin the raise/wrap legacy
 # sp_int Method ABI classification; under promote the poly-ABI stamp gates the
 # same dynamic calls instead, and the two classifications legitimately diverge
@@ -651,7 +655,7 @@ endif
 # additionally trips a typed `.to_proc`-with-defaults promote gap (an IntArray
 # default in a poly-widened callee), unrelated to the dispatch these pin.
 ifeq ($(SPINEL_INT_OVERFLOW),promote)
-TESTS := $(filter-out test/int_overflow_raises.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb,$(TESTS))
+TESTS := $(filter-out test/int_overflow_raises.rb test/float_to_int_out_of_range.rb test/float_to_int_boundary.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb,$(TESTS))
 # Drive the spinel front-end and the C compile in promote mode so the test
 # rule actually exercises the auto-promotion path end to end.
 SP_OV_FLAG := --int-overflow=promote

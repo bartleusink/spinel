@@ -5644,13 +5644,19 @@ else {
                   sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode");
       if (!pv_kw) {
         if ((sp_streq(name, "to_i") || sp_streq(name, "to_int")) && argc == 0) return TY_POLY;
+        /* No argument, or a literal 0 -- both reach the same emitter and are
+           exact. A NEGATIVE literal does not: it rounds to a power of ten by
+           dividing and multiplying in double, which loses bits past 2**53, so
+           (2.0**70).floor(-1) came out ...424 where CRuby says ...420.
+           Widening that would trade a RangeError for a wrong answer, so it
+           keeps raising until the rounding itself is done in Bignum. */
         if (sp_streq(name, "floor") || sp_streq(name, "ceil") ||
             sp_streq(name, "round") || sp_streq(name, "truncate")) {
           if (argc == 0) return TY_POLY;
           if (argc == 1) {
             const char *pv_aty = nt_type(nt, argv[0]);
             if (pv_aty && sp_streq(pv_aty, "IntegerNode") &&
-                nt_int(nt, argv[0], "value", 0) <= 0) return TY_POLY;
+                nt_int(nt, argv[0], "value", 0) == 0) return TY_POLY;
           }
         }
       }

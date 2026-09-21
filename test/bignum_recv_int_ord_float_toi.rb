@@ -1,6 +1,8 @@
-# Bignum-receiver conveniences (digits/to_s(base)/even?/odd?/abs),
-# Integer#ord/#integer?, and Float#to_i beyond int64 raising loudly
-# (Bignum promotion for statically-int results is tracked on #2024).
+# Bignum-receiver conveniences (digits/to_s(base)/even?/odd?/abs) and
+# Integer#ord/#integer?. The Float#to_i-beyond-int64 line that used to sit
+# here moved out: raise answers RangeError and promote answers the Bignum
+# now (#4688), so it lives in float_to_int_out_of_range (raise, excluded
+# from the promote run) and promote_float_to_int (promote).
 x = 2 ** 100
 p(x.digits)
 p(x.to_s(16))
@@ -15,10 +17,5 @@ p(65.ord)
 n = 7
 p n.ord
 p n.integer?
-begin
-  (1.5e20).to_i
-rescue RangeError => e
-  puts "RangeError"
-end
 p 3.9.to_i
 p(-2.9.to_i)
