@@ -1944,6 +1944,7 @@ sp_File *sp_File_open_flags_perm(const char *path, sp_int fl, sp_int perm) {SP_G
                 : (((int)fl & O_APPEND) ? "a+" : "r+");
   sp_File *f = sp_io_fdopen(fd, m);
   f->path = path;
+  f->is_file = 1;
   return f;
 }
 sp_File *sp_File_open_flags(const char *path, sp_int fl) {
@@ -1983,6 +1984,7 @@ sp_File *sp_File_open_perm(const char *path, const char *mode, sp_int perm) {SP_
   sp_File *f = sp_io_fdopen(fd, fm);
   f->path = path;
   f->mode = m;
+  f->is_file = 1;
   return f;
 }
 void sp_file_stat_scan(void *p) {
@@ -2203,6 +2205,19 @@ sp_int sp_stat_pred(sp_File *f, sp_int kind) {SP_GC_ROOT(f);
    does -- the class-method form truncates by path and cannot serve a handle
    whose path is gone or absent. Buffered bytes are flushed first so the file
    is cut at the size the program believes it has written. */
+/* File#size on a handle: fstat(2) of the descriptor, as CRuby reads it --
+   the path may have been renamed or unlinked since the open. */
+sp_int sp_File_size(sp_File *f) {SP_GC_ROOT(f);
+  SP_IO_OPEN(f);
+  struct stat st;
+  fflush(f->fp);
+  if (fstat(fileno(f->fp), &st) != 0) sp_file_raise_errno("rb_file_size", f->path ? f->path : "");
+  if ((off_t)(sp_int)st.st_size != st.st_size) {
+    sp_raise_cls("RangeError", "file size out of range for Integer");
+    return 0;
+  }
+  return (sp_int)st.st_size;
+}
 sp_int sp_File_truncate(sp_File *f, sp_int n) {SP_GC_ROOT(f);
   SP_IO_OPEN(f);
   if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
@@ -3832,6 +3847,50 @@ sp_RbVal sp_box_brat(sp_Bigint *num, sp_Bigint *den) {
   p->num = num; p->den = den;
   return sp_box_obj(p, SP_BUILTIN_BIG_RATIONAL);
 }
+/* Rational#to_i / #floor / #ceil / #round on a Bignum-numerator Rational.
+   Every one of these used to go through sp_brat_to_f and a cast to sp_int:
+   past the machine word the cast saturates, and a negative value lands on
+   INTPTR_MIN -- which IS the nil sentinel, so Rational(-(2**70), 3).to_i
+   answered nil rather than a number. The quotient is exact in bigint.
+   sp_box_brat keeps the denominator positive, so the sign is the
+   numerator's, and both operands below are non-negative where that matters
+   (sp_bigint_div floors, which is only the same as truncating then). */
+sp_Bigint *sp_brat_trunc_b(sp_BigRational *r) {        /* toward zero */
+  sp_Bigint *n = r->num; SP_GC_ROOT(n);
+  sp_Bigint *d = r->den; SP_GC_ROOT(d);
+  sp_Bigint *z = sp_bigint_new_int(0); SP_GC_ROOT(z);
+  int neg = sp_bigint_sign(n) < 0;
+  sp_Bigint *a = n; SP_GC_ROOT(a);
+  if (neg) a = sp_bigint_sub(z, n);
+  sp_Bigint *q = sp_bigint_div(a, d); SP_GC_ROOT(q);
+  return neg ? sp_bigint_sub(z, q) : q;
+}
+sp_Bigint *sp_brat_floor_b(sp_BigRational *r) {        /* toward -infinity */
+  return sp_bigint_div(r->num, r->den);                /* mpz_mdiv already floors */
+}
+sp_Bigint *sp_brat_ceil_b(sp_BigRational *r) {         /* toward +infinity */
+  sp_Bigint *d = r->den; SP_GC_ROOT(d);
+  sp_Bigint *z = sp_bigint_new_int(0); SP_GC_ROOT(z);
+  sp_Bigint *n = sp_bigint_sub(z, r->num); SP_GC_ROOT(n);
+  sp_Bigint *q = sp_bigint_div(n, d); SP_GC_ROOT(q);
+  return sp_bigint_sub(z, q);
+}
+sp_Bigint *sp_brat_round_b(sp_BigRational *r) {        /* nearest, half away from zero */
+  sp_Bigint *n = r->num; SP_GC_ROOT(n);
+  sp_Bigint *d = r->den; SP_GC_ROOT(d);
+  sp_Bigint *z = sp_bigint_new_int(0); SP_GC_ROOT(z);
+  sp_Bigint *one = sp_bigint_new_int(1); SP_GC_ROOT(one);
+  int neg = sp_bigint_sign(n) < 0;
+  sp_Bigint *a = n; SP_GC_ROOT(a);
+  if (neg) a = sp_bigint_sub(z, n);
+  sp_Bigint *q = sp_bigint_div(a, d); SP_GC_ROOT(q);
+  sp_Bigint *qd = sp_bigint_mul(q, d); SP_GC_ROOT(qd);
+  sp_Bigint *rem = sp_bigint_sub(a, qd); SP_GC_ROOT(rem);
+  sp_Bigint *dbl = sp_bigint_add(rem, rem); SP_GC_ROOT(dbl);
+  if (sp_bigint_cmp(dbl, d) >= 0) q = sp_bigint_add(q, one);
+  return neg ? sp_bigint_sub(z, q) : q;
+}
+
 /* Lift a bignum (or an int) to a big Rational num/1. */
 sp_RbVal sp_brat_from_bigint(sp_Bigint *n) {SP_GC_ROOT(n);   /* the denominator below allocates */
   return sp_box_brat(n, sp_bigint_new_int(1));

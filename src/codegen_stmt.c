@@ -4085,7 +4085,7 @@ static int emit_when_string_range(Compiler *c, int cond, int t, Buf *b) {
   return 1;
 }
 
-static int emit_when_lambda_inline(Compiler *c, int cond, int t, Buf *b);
+static int emit_when_lambda_inline(Compiler *c, int cond, int t, TyKind pt, Buf *b);
 /* Does the subject temp of a `case` need a root? The subject is bound before
    the `when` operands are evaluated, and a fresh subject held only by its
    temp was collected under an operand that allocates. A constant, a literal
@@ -4216,7 +4216,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
         }
         else {
           const char *cnty = nt_type(nt, conds[j]);
-          if (emit_when_lambda_inline(c, conds[j], t, b)) { /* literal lambda predicate */ }
+          if (emit_when_lambda_inline(c, conds[j], t, pt, b)) { /* literal lambda predicate */ }
           /* `when <proc>` (a variable): Proc#=== calls the proc with the
              subject, via the proc-call ABI (mirrors the case-as-value arm) */
           /* a Proc read out of a container arrives boxed: dispatch on the tag
@@ -4487,8 +4487,14 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
    with the scrutinee. Inline the body -- bind the param to the scrutinee
    temp `_tN` and evaluate the last expression as the condition -- so a
    struct-valued scrutinee (sp_Class, sp_Range) never has to ride the
-   sp_int proc-call ABI (#2439). Returns 1 when emitted. */
-static int emit_when_lambda_inline(Compiler *c, int cond, int t, Buf *b) {
+   sp_int proc-call ABI (#2439). Returns 1 when emitted.
+   `pt` is the scrutinee temp's type: the lambda's parameter has a type of
+   its own, and the two differ under --int-overflow=promote, where the
+   subject local is boxed while a block parameter keeps its scalar type
+   (#4730). A boxed subject is unboxed into a scalar parameter, raising past
+   the word as the other typed sinks do; a typed subject is boxed into a
+   poly parameter. */
+static int emit_when_lambda_inline(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   const NodeTable *nt = c->nt;
   if (!nt_type(nt, cond) || !sp_streq(nt_type(nt, cond), "LambdaNode")) return 0;
   int lbody = nt_ref(nt, cond, "body");
@@ -4501,7 +4507,18 @@ static int emit_when_lambda_inline(Compiler *c, int cond, int t, Buf *b) {
   int lrn = 0; const int *lreqs = lpn >= 0 ? nt_arr(nt, lpn, "requireds", &lrn) : NULL;
   const char *lpnm = lrn > 0 ? nt_str(nt, lreqs[0], "name") : NULL;
   buf_puts(b, "({ ");
-  if (lpnm) buf_printf(b, "lv_%s = _t%d; ", rename_local(lpnm), t);
+  if (lpnm) {
+    Scope *ls = comp_scope_of(c, lbody);
+    LocalVar *plv = ls ? scope_local(ls, lpnm) : NULL;
+    TyKind lt = plv ? plv->type : TY_UNKNOWN;
+    char tt[24]; snprintf(tt, sizeof tt, "_t%d", t);
+    buf_printf(b, "lv_%s = ", rename_local(lpnm));
+    if (pt == TY_POLY && lt == TY_INT) buf_printf(b, "sp_poly_to_i(%s)", tt);
+    else if (pt == TY_POLY && lt == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", tt);
+    else if (pt != TY_POLY && pt != TY_UNKNOWN && lt == TY_POLY) emit_boxed_text(c, pt, tt, b);
+    else buf_puts(b, tt);
+    buf_puts(b, "; ");
+  }
   for (int k9 = 0; k9 < lbn - 1; k9++) emit_stmt(c, lbb[k9], b, 0);
   emit_cond(c, lbb[lbn - 1], b);
   buf_puts(b, "; })");
@@ -4741,7 +4758,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
           buf_printf(b, "(sp_bigint_cmp(_t%d, ", t); emit_expr(c, conds[j], b); buf_puts(b, ") == 0)");
         }
         else if (comp_ntype(c, conds[j]) == TY_PROC &&
-                 emit_when_lambda_inline(c, conds[j], t, b)) { /* literal lambda inlined */ }
+                 emit_when_lambda_inline(c, conds[j], t, pt, b)) { /* literal lambda inlined */ }
         /* a Proc read out of a container arrives boxed: dispatch on the tag so
            it is CALLED and not compared (#3683) */
         else if (comp_ntype(c, conds[j]) == TY_POLY) {

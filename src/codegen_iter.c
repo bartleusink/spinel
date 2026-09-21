@@ -2130,6 +2130,18 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   LocalVar *tlv0 = (tsc && p0) ? scope_local(tsc, p0) : NULL;
   TyKind tsaved0 = tlv0 ? tlv0->type : TY_UNKNOWN;
   int use_shadow = tlv0 && tlv0->type != et && et != TY_UNKNOWN;
+  /* A boxed receiver over a SCALAR block parameter keeps the parameter typed
+     and unboxes the value into it, rather than shadowing the parameter as
+     boxed: the body was inferred against the scalar and reads it as one
+     (`v.negative?` on an sp_int), and the shadow's retype does not reach the
+     cached node types, so the two disagreed and the C did not build. Under
+     --int-overflow=promote every Integer local is boxed while a block
+     parameter is not, which is where this shape lives (#4730). The unbox
+     raises past the word, as the other typed sinks do. */
+  const char *unbox = NULL;
+  if (use_shadow && et == TY_POLY && tsaved0 == TY_INT) unbox = "sp_poly_to_i";
+  else if (use_shadow && et == TY_POLY && tsaved0 == TY_FLOAT) unbox = "sp_poly_to_f";
+  if (unbox) use_shadow = 0;
   int din = g_indent;
   if (use_shadow) {
     tlv0->type = et;
@@ -2142,7 +2154,9 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
       emit_cell_shadow_store(c, tsc, p0, g_pre, din);
   }
   else if (p0) {
-    emit_indent(g_pre, g_indent); buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tr);
+    emit_indent(g_pre, g_indent);
+    if (unbox) buf_printf(g_pre, "lv_%s = %s(_t%d);\n", p0, unbox, tr);
+    else buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tr);
     /* The block's parameter may be CELLED -- something inside the body needs it
        as a proc's capture, which here means a dispatch arm that hands the inner
        block over as a proc rather than splicing it. The arms that DO splice read
@@ -4155,6 +4169,18 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
        receiver keeps its shadow path -- boxing would strip its methods and
        break `nums.tap { |a| a.sort! }`. */
     int tap_escapes = tlv0 && tsaved0 == TY_POLY && ty_is_object(et);
+    /* A boxed receiver over a SCALAR param: keep the param typed and unbox
+       the value into it (raising past the word, as the other typed sinks
+       do) rather than shadowing it as boxed -- the body was inferred against
+       the scalar, and the shadow's retype does not reach the cached node
+       types, so `v.negative?` read an sp_int out of an sp_RbVal and the C did
+       not build. Under --int-overflow=promote every Integer local is boxed
+       while a block param is not, which is where the shape lives (#4730).
+       The expression-form emitter (emit_tap_then_expr) does the same. */
+    const char *tap_unbox = NULL;
+    if (use_shadow_t && et == TY_POLY && tsaved0 == TY_INT) tap_unbox = "sp_poly_to_i";
+    else if (use_shadow_t && et == TY_POLY && tsaved0 == TY_FLOAT) tap_unbox = "sp_poly_to_f";
+    if (tap_unbox) use_shadow_t = 0;
     /* tap runs the block once, not in a loop, so a `next` in it has no C loop
        to continue out of: give it one (#3978). */
     int tap_next = subtree_has_own_next(nt, body);
@@ -4183,6 +4209,9 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
           buf_printf(b, "lv_%s = ", p0);
           emit_boxed_text(c, et, src, b);
           buf_puts(b, ";\n");
+        }
+        else if (tap_unbox) {
+          buf_printf(b, "lv_%s = %s(_t%d);\n", p0, tap_unbox, tr);
         }
         else {
           buf_printf(b, "lv_%s = _t%d;\n", p0, tr);

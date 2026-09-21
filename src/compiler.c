@@ -930,7 +930,9 @@ static int name_in(char **list, int n, const char *name) {
   for (int i = 0; i < n; i++) if (sp_streq(list[i], name)) return 1;
   return 0;
 }
+unsigned comp_table_gen = 0;   /* bumped when a reader or alias table grows (poly-candidate memo stamp) */
 void comp_add_reader(ClassInfo *ci, const char *name) {
+  comp_table_gen++;
   if (name_in(ci->readers, ci->nreaders, name)) return;
   if (ci->nreaders >= ci->creaders) {
     ci->creaders = ci->creaders ? ci->creaders * 2 : 4;
@@ -1010,6 +1012,7 @@ int comp_is_sg_reader(ClassInfo *ci, const char *name) { return name_in(ci->sg_r
 int comp_is_sg_writer(ClassInfo *ci, const char *name) { return name_in(ci->sg_writers, ci->nsg_writers, name); }
 
 void comp_add_alias_from(ClassInfo *ci, const char *new_name, const char *old_name, int alias_node) {
+  comp_table_gen++;
   if (!new_name || !old_name) return;
   for (int i = 0; i < ci->naliases; i++)
     if (sp_streq(ci->alias_new[i], new_name)) return;
@@ -1247,6 +1250,119 @@ int comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_c
   for (int cid = class_id; cid >= 0; cid = c->classes[cid].parent)
     if (comp_is_writer(&c->classes[cid], name)) { if (def_class) *def_class = cid; return 1; }
   return 0;
+}
+
+/* ---- Poly-dispatch candidates by method name ----
+   A call on a poly receiver asks every class whether it answers `name`, and
+   asks again for the same name at every such call site, every fixpoint round:
+   (poly call sites x classes x chain depth) per round, the N^2 term of the
+   front end (lobsters: 543M of 792M chain walks from two sites). The answer
+   depends only on `name` while the scope index is frozen -- scope shape, the
+   parent chains, the reader and alias tables are all fixed there -- so it is
+   computed once per name and re-read. The memo is stamped with the scope-index
+   epoch, the scope and class counts and the table generation; any change drops
+   it. Unfrozen, nothing is memoized and the caller pays the scan as before.
+   The list holds every class in ascending order, so a consumer iterating it
+   sees the same classes in the same order as the loop it replaces; per-class
+   conditions that vary per call (ctor_reachable, an_builtin_only, native arity)
+   stay with the consumer. A native class is always listed: its answer depends
+   on the call's arity, which the consumer checks. */
+static unsigned pc_hash_name(const char *s) {
+  unsigned h = 2166136261u;
+  while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+  return h;
+}
+struct pc_entry { char *name; PolyCand *cands; int n; struct pc_entry *next; };
+#define PC_BUCKETS 4096
+static struct pc_entry *pc_tab[PC_BUCKETS];
+static unsigned pc_gen_stamp; static int pc_nscopes_stamp, pc_nclasses_stamp; static unsigned pc_table_stamp;
+/* Invalidation never frees: a consumer may be iterating a list when a nested
+   inference call invalidates the memo (bind_call_params -> infer_type -> this).
+   Retired entries are kept until comp_poly_candidates_reset, at the start of a
+   compile. */
+static struct pc_entry *pc_retired;
+static void pc_clear(void) {
+  for (int b = 0; b < PC_BUCKETS; b++) {
+    for (struct pc_entry *e = pc_tab[b]; e; ) { struct pc_entry *nx = e->next; e->next = pc_retired; pc_retired = e; e = nx; }
+    pc_tab[b] = NULL;
+  }
+}
+void comp_poly_candidates_reset(void) {
+  pc_clear();
+  for (struct pc_entry *e = pc_retired; e; ) { struct pc_entry *nx = e->next; free(e->name); free(e->cands); free(e); e = nx; }
+  pc_retired = NULL;
+}
+static void pc_build(Compiler *c, const char *name, PolyCand **out, int *n_out) {
+  PolyCand *v = NULL; int n = 0, cap = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    PolyCand pc; pc.cls = k; pc.rdcls = -1; pc.native = c->classes[k].is_native_class;
+    pc.mi = comp_method_in_chain(c, k, name, NULL);
+    if (!pc.native && pc.mi < 0 && !comp_reader_in_chain(c, k, name, &pc.rdcls)) continue;
+    if (n == cap) { cap = cap ? cap * 2 : 8; v = realloc(v, sizeof *v * (size_t)cap); }
+    v[n++] = pc;
+  }
+  *out = v; *n_out = n;
+}
+const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n) {
+  if (!name) { *n = 0; return NULL; }
+  if (!sm_frozen) {
+    /* scope shape may still change: answer fresh, and keep nothing */
+    struct pc_entry *e = calloc(1, sizeof *e);
+    pc_build(c, name, &e->cands, &e->n);
+    e->next = pc_retired; pc_retired = e;
+    *n = e->n; return e->cands;
+  }
+  if (pc_gen_stamp != sm_gen || pc_nscopes_stamp != c->nscopes || pc_nclasses_stamp != c->nclasses || pc_table_stamp != comp_table_gen) {
+    pc_clear(); pc_gen_stamp = sm_gen; pc_nscopes_stamp = c->nscopes; pc_nclasses_stamp = c->nclasses; pc_table_stamp = comp_table_gen;
+  }
+  unsigned b = pc_hash_name(name) % PC_BUCKETS;
+  for (struct pc_entry *e = pc_tab[b]; e; e = e->next)
+    if (sp_streq(e->name, name)) {
+      *n = e->n; return e->cands;
+    }
+  struct pc_entry *e = calloc(1, sizeof *e);
+  e->name = strdup(name);
+  pc_build(c, name, &e->cands, &e->n);
+  e->next = pc_tab[b]; pc_tab[b] = e;
+  *n = e->n; return e->cands;
+}
+
+/* ---- Descendants of a class ----
+   Five passes ask "which classes descend from X" by walking every class's
+   parent chain, for every call node they visit, every fixpoint round:
+   (call nodes x classes x chain depth). Parent links are set while classes
+   are collected and never after, so the answer is fixed for the whole of
+   inference; it is computed once per class -- every proper descendant, in
+   ascending order, the order the loops it replaces visited them in -- and
+   rebuilt only when the class count changes. */
+static int **desc_lists; static int *desc_counts; static int desc_nclasses = -1;
+const int *comp_descendants(Compiler *c, int cid, int *n) {
+  if (cid < 0 || cid >= c->nclasses) { *n = 0; return NULL; }
+  if (desc_nclasses != c->nclasses) {
+    for (int i = 0; i < desc_nclasses; i++) free(desc_lists[i]);
+    free(desc_lists); free(desc_counts);
+    desc_lists = calloc((size_t)c->nclasses, sizeof *desc_lists);
+    desc_counts = calloc((size_t)c->nclasses, sizeof *desc_counts);
+    desc_nclasses = c->nclasses;
+  }
+  if (!desc_lists[cid]) {
+    int *v = NULL, cnt = 0, cap = 0;
+    for (int k = 0; k < c->nclasses; k++) {
+      int is_desc = 0;
+      for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
+        if (p == cid) { is_desc = 1; break; }
+      if (!is_desc) continue;
+      if (cnt == cap) { cap = cap ? cap * 2 : 8; v = realloc(v, sizeof *v * (size_t)cap); }
+      v[cnt++] = k;
+    }
+    if (!v) v = malloc(sizeof *v);   /* a non-NULL sentinel for "computed, empty" */
+    desc_lists[cid] = v; desc_counts[cid] = cnt;
+  }
+  *n = desc_counts[cid]; return desc_lists[cid];
+}
+void comp_descendants_reset(void) {
+  for (int i = 0; i < desc_nclasses; i++) free(desc_lists[i]);
+  free(desc_lists); free(desc_counts); desc_lists = NULL; desc_counts = NULL; desc_nclasses = -1;
 }
 
 Scope *comp_scope_of(Compiler *c, int node_id) {

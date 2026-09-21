@@ -415,16 +415,20 @@ int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out) {
        to poly so the class is chosen from the runtime value. */
     if (sp_streq(name, "round") || sp_streq(name, "truncate") ||
         sp_streq(name, "floor") || sp_streq(name, "ceil")) {
-      if (argc == 1) {
+      /* a trailing `half:` keyword only picks the tie-break mode; peel it off
+         the positional count for the class choice, as the Float rule does.
+         Read as a positional argument it made `r.round(1, half: :even)` an
+         Integer, and with no arm answering that shape the call fell through
+         to a NoMethodError. */
+      int rr_argc = argc;
+      if (rr_argc >= 1 && nt_type(nt, argv[rr_argc - 1]) &&
+          sp_streq(nt_type(nt, argv[rr_argc - 1]), "KeywordHashNode")) rr_argc--;
+      if (rr_argc == 1) {
         if (nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "IntegerNode"))
           { *out = nt_int(nt, argv[0], "value", 0) > 0 ? TY_RATIONAL : TY_INT; return 1; }
-        /* round(half: :x) with no digits rounds to an Integer (#3047) */
-        if (sp_streq(name, "round") && nt_type(nt, argv[0]) &&
-            sp_streq(nt_type(nt, argv[0]), "KeywordHashNode"))
-          { *out = TY_INT; return 1; }
         { *out = TY_POLY; return 1; }
       }
-      { *out = TY_INT; return 1; }
+      { *out = TY_INT; return 1; }   /* no digits -> Integer */
     }
     if (sp_streq(name, "zero?") || sp_streq(name, "positive?") ||
         sp_streq(name, "negative?") || sp_streq(name, "finite?") ||
@@ -1509,11 +1513,9 @@ int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       TyKind r = method_call_ret(c, mi, id);
       /* Unify with descendant direct overrides: codegen dispatch emits a
          cls_id switch over all overrides, so the result type must cover all. */
-      for (int k = 0; k < c->nclasses; k++) {
-        int is_desc = 0;
-        for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-          if (p == cid) { is_desc = 1; break; }
-        if (!is_desc) continue;
+      int nd = 0; const int *ds = comp_descendants(c, cid, &nd);
+      for (int di = 0; di < nd; di++) {
+        int k = ds[di];
         int dmi = comp_method_in_class(c, k, name);
         if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
       }
@@ -1539,6 +1541,16 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       (sp_streq(name, "to_s") || sp_streq(name, "inspect")) &&
       !an_user_defines_method(c, name))
     { *out = TY_STRING; return 1; }
+  /* #hash on a boxed receiver is always the Integer sp_rbval_hash_key
+     answers -- a user #hash in the program is reached through
+     sp_obj_hash_hook inside it and its answer is folded to the key -- so the
+     static type is int whatever a user #hash of the program returns. Left to
+     the user-method union it was the union's poly (every int is poly under
+     --int-overflow=promote), and `h ^= x.hash` handed an sp_int to
+     sp_poly_bitop's sp_RbVal parameter: `require "set"` did not build there,
+     since Set#hash is exactly that loop (#4728). */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && sp_streq(name, "hash"))
+    { *out = TY_INT; return 1; }
   /* #name is a class name (a String) for a boxed Class and the method name (a
      Symbol) for a boxed Method, so where the program builds Method objects at
      all the static result is poly (#3692) */

@@ -64,8 +64,11 @@ typedef struct { int tag; int cls_id; union { sp_int i; const char *s; sp_float 
    static allocation in a minimal binary. Embedded targets can shrink it with
    -DSP_GC_STACK_MAX=<n> (pass the SAME value when building lib/sp_gc.c and the
    generated TU -- both consult this for the array and the SP_GC_ROOT bound).
-   Too small overflows silently into a dropped root (UAF), so size it to the
-   program's deepest live-root nesting. */
+   A push past it goes to a heap-allocated overflow segment (sp_gc_root_push_slow),
+   so a recursion deeper than the array -- 27k Ruby frames of a growing
+   string reached it, and the dropped roots were freed under the frames that
+   still held them -- keeps every root; only the fast path's bound is this
+   constant. */
 #ifndef SP_GC_STACK_MAX
 #define SP_GC_STACK_MAX 65536
 #endif
@@ -83,9 +86,17 @@ extern SP_TLS int sp_gc_in_sweeper;   /* set on a sweeper thread: finalizers ski
    Marshal loader, which builds GC arrays/hashes across a recursive parse --
    can root their in-flight objects too. Helpers touch only the extern root
    stack above, so relocating them is layout-neutral. */
+/* Root i, whichever segment holds it: the walkers and the fiber snapshot read
+   through this past SP_GC_STACK_MAX. */
+extern SP_TLS void ***sp_gc_roots_ext;
+int sp_gc_root_push_slow(void **p);
+int sp_gc_roots_ext_reserve(int n);   /* room for n roots in total; 0 on OOM */
+static inline void **sp_gc_root_at(int i) {
+  return i < SP_GC_STACK_MAX ? sp_gc_roots[i] : sp_gc_roots_ext[i - SP_GC_STACK_MAX];
+}
 static inline int _sp_gc_root_push(void **p) {
   if (sp_gc_nroots < SP_GC_STACK_MAX) { sp_gc_roots[sp_gc_nroots++] = p; return 1; }
-  return 0;
+  return sp_gc_root_push_slow(p);
 }
 static inline void _sp_gc_root_pop(int *added) { if (*added) sp_gc_nroots--; }
 static inline void sp_gc_cleanup(int *p) { sp_gc_nroots = *p; }

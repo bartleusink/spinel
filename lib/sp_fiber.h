@@ -111,4 +111,20 @@ void sp_fiber_fire_inject_if_pending(void);
 int  sp_fiber_inject_pending(sp_Fiber *f);   /* lock-free acquire peek */
 SP_NORETURN void sp_fiber_raise_kill_self(void);
 
+/* A C stack that ran out is CRuby's SystemStackError, and a program that
+   rescues it goes on running. The raise cannot live here: the exception
+   stack is thread-local state in the generated translation unit, which this
+   archive is compiled without. The generated TU installs this hook, and the
+   fault handler calls it instead of reporting and dying -- on the alternate
+   signal stack, so the raise runs on memory the overflow did not touch.
+   NULL (nothing installed, or no handler armed) keeps the old report. */
+extern void (*sp_stack_overflow_raise_fn)(void);
+void sp_stack_guard_init(void);
+
+/* The running thread's own stack, for the fault handler's overflow test: a
+   fault just below `lo` is this stack growing past its end. Recorded per
+   thread when the handler is armed. */
+extern SP_TLS char *sp_thread_stack_lo;
+extern SP_TLS char *sp_thread_stack_hi;
+
 #endif

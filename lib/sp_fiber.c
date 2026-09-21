@@ -254,12 +254,49 @@ SP_TLS sp_Fiber *sp_fiber_current = &sp_fiber_root;    /* extern: read by the ge
    Installed once, only when nothing else has claimed the signal (the GC
    verifier's fault reporter, for one). */
 #include <signal.h>
+#include <stdio.h>
+#include <sys/resource.h>
+#ifdef SP_THREADS
+#include <pthread.h>    /* only where the build has it: see sp_thread_stack_bounds */
+#endif
 static void sp_fiber_fault_write(const char *s) { size_t n = strlen(s); while (n) { ssize_t w = write(2, s, n); if (w <= 0) break; s += w; n -= (size_t)w; } }
 static void sp_fiber_fault_write_num(size_t v) { char b[24]; int i = (int)sizeof b; b[--i] = 0; do { b[--i] = (char)('0' + v % 10); v /= 10; } while (v); sp_fiber_fault_write(b + i); }
 static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
   (void)uctx;
   sp_Fiber *f = sp_fiber_current;
   char *a = si ? (char *)si->si_addr : NULL;
+  /* The thread's own stack ran past its end: the fault lands in the OS guard
+     just below it. Read as an ordinary segfault this killed the process where
+     CRuby raises SystemStackError and lets a rescue continue. The raise is
+     the generated TU's (it owns the exception stack). */
+  if (sp_stack_overflow_raise_fn && a && sp_thread_stack_lo &&
+      a < sp_thread_stack_lo && a >= sp_thread_stack_lo - (ptrdiff_t)(1 << 20) &&
+      (!f || f == &sp_fiber_root || !f->stack)) {
+    /* unblock the signal first: this raise does not return, and the mask it
+       was entered with would otherwise stay blocked in the frame we jump to
+       (on Linux longjmp does not restore it) */
+    sigset_t m; sigemptyset(&m); sigaddset(&m, SIGSEGV); sigaddset(&m, SIGBUS);
+#ifdef SP_THREADS
+    pthread_sigmask(SIG_UNBLOCK, &m, 0);
+#else
+    sigprocmask(SIG_UNBLOCK, &m, 0);   /* one thread: the same mask */
+#endif
+    sp_stack_overflow_raise_fn();   /* returns only if no handler is armed */
+    /* Nothing to rescue it: report it as the uncaught exception it is and
+       leave, rather than letting the default disposition kill the process on
+       a signal with nothing said. Writing a fixed string and _exit are all
+       this handler may do -- the allocator is not safe to re-enter from a
+       signal, and the stack a formatter would want is the one that just ran
+       out. */
+    /* what the program already printed is still in stdout's buffer, and
+       _exit does not flush it: a run that printed a hundred lines and then
+       overflowed would otherwise show none of them. The at_exit hooks do NOT
+       run here -- they are Ruby code, and the stack they would run on is the
+       one that just ran out. */
+    fflush(stdout);
+    sp_fiber_fault_write("stack level too deep (SystemStackError)\n");
+    _exit(1);
+  }
   if (f && f != &sp_fiber_root && f->stack && a >= f->stack && a < f->stack + sp_fiber_guard()) {
     sp_fiber_fault_write("spinel: fiber stack overflow: a green thread, Fiber or Enumerator body ran past the ");
     sp_fiber_fault_write_num(f->stack_size / 1024);
@@ -268,10 +305,64 @@ static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
   }
   signal(sig, SIG_DFL);
 }
+void (*sp_stack_overflow_raise_fn)(void) = 0;
+SP_TLS char *sp_thread_stack_lo = 0;
+SP_TLS char *sp_thread_stack_hi = 0;
+
+/* The running thread's stack bounds. A fault just below the low end is this
+   stack growing past it -- the OS puts its own guard page there, which is
+   what the fault is.
+
+   With threads, pthread answers for every stack including the main one (on
+   macOS the address it returns is the HIGH end; on Linux the attr pair gives
+   base and size). A program built without them has one stack, the process's
+   own: arming happens at startup, so a local here is within a frame or two of
+   its high end, and the soft RLIMIT_STACK is its size. That is asked of
+   <sys/resource.h> rather than of pthread, because a target may have no
+   pthread at all -- a pack of an unthreaded program is built with whatever
+   compiler its recipient has, and <pthread.h> there may not even compile. */
+static void sp_thread_stack_bounds(char *here) {
+#ifdef SP_THREADS
+  (void)here;
+  pthread_t self = pthread_self();
+#if defined(__APPLE__)
+  char *hi = (char *)pthread_get_stackaddr_np(self);
+  size_t sz = pthread_get_stacksize_np(self);
+  sp_thread_stack_hi = hi;
+  sp_thread_stack_lo = hi - sz;
+#else
+  pthread_attr_t at;
+  void *base = 0; size_t sz = 0;
+  if (pthread_getattr_np(self, &at) == 0) {
+    if (pthread_attr_getstack(&at, &base, &sz) != 0) { base = 0; sz = 0; }
+    pthread_attr_destroy(&at);
+  }
+  sp_thread_stack_lo = (char *)base;
+  sp_thread_stack_hi = (char *)base + sz;
+#endif
+#else
+  struct rlimit rl;
+  size_t sz = 8u << 20;   /* the common default, when the limit says nothing */
+  if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+      rl.rlim_cur > (rlim_t)(64u << 10))
+    sz = (size_t)rl.rlim_cur;
+  /* `here` is a frame or two below the true top, not at it, and the low end is
+     derived by subtracting the size -- so under-estimating the top would put
+     the computed low end BELOW the real one, and the real guard page would sit
+     above the band the handler tests rather than in it. Over-estimate instead:
+     64 KB of startup frames is far more than the few hundred bytes actually
+     used, and the computed low end then sits just inside the stack, which is
+     where the handler's window wants it. */
+  sp_thread_stack_hi = here + (64u << 10);
+  sp_thread_stack_lo = sp_thread_stack_hi - sz;
+#endif
+}
+
 static SP_TLS int sp_fiber_fault_armed = 0;
 static void sp_fiber_fault_arm(void) {
   if (sp_fiber_fault_armed) return;
   sp_fiber_fault_armed = 1;
+  { char here; sp_thread_stack_bounds(&here); }
   /* the alternate stack is per OS thread; workers live as long as the process */
   size_t asz = 64 * 1024;
   void *as = malloc(asz);
@@ -292,6 +383,12 @@ static void sp_fiber_fault_arm(void) {
   }
   installed = 1;
 }
+/* Arm the fault handler for a program that never creates a fiber: the C
+   stack it overflows is the thread's own, and the handler is what turns that
+   into SystemStackError. Fiber creation and worker startup arm it too, so
+   this is a no-op once either has run. */
+void sp_stack_guard_init(void) { sp_fiber_fault_arm(); }
+
 void sp_fiber_worker_init(void) {
   sp_fiber_current = &sp_fiber_root;
   sp_fiber_fault_arm();
@@ -307,8 +404,9 @@ void sp_fiber_worker_init(void) {
 sp_Fiber *sp_fiber_worker_root(void) { return &sp_fiber_root; }
 static sp_Fiber *sp_fiber_list_head = NULL;
 
-static void sp_fiber_save_roots(sp_Fiber*f){if(f->stack)sp_gc_wb((void*)f);/* the snapshot may name young objects, and only a scanned fiber follows it now: an old fiber has to be remembered (#4525) */if(f->saved_roots_cap<sp_gc_nroots){int nc=sp_gc_nroots>64?sp_gc_nroots*2:64;void***nx=(void***)realloc(f->saved_roots,sizeof(void**)*nc);if(!nx)return;f->saved_roots=nx;f->saved_roots_cap=nc;}if(sp_gc_nroots>0)memcpy(f->saved_roots,sp_gc_roots,sizeof(void**)*sp_gc_nroots);f->saved_nroots=sp_gc_nroots;}
-static void sp_fiber_restore_roots(sp_Fiber*f){if(f->saved_nroots>0)memcpy(sp_gc_roots,f->saved_roots,sizeof(void**)*f->saved_nroots);sp_gc_nroots=f->saved_nroots;}
+static void sp_fiber_save_roots(sp_Fiber*f){if(f->stack)sp_gc_wb((void*)f);/* the snapshot may name young objects, and only a scanned fiber follows it now: an old fiber has to be remembered (#4525) */if(f->saved_roots_cap<sp_gc_nroots){int nc=sp_gc_nroots>64?sp_gc_nroots*2:64;void***nx=(void***)realloc(f->saved_roots,sizeof(void**)*nc);if(!nx)return;f->saved_roots=nx;f->saved_roots_cap=nc;}/* both segments: the array, then whatever spilled past it (sp_gc.h) */
+int n1=sp_gc_nroots<SP_GC_STACK_MAX?sp_gc_nroots:SP_GC_STACK_MAX;if(n1>0)memcpy(f->saved_roots,sp_gc_roots,sizeof(void**)*n1);if(sp_gc_nroots>n1)memcpy(f->saved_roots+n1,sp_gc_roots_ext,sizeof(void**)*(sp_gc_nroots-n1));f->saved_nroots=sp_gc_nroots;}
+static void sp_fiber_restore_roots(sp_Fiber*f){int n=f->saved_nroots;int n1=n<SP_GC_STACK_MAX?n:SP_GC_STACK_MAX;if(n1>0)memcpy(sp_gc_roots,f->saved_roots,sizeof(void**)*n1);if(n>n1){if(!sp_gc_roots_ext_reserve(n))sp_oom_die();memcpy(sp_gc_roots_ext,f->saved_roots+n1,sizeof(void**)*(n-n1));}sp_gc_nroots=n;}
 /* Snapshot the calling worker's live shadow-stack roots into the green thread it
    is running, so a stop-the-world collector can mark them while this worker is
    parked at a safepoint. The collector reaches them via the suspended-fibers GC

@@ -3,6 +3,7 @@
    movement, no logic change. */
 
 #include "codegen_internal.h"
+#include "analyze.h"
 
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b);
 static void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const int *argv, int argc, Buf *b);
@@ -7924,24 +7925,46 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       else if ((sp_streq(name, "floor") || sp_streq(name, "ceil") ||
                 sp_streq(name, "round") || sp_streq(name, "truncate")) &&
                argc == 0) buf_printf(b, "(%s)", r);
-      else if (sp_streq(name, "round") && argc >= 1 && nt_type(nt, argv[argc - 1]) &&
-               sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
-        int hv2 = kwh_lookup(nt, argv[argc - 1], "half");
-        const char *hm = (hv2 >= 0 && nt_type(nt, hv2) && sp_streq(nt_type(nt, hv2), "SymbolNode"))
-                           ? nt_str(nt, hv2, "value") : NULL;
-        /* any mode other than the three CRuby names is an ArgumentError */
-        if (hm && !sp_streq(hm, "even") && !sp_streq(hm, "down") && !sp_streq(hm, "up")) {
-          buf_printf(b, "({ (void)(%s); sp_raise_cls(\"ArgumentError\","
-                        " sp_sprintf(\"invalid rounding mode: %%s\", ", r);
-          emit_str_literal(b, hm);
-          buf_puts(b, ")); (sp_int)0; })");
+      /* `round(half: mode)`, with or without a digit count. Only #round takes
+         a tie-break mode; the other three reject the hash outright, and with
+         a digit count as well it is the arity CRuby complains about first. */
+      else if ((argc == 1 || argc == 2) && nt_type(nt, argv[argc - 1]) &&
+               sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode") &&
+               (sp_streq(name, "round") || sp_streq(name, "floor") ||
+                sp_streq(name, "ceil") || sp_streq(name, "truncate"))) {
+        RoundKw kw; round_kw_read(c, argv[argc - 1], &kw);
+        int tr = ++g_tmp;
+        buf_printf(b, "({ sp_int _t%d = (%s); ", tr, r);
+        if (argc == 2) {
+          int tn = ++g_tmp;
+          buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+          if (!sp_streq(name, "round")) {
+            /* the hash is built before the call rejects it */
+            emit_round_kw_effects(c, &kw, b);
+            buf_printf(b, "(void)_t%d; (void)_t%d;"
+                          " sp_raise_cls(\"ArgumentError\", \"wrong number of"
+                          " arguments (given 2, expected 0..1)\"); (sp_int)0; })", tr, tn);
+          }
+          else {
+            int tm = emit_round_kw_binds(c, &kw, b);
+            buf_printf(b, "sp_int_round_half_v(_t%d, _t%d, ", tr, tn);
+            if (tm >= 0) buf_printf(b, "_t%d", tm); else buf_puts(b, "sp_box_nil()");
+            buf_puts(b, "); })");
+          }
         }
-        else if (argc == 1) buf_printf(b, "(%s)", r);   /* no digits: self */
+        else if (!sp_streq(name, "round")) {
+          emit_round_kw_effects(c, &kw, b);
+          buf_printf(b, "(void)_t%d; ", tr);
+          buf_puts(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of Hash"
+                      " into Integer\"); (sp_int)0; })");
+        }
         else {
-          int md = hm && sp_streq(hm, "even") ? 0 : hm && sp_streq(hm, "down") ? 2 : 1;
-          buf_printf(b, "sp_int_round_half(%s, ", r);
-          emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", %d)", md);
+          /* Integer#round with no digit count answers the receiver without
+             reading the keywords at all -- `1.round(half: :bogus)` is 1,
+             where `1.round(0, half: :bogus)` is an ArgumentError. They are
+             still evaluated: the hash is built before the call ignores it. */
+          emit_round_kw_effects(c, &kw, b);
+          buf_printf(b, "_t%d; })", tr);
         }
       }
       else if ((sp_streq(name, "floor") || sp_streq(name, "ceil") ||
@@ -8382,75 +8405,102 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       const char *half_fn = NULL;
       int half_dyn = -1;
       int eff_argc = argc;
-      /* only #round takes a tie-break mode; the other three reject a keyword
-         argument outright (#3646) */
-      if (!sp_streq(name, "round") && argc >= 1 && nt_type(c->nt, argv[argc - 1]) &&
-          sp_streq(nt_type(c->nt, argv[argc - 1]), "KeywordHashNode") &&
-          (sp_streq(name, "floor") || sp_streq(name, "ceil") || sp_streq(name, "truncate"))) {
-        buf_printf(b, "({ (void)(%s); sp_raise_cls(\"TypeError\","
-                      " \"no implicit conversion of Hash into Integer\"); 0.0; })", r);
+      RoundKw kw; memset(&kw, 0, sizeof kw); kw.half = -1;
+      int has_kwh = (argc == 1 || argc == 2) && nt_type(c->nt, argv[argc - 1]) &&
+                    sp_streq(nt_type(c->nt, argv[argc - 1]), "KeywordHashNode") &&
+                    (sp_streq(name, "round") || sp_streq(name, "floor") ||
+                     sp_streq(name, "ceil") || sp_streq(name, "truncate"));
+      if (has_kwh) round_kw_read(c, argv[argc - 1], &kw);
+      /* Only #round takes a tie-break mode; the other three reject the hash
+         outright, and with a digit count as well it is the arity CRuby
+         complains about first (#3646). The receiver, the digit count and
+         every keyword value are still evaluated: the hash is built before
+         the call rejects it. */
+      if (has_kwh && !sp_streq(name, "round")) {
+        buf_printf(b, "({ (void)(%s); ", r);
+        if (argc == 2) { buf_puts(b, "(void)("); emit_int_expr(c, argv[0], b); buf_puts(b, "); "); }
+        emit_round_kw_effects(c, &kw, b);
+        if (argc == 2)
+          buf_puts(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
+                      " (given 2, expected 0..1)\"); 0.0; })");
+        else buf_puts(b, "sp_raise_cls(\"TypeError\","
+                         " \"no implicit conversion of Hash into Integer\"); 0.0; })");
         return 1;
       }
-      if (sp_streq(name, "round") && argc >= 1 && nt_type(c->nt, argv[argc - 1]) &&
-          sp_streq(nt_type(c->nt, argv[argc - 1]), "KeywordHashNode")) {
-        int hvd = kwh_lookup(nt, argv[argc - 1], "half");
-        /* a nil mode is the default; a mode only known at run time is chosen
-           there rather than aborting the build (#3646) */
-        if (hvd >= 0 && nt_type(c->nt, hvd) && sp_streq(nt_type(c->nt, hvd), "NilNode"))
-          eff_argc = argc - 1;
-        else if (hvd >= 0 && !(nt_type(c->nt, hvd) && sp_streq(nt_type(c->nt, hvd), "SymbolNode"))) {
-          half_dyn = hvd;
-          eff_argc = argc - 1;
+      if (has_kwh) {
+        eff_argc = argc - 1;
+        /* A mode written as a literal :even / :down / :up is settled here and
+           the plain arms below answer the call. Everything else -- a String, a
+           Symbol out of a variable, a `**` source, an unknown keyword -- is
+           settled at run time, by the same helpers #4701 gave the boxed path,
+           so the two spellings of a mode cannot disagree. */
+        const char *hty = kw.half >= 0 ? nt_type(c->nt, kw.half) : NULL;
+        int lit = !kw.nunknown && kw.nelem <= 1 && kw.nsplat == 0 &&
+                  (kw.half < 0 ||
+                   (hty && (sp_streq(hty, "SymbolNode") || sp_streq(hty, "NilNode"))));
+        const char *hm = (lit && hty && sp_streq(hty, "SymbolNode"))
+                           ? nt_str(c->nt, kw.half, "value") : NULL;
+        /* promote widens `round(half: …)` with no digit count (or a literal
+           0) to a boxed Integer, as it widens the keyword-less `round`
+           (#4688). The literal-mode arms below answer a raw sp_int, so that
+           shape takes the run-time route, which is the one that can hand
+           back a Bignum. */
+        int pv_nd0 = eff_argc == 0 ||
+                     (eff_argc == 1 && nt_type(c->nt, argv[0]) &&
+                      sp_streq(nt_type(c->nt, argv[0]), "IntegerNode") &&
+                      nt_int(c->nt, argv[0], "value", 0) == 0);
+        if (!lit || (g_promote_mode && pv_nd0)) half_dyn = 1;
+        else if (!hm) { /* no mode, or `half: nil`: the plain half-up default */ }
+        else if (sp_streq(hm, "even")) half_fn = "sp_round_half_even";
+        else if (sp_streq(hm, "down")) half_fn = "sp_round_half_down";
+        else if (sp_streq(hm, "up")) half_fn = "round";
+        else {
+          /* any other name is CRuby's ArgumentError, not the default (#3647) */
+          buf_printf(b, "({ (void)(%s); sp_raise_cls(\"ArgumentError\","
+                        " sp_sprintf(\"invalid rounding mode: %%s\", ", r);
+          emit_str_literal(b, hm);
+          buf_puts(b, ")); 0.0; })");
+          return 1;
         }
       }
       if (half_dyn >= 0) {
-        int tmv = ++g_tmp, tsm = ++g_tmp;
-        int nd_lit = (eff_argc == 1 && nt_type(c->nt, argv[0]) &&
-                      sp_streq(nt_type(c->nt, argv[0]), "IntegerNode"))
-                     ? (int)nt_int(c->nt, argv[0], "value", 0) : 0;
-        int nd_nonlit = (eff_argc == 1 && !(nt_type(c->nt, argv[0]) &&
-                                            sp_streq(nt_type(c->nt, argv[0]), "IntegerNode")));
-        buf_printf(b, "({ double _t%d = (%s); sp_sym _t%d = ", tmv, r, tsm);
-        emit_expr(c, half_dyn, b);
-        buf_puts(b, "; ");
-        if (nd_nonlit) {
-          int tnn = ++g_tmp;
-          buf_printf(b, "sp_int _t%d = ", tnn); emit_int_expr(c, argv[0], b);
-          buf_printf(b, "; (_t%d > 0)"
-                        " ? ({ double _f = pow(10, (double)_t%d); sp_box_float(isinf(_f) ? _t%d"
-                        " : sp_round_half_mode(_t%d * _f, _t%d) / _f); })"
-                        " : ({ double _f = pow(10, (double)(-_t%d));"
-                        " sp_box_int(isinf(_f) ? 0 : (sp_int)(sp_round_half_mode(_t%d / _f, _t%d) * _f)); }); })",
-                     tnn, tnn, tmv, tmv, tsm, tnn, tmv, tsm);
+        /* CRuby evaluates the receiver, the digit count and every keyword
+           value before the call decides anything, so they are bound in that
+           order and only then read. */
+        int tv = ++g_tmp, tn = -1;
+        buf_printf(b, "({ double _t%d = (%s); ", tv, r);
+        if (eff_argc == 1) {
+          tn = ++g_tmp;
+          buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
         }
-        else if (nd_lit > 0)
-          buf_printf(b, "double _f = pow(10, %d); sp_round_half_mode(_t%d * _f, _t%d) / _f; })",
-                     nd_lit, tmv, tsm);
-        else if (nd_lit < 0)
-          buf_printf(b, "double _f = pow(10, %d); (sp_int)(sp_round_half_mode(_t%d / _f, _t%d) * _f); })",
-                     -nd_lit, tmv, tsm);
-        else
-          buf_printf(b, "(sp_int)sp_round_half_mode(_t%d, _t%d); })", tmv, tsm);
+        int tm = emit_round_kw_binds(c, &kw, b);
+        int pv_wide = g_promote_mode && (eff_argc == 0 ||
+                        (nt_type(c->nt, argv[0]) &&
+                         sp_streq(nt_type(c->nt, argv[0]), "IntegerNode") &&
+                         nt_int(c->nt, argv[0], "value", 0) == 0));
+        /* the widened form rounds at the decimal point, so a literal 0 digit
+           count is bound (CRuby evaluates it) and then has nothing to say */
+        if (pv_wide && tn >= 0) buf_printf(b, "(void)_t%d; ", tn);
+        const char *ndl = (eff_argc == 1 && nt_type(c->nt, argv[0]) &&
+                           sp_streq(nt_type(c->nt, argv[0]), "IntegerNode"))
+                          ? nt_type(c->nt, argv[0]) : NULL;
+        int nd_lit = ndl ? (int)nt_int(c->nt, argv[0], "value", 0) : 0;
+        /* the class follows the digit count exactly as the literal-mode arms
+           below choose it: Float above the decimal point, Integer at or below
+           it, and a boxed choice when the count is only known at run time */
+        const char *fn = pv_wide       ? "sp_float_round_half_p"
+                       : eff_argc == 0 ? "sp_float_round_half_i"
+                       : !ndl          ? "sp_float_round_half_v"
+                       : nd_lit > 0    ? "sp_float_round_half_f"
+                                       : "sp_float_round_half_i";
+        buf_printf(b, "%s(_t%d", fn, tv);
+        if (!pv_wide) {
+          buf_puts(b, ", ");
+          if (tn >= 0) buf_printf(b, "_t%d", tn); else buf_puts(b, "0");
+        }
+        if (tm >= 0) buf_printf(b, ", _t%d); })", tm);
+        else buf_puts(b, ", sp_box_nil()); })");
         return 1;
-      }
-      if (sp_streq(name, "round") && argc >= 1 && nt_type(c->nt, argv[argc - 1]) &&
-          sp_streq(nt_type(c->nt, argv[argc - 1]), "KeywordHashNode")) {
-        int hv = kwh_lookup(nt, argv[argc - 1], "half");
-        if (hv >= 0 && nt_type(c->nt, hv) && sp_streq(nt_type(c->nt, hv), "SymbolNode")) {
-          const char *hm = nt_str(c->nt, hv, "value");
-          if (hm && sp_streq(hm, "even")) half_fn = "sp_round_half_even";
-          else if (hm && sp_streq(hm, "down")) half_fn = "sp_round_half_down";
-          else if (hm && sp_streq(hm, "up")) half_fn = "round";
-          else {
-            /* any other mode is CRuby's ArgumentError, not the default (#3647) */
-            buf_printf(b, "({ (void)(%s); sp_raise_cls(\"ArgumentError\","
-                          " sp_sprintf(\"invalid rounding mode: %%s\", ", r);
-            emit_str_literal(b, hm ? hm : "?");
-            buf_puts(b, ")); 0.0; })");
-            return 1;
-          }
-          eff_argc = argc - 1;
-        }
       }
       if ((sp_streq(name, "floor") || sp_streq(name, "ceil") ||
            sp_streq(name, "round") || sp_streq(name, "truncate")) && eff_argc == 1) {
@@ -12669,19 +12719,13 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     for (int kk = 0; kk < c->nclasses && !has_user_kw; kk++)
       if (comp_poly_arm_defines_n(c, kk, name, argc) ||
           (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user_kw = 1;
-    /* Which keywords were written is a compile-time fact only while every
-       element is an `AssocNode` with a literal symbol key. A `**splat`, or a
-       key spelled some other way, leaves the set unknown: the mode still
-       comes from a literal `half:` if one is there, but nothing may be
-       called an unknown keyword on the strength of what cannot be read. */
-    int kwn = 0;
-    const int *kwe = nt_arr(nt, argv[argc - 1], "elements", &kwn);
-    int kw_opaque = 0;
-    for (int e = 0; e < kwn; e++) {
-      int key = nt_ref(nt, kwe[e], "key");
-      const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
-      if (!kty || !sp_streq(kty, "SymbolNode")) kw_opaque = 1;
-    }
+    /* Which keywords were written is a compile-time fact for a literal key;
+       a `**splat` is read at run time, and a key spelled some other way is
+       not read at all -- nothing may be called an unknown keyword on the
+       strength of what cannot be read. The typed Float and Integer arms use
+       the same reader, so a boxed receiver and a typed one cannot disagree
+       about what the call said. */
+    RoundKw kw; round_kw_read(c, argv[argc - 1], &kw);
     if (!has_user_kw) {
       /* CRuby evaluates the receiver, the positional argument and every
          keyword value before the call decides anything, so a call it then
@@ -12698,47 +12742,30 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         emit_int_expr(c, argv[0], b);
         buf_puts(b, "; ");
       }
-      int thalf = -1;
-      char unknown[256]; unknown[0] = 0; int nunknown = 0;
-      for (int e = 0; e < kwn; e++) {
-        int key = nt_ref(nt, kwe[e], "key");
-        const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
-        const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
-        int val = nt_ref(nt, kwe[e], "value");
-        if (val < 0) continue;
-        int tk = ++g_tmp;
-        buf_printf(b, "sp_RbVal _t%d = ", tk);
-        emit_boxed(c, val, b);
-        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tk);
-        if (kn && sp_streq(kn, "half")) thalf = tk;   /* a repeated key: the last wins */
-        else if (kn && nunknown < 8) {
-          size_t at = strlen(unknown);
-          snprintf(unknown + at, sizeof unknown - at, "%s:%s", nunknown ? ", " : "", kn);
-          nunknown++;
-        }
-      }
       /* only #round takes a tie-break mode; the other three reject a keyword
          outright, with CRuby's words (the typed arm does the same, #3646).
          With a digit count as well the hash is a second argument, and the
-         arity is what CRuby complains about first. */
+         arity is what CRuby complains about first. The keyword values are
+         still evaluated: the hash is built before the call rejects it. */
       if (!sp_streq(name, "round")) {
+        emit_round_kw_effects(c, &kw, b);
         if (argc == 2)
-          buf_puts(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
-                      " (given 2, expected 0..1)\");");
+          buf_printf(b, "(void)_t%d;"
+                        " sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
+                        " (given 2, expected 0..1)\");", tn);
         else
-          buf_puts(b, "sp_raise_cls(\"TypeError\","
-                      " \"no implicit conversion of Hash into Integer\");");
+          /* CRuby's words for a Rational are its own, and which receiver
+             this is only the run time knows */
+          buf_printf(b, "sp_raise_cls(\"TypeError\", sp_poly_is_rational(_t%d)"
+                        " ? \"not an integer\""
+                        " : \"no implicit conversion of Hash into Integer\");", tv);
         buf_puts(b, " sp_box_nil(); })");
         return 1;
       }
-      /* `round` takes `half:` and nothing else: any other key is the
-         unknown-keyword ArgumentError, not a silently defaulted mode */
-      if (nunknown && !kw_opaque) {
-        buf_printf(b, "sp_raise_cls(\"ArgumentError\", \"unknown keyword%s: %s\");"
-                      " sp_box_nil(); })",
-                   nunknown > 1 ? "s" : "", unknown);
-        return 1;
-      }
+      /* `round` takes `half:` and nothing else, so the binder raises for any
+         other key -- a `**` source's keys included, which it reads at run
+         time rather than leaving the mode silently defaulted. */
+      int thalf = emit_round_kw_binds(c, &kw, b);
       /* the mode reaches the helper as the value it was written as: a
          Symbol, a String, nil for the default -- deciding which is the
          helper's job, since only it knows whether the receiver cares */
@@ -13102,7 +13129,9 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     /* Same guard as #to_s above: a user class defining the conversion wins
        through poly dispatch. sp_poly_to_i answers 0 for an object, so a
        wrapper's `value.to_i` silently read zero. */
-    if (sp_streq(name, "to_i") || sp_streq(name, "to_f")) {
+    /* `to_int` is the same method by its other name (#2317): a boxed
+       Rational answered NoMethodError for it while answering to_i fine. */
+    if (sp_streq(name, "to_i") || sp_streq(name, "to_int") || sp_streq(name, "to_f")) {
       int has_user_conv = 0;
       if (!g_poly_builtin_arm)
         for (int k = 0; k < c->nclasses && !has_user_conv; k++)
@@ -13111,7 +13140,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         /* sp_poly_to_i_meth: this is the METHOD, named by the program, so an
            object without it is NoMethodError rather than the conversion
            protocol's TypeError. */
-        buf_printf(b, "%s(", sp_streq(name, "to_i")
+        buf_printf(b, "%s(", !sp_streq(name, "to_f")
                               ? (comp_ntype(c, id) == TY_POLY ? "sp_poly_to_i_meth_v" : "sp_poly_to_i_meth")
                               : "sp_poly_to_f");
         emit_expr(c, recv, b); buf_puts(b, ")"); return 1;

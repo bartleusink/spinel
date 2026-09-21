@@ -2217,6 +2217,15 @@ static inline sp_Rational sp_poly_kernel_rational(sp_RbVal v) {
   if (sp_poly_is_rational(v) && v.v.p) return *(sp_Rational *)v.v.p;
   if (v.tag == SP_TAG_FLT) return sp_float_to_rational(v.v.f);
   if (v.tag == SP_TAG_STR) return sp_str_to_r(v.v.s ? v.v.s : sp_str_empty);
+  /* An sp_Rational is a pair of sp_ints and cannot hold a big one, so a
+     Bignum operand read through here was truncated to its low word:
+     `Rational([2**70, nil][0], 1)` answered (0/1), where the same call with
+     the literal builds the big Rational exactly. Say so instead. Answering
+     it needs the call to type itself poly, which the return-type derivation
+     refuses to widen to (g_ret_no_new_poly) -- see #2024. */
+  if (v.tag == SP_TAG_BIGINT ||
+      (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL))
+    sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   return sp_rational_new(sp_poly_to_i(v), 1);
 }
 /* Unbox a boxed Complex (a real number becomes re+0i). Used to keep a Complex
@@ -2237,17 +2246,36 @@ static sp_PolyArray *sp_PolyArray_concat(sp_PolyArray *a, sp_PolyArray *b); /* d
 static sp_PolyArray *sp_PolyArray_difference(sp_PolyArray *a, sp_PolyArray *b); /* defined below */
 static sp_PolyArray *sp_PolyArray_intersect(sp_PolyArray *a, sp_PolyArray *b);  /* defined below */
 static sp_PolyArray *sp_PolyArray_union(sp_PolyArray *a, sp_PolyArray *b);      /* defined below */
-/* int+int that auto-promotes to bigint on overflow in --int-overflow=promote;
-   plain (wrapping) C arithmetic otherwise, matching the sp_int_* macro policy. */
+/* int+int in a BOXED slot. This follows the same three-way policy the typed
+   sp_int_* macros above follow, because the same program means the same
+   thing whichever slot its numbers went through: promote boxes a bigint,
+   wrap wraps, and the default raises.
+   It used to read "plain (wrapping) C arithmetic otherwise, matching the
+   sp_int_* macro policy" -- but those macros do NOT wrap outside wrap mode,
+   they check and raise. So raise mode answered `n * 2` for a boxed 2**62
+   with the wrapped low word, and where that word lands on INTPTR_MIN the
+   answer was the nil SENTINEL: `[2**62, nil][0] * 2` was nil, and the
+   program failed later somewhere that never mentions arithmetic. */
+#define SP_POLY_OP_SYM_add "+"
+#define SP_POLY_OP_SYM_sub "-"
+#define SP_POLY_OP_SYM_mul "*"
 #ifdef SP_INT_OVERFLOW_MODE_PROMOTE
 #  define SP_POLY_INT_OP(op, x, y) ({ sp_int _r; sp_int_##op##_overflow_p((x), (y), &_r) \
      ? sp_box_bigint(sp_bigint_##op(sp_bigint_new_int(x), sp_bigint_new_int(y))) : sp_box_int(_r); })
-#else
+#elif defined(SP_INT_OVERFLOW_MODE_WRAP)
 #  define SP_POLY_INT_OP(op, x, y) sp_box_int(sp_int_c_##op((x), (y)))
+#else
+#  define SP_POLY_INT_OP(op, x, y) ({ sp_int _r; \
+     if (sp_int_##op##_overflow_p((x), (y), &_r)) \
+       sp_raise_cls("RangeError", "integer overflow in " SP_POLY_OP_SYM_##op); \
+     sp_box_int(_r); })
 #endif
-static inline sp_int sp_int_c_add(sp_int x, sp_int y) { return x + y; }
-static inline sp_int sp_int_c_sub(sp_int x, sp_int y) { return x - y; }
-static inline sp_int sp_int_c_mul(sp_int x, sp_int y) { return x * y; }
+/* wrap mode's arithmetic, computed in the unsigned counterpart: signed
+   overflow is undefined behaviour, and wrap mode is a promise ABOUT the
+   overflow, so it cannot be spelled with the operation that has none. */
+static inline sp_int sp_int_c_add(sp_int x, sp_int y) { return (sp_int)((uintptr_t)x + (uintptr_t)y); }
+static inline sp_int sp_int_c_sub(sp_int x, sp_int y) { return (sp_int)((uintptr_t)x - (uintptr_t)y); }
+static inline sp_int sp_int_c_mul(sp_int x, sp_int y) { return (sp_int)((uintptr_t)x * (uintptr_t)y); }
 /* big Rational arithmetic (#2469): coerce every numeric operand to a num/den
    sp_Bigint* pair, run the cross-multiplied formula, and reduce via sp_box_brat.
    Used when one operand is already a big Rational. */
@@ -2469,13 +2497,33 @@ static SP_INLINE sp_int sp_poly_to_i(sp_RbVal v) {
   return sp_poly_to_i_cold(v);
 }
 static SP_NOINLINE sp_int sp_poly_arg_int_obj(sp_RbVal v);   /* the object arm, below */
+/* Does this Bignum fit the Integer slot? The width is sp_int's, not a
+   64-bit constant: under -m32 sp_int is 32 bits, so a 40-bit value passed a
+   `<= 63` test and was then silently cut by the cast -- the very shape of
+   wrong answer the arms below exist to remove. SP_INT_NIL is the nil
+   sentinel and cannot be a value (-2**63 has bit_length 63 and fits the
+   width, but collides with it). */
+static int sp_bigint_fits_int(sp_Bigint *b) {
+  if (sp_bigint_bit_length(b) > (sp_int)(sizeof(sp_int) * 8 - 1)) return 0;
+  return (sp_int)sp_bigint_to_int(b) != SP_INT_NIL;
+}
 static SP_NOINLINE sp_int sp_poly_to_i_cold(sp_RbVal v) {
   if (v.tag == SP_TAG_BIGINT) return sp_i64_to_int(sp_bigint_to_int((sp_Bigint *)v.v.p));   /* a 32-bit sp_int refuses what does not fit (RangeError); 64-bit keeps its wrap */
   if (v.tag == SP_TAG_STR) return (sp_int)strtoll(v.v.s ? v.v.s : sp_str_empty, NULL, 10);
   if (v.tag == SP_TAG_BOOL) return v.v.b ? 1 : 0;
   /* a boxed Rational truncates toward zero, as Rational#to_i does */
   if (sp_poly_is_rational(v) && v.v.p) { sp_Rational _r = *(sp_Rational *)v.v.p; return _r.den ? _r.num / _r.den : 0; }
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL) return (sp_int)sp_brat_to_f((sp_BigRational *)v.v.p);
+  /* A Bignum-numerator Rational truncates toward zero too, but the quotient
+     may be wider than the slot. Through sp_brat_to_f and a cast it saturated
+     silently, and a negative one landed on INTPTR_MIN -- the nil sentinel --
+     so the value came back as nil. The quotient is exact in bigint; past the
+     word it is the same loud RangeError a boxed Bignum's to_i gives, pending
+     #2024. */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL && v.v.p) {
+    sp_Bigint *q = sp_brat_trunc_b((sp_BigRational *)v.v.p);
+    if (sp_bigint_fits_int(q)) return (sp_int)sp_bigint_to_int(q);
+    sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+  }
   /* a Time read out of a container: its to_i is the epoch second (#3699) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p) return (sp_int)((sp_Time *)v.v.p)->tv_sec;
   /* A USER object (builtin-backed ones carry a negative cls_id and are handled
@@ -2820,10 +2868,30 @@ static sp_int sp_poly_length_m(sp_RbVal v) {
 /* `size` on a boxed receiver: a collection answers its length, but an Integer
    answers the bytes of its machine representation, which sp_poly_length has no
    arm for and reported as 0. nil and a user object have no size at all. */
+sp_int sp_File_size(sp_File *f);
+sp_int sp_File_truncate(sp_File *f, sp_int n);
+/* A boxed handle: File#size and #truncate are File's, not IO's, and the
+   class is decided at run time by how the handle was opened (is_file) --
+   a File out of a Hash that also holds the standard streams answers as a
+   File, a pipe end or IO.for_fd out of the same Hash raises CRuby's
+   NoMethodError. `n == SP_INT_NIL` is the blockless #truncate, which CRuby
+   answers with the arity error for a File. */
+static sp_bool sp_poly_io_owns(sp_RbVal v) {
+  return v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO && v.v.p && ((sp_File *)v.v.p)->is_file;
+}
+static sp_RbVal sp_poly_io_truncate(sp_RbVal v, sp_int n) {
+  if (!sp_poly_io_owns(v)) sp_raise_poly_nomethod("truncate", v);
+  if (n == SP_INT_NIL) sp_raise_cls("ArgumentError", "wrong number of arguments (given 0, expected 1)");
+  return sp_box_int(sp_File_truncate((sp_File *)v.v.p, n));
+}
 static sp_int sp_poly_size(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_BOOL || v.tag == SP_TAG_FLT ||
       sp_poly_is_user_obj(v))
     sp_raise_poly_nomethod("size", v);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) {
+    if (!sp_poly_io_owns(v)) sp_raise_poly_nomethod("size", v);
+    return sp_File_size((sp_File *)v.v.p);
+  }
   if (v.tag == SP_TAG_INT) return (sp_int)sizeof(sp_int);
   if (v.tag == SP_TAG_BIGINT) {
     sp_Bigint *bg = (sp_Bigint *)v.v.p;
@@ -2885,10 +2953,9 @@ static sp_int sp_poly_Integer(sp_RbVal v) {
   if (v.tag == SP_TAG_INT) return v.v.i;
   if (v.tag == SP_TAG_BIGINT) {
     /* the Integer slot cannot carry a Bignum: the value when it fits, a
-       loud RangeError otherwise, never a number cut to 64 bits */
+       loud RangeError otherwise, never a number cut to the slot's width */
     sp_Bigint *bg = (sp_Bigint *)v.v.p;
-    sp_int n = (sp_int)sp_bigint_to_int(bg);
-    if (sp_bigint_bit_length(bg) <= 63 && n != SP_INT_NIL) return n;
+    if (sp_bigint_fits_int(bg)) return (sp_int)sp_bigint_to_int(bg);
     sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   }
   if (v.tag == SP_TAG_FLT) {
@@ -2897,6 +2964,11 @@ static sp_int sp_poly_Integer(sp_RbVal v) {
     return (sp_int)v.v.f;
   }
   if (v.tag == SP_TAG_STR) return (sp_int)sp_str_to_i_strict(v.v.s ? v.v.s : sp_str_empty);
+  /* Integer(Rational) truncates toward zero, as Rational#to_i does: the
+     conversion had no Rational arm at all and called a number it can convert
+     unconvertible. A Bignum-numerator one answers the slot's RangeError. */
+  if (sp_poly_is_rational(v) && v.v.p) { sp_Rational _r = *(sp_Rational *)v.v.p; return _r.den ? _r.num / _r.den : 0; }
+  if (sp_poly_is_brat(v) && v.v.p) return sp_poly_to_i(v);
   /* a user object converts through its own #to_int / #to_str / #to_i */
   if (sp_poly_is_user_obj(v)) return sp_poly_Integer_ex(v, 0, 1);
   sp_raise_cls("TypeError", sp_sprintf("can't convert %s into Integer", sp_convert_src_name(v)));
@@ -3099,6 +3171,10 @@ static sp_RbVal sp_poly_to_i_meth_v(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
   if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return v;
   if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(v.v.f); }
+  /* a Bignum-numerator Rational's quotient is itself a Bignum, and this slot
+     holds one (#4688) */
+  if (sp_poly_is_brat(v) && v.v.p)
+    return sp_box_bigint(sp_brat_trunc_b((sp_BigRational *)v.v.p));
   return sp_box_int(sp_poly_to_i(v));
 }
 static inline sp_int sp_float_fit_i(sp_float v) {
@@ -3171,12 +3247,12 @@ static sp_bool sp_poly_negative_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return 
 /* abs of a negative int goes through SP_POLY_INT_OP(sub, 0, x): plain -x is
    UB for INT_MIN; promote mode boxes it as a bigint, wrap mode keeps the
    documented wrapping C arithmetic. fabs covers -0.0 -> 0.0 too. */
-static sp_RbVal sp_poly_abs(sp_RbVal v) { if (v.tag == SP_TAG_INT) { if (v.v.i >= 0) return v; return SP_POLY_INT_OP(sub, (sp_int)0, v.v.i); } if (v.tag == SP_TAG_FLT) return sp_box_float(fabs(v.v.f)); if (v.tag == SP_TAG_BIGINT) { sp_Bigint *b = (sp_Bigint *)v.v.p; return sp_bigint_sign(b) < 0 ? sp_box_bigint(sp_bigint_sub(sp_bigint_new_int(0), b)) : v; } if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs_v(*(sp_Complex *)v.v.p); if (sp_poly_is_rational(v)) return sp_box_rational(sp_rational_abs(sp_poly_as_rational(v))); sp_raise_poly_nomethod("abs", v); }
+static sp_RbVal sp_poly_abs(sp_RbVal v) { if (v.tag == SP_TAG_INT) { if (v.v.i >= 0) return v; return SP_POLY_INT_OP(sub, (sp_int)0, v.v.i); } if (v.tag == SP_TAG_FLT) return sp_box_float(fabs(v.v.f)); if (v.tag == SP_TAG_BIGINT) { sp_Bigint *b = (sp_Bigint *)v.v.p; return sp_bigint_sign(b) < 0 ? sp_box_bigint(sp_bigint_sub(sp_bigint_new_int(0), b)) : v; } if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs_v(*(sp_Complex *)v.v.p); if (sp_poly_is_rational(v)) return sp_box_rational(sp_rational_abs(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) { sp_BigRational *_br = (sp_BigRational *)v.v.p; return sp_bigint_sign(_br->num) < 0 ? sp_box_brat(sp_bigint_sub(sp_bigint_new_int(0), _br->num), _br->den) : v; } sp_raise_poly_nomethod("abs", v); }
 static sp_RbVal sp_poly_abs2(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs2_v(*(sp_Complex *)v.v.p); if (sp_poly_numeric_p(v)) { sp_RbVal a = sp_poly_abs(v); return sp_poly_mul(a, a); } sp_raise_poly_nomethod("abs2", v); }
 /* No-arg floor/ceil/round/truncate return Integer in Ruby: an int/bigint tag
    is already its own floor (returned unchanged, lossless for bigints), a
    float converts through the matching libm rounding. */
-static sp_RbVal sp_poly_floor(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(floor(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_floor_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("floor", v); }
+static sp_RbVal sp_poly_floor(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(floor(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_floor_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_floor_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("floor", v); }
 /* a NULL char* carried under SP_TAG_STR is the empty string (as in
    sp_poly_to_i / sp_poly_eq): bytesize 0, ord raises CRuby's ArgumentError. */
 static sp_int sp_poly_bytesize(sp_RbVal v) { if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_bytesize_m(v.v.s) : 0; sp_raise_poly_nomethod("bytesize", v); }
@@ -3286,13 +3362,22 @@ static sp_int sp_poly_int_bit(sp_RbVal v, sp_int i) {
 /* Rational#numerator / #denominator on a boxed value: a Rational reports its
    reduced parts; an Integer is n/1. Both commit to sp_int (analyze's TY_INT),
    matching the typed Rational path. */
-static sp_int sp_poly_numerator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).num; if (v.tag == SP_TAG_INT) return v.v.i; sp_raise_poly_nomethod("numerator", v); }
-static sp_int sp_poly_denominator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).den; if (v.tag == SP_TAG_INT) return 1; sp_raise_poly_nomethod("denominator", v); }
+/* A BigRational's parts are Bignums and this slot is an sp_int: the value
+   when it fits (a denominator almost always does), the same loud RangeError
+   a boxed Bignum's to_i gives when it does not -- never a NoMethodError for
+   a name Rational has. */
+static sp_int sp_brat_part_i(sp_Bigint *b) {
+  if (sp_bigint_fits_int(b)) return (sp_int)sp_bigint_to_int(b);
+  sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+  return 0;
+}
+static sp_int sp_poly_numerator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).num; if (sp_poly_is_brat(v) && v.v.p) return sp_brat_part_i(((sp_BigRational *)v.v.p)->num); if (v.tag == SP_TAG_INT) return v.v.i; sp_raise_poly_nomethod("numerator", v); }
+static sp_int sp_poly_denominator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).den; if (sp_poly_is_brat(v) && v.v.p) return sp_brat_part_i(((sp_BigRational *)v.v.p)->den); if (v.tag == SP_TAG_INT) return 1; sp_raise_poly_nomethod("denominator", v); }
 /* String#getbyte on a poly value; nil (not 0) for an out-of-range index, per
    CRuby, so the result is boxed. */
 static sp_RbVal sp_poly_getbyte(sp_RbVal v, sp_int i) { if (v.tag != SP_TAG_STR) sp_raise_poly_nomethod("getbyte", v); const char *s = v.v.s; if (!s) return sp_box_nil(); sp_int bl = (sp_int)sp_str_byte_len(s); if (i < 0) i += bl; if (i < 0 || i >= bl) return sp_box_nil(); return sp_box_int((sp_int)(unsigned char)s[i]); }
-static sp_RbVal sp_poly_ceil(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(ceil(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_ceil_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("ceil", v); }
-static sp_RbVal sp_poly_round(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(round(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_round_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("round", v); }
+static sp_RbVal sp_poly_ceil(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(ceil(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_ceil_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_ceil_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("ceil", v); }
+static sp_RbVal sp_poly_round(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(round(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_round_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_round_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("round", v); }
 /* Numeric#round(ndigits): a Float stays Float when n > 0 (rounded to n decimal
    places) and becomes Integer when n <= 0; an Integer is unchanged for n >= 0
    and rounded to a power of ten for n < 0. Mirrors the scalar Float#round(n)
@@ -3329,6 +3414,7 @@ static sp_RbVal sp_poly_round_n(sp_RbVal v, sp_int n) {
    own helper above for the half-up tie rule and the Rational arm. */
 static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
   const char *nm = op == SP_PREC_FLOOR ? "floor" : op == SP_PREC_CEIL ? "ceil" : "truncate";
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO && op == SP_PREC_TRUNC) return sp_poly_io_truncate(v, n);
   if (v.tag == SP_TAG_FLT) {
     double x = v.v.f;
     if (n > 0) return sp_box_float(sp_float_prec_op(x, n, op));
@@ -3352,7 +3438,7 @@ static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
   }
   sp_raise_poly_nomethod(nm, v);
 }
-static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } sp_raise_poly_nomethod("truncate", v); }
+static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return sp_poly_io_truncate(v, SP_INT_NIL); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_trunc_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("truncate", v); }
 /* forward: generic array length/element (defined later in this header) and
    the array-kind predicate for cross-kind value equality. */
 static sp_int sp_poly_length(sp_RbVal v);
@@ -5723,7 +5809,11 @@ static void _sp_poly_msort(sp_PolyArray *a, int (*cmp)(const void *, const void 
   if (src != a->data) memcpy(a->data, src, (size_t)a->len * sizeof(sp_RbVal));
 }
 /* max/min over boxed elements: numerics/strings via sp_poly_cmp, int arrays
-   lexicographically. Returns nil for an empty array. */
+   lexicographically. Returns nil for an empty array. A failed comparison is
+   worded the way Array#min/#max word it, `acc <=> new`: "comparison of
+   <accumulator's class> with <new element> failed" (CRuby's literal-array
+   VM shortcut says it the other way round, but `a = [1, "a"]; a.min` and
+   minmax do not). */
 static sp_RbVal sp_PolyArray_max(sp_PolyArray *a) {sp_gc_wb((void*)a); 
   if (!a || a->len == 0) return sp_box_nil();
   SP_GC_ROOT(a);  /* sp_poly_cmp can allocate; keep a (and best, which is one of
@@ -5732,7 +5822,7 @@ static sp_RbVal sp_PolyArray_max(sp_PolyArray *a) {sp_gc_wb((void*)a);
   for (sp_int i = 1; i < a->len; i++) {
     sp_bool ok = FALSE;
     sp_int r = sp_poly_order_cmp(a->data[i], best, &ok);
-    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(a->data[i]), sp_cmperr_desc(best)));
+    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(best), sp_cmperr_desc(a->data[i])));
     if (r > 0) best = a->data[i];
   }
   return best;
@@ -5745,7 +5835,7 @@ static sp_RbVal sp_PolyArray_min(sp_PolyArray *a) {sp_gc_wb((void*)a);
   for (sp_int i = 1; i < a->len; i++) {
     sp_bool ok = FALSE;
     sp_int r = sp_poly_order_cmp(a->data[i], best, &ok);
-    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(a->data[i]), sp_cmperr_desc(best)));
+    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(best), sp_cmperr_desc(a->data[i])));
     if (r < 0) best = a->data[i];
   }
   return best;
@@ -5817,7 +5907,7 @@ static void *sp_PtrArray_minmax_obj(sp_PtrArray *a, int cls_id, int want_max) {s
     sp_RbVal bi = sp_box_nullable_obj(a->data[i], cls_id);
     sp_RbVal bb = sp_box_nullable_obj(best, cls_id);
     sp_int r = sp_poly_order_cmp(bi, bb, &ok);
-    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(bi), sp_cmperr_desc(bb)));
+    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(bb), sp_cmperr_desc(bi)));
     if (want_max ? (r > 0) : (r < 0)) best = a->data[i];
   }
   return best;
@@ -9685,6 +9775,31 @@ static void sp_exc_print_uncaught(const char *cls, const char *msg) {
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
 #else
+/* The C stack ran out. Unlike the handler-stack exhaustion below, this one
+   CAN be rescued: the frames that filled the stack are about to be unwound,
+   and the handler that catches it sits in one of them.
+   Called from the SIGSEGV handler, on the alternate signal stack, so nothing
+   here may allocate or take a lock -- sp_raise_cls does both. These are the
+   three plain stores sp_raise_cls ends with, and the same longjmp: the
+   landing pad reads the class and message from the slots, and restores the
+   root watermark itself. With no handler armed there is nothing to jump to,
+   so the caller's report stands and the process dies as before. */
+static void sp_raise_stack_overflow(void) {
+  if (sp_exc_top <= 0) return;   /* nothing armed: let the handler report */
+  sp_exc_msg[sp_exc_top-1] = (&("\xff" "stack level too deep")[1]);
+  sp_exc_cls[sp_exc_top-1] = "SystemStackError";
+  sp_exc_obj[sp_exc_top-1] = NULL;
+  sp_pending_exc_obj = NULL;
+  sp_pending_cause = NULL;
+  sp_inflight_cause = NULL;
+  sp_explicit_cause = NULL;
+  sp_explicit_cause_set = 0;
+  sp_last_exc_cls = "SystemStackError";
+  sp_unwind_kind = SP_UNWIND_NONE;
+  sp_handler_stacks_unwind();
+  sp_poly_recur_unwind();
+  longjmp(sp_exc_stack[sp_exc_top-1], 1);
+}
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
   /* Launder the message onto the string heap and root the copy before anything
      below allocates. `msg` is the caller's own pointer and comes in one of two
@@ -9837,18 +9952,6 @@ static sp_RbVal sp_bm_receiver(sp_BoundMethod *m) {
   return sp_box_nil();
 }
 
-/* Float#round(half: mode) where the mode is only known at run time (#3646).
-   A nil mode is the default (round half up, away from zero). */
-static double sp_round_half_mode(double x, sp_sym mode) {
-  const char *m = (mode == (sp_sym)-1) ? NULL : sp_sym_to_s(mode);
-  if (!m || !m[0]) return round(x);
-  if (strcmp(m, "even") == 0) return sp_round_half_even(x);
-  if (strcmp(m, "down") == 0) return sp_round_half_down(x);
-  if (strcmp(m, "up") == 0) return round(x);
-  sp_raise_cls("ArgumentError", sp_sprintf("invalid rounding mode: %s", m));
-  return 0.0;
-}
-
 /* `round(half: :even)` on a BOXED number. sp_poly_round_n answers the
    half-up rule the bare `round` has; the tie-break mode is a keyword the
    typed Float and Integer paths already honour, and a boxed receiver has to
@@ -9891,6 +9994,17 @@ static sp_RbVal sp_poly_round_half(sp_RbVal v, sp_int n, sp_RbVal mode) {
     if (n >= 0) return v;
     return sp_box_int(sp_int_round_half(v.v.i, n, md < 0 ? 1 : md));
   }
+  /* a Rational was handed to sp_poly_round_n, which rounds half up at every
+     precision: the mode was read, validated and then thrown away. The class
+     follows the digit count as the no-keyword arms choose it. */
+  if (sp_poly_is_rational(v)) {
+    sp_Rational rr = sp_poly_as_rational(v);
+    int rmd = md < 0 ? 1 : md;
+    if (n > 0) return sp_box_rational(sp_rational_round_prec_mode(rr, n, rmd));
+    if (n == 0) return sp_box_int(sp_rational_round_i_mode(rr, rmd));
+    { sp_Rational q = sp_rational_round_prec_mode(rr, n, rmd);
+      return sp_box_int(q.num / q.den); }
+  }
   if (v.tag != SP_TAG_FLT) return sp_poly_round_n(v, n);
   double x = v.v.f;
   if (n > 0) {
@@ -9901,7 +10015,104 @@ static sp_RbVal sp_poly_round_half(sp_RbVal v, sp_int n, sp_RbVal mode) {
   }
   sp_poly_flo_domain_ck(x);
   double f = pow(10, (double)(-n));
-  return sp_box_int(isinf(f) ? 0 : sp_float_fit_i(sp_round_half_c(x / f, md) * f));
+  /* sp_box_f_to_int, not sp_float_fit_i: the keyword-less sp_poly_round_n
+     answers a Bignum past the machine word (#4688), and the tie-break mode
+     cannot be what decides whether the same value is representable. */
+  return isinf(f) ? sp_box_int(0) : sp_box_f_to_int(sp_round_half_c(x / f, md) * f);
+}
+/* `round(**opts)`: the `half:` of a keyword hash the compiler could not read
+   through. A hash without one answers nil -- the plain half-up default --
+   and any other key is CRuby's unknown-keyword ArgumentError, since `round`
+   takes no other. A key is named the way CRuby names it: a Symbol as :text,
+   anything else by its inspect. */
+static sp_RbVal sp_round_half_kwsplat(sp_RbVal h) {
+  if (!(h.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(h.cls_id))) return sp_box_nil();
+  sp_RbVal mode = sp_box_nil();
+  char unk[256]; unk[0] = 0; int nunk = 0;
+  sp_int n = sp_poly_length(h);
+  for (sp_int i = 0; i < n; i++) {
+    sp_RbVal k = sp_box_nil(), v = sp_box_nil();
+    sp_poly_hash_pair_i(h, i, &k, &v);
+    const char *kn = k.tag == SP_TAG_SYM ? sp_sym_to_s((sp_sym)k.v.i) : NULL;
+    if (kn && strcmp(kn, "half") == 0) { mode = v; continue; }
+    if (nunk < 8) {
+      size_t at = strlen(unk);
+      snprintf(unk + at, sizeof unk - at, "%s%s%s", nunk ? ", " : "",
+               kn ? ":" : "", kn ? kn : sp_poly_inspect(k));
+    }
+    nunk++;
+  }
+  if (nunk)
+    sp_raise_cls("ArgumentError",
+                 sp_sprintf("unknown keyword%s: %s", nunk > 1 ? "s" : "", unk));
+  return mode;
+}
+
+/* Float#round(ndigits, half: mode) on a TYPED receiver, where the mode is a
+   value rather than a name the compiler could read -- a String, a Symbol out
+   of a variable, a `**` hash. The literal-mode arms pick their rule at
+   compile time and go through sp_float_prec_op; these answer the same, with
+   the rule decided here, so `half: m` and `half: :even` agree.
+   Split by the class CRuby gives the result: Float above the decimal point,
+   Integer at or below it, and a boxed choice when the digit count is only
+   known at run time. */
+static double sp_float_round_half_f(double x, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  return sp_float_prec_op(x, nd, md == 0 ? SP_PREC_HALF_EVEN
+                                : md == 2 ? SP_PREC_HALF_DOWN : SP_PREC_ROUND);
+}
+static sp_int sp_float_round_half_i(double x, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  if (isinf(x)) sp_raise_cls("FloatDomainError", x > 0 ? "Infinity" : "-Infinity");
+  if (isnan(x)) sp_raise_cls("FloatDomainError", "NaN");
+  if (nd == 0) return sp_float_fit_i(sp_round_half_c(x, md));
+  double f = pow(10, (double)(-nd));
+  return isinf(f) ? 0 : sp_float_fit_i(sp_round_half_c(x / f, md) * f);
+}
+/* promote mode's answer for the no-digits form: an Integer too wide for the
+   machine word widens to a Bignum rather than failing, exactly as the
+   keyword-less `round` does (#4688). Only this shape widens -- a NEGATIVE
+   digit count still rounds by dividing and multiplying in double, which
+   loses bits past 2**53, so it keeps raising until that is done in Bignum. */
+static sp_RbVal sp_float_round_half_p(double x, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  sp_poly_flo_domain_ck(x);
+  return sp_box_f_to_int(sp_round_half_c(x, md));
+}
+static sp_RbVal sp_float_round_half_v(double x, sp_int nd, sp_RbVal mode) {
+  if (nd > 0) return sp_box_float(sp_float_round_half_f(x, nd, mode));
+  return sp_box_int(sp_float_round_half_i(x, nd, mode));
+}
+
+/* Rational#round(ndigits, half: mode) on a TYPED receiver. The three named
+   helpers answer the tie-break rules and sp_rational_round_prec_mode carries
+   one through a precision; these pick it from the mode as it was written.
+   Split by the class CRuby gives the result, the way the Float helpers are:
+   a positive precision keeps the Rational, at or below the decimal point the
+   answer is an Integer, and a digit count known only at run time chooses
+   there. */
+static sp_Rational sp_rational_round_half_r(sp_Rational a, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  return sp_rational_round_prec_mode(a, nd, md < 0 ? 1 : md);
+}
+static sp_int sp_rational_round_half_i(sp_Rational a, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  if (nd == 0) return sp_rational_round_i_mode(a, md < 0 ? 1 : md);
+  { sp_Rational q = sp_rational_round_prec_mode(a, nd, md < 0 ? 1 : md);
+    return q.num / q.den; }
+}
+static sp_RbVal sp_rational_round_half_v(sp_Rational a, sp_int nd, sp_RbVal mode) {
+  if (nd > 0) return sp_box_rational(sp_rational_round_half_r(a, nd, mode));
+  return sp_box_int(sp_rational_round_half_i(a, nd, mode));
+}
+
+/* Integer#round(ndigits, half: mode): the mode is checked whenever a digit
+   count is there, even where the rounding itself has no tie to break
+   (`1.round(0, half: :bogus)` is an ArgumentError). The no-digits form is
+   the one CRuby answers without looking at the keywords at all. */
+static sp_int sp_int_round_half_v(sp_int v, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  return sp_int_round_half(v, nd, md < 0 ? 1 : md);
 }
 
 /* `rescue *list`: the clause matches when the raised class is (or descends
@@ -10803,6 +11014,7 @@ sp_int sp_stat_size(sp_File *f);
 sp_int sp_stat_field(sp_File *f, sp_int which);   /* uid/gid/nlink/dev/ino/blksize/blocks/rdev */
 sp_int sp_stat_pred(sp_File *f, sp_int kind);     /* pipe?/zero?/readable?/... /size? */
 sp_int sp_File_truncate(sp_File *f, sp_int n);   /* File#truncate: ftruncate(2) on the handle */
+sp_int sp_File_size(sp_File *f);                 /* File#size: fstat(2) of the handle */
 sp_int sp_stat_type_pred(sp_File *f, sp_int kind);  /* file?/directory?/symlink?/... honouring the handle's stat mode */
 sp_Time sp_stat_handle_time(sp_File *f, sp_int kind);  /* mtime/atime/ctime, likewise */
 sp_int sp_stat_mode(sp_File *f);
@@ -12241,8 +12453,7 @@ static sp_int sp_poly_Integer_ex(sp_RbVal v, sp_int base, int raise) {
   if (r.tag == SP_TAG_NIL) return SP_INT_NIL;
   if (r.tag == SP_TAG_BIGINT) {
     sp_Bigint *bg = (sp_Bigint *)r.v.p;
-    sp_int n = (sp_int)sp_bigint_to_int(bg);
-    if (sp_bigint_bit_length(bg) <= 63 && n != SP_INT_NIL) return n;
+    if (sp_bigint_fits_int(bg)) return (sp_int)sp_bigint_to_int(bg);
     if (raise) sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
     return SP_INT_NIL;
   }

@@ -1132,11 +1132,9 @@ static TyKind infer_call_inner(Compiler *c, int id);
    since codegen's dispatch switches over them all. */
 static TyKind an_self_call_ret(Compiler *c, Scope *self, const char *name, int mi, int id) {
   TyKind r = method_call_ret(c, mi, id);
-  for (int k = 0; k < c->nclasses; k++) {
-    int is_desc = 0;
-    for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-      if (p == self->class_id) { is_desc = 1; break; }
-    if (!is_desc) continue;
+  int nd = 0; const int *ds = comp_descendants(c, self->class_id, &nd);
+  for (int di = 0; di < nd; di++) {
+    int k = ds[di];
     int dmi = self->is_cmethod ? comp_cmethod_in_class(c, k, name) :
                                  comp_method_in_class(c, k, name);
     if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
@@ -3867,11 +3865,9 @@ else {
          keys compared nil, #3237). Instance methods included. */
       {
         TyKind r = TY_UNKNOWN; int found = 0;
-        for (int k = 0; k < c->nclasses; k++) {
-          int is_desc = 0;
-          for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-            if (p == self->class_id) { is_desc = 1; break; }
-          if (!is_desc) continue;
+        int nd = 0; const int *ds = comp_descendants(c, self->class_id, &nd);
+        for (int di = 0; di < nd; di++) {
+          int k = ds[di];
           int dmi = self->is_cmethod ? comp_cmethod_in_class(c, k, name)
                                      : comp_method_in_class(c, k, name);
           if (dmi < 0) continue;
@@ -4715,7 +4711,10 @@ else {
       /* poly method dispatch: unify the return type over every class that
          defines `name` (the runtime cls_id picks the impl). */
       TyKind r = TY_UNKNOWN; int found = 0, nat_found = 0;
-      for (int k = 0; k < c->nclasses; k++) {
+      int npc = 0;
+      const PolyCand *pcs = comp_poly_candidates(c, name, &npc);
+      for (int pi = 0; pi < npc; pi++) {
+        int k = pcs[pi].cls;
         if (an_builtin_only) continue;   /* the builtin answer alone is wanted */
         if (c->classes[k].is_native_class) {
           /* A native class no reachable code constructs is no candidate: its
@@ -4738,7 +4737,7 @@ else {
           }
           continue;
         }
-        int mi = comp_method_in_chain(c, k, name, NULL);
+        int mi = pcs[pi].mi;
         /* A candidate whose own return has not been derived yet contributes
            nothing: "not known yet" is not an answer, and taking it as one is
            permanent. `def zero?; @value.zero?; end` on a union receiver
@@ -4750,8 +4749,8 @@ else {
            the method's return does settle it unifies in on a later round. */
         if (mi >= 0 && c->scopes[mi].ret == TY_UNKNOWN) continue;
         if (mi >= 0) { r = found ? ty_unify(r, c->scopes[mi].ret) : c->scopes[mi].ret; found = 1; continue; }
-        int rdcls = -1;
-        if (comp_reader_in_chain(c, k, name, &rdcls)) {
+        int rdcls = pcs[pi].rdcls;
+        if (rdcls >= 0) {
           /* resolve alias so `alias_method :required?, :required` reads the
              backing @required, not a bogus @required? */
           const char *rname = comp_resolve_alias(c, k, name);
@@ -5635,14 +5634,17 @@ else {
        widen; `round(2)` stays a Float, and raise/wrap keep their sp_int so
        no hot loop boxes for this. */
     if (g_promote_mode) {
-      /* Only the shapes whose emitter this PR widened. A `half:` keyword is
-         served by a different arm that answers a Float or a raw int, so a
-         call carrying one is left exactly where it was -- peeling the keyword
-         off and treating the call as argument-less made the inference
-         disagree with that arm and the C stopped building. */
+      /* A trailing `half:` keyword only picks the tie-break mode, and the arm
+         that serves it answers the same Integer, so the same widening
+         applies: `f.round(half: :even)` cannot be the one form that fails
+         where `f.round` promotes. It is peeled off the positional count.
+         floor / ceil / truncate reject a keyword outright and keep the arm
+         that raises, so they stay where they were. */
       int pv_kw = argc >= 1 && nt_type(nt, argv[argc - 1]) &&
                   sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode");
-      if (!pv_kw) {
+      int pv_round_kw = pv_kw && sp_streq(name, "round");
+      if (!pv_kw || pv_round_kw) {
+        int pv_argc = argc - (pv_round_kw ? 1 : 0);
         if ((sp_streq(name, "to_i") || sp_streq(name, "to_int")) && argc == 0) return TY_POLY;
         /* No argument, or a literal 0 -- both reach the same emitter and are
            exact. A NEGATIVE literal does not: it rounds to a power of ten by
@@ -5652,8 +5654,8 @@ else {
            keeps raising until the rounding itself is done in Bignum. */
         if (sp_streq(name, "floor") || sp_streq(name, "ceil") ||
             sp_streq(name, "round") || sp_streq(name, "truncate")) {
-          if (argc == 0) return TY_POLY;
-          if (argc == 1) {
+          if (pv_argc == 0) return TY_POLY;
+          if (pv_argc == 1) {
             const char *pv_aty = nt_type(nt, argv[0]);
             if (pv_aty && sp_streq(pv_aty, "IntegerNode") &&
                 nt_int(nt, argv[0], "value", 0) == 0) return TY_POLY;

@@ -49,3 +49,15 @@ p 1234.5.round(-1)
 begin; (1.0/0).floor; rescue => e; p e.class; end
 begin; (0.0/0).round; rescue => e; p e.class; end
 begin; Integer(1.0/0); rescue => e; p e.class; end
+
+# promote widens `round(half:)` with no digit count just as it widens the
+# keyword-less `round`: the mode picks the tie, never the representability.
+f = 1e20
+m = :even
+p f.round
+p f.round(half: :even)
+p f.round(half: m)
+p f.round(half: "even")
+p f.round(0, half: :even)
+p f.round(**{ half: :even })
+p((-1e20).round(half: :even))

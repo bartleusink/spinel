@@ -491,12 +491,23 @@ sp_int sp_rational_floor_i(sp_Rational a) {
 sp_int sp_rational_ceil_i(sp_Rational a) {
   return a.num >= 0 ? (a.num + a.den - 1) / a.den : -((-a.num) / a.den);
 }
-sp_Rational sp_rational_round_prec(sp_Rational a, sp_int nd) {
+/* Rational#round's tie-break rule as the 0 even / 1 up / 2 down code the
+   other numeric paths take, so a mode read at run time reaches the same
+   three answers the named forms give. */
+sp_int sp_rational_round_i_mode(sp_Rational a, int md) {
+  if (md == 0) return sp_rational_round_i_even(a);
+  if (md == 2) return sp_rational_round_i_down(a);
+  return sp_rational_round_i(a);
+}
+sp_Rational sp_rational_round_prec_mode(sp_Rational a, sp_int nd, int md) {
   sp_rat_wide p = sp_rat_pow10(nd < 0 ? -nd : nd);
   sp_Rational s = nd >= 0 ? sp_rational_new_wide((sp_rat_wide)a.num * p, a.den)
                           : sp_rational_new_wide(a.num, (sp_rat_wide)a.den * p);
-  sp_int q = sp_rational_round_i(s);
+  sp_int q = sp_rational_round_i_mode(s, md);
   return nd >= 0 ? sp_rational_new_wide(q, p) : sp_rational_new_wide((sp_rat_wide)q * p, 1);
+}
+sp_Rational sp_rational_round_prec(sp_Rational a, sp_int nd) {
+  return sp_rational_round_prec_mode(a, nd, 1);
 }
 sp_Rational sp_rational_mod(sp_Rational a, sp_Rational b) {
   sp_int q = sp_rational_idiv(a, b);
