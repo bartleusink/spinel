@@ -1794,6 +1794,103 @@ int bytes_are_ascii7(const char *s, size_t n) {
 void emit_frozen_literal_close(Buf *b, int id) {
   buf_printf(b, "\" }; _fzl_%d.d; })", id);
 }
+static int round_kw_elem(Compiler *c, const RoundKw *o, int e, int *is_splat, int *opaque) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  const int *els = nt_arr(nt, o->node, "elements", &n);
+  if (e >= n) return -1;
+  int key = nt_ref(nt, els[e], "key");
+  const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
+  int kn_ok = kty && (sp_streq(kty, "SymbolNode") || sp_streq(kty, "StringNode"));
+  *is_splat = key < 0;
+  *opaque = key >= 0 && !kn_ok;
+  return nt_ref(nt, els[e], "value");
+}
+
+void round_kw_read(Compiler *c, int kwh, RoundKw *o) {
+  const NodeTable *nt = c->nt;
+  memset(o, 0, sizeof *o);
+  o->node = kwh;
+  o->half = -1;
+  int n = 0;
+  const int *els = nt_arr(nt, kwh, "elements", &n);
+  char names[256]; names[0] = 0;
+  for (int e = 0; e < n; e++) {
+    int val = nt_ref(nt, els[e], "value");
+    if (val < 0) continue;              /* nothing to evaluate and nothing to say */
+    o->nelem = e + 1;
+    int key = nt_ref(nt, els[e], "key");
+    if (key < 0) { o->nsplat++; continue; }
+    const char *kty = nt_type(nt, key);
+    const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
+    if (kn && sp_streq(kn, "half")) { o->half = val; continue; }  /* a repeated key: the last wins */
+    const char *ks = (!kn && kty && sp_streq(kty, "StringNode")) ? nt_str(nt, key, "content") : NULL;
+    if (!kn && !ks) continue;           /* unreadable: claim nothing */
+    if (o->nunknown < 8) {
+      size_t at = strlen(names);
+      snprintf(names + at, sizeof names - at, "%s%s%s%s", o->nunknown ? ", " : "",
+               kn ? ":" : "\"", kn ? kn : ks, kn ? "" : "\"");
+    }
+    o->nunknown++;
+  }
+  if (n) o->nelem = n;
+  if (o->nunknown)
+    snprintf(o->unknown, sizeof o->unknown, "unknown keyword%s: %s",
+             o->nunknown > 1 ? "s" : "", names);
+}
+
+/* Evaluate every keyword value for its side effects and say nothing else --
+   the reject paths, where CRuby has still built the hash before deciding the
+   call cannot be made. */
+void emit_round_kw_effects(Compiler *c, const RoundKw *kw, Buf *b) {
+  for (int e = 0; e < kw->nelem; e++) {
+    int sp_, op_; int v = round_kw_elem(c, kw, e, &sp_, &op_);
+    if (v < 0) continue;
+    buf_puts(b, "(void)("); emit_boxed(c, v, b); buf_puts(b, "); ");
+  }
+}
+
+/* Bind what CRuby evaluates before a `round`-family call decides anything --
+   every keyword value, in source order -- then settle the tie-break mode and
+   raise for an unknown keyword, which CRuby does only once the whole hash has
+   been read. Emits into an already-open statement expression; answers the
+   temp holding the mode, or -1 when the hash names none. */
+int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b) {
+  int thalf = -1, has_splat = 0, tfirst = g_tmp + 1;
+  for (int e = 0; e < kw->nelem; e++) {
+    int is_splat, opaque; int v = round_kw_elem(c, kw, e, &is_splat, &opaque);
+    int t = ++g_tmp;
+    if (v < 0) { buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); (void)_t%d; ", t, t); continue; }
+    buf_printf(b, "sp_RbVal _t%d = ", t);
+    emit_boxed(c, v, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", t);
+    if (is_splat) has_splat = 1;
+    else if (!opaque && v == kw->half) thalf = t;
+  }
+  if (kw->nunknown) {
+    buf_puts(b, "sp_raise_cls(\"ArgumentError\", ");
+    emit_str_literal(b, kw->unknown);
+    buf_puts(b, "); ");
+  }
+  if (!has_splat) return thalf;
+  /* a `**` source is read in its place, so a `half:` on either side of it
+     wins by being later, as it does in the hash the call really builds */
+  int tm = ++g_tmp;
+  buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); ", tm, tm);
+  for (int e = 0; e < kw->nelem; e++) {
+    int is_splat, opaque; int v = round_kw_elem(c, kw, e, &is_splat, &opaque);
+    int t = tfirst + e;                 /* the temps were numbered in this order */
+    if (v < 0) continue;
+    if (is_splat)
+      buf_printf(b, "{ sp_RbVal _s%d = sp_round_half_kwsplat(_t%d);"
+                    " if (_s%d.tag != SP_TAG_NIL) _t%d = _s%d; } ",
+                 t, t, t, tm, t);
+    else if (!opaque && v == kw->half)
+      buf_printf(b, "_t%d = _t%d; ", tm, t);
+  }
+  return tm;
+}
+
 void emit_str_literal_n(Buf *b, const char *content, size_t len, int frozen) {
   const char *mk = frozen ? "\\xf1" : "\\xff";
   /* A frozen literal must carry a REAL sp_str_hdr: the 0xf1 marker promises

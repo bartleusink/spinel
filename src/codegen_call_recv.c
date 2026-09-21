@@ -6862,123 +6862,6 @@ void emit_str_pattern_expr(Compiler *c, int node, Buf *b) {
   emit_str_expr_nilable(c, node, b);
 }
 
-/* What a `round`-family call's trailing keyword hash says, as far as it can
-   be read at compile time. `half` is the node the tie-break mode was written
-   as; a `**` source's keys are only known at run time and are marked splat;
-   `unknown` is the ArgumentError message for the keys that are neither --
-   `round` takes no keyword but `half:`, and CRuby names every other one. A
-   key spelled some other way leaves the set unreadable, and nothing may be
-   called an unknown keyword on the strength of what cannot be read. */
-typedef struct {
-  int node;                   /* the KeywordHashNode itself */
-  int half;                   /* value node of the last literal `half:`, or -1 */
-  int nelem;
-  int nsplat;                 /* how many `**` sources it carries */
-  char unknown[256];          /* the ArgumentError message, or empty */
-  int nunknown;
-} RoundKw;
-/* What one element is: its value node, and which of the three kinds of key it
-   was written with. Read from the node each time rather than cached in the
-   struct, so a call may carry any number of keywords -- a fixed cap meant a
-   hash past it was read as empty, which silently dropped its `half:` and let
-   an unknown keyword through. */
-static int round_kw_elem(Compiler *c, const RoundKw *o, int e, int *is_splat, int *opaque) {
-  const NodeTable *nt = c->nt;
-  int n = 0;
-  const int *els = nt_arr(nt, o->node, "elements", &n);
-  if (e >= n) return -1;
-  int key = nt_ref(nt, els[e], "key");
-  const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
-  int kn_ok = kty && (sp_streq(kty, "SymbolNode") || sp_streq(kty, "StringNode"));
-  *is_splat = key < 0;
-  *opaque = key >= 0 && !kn_ok;
-  return nt_ref(nt, els[e], "value");
-}
-
-static void round_kw_read(Compiler *c, int kwh, RoundKw *o) {
-  const NodeTable *nt = c->nt;
-  memset(o, 0, sizeof *o);
-  o->node = kwh;
-  o->half = -1;
-  int n = 0;
-  const int *els = nt_arr(nt, kwh, "elements", &n);
-  char names[256]; names[0] = 0;
-  for (int e = 0; e < n; e++) {
-    int val = nt_ref(nt, els[e], "value");
-    if (val < 0) continue;              /* nothing to evaluate and nothing to say */
-    o->nelem = e + 1;
-    int key = nt_ref(nt, els[e], "key");
-    if (key < 0) { o->nsplat++; continue; }
-    const char *kty = nt_type(nt, key);
-    const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
-    if (kn && sp_streq(kn, "half")) { o->half = val; continue; }  /* a repeated key: the last wins */
-    const char *ks = (!kn && kty && sp_streq(kty, "StringNode")) ? nt_str(nt, key, "content") : NULL;
-    if (!kn && !ks) continue;           /* unreadable: claim nothing */
-    if (o->nunknown < 8) {
-      size_t at = strlen(names);
-      snprintf(names + at, sizeof names - at, "%s%s%s%s", o->nunknown ? ", " : "",
-               kn ? ":" : "\"", kn ? kn : ks, kn ? "" : "\"");
-    }
-    o->nunknown++;
-  }
-  if (n) o->nelem = n;
-  if (o->nunknown)
-    snprintf(o->unknown, sizeof o->unknown, "unknown keyword%s: %s",
-             o->nunknown > 1 ? "s" : "", names);
-}
-
-/* Evaluate every keyword value for its side effects and say nothing else --
-   the reject paths, where CRuby has still built the hash before deciding the
-   call cannot be made. */
-static void emit_round_kw_effects(Compiler *c, const RoundKw *kw, Buf *b) {
-  for (int e = 0; e < kw->nelem; e++) {
-    int sp_, op_; int v = round_kw_elem(c, kw, e, &sp_, &op_);
-    if (v < 0) continue;
-    buf_puts(b, "(void)("); emit_boxed(c, v, b); buf_puts(b, "); ");
-  }
-}
-
-/* Bind what CRuby evaluates before a `round`-family call decides anything --
-   every keyword value, in source order -- then settle the tie-break mode and
-   raise for an unknown keyword, which CRuby does only once the whole hash has
-   been read. Emits into an already-open statement expression; answers the
-   temp holding the mode, or -1 when the hash names none. */
-static int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b) {
-  int thalf = -1, has_splat = 0, tfirst = g_tmp + 1;
-  for (int e = 0; e < kw->nelem; e++) {
-    int is_splat, opaque; int v = round_kw_elem(c, kw, e, &is_splat, &opaque);
-    int t = ++g_tmp;
-    if (v < 0) { buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); (void)_t%d; ", t, t); continue; }
-    buf_printf(b, "sp_RbVal _t%d = ", t);
-    emit_boxed(c, v, b);
-    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", t);
-    if (is_splat) has_splat = 1;
-    else if (!opaque && v == kw->half) thalf = t;
-  }
-  if (kw->nunknown) {
-    buf_puts(b, "sp_raise_cls(\"ArgumentError\", ");
-    emit_str_literal(b, kw->unknown);
-    buf_puts(b, "); ");
-  }
-  if (!has_splat) return thalf;
-  /* a `**` source is read in its place, so a `half:` on either side of it
-     wins by being later, as it does in the hash the call really builds */
-  int tm = ++g_tmp;
-  buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); ", tm, tm);
-  for (int e = 0; e < kw->nelem; e++) {
-    int is_splat, opaque; int v = round_kw_elem(c, kw, e, &is_splat, &opaque);
-    int t = tfirst + e;                 /* the temps were numbered in this order */
-    if (v < 0) continue;
-    if (is_splat)
-      buf_printf(b, "{ sp_RbVal _s%d = sp_round_half_kwsplat(_t%d);"
-                    " if (_s%d.tag != SP_TAG_NIL) _t%d = _s%d; } ",
-                 t, t, t, tm, t);
-    else if (!opaque && v == kw->half)
-      buf_printf(b, "_t%d = _t%d; ", tm, t);
-  }
-  return tm;
-}
-
 int emit_scalar_call(Compiler *c, int id, Buf *b) {
   /* Shared-mutable shim (#3227): setbyte on a strbuf local -- shadow-copy
      re-entry, same as emit_array_call's. */
@@ -12871,8 +12754,11 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
                         " sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
                         " (given 2, expected 0..1)\");", tn);
         else
-          buf_puts(b, "sp_raise_cls(\"TypeError\","
-                      " \"no implicit conversion of Hash into Integer\");");
+          /* CRuby's words for a Rational are its own, and which receiver
+             this is only the run time knows */
+          buf_printf(b, "sp_raise_cls(\"TypeError\", sp_poly_is_rational(_t%d)"
+                        " ? \"not an integer\""
+                        " : \"no implicit conversion of Hash into Integer\");", tv);
         buf_puts(b, " sp_box_nil(); })");
         return 1;
       }

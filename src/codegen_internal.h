@@ -702,6 +702,30 @@ int bytes_are_ascii7(const char *s, size_t n);
 void emit_frozen_literal_close(Buf *b, int id);
 /* Emit a Ruby string literal. len is the true byte count (may exceed strlen
    when the string contains embedded NUL bytes). */
+/* What a `round`-family call's trailing keyword hash says, as far as it can
+   be read at compile time. `half` is the node the tie-break mode was written
+   as; a `**` source's keys are only known at run time and are marked splat;
+   `unknown` is the ArgumentError message for the keys that are neither --
+   `round` takes no keyword but `half:`, and CRuby names every other one. A
+   key spelled some other way leaves the set unreadable, and nothing may be
+   called an unknown keyword on the strength of what cannot be read. */
+typedef struct {
+  int node;                   /* the KeywordHashNode itself */
+  int half;                   /* value node of the last literal `half:`, or -1 */
+  int nelem;
+  int nsplat;                 /* how many `**` sources it carries */
+  char unknown[256];          /* the ArgumentError message, or empty */
+  int nunknown;
+} RoundKw;
+/* What one element is: its value node, and which of the three kinds of key it
+   was written with. Read from the node each time rather than cached in the
+   struct, so a call may carry any number of keywords -- a fixed cap meant a
+   hash past it was read as empty, which silently dropped its `half:` and let
+   an unknown keyword through. */
+void round_kw_read(Compiler *c, int kwh, RoundKw *o);
+void emit_round_kw_effects(Compiler *c, const RoundKw *kw, Buf *b);
+int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b);
+
 void emit_str_literal_n(Buf *b, const char *content, size_t len, int frozen);
 void emit_str_literal(Buf *b, const char *content);
 void emit_str_literal_src(Buf *b, const char *content, size_t len, int frozen);
