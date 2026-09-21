@@ -6948,7 +6948,10 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       /* nil answers these itself: nil.to_i is 0, nil.to_f is 0.0 */
       int tfr = ++g_tmp;
       if (sp_streq(name, "to_i"))
-        buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? (sp_int)0 : sp_float_to_i_checked(_t%d); })", tfr, r, tfr, tfr);
+        if (comp_ntype(c, id) == TY_POLY)
+          buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? sp_box_int(0) : sp_box_f_to_int(_t%d); })", tfr, r, tfr, tfr);
+        else
+          buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? (sp_int)0 : sp_float_to_i_checked(_t%d); })", tfr, r, tfr, tfr);
       else
         buf_printf(b, "({ sp_float _t%d = (%s); sp_float_is_nil(_t%d) ? 0.0 : _t%d; })", tfr, r, tfr, tfr);
       free(rs.p);
@@ -8506,8 +8509,10 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ double _t%d = (%s);"
                         " if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
                         " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
-                        " sp_float_fit_i(%s(_t%d)); })",
-                     tg, r, tg, tg, tg, cfn, tg);
+                        " %s(%s(_t%d)); })",
+                     tg, r, tg, tg, tg,
+                     comp_ntype(c, id) == TY_POLY ? "sp_box_f_to_int" : "sp_float_fit_i",
+                     cfn, tg);
         }
       }
       else if (sp_streq(name, "clamp") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT_RANGE &&
@@ -8574,7 +8579,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
                      tf2);
         }
       }
-      else if (sp_streq(name, "to_i"))  buf_printf(b, "sp_float_to_i_checked(%s)", r);
+      else if (sp_streq(name, "to_i"))  buf_printf(b, comp_ntype(c, id) == TY_POLY ? "sp_box_f_to_int(%s)" : "sp_float_to_i_checked(%s)", r);
       else if (sp_streq(name, "to_f"))  buf_printf(b, "(%s)", r);
       else if (sp_streq(name, "divmod") && argc == 1) {
         /* Float#divmod(n) -> [floor(x/n) (Integer), x - q*n (Float)] */
@@ -8621,7 +8626,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       /* Float arg/angle/phase: Integer 0 for >= 0, Float PI for < 0 -> poly (#2316) */
       else if (sp_streq(name, "arg") || sp_streq(name, "angle") || sp_streq(name, "phase"))
         buf_printf(b, "((%s) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0))", r);
-      else if (sp_streq(name, "to_int")) buf_printf(b, "sp_float_to_i_checked(%s)", r);  /* alias of to_i (#2317); raises on Inf/NaN */
+      else if (sp_streq(name, "to_int")) buf_printf(b, comp_ntype(c, id) == TY_POLY ? "sp_box_f_to_int(%s)" : "sp_float_to_i_checked(%s)", r);  /* alias of to_i (#2317); raises on Inf/NaN */
       else if (sp_streq(name, "zero?")) buf_printf(b, "((%s) == 0.0)", r);
       else if (sp_streq(name, "nan?"))  buf_printf(b, "(isnan(%s) != 0)", r);
       else if (sp_streq(name, "finite?")) buf_printf(b, "(isfinite(%s) != 0)", r);
@@ -13106,7 +13111,9 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         /* sp_poly_to_i_meth: this is the METHOD, named by the program, so an
            object without it is NoMethodError rather than the conversion
            protocol's TypeError. */
-        buf_printf(b, "%s(", sp_streq(name, "to_i") ? "sp_poly_to_i_meth" : "sp_poly_to_f");
+        buf_printf(b, "%s(", sp_streq(name, "to_i")
+                              ? (comp_ntype(c, id) == TY_POLY ? "sp_poly_to_i_meth_v" : "sp_poly_to_i_meth")
+                              : "sp_poly_to_f");
         emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
       }
     }

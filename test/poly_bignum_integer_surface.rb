@@ -5,6 +5,9 @@
 # answers by the box's tag now; an answer that can itself be a Bignum
 # stays boxed. The same names on a boxed small Integer keep answering as
 # before, and a loop that counts in an sp_int says what it cannot do.
+# `b.to_i` moved out: #4665 held it at RangeError pending #2024, and promote
+# now answers the Bignum, so the raise side lives in float_to_int_out_of_range
+# (excluded from the promote run) and the promote side in promote_float_to_int.
 def poly(x) = x
 p poly("s")
 b = poly(18446744073709551615)
@@ -32,6 +35,5 @@ n.upto(lim) { |i| print i, " " }
 puts
 n.downto(lim - 5) { |i| print i, " " }
 puts
-begin; p b.to_i; rescue => e; p e.class; end
 p poly(2**64).pred.pred
 p poly(2**63).pred.class

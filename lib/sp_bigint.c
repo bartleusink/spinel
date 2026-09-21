@@ -5319,6 +5319,25 @@ sp_Bigint *sp_bigint_new_int(int64_t v) {
   return b;
 }
 
+sp_Bigint *sp_bigint_shl(sp_Bigint *a, int64_t n);   /* fwd: the scale below */
+sp_Bigint *sp_bigint_shr(sp_Bigint *a, int64_t n);
+
+/* The exact integer value of a finite Float. Above 2**53 a double IS an
+   integer -- its mantissa scaled by a power of two -- so frexp's 53-bit
+   mantissa shifted by the remaining exponent loses nothing, and the shift is
+   a limb move. The caller checks for NaN/infinity; a value that already fits
+   sp_int never needs this. */
+sp_Bigint *sp_bigint_new_double(double d) {
+  int e = 0;
+  double m = frexp(d, &e);              /* d == m * 2**e, 0.5 <= |m| < 1 */
+  int64_t mant = (int64_t)ldexp(m, 53); /* exact: a double carries 53 bits */
+  int sh = e - 53;
+  sp_Bigint *b = sp_bigint_new_int(mant);
+  if (sh > 0) return sp_bigint_shl(b, sh);
+  if (sh < 0) return sp_bigint_shr(b, -sh);
+  return b;
+}
+
 sp_Bigint *sp_bigint_new_str(const char *s, int base) {
   sp_Bigint *b = sp_bigint_alloc();
   mpz_init(sp_mpz_ctx, &b->mpz);
