@@ -13042,7 +13042,9 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         /* sp_poly_to_i_meth: this is the METHOD, named by the program, so an
            object without it is NoMethodError rather than the conversion
            protocol's TypeError. */
-        buf_printf(b, "%s(", sp_streq(name, "to_i") ? "sp_poly_to_i_meth" : "sp_poly_to_f");
+        buf_printf(b, "%s(", sp_streq(name, "to_i")
+                              ? (comp_ntype(c, id) == TY_POLY ? "sp_poly_to_i_meth_v" : "sp_poly_to_i_meth")
+                              : "sp_poly_to_f");
         emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
       }
     }

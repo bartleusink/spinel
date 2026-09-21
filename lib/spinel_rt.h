@@ -3087,6 +3087,15 @@ static sp_RbVal sp_box_f_to_int(sp_float v) {
   if (v < -(sp_float)INTPTR_MIN && v >= (sp_float)INTPTR_MIN) return sp_box_int((sp_int)v);
   return sp_box_bigint(sp_bigint_new_double(v));
 }
+/* The same method into a BOXED slot, which promote mode gives it: an Integer
+   too wide for sp_int is the answer rather than an error, and a Bignum
+   receiver is already one (#4688). */
+static sp_RbVal sp_poly_to_i_meth_v(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
+  if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return v;
+  if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(v.v.f); }
+  return sp_box_int(sp_poly_to_i(v));
+}
 static inline sp_int sp_float_fit_i(sp_float v) {
   /* (double)INTPTR_MIN is exact at either width: -2^63 on 64-bit, -2^31 on
      the 32-bit build, so the same test bounds whichever sp_int this is. */
