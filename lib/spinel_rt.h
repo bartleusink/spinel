@@ -9822,33 +9822,53 @@ static double sp_round_half_mode(double x, sp_sym mode) {
    give the same answers or the same program means two things depending on
    whether its value went through a container. An Integer receiver has no
    tie to break at n >= 0, and a Rational keeps sp_poly_round_n's arms. */
+/* What `half:` was given, as the 0 even / 1 up / 2 down code the typed
+   helpers take, or -1 for "no mode": the plain half-up default. CRuby reads
+   a Symbol or a String and answers ArgumentError for anything else, naming
+   the offending value -- a Symbol and a String by their text, everything
+   else by its inspect. */
+static int sp_round_half_code(sp_RbVal mode) {
+  const char *m = NULL;
+  if (mode.tag == SP_TAG_NIL) return -1;
+  if (mode.tag == SP_TAG_SYM) m = sp_sym_to_s((sp_sym)mode.v.i);
+  else if (mode.tag == SP_TAG_STR) m = mode.v.s;
+  if (m) {
+    if (strcmp(m, "even") == 0) return 0;
+    if (strcmp(m, "up") == 0) return 1;
+    if (strcmp(m, "down") == 0) return 2;
+  }
+  sp_raise_cls("ArgumentError",
+               sp_sprintf("invalid rounding mode: %s", m ? m : sp_poly_inspect(mode)));
+  return -1;
+}
+static double sp_round_half_c(double x, int md) {
+  if (md == 0) return sp_round_half_even(x);
+  if (md == 2) return sp_round_half_down(x);
+  return round(x);
+}
 sp_int sp_int_round_half(sp_int v, sp_int nd, int mode);
-static sp_RbVal sp_poly_round_half(sp_RbVal v, sp_int n, sp_sym mode) {
+static sp_RbVal sp_poly_round_half(sp_RbVal v, sp_int n, sp_RbVal mode) {
+  /* The mode is checked before anything answers: `2.round(0, half: :bogus)`
+     is an ArgumentError in CRuby even though the Integer arm below returns
+     the receiver unchanged. */
+  int md = sp_round_half_code(mode);
   if (v.tag == SP_TAG_INT) {
     /* an Integer has a tie to break only below the decimal point, and the
        typed path's helper already knows the rule (0 even / 1 up / 2 down) */
     if (n >= 0) return v;
-    const char *m = (mode == (sp_sym)-1) ? NULL : sp_sym_to_s(mode);
-    int md = 1;
-    if (m && m[0]) {
-      if (strcmp(m, "even") == 0) md = 0;
-      else if (strcmp(m, "down") == 0) md = 2;
-      else if (strcmp(m, "up") != 0)
-        sp_raise_cls("ArgumentError", sp_sprintf("invalid rounding mode: %s", m));
-    }
-    return sp_box_int(sp_int_round_half(v.v.i, n, md));
+    return sp_box_int(sp_int_round_half(v.v.i, n, md < 0 ? 1 : md));
   }
   if (v.tag != SP_TAG_FLT) return sp_poly_round_n(v, n);
   double x = v.v.f;
   if (n > 0) {
     double f = pow(10, (double)n);
     if (isinf(f)) return sp_box_float(x);
-    double r = sp_round_half_mode(x * f, mode) / f;
+    double r = sp_round_half_c(x * f, md) / f;
     return sp_box_float((x != 0.0 && r == 0.0) ? 0.0 : r);   /* +0.0 normalize */
   }
   sp_poly_flo_domain_ck(x);
   double f = pow(10, (double)(-n));
-  return sp_box_int(isinf(f) ? 0 : sp_float_fit_i(sp_round_half_mode(x / f, mode) * f));
+  return sp_box_int(isinf(f) ? 0 : sp_float_fit_i(sp_round_half_c(x / f, md) * f));
 }
 
 /* `rescue *list`: the clause matches when the raised class is (or descends
