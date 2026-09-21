@@ -8384,6 +8384,20 @@ else {
     /* a poly-typed global/const slot boxes a scalar value (`$g = 42` where $g
        elsewhere holds a string/array, so its slot is sp_RbVal) */
     else if (lv->type == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
+    else if (lv->type == TY_POLY_ARRAY && ty_is_array(comp_ntype(c, v)) &&
+             comp_ntype(c, v) != TY_POLY_ARRAY) {
+      /* a typed array into a poly-array global: rebuilt with its elements
+         boxed, the conversion the local and ivar writes make (a slot that
+         widened on a write the node never saw -- under --int-overflow=promote
+         every array built from widened Integers, #4738) */
+      TyKind vt2 = comp_ntype(c, v);
+      if (conv_reads_shared_storage(c, v))
+        unsupported(c, v, "widening a typed array READ into a poly global (the conversion copies, so writes would not be shared)");
+      if (vt2 == TY_INT_ARRAY) { buf_puts(b, "sp_PolyArray_from_int_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+      else if (vt2 == TY_STR_ARRAY) { buf_puts(b, "sp_PolyArray_from_str_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+      else if (vt2 == TY_FLOAT_ARRAY) { buf_puts(b, "sp_PolyArray_from_float_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+      else emit_expr(c, v, b);
+    }
     else emit_expr(c, v, b);
     buf_puts(b, ";\n");
     if (!isg && lv->init_guarded) {
@@ -9311,13 +9325,13 @@ else {
         if (rest_var || rn > 0) {
           int tn = ++g_tmp;
           emit_indent(b, indent);
-          buf_printf(b, "sp_int _t%d = sp_poly_arr_len(_t%d);\n", tn, tarr);
+          buf_printf(b, "sp_int _t%d = sp_poly_massign_len(_t%d);\n", tn, tarr);
           if (rest_var) {
             int tr = ++g_tmp, ti = ++g_tmp;
             emit_indent(b, indent);
             buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tr, tr);
             emit_indent(b, indent);
-            buf_printf(b, "for (sp_int _t%d = %dLL; _t%d < _t%d - %dLL; _t%d++) sp_PolyArray_push(_t%d, sp_poly_arr_get(_t%d, _t%d));\n",
+            buf_printf(b, "for (sp_int _t%d = %dLL; _t%d < _t%d - %dLL; _t%d++) sp_PolyArray_push(_t%d, sp_poly_massign_get(_t%d, _t%d));\n",
                        ti, ln, ti, tn, rn, ti, tr, tarr, ti);
             emit_indent(b, indent);
             emit_local_ref(c, id, rest_var, b); buf_printf(b, " = _t%d;\n", tr);

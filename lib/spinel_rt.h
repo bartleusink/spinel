@@ -7637,6 +7637,21 @@ static sp_StrArray *sp_poly_as_str_array(sp_RbVal v) {
    scalar -- the first target takes the whole value, the rest nil-fill.
    sp_poly_arr_get_hash is NOT that (Integer#[i] reads a bit, String#[i] a
    char, Hash#[i] a lookup). */
+/* The count a multiple assignment destructures a boxed source into: an
+   array's length, and one for anything else, which stands for itself (nil
+   included: `*d = nil` is `[nil]`, the to_ary protocol, not nil.to_a) --
+   `*a, b = x` with a boxed Integer x is `a = [], b = x`. sp_poly_arr_len
+   answered 0 for the scalar (and a Hash's pair count), so a leading splat
+   dropped the value on the floor and every post-splat target read nil. */
+static sp_int sp_poly_massign_len(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ) switch (v.cls_id) {
+    case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY:
+    case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_PTR_ARRAY:
+      return sp_poly_arr_len(v);
+    default: break;
+  }
+  return 1;
+}
 static sp_RbVal sp_poly_massign_get(sp_RbVal v, sp_int i) {
   if (v.tag == SP_TAG_OBJ) switch (v.cls_id) {
     case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY:
