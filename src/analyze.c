@@ -10681,6 +10681,41 @@ static int strbuf_container_stores_nonstring(Compiler *c, const char *contn, Sco
   }
   return 0;
 }
+/* Does method scope `mi` mutate its parameter `name` in place (a push, a
+   store, a bang), directly or by handing it to a receiverless user method
+   that does? The promote reconciliation keeps such a parameter at its kind:
+   the argument is passed by reference only while the two agree (#4480). */
+static int pw_scope_mutates_param(Compiler *c, int mi, const char *name) {
+  static const char *const muts[] = {
+    "<<", "push", "append", "unshift", "prepend", "insert", "[]=", "concat",
+    "pop", "shift", "delete", "delete_at", "delete_if", "clear", "replace",
+    "fill", "map!", "collect!", "select!", "filter!", "reject!", "sort!",
+    "sort_by!", "uniq!", "compact!", "reverse!", "shuffle!", "rotate!",
+    "slice!", "keep_if", "flatten!", NULL };
+  const NodeTable *nt = c->nt;
+  for (int q = 0; q < nt->count; q++) {
+    if (c->nscope[q] != mi || nt_kind(nt, q) != NK_CallNode) continue;
+    const char *cnm = nt_str(nt, q, "name");
+    if (!cnm) continue;
+    int r = nt_ref(nt, q, "receiver");
+    if (r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode) {
+      const char *rn = nt_str(nt, r, "name");
+      if (rn && sp_streq(rn, name))
+        for (int k = 0; muts[k]; k++) if (sp_streq(cnm, muts[k])) return 1;
+    }
+    if (r >= 0 && nt_kind(nt, r) != NK_SelfNode) continue;
+    int aa = nt_ref(nt, q, "arguments"); int an = 0;
+    const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &an) : NULL;
+    for (int k = 0; k < an; k++) {
+      if (nt_kind(nt, av[k]) != NK_LocalVariableReadNode) continue;
+      const char *vn = nt_str(nt, av[k], "name");
+      if (!vn || !sp_streq(vn, name)) continue;
+      /* passed on: conservatively, a callee that takes it may mutate it */
+      return 1;
+    }
+  }
+  return 0;
+}
 /* Iterators whose block receives the ELEMENT as its first parameter. */
 static int strbuf_elem_first_iterator(const char *n) {
   static const char *const names[] = {
@@ -15767,13 +15802,30 @@ void analyze_program(Compiler *c) {
         TyKind r = (TyKind)sc->ret;
         if (r != TY_INT_ARRAY && r != TY_STR_ARRAY && r != TY_FLOAT_ARRAY) continue;
         TyKind br = TY_UNKNOWN;
-        if (sc->body >= 0) { int bn = 0; const int *bb = nt_arr(nt, sc->body, "body", &bn); if (bn > 0) br = comp_ntype(c, bb[bn - 1]); }
+        /* infer_type, not the cache: a local the steps below widened in this
+           same pass reads as its new kind only through a fresh inference. A
+           tail that is `if block_given? ... else ... end` answers through its
+           block arm: that arm is what a call with a block receives, and the
+           if's own type unifies it with the blockless Enumerator arm. */
+        if (sc->body >= 0) {
+          int bn = 0; const int *bb = nt_arr(nt, sc->body, "body", &bn);
+          int tail = bn > 0 ? bb[bn - 1] : -1;
+          for (int guard = 0; tail >= 0 && guard < 4 && nt_kind(nt, tail) == NK_IfNode; guard++) {
+            int pred = nt_ref(nt, tail, "predicate");
+            const char *pnm = pred >= 0 && nt_kind(nt, pred) == NK_CallNode ? nt_str(nt, pred, "name") : NULL;
+            if (!pnm || !sp_streq(pnm, "block_given?")) break;
+            int st = nt_ref(nt, tail, "statements");
+            int sn = 0; const int *sb = st >= 0 ? nt_arr(nt, st, "body", &sn) : NULL;
+            tail = sn > 0 ? sb[sn - 1] : -1;
+          }
+          if (tail >= 0) br = infer_type(c, tail);
+        }
         for (int id = 0; id < nt->count && br != TY_POLY_ARRAY; id++) {
           const char *ty = nt_type(nt, id);
           if (ty && sp_streq(ty, "ReturnNode") && comp_scope_of(c, id) == sc) {
             int a = nt_ref(nt, id, "arguments"); int an = 0;
             const int *av = a >= 0 ? nt_arr(nt, id, "arguments", &an) : NULL;
-            if (an == 1 && comp_ntype(c, av[0]) == TY_POLY_ARRAY) br = TY_POLY_ARRAY;
+            if (an == 1 && infer_type(c, av[0]) == TY_POLY_ARRAY) br = TY_POLY_ARRAY;
           }
         }
         if (br == TY_POLY_ARRAY) { sc->ret = TY_POLY_ARRAY; changed = 1; }
@@ -15835,6 +15887,277 @@ void analyze_program(Compiler *c) {
         int vnode = nt_ref(nt, id, "value");
         if (vnode < 0) continue;
         if (infer_type(c, vnode) == TY_POLY) { cv->type = TY_POLY; changed = 1; }
+      }
+      /* (6)-(10), --int-overflow=promote only: the slots the widening leaves
+         behind. A producer of an Integer array that reads a widened slot --
+         `[x, x * 2]`, `[x]`, a map over them -- is a poly array in the final
+         types, while the slot it flows into was decided as an Integer array
+         during the fixpoint and, unlike a plain local (step 4), was re-derived
+         by nothing afterwards: an ivar, a global, a multiple assignment's
+         targets, a callee's parameter, and a local pinned to a container's
+         element kind whose container has since widened. Each is widened here
+         in the same direction step 4 widens, with the array-aware join the
+         ivar write merge already uses (a typed array meets a poly array as
+         the poly ARRAY, not the poly scalar ty_unify answers); a typed-array
+         slot fed a boxed element becomes the box. Default mode never reaches
+         these: its fixpoint saw every producer as it is (#4738). */
+      if (g_promote_mode) {
+        /* the join: what a slot of kind `cur` becomes when fed `val` */
+        /* the flat scalar arrays only: a table (Array[Array[Integer]]) and an
+           object array are the narrowing passes' kinds, re-derived by them */
+        #define PW_TYPED_ARR(t) ((t) == TY_INT_ARRAY || (t) == TY_STR_ARRAY || (t) == TY_FLOAT_ARRAY)
+        #define PW_JOIN(cur, val) (PW_TYPED_ARR(cur) && (val) == TY_POLY_ARRAY ? TY_POLY_ARRAY \
+                                   : PW_TYPED_ARR(cur) && (val) == TY_POLY ? TY_POLY : (cur))
+        /* (6) an ivar / cvar written a poly array or a boxed element */
+        for (int id = 0; id < nt->count; id++) {
+          NodeKind k = nt_kind(nt, id);
+          int iv_write = k == NK_InstanceVariableWriteNode || k == NK_InstanceVariableOrWriteNode ||
+                         k == NK_InstanceVariableAndWriteNode;
+          int cv_write = k == NK_ClassVariableWriteNode || k == NK_ClassVariableOrWriteNode;
+          if (!iv_write && !cv_write) continue;
+          int vnode = nt_ref(nt, id, "value");
+          if (vnode < 0) continue;
+          const char *nm = nt_str(nt, id, "name");
+          if (!nm) continue;
+          TyKind vt = infer_type(c, vnode);
+          if (vt != TY_POLY_ARRAY && vt != TY_POLY) continue;
+          if (iv_write) {
+            int cid = an_ivar_owner(c, id);
+            int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
+            if (iv < 0) continue;
+            TyKind cur = c->classes[cid].ivar_types[iv], nw = PW_JOIN(cur, vt);
+            if (nw != cur) { c->classes[cid].ivar_types[iv] = nw; changed = 1; }
+          }
+          else {
+            Scope *ws = comp_scope_of(c, id);
+            int cid = ws ? ws->class_id : -1;
+            if (cid < 0) continue;
+            ClassInfo *ci = &c->classes[cid];
+            for (int cv = 0; cv < ci->ncvars; cv++) {
+              if (!ci->cvars[cv] || !sp_streq(ci->cvars[cv], nm)) continue;
+              TyKind cur = ci->cvar_types[cv], nw = PW_JOIN(cur, vt);
+              if (nw != cur) { ci->cvar_types[cv] = nw; changed = 1; }
+            }
+          }
+        }
+        /* (7) a global written a poly array or a boxed element */
+        for (int id = 0; id < nt->count; id++) {
+          if (nt_kind(nt, id) != NK_GlobalVariableWriteNode && nt_kind(nt, id) != NK_GlobalVariableOrWriteNode) continue;
+          int vnode = nt_ref(nt, id, "value");
+          const char *nm = nt_str(nt, id, "name");
+          if (vnode < 0 || !nm) continue;
+          LocalVar *gv = comp_gvar(c, nm[0] == '$' ? nm + 1 : nm);   /* keyed without the `$` */
+          if (!gv) continue;
+          TyKind vt = infer_type(c, vnode), nw = PW_JOIN(gv->type, vt);
+          if (nw != gv->type) { gv->type = nw; changed = 1; }
+        }
+        /* (8) a multiple assignment: a splat target collects a poly array
+           from a boxed scalar or a poly-array source, and a plain target
+           takes a boxed element out of a poly-array source */
+        for (int id = 0; id < nt->count; id++) {
+          if (nt_kind(nt, id) != NK_MultiWriteNode) continue;
+          int value = nt_ref(nt, id, "value");
+          if (value < 0) continue;
+          Scope *ms = comp_scope_of(c, id);
+          if (!ms) continue;
+          /* a tuple right-hand side (`a, b = [], [x]`) pairs element with
+             target: each target follows its own element */
+          if (nt_kind(nt, value) == NK_ArrayNode) {
+            int en = 0; const int *el = nt_arr(nt, value, "elements", &en);
+            int ln0 = 0; const int *lf = nt_arr(nt, id, "lefts", &ln0);
+            for (int i = 0; i < ln0 && i < en; i++) {
+              if (nt_kind(nt, lf[i]) != NK_LocalVariableTargetNode) continue;
+              const char *lnm = nt_str(nt, lf[i], "name");
+              LocalVar *lv = lnm ? scope_local(ms, lnm) : NULL;
+              if (!lv) continue;
+              TyKind et = infer_type(c, el[i]), nw = PW_JOIN(lv->type, et);
+              if (nw != lv->type) { lv->type = nw; changed = 1; }
+            }
+            continue;
+          }
+          TyKind st = infer_type(c, value);
+          if (st != TY_POLY && st != TY_POLY_ARRAY) continue;
+          int rest = nt_ref(nt, id, "rest");
+          if (rest >= 0 && nt_kind(nt, rest) == NK_SplatNode) {
+            int rin = nt_ref(nt, rest, "expression");
+            const char *rnm = rin >= 0 ? nt_str(nt, rin, "name") : NULL;
+            LocalVar *rlv = rnm ? scope_local(ms, rnm) : NULL;
+            if (rlv && PW_TYPED_ARR(rlv->type)) { rlv->type = TY_POLY_ARRAY; changed = 1; }
+          }
+          if (st != TY_POLY_ARRAY) continue;
+          int ln = 0; const int *lefts = nt_arr(nt, id, "lefts", &ln);
+          for (int i = 0; i < ln; i++) {
+            if (nt_kind(nt, lefts[i]) != NK_LocalVariableTargetNode) continue;
+            const char *lnm = nt_str(nt, lefts[i], "name");
+            LocalVar *lv = lnm ? scope_local(ms, lnm) : NULL;
+            if (lv && PW_TYPED_ARR(lv->type)) { lv->type = TY_POLY; changed = 1; }
+          }
+        }
+        /* (9) a parameter bound from an argument that is a poly array now
+           (a clone's receiver parameter included: the rewrite passes the
+           receiver as the first argument) */
+        for (int s = 1; s < c->nscopes; s++) {
+          Scope *sc = &c->scopes[s];
+          if (!sc->name || sc->nparams <= 0) continue;
+          for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
+            if (nt_kind(nt, u) != NK_CallNode) continue;
+            if (!an_call_targets_scope(c, u, s, sc)) continue;
+            int a = nt_ref(nt, u, "arguments"); int an = 0;
+            const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+            for (int j = 0; j < an && j < sc->nparams; j++) {
+              if (!sc->pnames[j]) continue;
+              LocalVar *pv = scope_local(sc, sc->pnames[j]);
+              if (!pv || !PW_TYPED_ARR(pv->type)) continue;
+              /* an empty literal argument is built at the parameter's kind
+                 and says nothing about it */
+              if (nt_kind(nt, av[j]) == NK_ArrayNode) {
+                int en0 = 0; nt_arr(nt, av[j], "elements", &en0);
+                if (en0 == 0) continue;
+              }
+              if (infer_type(c, av[j]) != TY_POLY_ARRAY) continue;
+              /* a parameter the callee mutates in place is passed by
+                 reference at its kind; widened, the argument would be copied
+                 into it and the mutation lost (the #4480 rule), and the
+                 emitter refuses that shape outright */
+              if (pw_scope_mutates_param(c, s, sc->pnames[j])) continue;
+              pv->type = TY_POLY_ARRAY; changed = 1;
+            }
+          }
+        }
+        /* (10) a local pinned to a container's element kind whose container
+           has widened: the read hands it a box now, so the pin no longer
+           holds and the slot takes the box (int_array_array's `row = t[3]`) */
+        for (int id = 0; id < nt->count; id++) {
+          NodeKind k = nt_kind(nt, id);
+          if (k != NK_LocalVariableWriteNode && k != NK_LocalVariableOrWriteNode) continue;
+          const char *nm = nt_str(nt, id, "name");
+          LocalVar *lv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+          if (!lv || !PW_TYPED_ARR(lv->type)) continue;
+          int vnode = nt_ref(nt, id, "value");
+          if (vnode < 0) continue;
+          TyKind vt = infer_type(c, vnode);
+          if (vt == TY_POLY_ARRAY) { lv->type = TY_POLY_ARRAY; changed = 1; }   /* step 4's rule, for `||=` */
+          else if (vt == TY_POLY) { lv->type = TY_POLY; lv->oa_pin = TY_UNKNOWN; changed = 1; }
+        }
+        /* (11) a block over a receiver that is a poly array now: the params
+           the fixpoint typed from the receiver's Integer elements are bound
+           from boxed elements (the widening skips block params on purpose,
+           since the emitters retype them from the receiver -- but from the
+           receiver as the fixpoint saw it). Every scalar-typed param takes the
+           box, except an each_with_index / with_index index, which is the
+           emitter's own counter; each_cons / each_slice hand their first
+           param a slice of the receiver, a poly array. */
+        for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
+          if (nt_kind(nt, u) != NK_CallNode) continue;
+          int blk = nt_ref(nt, u, "block");
+          if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
+          int recv = nt_ref(nt, u, "receiver");
+          const char *inm = nt_str(nt, u, "name");
+          if (!inm) continue;
+          /* a Ruby-defined builtin's call, rewritten receiverless with the
+             receiver as its first argument (desugar_builtin_enum_calls) */
+          if (recv < 0 && strncmp(inm, "__enum_", 7) == 0) {
+            int a = nt_ref(nt, u, "arguments"); int an = 0;
+            const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+            if (an >= 1) recv = av[0];
+          }
+          int slice_first = sp_streq(inm, "each_cons") || sp_streq(inm, "each_slice");
+          int idx_second = sp_streq(inm, "each_with_index") || sp_streq(inm, "with_index");
+          /* only an iterator whose block receives ELEMENTS: `fetch(i) { |i| }`
+             hands its block the index, `each_with_index` its second param */
+          if (!slice_first && !strbuf_elem_first_iterator(inm) &&
+              !sp_streq(inm, "inject") && !sp_streq(inm, "reduce") &&
+              !sp_streq(inm, "min") && !sp_streq(inm, "max") && !sp_streq(inm, "minmax") &&
+              !sp_streq(inm, "sort") && !sp_streq(inm, "sum") &&
+              !(strncmp(inm, "__enum_", 7) == 0)) continue;
+          /* `arr.each_cons(2).with_index(1).map { |(x, y), i| }`: the block
+             sits on a chain; walk it down to the each_cons / each_slice whose
+             receiver is the array, and the first param is its slice */
+          for (int guard = 0; recv >= 0 && guard < 6 && nt_kind(nt, recv) == NK_CallNode &&
+                              nt_ref(nt, recv, "block") < 0; guard++) {
+            const char *cn = nt_str(nt, recv, "name");
+            if (!cn) break;
+            if (sp_streq(cn, "each_cons") || sp_streq(cn, "each_slice")) {
+              slice_first = 1; recv = nt_ref(nt, recv, "receiver"); break;
+            }
+            if (sp_streq(cn, "with_index") || sp_streq(cn, "each_with_index")) idx_second = 1;
+            else if (!(sp_streq(cn, "each") || sp_streq(cn, "with_object") || sp_streq(cn, "lazy") ||
+                       sp_streq(cn, "each_entry"))) break;
+            recv = nt_ref(nt, recv, "receiver");
+          }
+          if (recv < 0 || infer_type(c, recv) != TY_POLY_ARRAY) continue;
+          Scope *bs = comp_scope_of(c, blk);
+          if (!bs) continue;
+          for (int k = 0; k < 8; k++) {
+            const char *pnm = block_param_name(c, blk, k);
+            if (!pnm) break;
+            if (idx_second && k == 1) continue;
+            LocalVar *pv = scope_local(bs, pnm);
+            if (!pv) continue;
+            if (slice_first && k == 0) {
+              if (PW_TYPED_ARR(pv->type)) { pv->type = TY_POLY_ARRAY; changed = 1; }
+              continue;
+            }
+            if (pv->type == TY_INT || pv->type == TY_FLOAT || pv->type == TY_STRING)
+              { pv->type = TY_POLY; changed = 1; }
+          }
+        }
+        /* (12) a typed array local or ivar pushed a boxed value: the push's
+           element evidence widened with the slot it reads, and the array has
+           to hold the box (a Bignum among them is the mode's whole point) */
+        for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
+          if (nt_kind(nt, u) != NK_CallNode) continue;
+          const char *pn = nt_str(nt, u, "name");
+          if (!pn || !(sp_streq(pn, "<<") || sp_streq(pn, "push") || sp_streq(pn, "append") ||
+                       sp_streq(pn, "unshift"))) continue;
+          int recv = nt_ref(nt, u, "receiver");
+          if (recv < 0) continue;
+          int a = nt_ref(nt, u, "arguments"); int an = 0;
+          const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+          int boxed = 0;
+          for (int j = 0; j < an; j++) if (infer_type(c, av[j]) == TY_POLY) boxed = 1;
+          if (!boxed) continue;
+          NodeKind rk = nt_kind(nt, recv);
+          if (rk == NK_LocalVariableReadNode) {
+            const char *rn = nt_str(nt, recv, "name");
+            LocalVar *lv = rn ? scope_local(comp_scope_of(c, recv), rn) : NULL;
+            /* a parameter is the caller's array by reference and a block
+               parameter is bound by its iterator: both keep their kind, and
+               the push unboxes (raising on a foreign element, as the typed
+               store always has) */
+            if (!lv || lv->is_param || lv->is_block_param ||
+                !(lv->type == TY_INT_ARRAY || lv->type == TY_FLOAT_ARRAY || lv->type == TY_STR_ARRAY))
+              continue;
+            /* and only an array the local BUILT: bound from an element or an
+               ivar read it is another name for storage something else holds,
+               and a widened slot would take a converted copy, so the pushes
+               would no longer reach the container (#4412) */
+            Scope *ls = comp_scope_of(c, recv);
+            int owns = 1, saw = 0;
+            for (int w = comp_kind_first(c, NK_LocalVariableWriteNode); w >= 0 && owns; w = comp_kind_next(c, w)) {
+              if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
+              const char *wn = nt_str(nt, w, "name");
+              if (!wn || !sp_streq(wn, rn) || comp_scope_of(c, w) != ls) continue;
+              saw = 1;
+              int wv = nt_ref(nt, w, "value");
+              if (wv < 0 || nt_kind(nt, wv) != NK_ArrayNode) owns = 0;
+            }
+            if (!saw || !owns) continue;
+            lv->type = TY_POLY_ARRAY; changed = 1;
+          }
+          else if (rk == NK_InstanceVariableReadNode) {
+            const char *rn = nt_str(nt, recv, "name");
+            int cid = rn ? an_ivar_owner(c, recv) : -1;
+            int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], rn) : -1;
+            if (iv >= 0) {
+              TyKind cur = c->classes[cid].ivar_types[iv];
+              if (cur == TY_INT_ARRAY || cur == TY_FLOAT_ARRAY || cur == TY_STR_ARRAY)
+                { c->classes[cid].ivar_types[iv] = TY_POLY_ARRAY; changed = 1; }
+            }
+          }
+        }
+        #undef PW_JOIN
+        #undef PW_TYPED_ARR
       }
     }
     /* refresh the node-type cache so a `proc.call` node picks up the updated
