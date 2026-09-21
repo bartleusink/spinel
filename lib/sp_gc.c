@@ -32,6 +32,28 @@ int  sp_str_sweep_begin(int *major);   /* lib/sp_alloc.c: the string heap's gate
 
 /* ---- Globals shared with the generated TU (declared extern in sp_gc.h) ---- */
 SP_TLS void **sp_gc_roots[SP_GC_STACK_MAX];   /* per-worker (SP_TLS); see sp_gc.h */
+/* The overflow segment: roots SP_GC_STACK_MAX and up, grown on demand and
+   kept for the worker's life. A push the array cannot take used to be dropped
+   on the floor, and a deep enough recursion then had the collector free
+   strings its live frames still named. */
+SP_TLS void ***sp_gc_roots_ext = NULL;
+static SP_TLS int sp_gc_roots_ext_cap = 0;
+int sp_gc_roots_ext_reserve(int n) {
+  int need = n - SP_GC_STACK_MAX;
+  if (need <= sp_gc_roots_ext_cap) return 1;
+  int nc = sp_gc_roots_ext_cap ? sp_gc_roots_ext_cap : 4096;
+  while (nc < need) nc *= 2;
+  void ***nx = (void ***)realloc(sp_gc_roots_ext, sizeof(void **) * (size_t)nc);
+  if (!nx) return 0;
+  sp_gc_roots_ext = nx; sp_gc_roots_ext_cap = nc;
+  return 1;
+}
+int sp_gc_root_push_slow(void **p) {
+  if (!sp_gc_roots_ext_reserve(sp_gc_nroots + 1)) return 0;
+  sp_gc_roots_ext[sp_gc_nroots - SP_GC_STACK_MAX] = p;
+  sp_gc_nroots++;
+  return 1;
+}
 SP_TLS int sp_gc_nroots = 0;
 #ifdef SP_THREADS
 sp_gc_wslot_t sp_gc_wslot[SP_MAX_WORKERS];   /* per-worker young head + flush delta, cache-line padded */
@@ -519,7 +541,7 @@ void sp_gc_mark_all(void){if(!sp_gc_mark_stack){sp_gc_mark_stack=(void**)malloc(
      (aged is set before the mark); the rest of the graph ages. The same for
      a suspended fiber's roots, which are runtime locals too. */
   sp_gc_root_phase=1;
-  for(int i=0;i<sp_gc_nroots;i++){void**e=sp_gc_roots[i];if(vd){sp_gc_dbg_phase="root";sp_gc_dbg_ctx=(void*)e;}if((uintptr_t)e&(uintptr_t)3){sp_gc_mark_root_entry(e);}
+  for(int i=0;i<sp_gc_nroots;i++){void**e=sp_gc_root_at(i);if(vd){sp_gc_dbg_phase="root";sp_gc_dbg_ctx=(void*)e;}if((uintptr_t)e&(uintptr_t)3){sp_gc_mark_root_entry(e);}
 else{void*obj=*e;if(obj)sp_gc_mark(obj);}}
   SP_GC_MK_PH(sp_gc_ph_mk_roots);
   if(vd)sp_gc_dbg_phase="fibers";if(sp_gc_mark_suspended_fibers_hook)sp_gc_mark_suspended_fibers_hook();

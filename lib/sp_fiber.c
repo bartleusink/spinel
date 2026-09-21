@@ -307,8 +307,9 @@ void sp_fiber_worker_init(void) {
 sp_Fiber *sp_fiber_worker_root(void) { return &sp_fiber_root; }
 static sp_Fiber *sp_fiber_list_head = NULL;
 
-static void sp_fiber_save_roots(sp_Fiber*f){if(f->stack)sp_gc_wb((void*)f);/* the snapshot may name young objects, and only a scanned fiber follows it now: an old fiber has to be remembered (#4525) */if(f->saved_roots_cap<sp_gc_nroots){int nc=sp_gc_nroots>64?sp_gc_nroots*2:64;void***nx=(void***)realloc(f->saved_roots,sizeof(void**)*nc);if(!nx)return;f->saved_roots=nx;f->saved_roots_cap=nc;}if(sp_gc_nroots>0)memcpy(f->saved_roots,sp_gc_roots,sizeof(void**)*sp_gc_nroots);f->saved_nroots=sp_gc_nroots;}
-static void sp_fiber_restore_roots(sp_Fiber*f){if(f->saved_nroots>0)memcpy(sp_gc_roots,f->saved_roots,sizeof(void**)*f->saved_nroots);sp_gc_nroots=f->saved_nroots;}
+static void sp_fiber_save_roots(sp_Fiber*f){if(f->stack)sp_gc_wb((void*)f);/* the snapshot may name young objects, and only a scanned fiber follows it now: an old fiber has to be remembered (#4525) */if(f->saved_roots_cap<sp_gc_nroots){int nc=sp_gc_nroots>64?sp_gc_nroots*2:64;void***nx=(void***)realloc(f->saved_roots,sizeof(void**)*nc);if(!nx)return;f->saved_roots=nx;f->saved_roots_cap=nc;}/* both segments: the array, then whatever spilled past it (sp_gc.h) */
+int n1=sp_gc_nroots<SP_GC_STACK_MAX?sp_gc_nroots:SP_GC_STACK_MAX;if(n1>0)memcpy(f->saved_roots,sp_gc_roots,sizeof(void**)*n1);if(sp_gc_nroots>n1)memcpy(f->saved_roots+n1,sp_gc_roots_ext,sizeof(void**)*(sp_gc_nroots-n1));f->saved_nroots=sp_gc_nroots;}
+static void sp_fiber_restore_roots(sp_Fiber*f){int n=f->saved_nroots;int n1=n<SP_GC_STACK_MAX?n:SP_GC_STACK_MAX;if(n1>0)memcpy(sp_gc_roots,f->saved_roots,sizeof(void**)*n1);if(n>n1){if(!sp_gc_roots_ext_reserve(n))sp_oom_die();memcpy(sp_gc_roots_ext,f->saved_roots+n1,sizeof(void**)*(n-n1));}sp_gc_nroots=n;}
 /* Snapshot the calling worker's live shadow-stack roots into the green thread it
    is running, so a stop-the-world collector can mark them while this worker is
    parked at a safepoint. The collector reaches them via the suspended-fibers GC
