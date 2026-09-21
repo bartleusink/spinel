@@ -57,6 +57,7 @@ void infer_subtree(Compiler *c, int id);
    collecting emitter widen its element type past the tail expression so a
    `next <other-type>` is boxed rather than assigned to a mismatched temp. */
 TyKind ie_block_break_next_ty(Compiler *c, int node);
+TyKind then_block_value_ty(Compiler *c, int body, TyKind tail);
 
 /* True if CallNode `id` is an Enumerable method on a Range that spinel does not
    handle natively but supports on arrays -- served by materializing the range
