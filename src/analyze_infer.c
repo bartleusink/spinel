@@ -1525,6 +1525,16 @@ static TyKind infer_call_inner(Compiler *c, int id) {
        (argc == 1 && (sp_streq(name, "upto") || sp_streq(name, "downto")))) &&
       infer_type(c, recv) == TY_POLY && !an_user_defines_or_reads(c, name))
     return TY_INT;
+  /* The blockless forms answer the same range-shaped enumerator the typed
+     Integer arm answers below, so a chain on them (`n.times.map { }`) keeps
+     its array type. Without this arm a boxed receiver -- every Integer
+     parameter under promote mode -- left the chain unknown, and the call on
+     its answer was emitted as a NoMethodError (#4677). */
+  if (recv >= 0 && nt_ref(nt, id, "block") < 0 &&
+      ((argc == 0 && sp_streq(name, "times")) ||
+       (argc == 1 && (sp_streq(name, "upto") || sp_streq(name, "downto")))) &&
+      infer_type(c, recv) == TY_POLY && !an_user_defines_or_reads(c, name))
+    return TY_RANGE;
   /* `poly.find { }` / `detect { }` answer the winning ELEMENT, boxed. Without
      an arm here they fell through to the last-resort Hash face below, which
      types them as the winning [k, v] pair -- and the emitter, which answers
