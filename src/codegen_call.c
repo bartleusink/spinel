@@ -16542,6 +16542,52 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
   }
   return binds;
 }
+/* True if the push argument at `id` can neither write a variable nor reach
+   user code, so the slot the receiver was read from still holds the
+   receiver when the push runs. Admitted by shape alone: a literal, a local
+   or ivar read, self, or an index read on a builtin array held in a local
+   or ivar with an integer literal, local or ivar as the index. Anything
+   else roots: a call, an operator (its argument's class may answer it), an
+   interpolation (it calls to_s), a block, an assignment. A poly value is
+   admitted only as the whole argument of a push into a poly array, where
+   it is boxed as it is; anywhere else it would be coerced through a method
+   of its class. */
+static int push_arg_var_read(const NodeTable *nt, int id) {
+  const char *ty = id >= 0 ? nt_type(nt, id) : NULL;
+  return ty && (sp_streq(ty, "LocalVariableReadNode") ||
+                sp_streq(ty, "InstanceVariableReadNode"));
+}
+static int push_arg_keeps_slot(Compiler *c, int id, TyKind art) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return 0;
+  if (comp_ntype(c, id) == TY_POLY && art != TY_POLY_ARRAY) return 0;
+  if (sp_streq(ty, "IntegerNode") || sp_streq(ty, "FloatNode") ||
+      sp_streq(ty, "StringNode") || sp_streq(ty, "SymbolNode") ||
+      sp_streq(ty, "NilNode") || sp_streq(ty, "TrueNode") || sp_streq(ty, "FalseNode") ||
+      sp_streq(ty, "SelfNode") || push_arg_var_read(nt, id))
+    return 1;
+  if (!sp_streq(ty, "CallNode")) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  int rv = nt_ref(nt, id, "receiver");
+  if (!nm || !sp_streq(nm, "[]") || nt_ref(nt, id, "block") >= 0) return 0;
+  if (!push_arg_var_read(nt, rv) || !ty_is_array(comp_ntype(c, rv))) return 0;
+  int n = 0; const int *av = call_args(nt, id, &n);
+  if (n != 1 || !av) return 0;
+  const char *ity = nt_type(nt, av[0]);
+  if (!ity) return 0;
+  if (sp_streq(ity, "IntegerNode")) return 1;
+  return push_arg_var_read(nt, av[0]) && comp_ntype(c, av[0]) == TY_INT;
+}
+/* True if the push receiver at `recv` is a local or ivar read and every
+   argument keeps that slot, so the hoisted temp needs no root. */
+static int push_recv_in_slot(Compiler *c, int recv, int argc, const int *argv, TyKind art) {
+  if (!push_arg_var_read(c->nt, recv)) return 0;
+  for (int a = 0; a < argc; a++)
+    if (!push_arg_keeps_slot(c, argv[a], art)) return 0;
+  return 1;
+}
 
 static void emit_call_body(Compiler *c, int id, Buf *b) {
   /* deep-return pickup (#3227 P6): a marked receiverless call to a method
@@ -22089,7 +22135,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        (an sp_IntArray*) directly into the sp_PtrArray, no boxing. */
     if (ty_is_ptr_array(art)) {
       int t = ++g_tmp;
-      buf_printf(b, "({ sp_PtrArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, "; ");
+      buf_printf(b, "({ sp_PtrArray *_t%d = ", t);
+      if (push_recv_in_slot(c, recv, argc, argv, art)) { emit_expr(c, recv, b); buf_puts(b, "; "); }
+      else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
       for (int a = 0; a < argc; a++) {
         buf_printf(b, "sp_PtrArray_push(_t%d, ", t); emit_expr(c, argv[a], b); buf_puts(b, "); ");
       }
@@ -22132,7 +22180,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     const char *k = (art == TY_POLY_ARRAY) ? "Poly" : array_kind(art);
     int t = ++g_tmp;
     buf_puts(b, "({ ");
-    emit_ctype(c, art, b); buf_printf(b, " _t%d = ", t); emit_expr(c, recv, b); buf_puts(b, "; ");
+    emit_ctype(c, art, b); buf_printf(b, " _t%d = ", t);
+    /* The receiver sits in `_tN`, which is not a root, while the arguments
+       run. A fresh array from a call is held by nothing else; a local or an
+       ivar is held by its slot, but only until an argument overwrites the
+       slot, which an argument that writes a variable or runs user code can
+       do. So `_tN` is rooted, as the hoisting arms in codegen_call_recv.c
+       root theirs, unless the receiver is a slot read and every argument
+       keeps the slot (push_recv_in_slot above). The pointer-array form
+       above follows the same rule. */
+    if (push_recv_in_slot(c, recv, argc, argv, art)) { emit_expr(c, recv, b); buf_puts(b, "; "); }
+    else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
     TyKind elem = ty_array_elem(art);
     for (int a = 0; a < argc; a++) {
       buf_printf(b, "sp_%sArray_push(_t%d, ", k, t);
