@@ -1693,7 +1693,7 @@ endif
 # load anyway. The binaries are the same speed here -- these are wide-API tests
 # rather than loops, 0.023s vs 0.024s on the worst one.
 define RUN_ONE_TEST
-@mkdir -p build/test-results
+@mkdir -p build/test-results build/test-slots
 @# Raise the descriptor soft limit toward the hard one, best effort. A test
 @# that has to reach a descriptor past FD_SETSIZE (io_select_high_fd, #4314)
 @# cannot get there under a 1024 soft limit, and a shell that refuses the
@@ -1741,7 +1741,16 @@ if [ $$? -eq 0 ]; then \
     fi; \
     LC_ALL=C sed 's/\r$$//' "$$exp" >"$$exp.n"; \
   fi; \
-  $(TIMEOUT10) "$$bin" $$args <"$$stdinf" >"$$act" 2>"$$acterr"; \
+  slotn=""; \
+  for _i in $$(seq 0 63); do \
+    if mkdir "build/test-slots/lock.$$_i" 2>/dev/null; then slotn=$$_i; break; fi; \
+  done; \
+  runbin="$$bin"; \
+  if [ -n "$$slotn" ] && cat "$$bin" > "build/test-slots/bin.$$slotn" 2>/dev/null; then \
+    chmod +x "build/test-slots/bin.$$slotn"; runbin="build/test-slots/bin.$$slotn"; \
+  fi; \
+  $(TIMEOUT10) "$$runbin" $$args <"$$stdinf" >"$$act" 2>"$$acterr"; \
+  if [ -n "$$slotn" ]; then rmdir "build/test-slots/lock.$$slotn" 2>/dev/null || true; fi; \
   LC_ALL=C sed 's/\r$$//' "$$act" >"$$act.n"; \
   LC_ALL=C sed 's/\r$$//' "$$acterr" >"$$acterr.n"; \
   if [ -f "$<.err.expected" ]; then \
@@ -1779,6 +1788,9 @@ build/test-results/%.ok: test/%.rb $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE
 
 clean-test-results:
 	@rm -rf build/test-results
+	@# Only the locks: the slot files themselves are what we are keeping, and
+	@# a lock left behind by an interrupted run would retire that slot.
+	@rm -rf build/test-slots/lock.* 2>/dev/null || true
 
 # ---- Expected-output regeneration ----
 # Snapshot each test's reference Ruby output so the test target uses the file
