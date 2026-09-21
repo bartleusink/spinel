@@ -396,6 +396,93 @@ static void sp_fiber_fault_arm(void) {
    this is a no-op once either has run. */
 void sp_stack_guard_init(void) { sp_fiber_fault_arm(); }
 
+/* ---- the stack the program body runs on -------------------------------
+   The OS gives a process one stack and decides how big: 8 MB on macOS, and
+   a recursion that is merely deep -- generated code reaches depths written
+   code does not -- runs out of it long before it has done anything wrong.
+   The body runs on a stack mapped here instead, so its depth is this
+   compiler's choice rather than the loader's.
+
+   This deliberately does NOT go through sp_Fiber. A fiber would bring its
+   bookkeeping -- state, roots, exception context, a resumer to hand back to
+   -- and an overflow raised past all that leaves it mid-flight. The body
+   needs none of it: it is entered once, it returns once, and nothing
+   transfers to it. So it takes the context primitives on their own, and the
+   root fiber stays what it already is, the implicit running coroutine with
+   no mmap'd stack of its own.
+
+   The guard is the same PROT_NONE page a fiber's stack gets, and the raise
+   that reads it is the one already in this file: sp_thread_stack_lo/hi are
+   pointed at the new stack, so the handler's own test needs no change. */
+static size_t sp_main_stack_size = 0;
+static int sp_main_stack_from_env = 0;
+void sp_main_stack_hint(size_t bytes) {
+  if (!sp_main_stack_from_env && bytes) sp_main_stack_size = bytes;
+}
+static size_t sp_main_stack_bytes(void) {
+  if (!sp_main_stack_size) {
+    const char *e = getenv("SPINEL_MAIN_STACK");
+    size_t v = e && *e ? sp_fiber_stack_parse(e) : 0;
+    if (v) sp_main_stack_from_env = 1;
+    /* 32-bit address space is not free; 64-bit address space is */
+    sp_main_stack_size = v ? v
+                          : (sizeof(void *) < 8 ? (size_t)24 << 20
+                                                : (size_t)256 << 20);
+  }
+  long p = sysconf(_SC_PAGESIZE); size_t page = p > 0 ? (size_t)p : 4096;
+  size_t sz = (sp_main_stack_size + page - 1) / page * page;
+  /* a stack too small to hold the startup frames is worse than none: floor it
+     at a size that certainly works, whatever the environment asked for */
+  if (sz < (size_t)(1u << 20)) sz = (size_t)1u << 20;
+  return sz;
+}
+
+static char *sp_main_stack_base = 0;   /* mmap base (guard + stack), or NULL */
+static size_t sp_main_stack_map = 0;
+static void (*sp_main_stack_body)(void) = 0;
+static sp_fiber_ctx sp_main_stack_caller;
+static sp_fiber_ctx sp_main_stack_ctx;
+
+static void sp_main_stack_entry(void) {
+  sp_main_stack_body();
+  /* back to main, on the stack the loader gave it, to return from there */
+  sp_ctx_swap(&sp_main_stack_ctx, &sp_main_stack_caller);
+}
+
+/* Run `body` on a stack of this compiler's choosing. If one cannot be had --
+   any size, down to the floor -- run it where we are: a program must not fail
+   to start because it could not reserve a big stack. */
+void sp_main_stack_run(void (*body)(void)) {
+  size_t guard = sp_fiber_guard();
+  size_t want = sp_main_stack_bytes();
+  char *base = MAP_FAILED;
+  for (;;) {
+    base = (char *)mmap(NULL, guard + want, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_NORESERVE, -1, 0);
+    if (base != MAP_FAILED) break;
+    if (want <= (size_t)(1u << 20)) break;    /* the floor: give up on mapping */
+    want /= 2;                                 /* halve and ask again */
+  }
+  if (base == MAP_FAILED) { body(); return; }
+  mprotect(base, guard, PROT_NONE);
+  sp_main_stack_base = base; sp_main_stack_map = guard + want;
+  sp_main_stack_body = body;
+  /* Arm FIRST: arming reads the running thread's own bounds, and would
+     overwrite the ones set here if it ran after them. Then say where the
+     stack really is -- the handler reads these to tell a stack that ran out
+     from a bad pointer, and the guard page below `lo` is the mprotect'd one
+     above. */
+  sp_stack_guard_init();
+  sp_thread_stack_lo = base + guard;
+  sp_thread_stack_hi = base + guard + want;
+  sp_ctx_make(&sp_main_stack_ctx, base + guard, want, sp_main_stack_entry);
+  sp_ctx_swap(&sp_main_stack_caller, &sp_main_stack_ctx);
+  /* the body returned; nothing runs on that stack any more */
+  sp_thread_stack_lo = 0; sp_thread_stack_hi = 0;
+  munmap(sp_main_stack_base, sp_main_stack_map);
+  sp_main_stack_base = 0; sp_main_stack_map = 0;
+}
+
 void sp_fiber_worker_init(void) {
   sp_fiber_current = &sp_fiber_root;
   sp_fiber_fault_arm();
