@@ -13012,8 +13012,18 @@ static sp_RbVal sp_poly_callable_spread(sp_RbVal v, sp_RbVal arr) {
          side-channel below, the same way a statically-typed .call declines via
          sp_bm_legacy_abi_ok. */
       _sp_proc_poly_args[i] = e;
+      /* So this raw view is SPECULATIVE: the trampoline may never look at it,
+         and for a Float or a Bignum it is guaranteed not to -- neither has an
+         sp_int slot to be read from. Converting them anyway used to saturate
+         in silence and now raises past the machine word (#4688), which turned
+         a speculative conversion into the answer: `m.call(*args)` with a wide
+         Float died on an argument the target was about to receive boxed and
+         intact, whatever ABI it was stamped with (#4704 regression). The
+         value here is a placeholder for exactly the kinds that have no slot. */
       slots[i] = (e.tag == SP_TAG_OBJ || e.tag == SP_TAG_STR)
-               ? (sp_int)(uintptr_t)e.v.p : sp_poly_to_i(e);
+                   ? (sp_int)(uintptr_t)e.v.p
+               : (e.tag == SP_TAG_FLT || e.tag == SP_TAG_BIGINT) ? 0
+               : sp_poly_to_i(e);
     }
     sp_method_proc_tramp((void *)v.v.p, n, slots);
     return _sp_proc_poly_ret;
