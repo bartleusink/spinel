@@ -2069,7 +2069,7 @@ static sp_bool sp_poly_responds_builtin(sp_RbVal v, const char *m) {
   static const char *const intm[] = {
     "times", "upto", "downto", "succ", "next", "pred", "even?", "odd?",
     "gcd", "lcm", "digits", "bit_length", "chr", "ord", "pow", "&", "|",
-    "^", "<<", ">>", "~", "integer?", NULL };
+    "^", "<<", ">>", "~", "integer?", "allbits?", "anybits?", "nobits?", NULL };
   static const char *const fltm[] = {
     "nan?", "infinite?", "finite?", "integer?", NULL };
   static const char *const rngm[] = {
@@ -3194,6 +3194,23 @@ static sp_RbVal sp_poly_int_ceildiv(sp_RbVal v, sp_RbVal d) {
   sp_RbVal nd = sp_poly_neg(d); SP_GC_ROOT_RBVAL(nd);
   sp_RbVal q = sp_poly_div(v, nd); SP_GC_ROOT_RBVAL(q);
   return sp_poly_neg(q);
+}
+/* allbits? / anybits? / nobits? on a boxed receiver: an Integer pair tests
+   in the word; a Bignum on either side tests in the Bignum, where a negative
+   receiver is sign-extended past the mask exactly as CRuby's is (`-1` covers
+   any mask). The face re-entry narrowed the box to sp_int and answered on a
+   truncated receiver, or raised NoMethodError for the Bignum it had. */
+static sp_bool sp_poly_int_bits_test(sp_RbVal v, sp_RbVal m, int which) {
+  static const char *const names[] = { "allbits?", "anybits?", "nobits?" };
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod(names[which], v);
+  if (v.tag == SP_TAG_INT && m.tag == SP_TAG_INT) {
+    sp_int x = v.v.i & m.v.i;
+    return which == 0 ? x == m.v.i : which == 1 ? x != 0 : x == 0;
+  }
+  sp_Bigint *a = sp_poly_int_operand(v, names[which]); SP_GC_ROOT(a);
+  sp_Bigint *b = sp_poly_int_operand(m, names[which]); SP_GC_ROOT(b);
+  sp_Bigint *x = sp_bigint_and(a, b); SP_GC_ROOT(x);
+  return which == 0 ? sp_bigint_cmp(x, b) == 0 : which == 1 ? sp_bigint_sign(x) != 0 : sp_bigint_sign(x) == 0;
 }
 static sp_RbVal sp_poly_int_gcd(sp_RbVal v, sp_RbVal o) {
   if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("gcd", v);
