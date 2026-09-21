@@ -2287,6 +2287,13 @@ int desugar_enumerable_via_to_a(Compiler *c) {
         if (ernm && (sp_streq(ernm, "each") || sp_streq(ernm, "each_with_index") ||
                      sp_streq(ernm, "reverse_each"))) continue;
       } }
+    /* find_index WITH A BLOCK is a Ruby definition now (builtins/enumerable.rb)
+       whose `each` walks a Hash or a Range as it is, an endless Range
+       included, the same carve-out find/detect already have below; only the
+       value-argument form (`find_index(v)`, no walk of its own -- kept on
+       its own emitter) still wants the faithfully-raising to_a hop on an
+       endless Range. */
+    if (sp_streq(nm, "find_index") && nt_ref(nt, id, "block") >= 0) continue;
     /* A one-sided Range cannot become an array at all, and find / detect
        have their own walk from the bounded end: routing them through to_a
        turned a working search into a RangeError (#3863). The other names
@@ -2877,6 +2884,16 @@ int desugar_builtin_enum_calls(Compiler *c) {
     if ((sp_streq(name, "any?") || sp_streq(name, "all?") ||
          sp_streq(name, "none?") || sp_streq(name, "one?")) &&
         nt_ref(nt, id, "block") < 0) continue;
+    /* find_index without a block is either the value-argument form
+       (`find_index(v)`, its own arity/emitter arm) or the blockless
+       Enumerator form (`find_index` alone); the generic def has no
+       parameter for the value form and no non-inlined body for the
+       Enumerator form (both stay unreached by design, like find/detect's
+       `else: each`), so a blockless call here found no block to inline
+       against and called an out-of-line clone that was never emitted
+       (undefined reference at link time). Only the block form is a
+       rewrite target. */
+    if (sp_streq(name, "find_index") && nt_ref(nt, id, "block") < 0) continue;
     /* find/detect reachable from an optional/keyword parameter's default
        value: see find_calls_in_param_defaults. */
     if (in_default && in_default[id] &&

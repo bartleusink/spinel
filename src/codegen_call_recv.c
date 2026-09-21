@@ -2306,13 +2306,21 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         }
       }
     }
-    /* find_index / index { |x| cond } on a poly array -> the index or nil.
-       The typed-array form lives inside the `if (k)` block below; array_kind
-       is NULL for a poly array, so handle it here. Unlike the int/str-array
-       forms (which infer TY_POLY and box), index/find_index on a poly array
-       infer as a plain nullable sp_int -- return the bare SP_INT_NIL
-       sentinel, don't box. */
-    if (rt == TY_POLY_ARRAY && (sp_streq(name, "find_index") || sp_streq(name, "index")) &&
+    /* index { |x| cond } on a poly array -> the index or nil. The typed-array
+       form lives inside the `if (k)` block below; array_kind is NULL for a
+       poly array, so handle it here. Unlike the int/str-array forms (which
+       infer TY_POLY and box), index on a poly array infers as a plain
+       nullable sp_int -- return the bare SP_INT_NIL sentinel, don't box.
+       find_index used to be here too: now a Ruby definition (builtins/
+       enumerable.rb), it is always rewritten to the generic __enum_find_index__
+       dispatch before codegen ever sees this name here (desugar_builtin_enum_calls'
+       `ty_is_array(rt)` gate covers TY_POLY_ARRAY), so this arm is dead for
+       it -- and a stale hand-written find_index arm sharing a guard with a
+       still-live name (emit_find_index_poly_expr, elsewhere in this
+       migration) is exactly what raced the new dispatch and corrupted an
+       unrelated poly call the moment Set was merely required; drop it here
+       too rather than leave a second copy of that trap. */
+    if (rt == TY_POLY_ARRAY && sp_streq(name, "index") &&
         nt_ref(nt, id, "block") >= 0) {
       int fblock = nt_ref(nt, id, "block");
       const char *bp = block_param_name(c, fblock, 0); if (bp) bp = rename_local(bp);

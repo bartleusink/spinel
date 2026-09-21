@@ -1493,15 +1493,31 @@ static int is_stopiter_loop(Compiler *c, int id) {
   return nm && sp_streq(nm, "loop") && nt_ref(nt, id, "block") >= 0;
 }
 
-/* Does scope index `si` contain a begin/rescue or a `loop {}` (so its locals
-   need volatile across the setjmp it emits)? */
+/* A break-carrying block call whose break cannot be delivered by a
+   same-function goto (brk_wrapper_light declines: the receiver's each is
+   only resolved at run time, or the call reaches a user method that lifts
+   the block into a real Proc) is wrapped in the same serial-addressed
+   sp_brk_push/setjmp/sp_brk_throw scope a begin/rescue uses -- a local
+   written before the throw and read after (an accumulator set right before
+   `break`, find_index's `idx = i; break`) is just as indeterminate there
+   without volatile. A LIGHT wrapper (every break a goto within this same
+   function) needs none of this. */
+static int is_heavy_brk_call(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) return 0;
+  return call_breaks(c, id) && !brk_wrapper_light(c, id);
+}
+
+/* Does scope index `si` contain a begin/rescue, a `loop {}`, or a heavy
+   (real-setjmp) break-carrying call (so its locals need volatile across the
+   setjmp it emits)? */
 int scope_has_begin(Compiler *c, int si) {
   for (int id = 0; id < c->nt->count; id++) {
     if (c->nscope[id] != si) continue;
     const char *ty = nt_type(c->nt, id);
     if (ty && (sp_streq(ty, "BeginNode") || sp_streq(ty, "RescueNode")))
       return 1;
-    if (is_stopiter_loop(c, id)) return 1;
+    if (is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) return 1;
   }
   return 0;
 }
@@ -1545,7 +1561,7 @@ static void begin_volatile_names(Compiler *c, int si, char ***out, int *nout, in
   char *inb = (char *)calloc((size_t)(nt->count > 0 ? nt->count : 1), 1);
   if (!inb) { *all = 1; return; }  /* OOM: fall back to the conservative whole-scope rule */
   for (int id = 0; id < nt->count; id++)
-    if (((nt_kind(nt, id) == NK_BeginNode) || is_stopiter_loop(c, id)) && c->nscope[id] == si) mark_subtree(nt, id, inb);
+    if (((nt_kind(nt, id) == NK_BeginNode) || is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) && c->nscope[id] == si) mark_subtree(nt, id, inb);
   for (int id = 0; id < nt->count; id++)
     if (nt_kind(nt, id) == NK_RescueNode && c->nscope[id] == si && !inb[id]) { *all = 1; break; }
   if (*all) { free(inb); return; }

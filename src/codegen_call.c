@@ -10912,7 +10912,7 @@ static int brk_block_direct_only(const NodeTable *nt, int node, int depth) {
    user method. Anything else (a boxed receiver dispatching to a user each
    that lifts the block, an Enumerator driven by the runtime) keeps the
    serial-addressed scope. */
-static int brk_wrapper_light(Compiler *c, int id) {
+int brk_wrapper_light(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   int blk = nt_ref(nt, id, "block");
   if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
