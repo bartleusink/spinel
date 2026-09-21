@@ -2148,7 +2148,11 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
        so the arg order is preserved), return the receiver. */
     if (rt == TY_POLY_ARRAY && (sp_streq(name, "unshift") || sp_streq(name, "prepend")) && argc >= 1) {
       int t = ++g_tmp;
-      buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, ";");
+      buf_printf(b, "({ sp_PolyArray *_t%d = ", t);
+      /* the hoisted receiver is rooted across its arguments unless a slot
+         read with slot-keeping arguments already holds it (push_recv_in_slot) */
+      if (push_recv_in_slot(c, recv, argc, argv, rt)) { emit_expr(c, recv, b); buf_puts(b, ";"); }
+      else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
       /* evaluate (and root) every element left-to-right first, THEN insert them
          at the front in reverse so the arg order is preserved -- keeps Ruby's
          left-to-right evaluation independent of the receiver mutations. */
@@ -2851,14 +2855,21 @@ else {
       }
       if ((sp_streq(name, "unshift") || sp_streq(name, "prepend")) && argc >= 1) {
         int t = ++g_tmp;
+        /* the hoisted receiver is rooted across its arguments unless a slot
+           read with slot-keeping arguments already holds it (push_recv_in_slot) */
+        int held = push_recv_in_slot(c, recv, argc, argv, rt);
         if (rt == TY_INT_ARRAY) {
-          buf_printf(b, "({ sp_IntArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, ";");
+          buf_printf(b, "({ sp_IntArray *_t%d = ", t);
+          if (held) { emit_expr(c, recv, b); buf_puts(b, ";"); }
+          else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
           for (int a = argc - 1; a >= 0; a--) {
             buf_printf(b, " sp_IntArray_unshift(_t%d, ", t); emit_typed_elem_value(c, argv[a], TY_INT, b); buf_puts(b, ");");
           }
         }
         else if (rt == TY_STR_ARRAY) {
-          buf_printf(b, "({ sp_StrArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, ";");
+          buf_printf(b, "({ sp_StrArray *_t%d = ", t);
+          if (held) { emit_expr(c, recv, b); buf_puts(b, ";"); }
+          else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
           for (int a = 0; a < argc; a++) {
             buf_printf(b, " sp_StrArray_insert(_t%d, %d, ", t, a); emit_typed_elem_value(c, argv[a], TY_STRING, b); buf_puts(b, ");");
           }
@@ -2868,7 +2879,9 @@ else {
              dispatch; poly arrays route elsewhere). Evaluate the arguments
              left to right into temporaries (Ruby's argument-evaluation order),
              then prepend them in reverse so a multi-arg unshift keeps order. */
-          buf_printf(b, "({ sp_FloatArray *_t%d = ", t); emit_expr(c, recv, b); buf_puts(b, ";");
+          buf_printf(b, "({ sp_FloatArray *_t%d = ", t);
+          if (held) { emit_expr(c, recv, b); buf_puts(b, ";"); }
+          else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
           for (int a = 0; a < argc; a++) {
             buf_printf(b, " sp_float _u%d_%d = ", t, a); emit_typed_elem_value(c, argv[a], TY_FLOAT, b); buf_puts(b, ";");
           }
