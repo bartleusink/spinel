@@ -2660,6 +2660,12 @@ int desugar_builtins(Compiler *c) {
       cn0 = "flat_map";
       nt_node_set_str(nt, id, "name", cn0);
     }
+    /* detect is find under another name, the same way */
+    if (cn0 && sp_streq(cn0, "detect") && builtin_enum_name_index("find") >= 0 &&
+        !program_defines_name(nt, n0, "detect")) {
+      cn0 = "find";
+      nt_node_set_str(nt, id, "name", cn0);
+    }
     int bi = builtin_enum_name_index(cn0);
     if (bi < 0 || gdef[bi] < 0) continue;
     int copy = nt_clone_subtree(nt, gdef[bi]);
@@ -2774,11 +2780,46 @@ int fold_static_is_a(Compiler *c) {
    when no class in the program defines `m`. Rewritten into
    `__enum_m(recv, args) { }`; runs in the fixpoint so the receiver's type has
    settled. A receiver whose class defines `m` keeps its call. */
+static void mark_subtree_ids(const NodeTable *nt, int id, unsigned char *mark) {
+  if (id < 0 || id >= nt->count || mark[id]) return;
+  mark[id] = 1;
+  const SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++) mark_subtree_ids(nt, nd->r[j].ref, mark);
+  for (int j = 0; j < nd->na; j++)
+    for (int k = 0; k < nd->a[j].n; k++) mark_subtree_ids(nt, nd->a[j].ids[k], mark);
+}
+
+/* An optional/keyword parameter's default is hoisted to the CALL site (any
+   one of them, however many there are) rather than evaluated inside the
+   method's own body: the top-of-function local declaration a yielding call's
+   spliced block param needs is emitted for the method that lexically OWNS
+   the default (where it is dead) rather than for whichever caller actually
+   evaluates it, so a caller's `lv_<param>` comes out undeclared there
+   (independent of this migration -- a hand-written yielding method used the
+   same way hits it too). find/detect's own typed/poly-array emitters below
+   are self-contained (they declare the block param inside their own loop,
+   the way the deleted C emitters for the other migrated names used to), so a
+   find/detect call reachable from a default value keeps its emitter instead
+   of taking the rewrite. */
+static unsigned char *find_calls_in_param_defaults(const NodeTable *nt, int n0) {
+  unsigned char *mark = (unsigned char *)calloc((size_t)(n0 ? n0 : 1), 1);
+  if (!mark) return NULL;
+  for (int id = 0; id < n0; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || (!sp_streq(ty, "OptionalParameterNode") && !sp_streq(ty, "OptionalKeywordParameterNode")))
+      continue;
+    int v = nt_ref(nt, id, "value");
+    if (v >= 0) mark_subtree_ids(nt, v, mark);
+  }
+  return mark;
+}
+
 int desugar_builtin_enum_calls(Compiler *c) {
   if (sp_builtin_enum_names_n == 0) return 0;
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count;
   int changed = 0;
+  unsigned char *in_default = find_calls_in_param_defaults(nt, n0);
   /* `recv.m(args).each { blk }` is `recv.m(args) { blk }` (the Enumerator's
      each runs the method it came from, #4332), and that chain rule keys on
      the inner call's receiver: a blockless call that is the receiver of an
@@ -2806,8 +2847,13 @@ int desugar_builtin_enum_calls(Compiler *c) {
     int ok = 0;
     /* an Enumerator over a generator is driven lazily through #next by the
        typed emitter of these names, which is what lets a prefix be taken
-       from an infinite one; the definition's `each` would materialize it */
-    int lazy_driven = rt == TY_ENUMERATOR && sp_streq(name, "take_while");
+       from an infinite one (or a search on one to terminate at all); the
+       definition's `each` would materialize it first. A user class with no
+       `each` of its own that never ends (an infinite `loop { yield }`) is
+       routed through the same `__to_enum_each` synthesis (#3756) before this
+       runs, so it reaches here as TY_ENUMERATOR too. */
+    int lazy_driven = rt == TY_ENUMERATOR &&
+                      (sp_streq(name, "take_while") || sp_streq(name, "find") || sp_streq(name, "detect"));
     /* Range overrides these in CRuby with an O(1) answer read off the
        endpoints, never calling each -- observable, not only faster: a Float
        range cannot iterate at all, and `(1.0..5.0).minmax` answers. Those
@@ -2824,6 +2870,9 @@ int desugar_builtin_enum_calls(Compiler *c) {
        O(n) walk CRuby's Enumerable#count itself does, which the definition
        below does not special-case; both stay on the existing emitter. */
     if (sp_streq(name, "count") && nt_ref(nt, id, "block") < 0) continue;
+    /* find/detect reachable from an optional/keyword parameter's default
+       value: see find_calls_in_param_defaults. */
+    if (in_default && in_default[id] && (sp_streq(name, "find") || sp_streq(name, "detect"))) continue;
     if (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE || rt == TY_FLOAT_RANGE ||
         rt == TY_STR_RANGE || (rt == TY_ENUMERATOR && !lazy_driven)) ok = 1;
     /* an empty `[]` / `{}` receiver has no type until its use decides one,
@@ -2878,7 +2927,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
       int es = nt_new_node(nt, "StatementsNode");
       int eln = nt_new_node(nt, "ElseNode");
       int body = nt_new_node(nt, "StatementsNode");
-      if (w < 0 || own < 0 || ownr < 0 || genr < 0 || gen < 0 || ifn < 0 || ts < 0 || es < 0 || eln < 0 || body < 0) { free(chained); return changed; }
+      if (w < 0 || own < 0 || ownr < 0 || genr < 0 || gen < 0 || ifn < 0 || ts < 0 || es < 0 || eln < 0 || body < 0) { free(chained); free(in_default); return changed; }
       nt_node_set_str(nt, w, "name", rn); nt_node_set_int(nt, w, "depth", 0);
       nt_node_set_ref(nt, w, "value", recv);
       nt_node_set_str(nt, ownr, "name", rn); nt_node_set_int(nt, ownr, "depth", 0);
@@ -2889,7 +2938,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
       if (safe_nav) {
         int nr = nt_new_node(nt, "LocalVariableReadNode");
         int nq = nt_new_node(nt, "CallNode");
-        if (nr < 0 || nq < 0) { free(chained); return changed; }
+        if (nr < 0 || nq < 0) { free(chained); free(in_default); return changed; }
         nt_node_set_str(nt, nr, "name", rn); nt_node_set_int(nt, nr, "depth", 0);
         nt_node_set_str(nt, nq, "name", "nil?");
         nt_node_set_ref(nt, nq, "receiver", nr);
@@ -2900,7 +2949,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
         int cr = nt_new_node(nt, "ConstantReadNode");
         int ia = nt_new_node(nt, "CallNode");
         int iaa = nt_new_node(nt, "ArgumentsNode");
-        if (pr < 0 || cr < 0 || ia < 0 || iaa < 0) { free(chained); return changed; }
+        if (pr < 0 || cr < 0 || ia < 0 || iaa < 0) { free(chained); free(in_default); return changed; }
         nt_node_set_str(nt, pr, "name", rn); nt_node_set_int(nt, pr, "depth", 0);
         nt_node_set_str(nt, cr, "name", c->classes[defcls[k]].name);
         nt_node_set_arr(nt, iaa, "arguments", &cr, 1);
@@ -2910,7 +2959,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
         if (pred < 0) pred = ia;
         else {
           int orn = nt_new_node(nt, "OrNode");
-          if (orn < 0) { free(chained); return changed; }
+          if (orn < 0) { free(chained); free(in_default); return changed; }
           nt_node_set_ref(nt, orn, "left", pred);
           nt_node_set_ref(nt, orn, "right", ia);
           pred = orn;
@@ -2929,7 +2978,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
         int cts = nt_new_node(nt, "StatementsNode");
         int ces = nt_new_node(nt, "StatementsNode");
         int celse = nt_new_node(nt, "ElseNode");
-        if (nil_n < 0 || ifc < 0 || cts < 0 || ces < 0 || celse < 0) { free(chained); return changed; }
+        if (nil_n < 0 || ifc < 0 || cts < 0 || ces < 0 || celse < 0) { free(chained); free(in_default); return changed; }
         /* pred so far is `__r.nil?`; the class test becomes the inner if */
         int cpred = -1;
         for (int k = 0; k < ndef; k++) {
@@ -2937,7 +2986,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
           int cr2 = nt_new_node(nt, "ConstantReadNode");
           int ia2 = nt_new_node(nt, "CallNode");
           int iaa2 = nt_new_node(nt, "ArgumentsNode");
-          if (pr2 < 0 || cr2 < 0 || ia2 < 0 || iaa2 < 0) { free(chained); return changed; }
+          if (pr2 < 0 || cr2 < 0 || ia2 < 0 || iaa2 < 0) { free(chained); free(in_default); return changed; }
           nt_node_set_str(nt, pr2, "name", rn); nt_node_set_int(nt, pr2, "depth", 0);
           nt_node_set_str(nt, cr2, "name", c->classes[defcls[k]].name);
           nt_node_set_arr(nt, iaa2, "arguments", &cr2, 1);
@@ -2945,7 +2994,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
           nt_node_set_ref(nt, ia2, "receiver", pr2);
           nt_node_set_ref(nt, ia2, "arguments", iaa2);
           if (cpred < 0) cpred = ia2;
-          else { int o2 = nt_new_node(nt, "OrNode"); if (o2 < 0) { free(chained); return changed; }
+          else { int o2 = nt_new_node(nt, "OrNode"); if (o2 < 0) { free(chained); free(in_default); return changed; }
                  nt_node_set_ref(nt, o2, "left", cpred); nt_node_set_ref(nt, o2, "right", ia2); cpred = o2; }
         }
         nt_node_set_str(nt, own, "name", name);
@@ -2990,12 +3039,12 @@ int desugar_builtin_enum_calls(Compiler *c) {
       if (es2) scope_local_intern(es2, rn);
     }
     int *na = (int *)malloc(sizeof(int) * (size_t)(an + 1));
-    if (!na) { free(chained); return changed; }
+    if (!na) { free(chained); free(in_default); return changed; }
     na[0] = recv_read; for (int j = 0; j < an; j++) na[j + 1] = av[j];
     /* a fresh arguments node: the old one may be shared with a call the
        Enumerator each rule rewrote onto it (an orphan keeps a reference) */
     int nargs = nt_new_node(nt, "ArgumentsNode");
-    if (nargs < 0) { free(na); free(chained); return changed; }
+    if (nargs < 0) { free(na); free(chained); free(in_default); return changed; }
     nt_node_set_arr(nt, nargs, "arguments", na, an + 1);
     nt_node_set_ref(nt, generic, "arguments", nargs);
     free(na);
@@ -3005,6 +3054,6 @@ int desugar_builtin_enum_calls(Compiler *c) {
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     changed = 1;
   }
-  free(chained);
+  free(chained); free(in_default);
   return changed;
 }

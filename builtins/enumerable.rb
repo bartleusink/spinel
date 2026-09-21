@@ -202,6 +202,21 @@ module Enumerable
     end
   end
 
+  def find
+    if block_given?
+      found = nil
+      each do |x|
+        if yield(x)
+          found = x
+          break
+        end
+      end
+      found
+    else
+      each
+    end
+  end
+
   def take_while
     if block_given?
       out = []
