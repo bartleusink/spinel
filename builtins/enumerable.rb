@@ -202,6 +202,94 @@ module Enumerable
     end
   end
 
+  def any?
+    if block_given?
+      found = false
+      each do |x|
+        if yield(x)
+          found = true
+          break
+        end
+      end
+      found
+    else
+      # unreached by the rewrite (desugar_builtin_enum_calls keeps a
+      # blockless call, and the pattern-argument form, on the typed
+      # emitter): a blockless any? asks about each element's own
+      # truthiness, not the block's.
+      found = false
+      each do |x|
+        if x
+          found = true
+          break
+        end
+      end
+      found
+    end
+  end
+
+  def all?
+    if block_given?
+      result = true
+      each do |x|
+        unless yield(x)
+          result = false
+          break
+        end
+      end
+      result
+    else
+      result = true
+      each do |x|
+        unless x
+          result = false
+          break
+        end
+      end
+      result
+    end
+  end
+
+  def none?
+    if block_given?
+      result = true
+      each do |x|
+        if yield(x)
+          result = false
+          break
+        end
+      end
+      result
+    else
+      result = true
+      each do |x|
+        if x
+          result = false
+          break
+        end
+      end
+      result
+    end
+  end
+
+  def one?
+    if block_given?
+      n = 0
+      each do |x|
+        n += 1 if yield(x)
+        break if n > 1
+      end
+      n == 1
+    else
+      n = 0
+      each do |x|
+        n += 1 if x
+        break if n > 1
+      end
+      n == 1
+    end
+  end
+
   def find
     if block_given?
       found = nil

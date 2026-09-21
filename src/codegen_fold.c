@@ -5144,14 +5144,22 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
     LocalVar *pblv = (pbs && p0raw) ? scope_local(pbs, p0raw) : NULL;
     TyKind pbt = pblv ? pblv->type : ty_array_elem(rt);
     emit_indent(g_pre, bodyIndent);
+    /* Declare the block param in the loop body (not a bare assignment) so
+       this is self-contained: when the call is a parameter default hoisted
+       to the call site, the enclosing function has no top-level declaration
+       for the block local (find/detect's own arms already do this).
+       Shadows the method-scope slot in the ordinary in-body case, which is
+       harmless. */
     if (pbt == TY_POLY && ty_array_elem(rt) != TY_POLY) {
       /* poly slot fed by a concrete element: box it */
-      buf_printf(g_pre, "lv_%s = ", p0);
+      emit_ctype(c, pbt, g_pre);
+      buf_printf(g_pre, " lv_%s = ", p0);
       emit_boxed_text(c, ty_array_elem(rt), es_pr, g_pre);
       buf_puts(g_pre, ";\n");
     }
     else {
-      buf_printf(g_pre, "lv_%s = %s;\n", p0, es_pr);
+      emit_ctype(c, pbt, g_pre);
+      buf_printf(g_pre, " lv_%s = %s;\n", p0, es_pr);
     }
   }
   /* see the sibling above: a `next <value>` is the block's answer, and
