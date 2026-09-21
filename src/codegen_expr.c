@@ -1312,6 +1312,18 @@ void emit_expr(Compiler *c, int id, Buf *b) {
           return;
         }
       }
+      /* The narrowing was recorded while the slot was boxed; a slot that
+         has since settled on the narrowed type itself (`v = yield x` whose
+         every site answers an Array) is read as it is, not unboxed from a
+         box it never was. */
+      {
+        LocalVar *nlv = lrn ? scope_local(comp_scope_of(c, id), lrn) : NULL;
+        if (nlv && nlv->type == c->nilnarrow[id] && nlv->type != TY_POLY) {
+          buf_puts(b, rb2.p ? rb2.p : "");
+          free(rb2.p);
+          return;
+        }
+      }
       /* An `is_a?(Array)`-narrowed read: a boxed array can be any element-typed
          representation (Int/Float/Str/Poly array), so normalize to a PolyArray
          at runtime rather than casting the raw .v.p to one kind. */
@@ -1854,8 +1866,18 @@ void emit_expr(Compiler *c, int id, Buf *b) {
          value -- a Thread body's yielded_value, which is an sp_RbVal -- needs
          the whole struct instead, so take the yield's own inferred type as the
          answer to which (#3383). */
-      if (comp_ntype(c, id) == TY_POLY) buf_puts(b, ", _sp_proc_poly_ret)");
-      else buf_puts(b, ", _sp_proc_poly_ret.v.i)");
+      { TyKind yt = comp_ntype(c, id);
+        if (yt == TY_POLY) buf_puts(b, ", _sp_proc_poly_ret)");
+        else if (yt == TY_UNKNOWN || yt == TY_VOID || yt == TY_NIL || yt == TY_INT) buf_puts(b, ", _sp_proc_poly_ret.v.i)");
+        else {
+          /* a typed slot other than an Integer's reads the boxed answer by
+             its own kind: an array answer landed its raw carrier bits in an
+             sp_PolyArray * (the flat_map of a boxed receiver whose class
+             list has a Ruby `each`, so the definition was lowered) */
+          buf_puts(b, ", ");
+          emit_unbox_text(c, yt, "_sp_proc_poly_ret", b);
+          buf_puts(b, ")");
+        } }
       return;
     }
     if (g_yield_proc_ref) {

@@ -12058,7 +12058,7 @@ static sp_float sp_poly_Float_ex(sp_RbVal v, int raise) {
    second argument (each_with_object, inject) is not dispatched this way. */
 enum {
   SP_PENUM_EACH, SP_PENUM_MAP, SP_PENUM_SELECT, SP_PENUM_REJECT,
-  SP_PENUM_FIND, SP_PENUM_SORT_BY, SP_PENUM_FLAT_MAP, SP_PENUM_COUNT, SP_PENUM_SUM,
+  SP_PENUM_FIND, SP_PENUM_SORT_BY, SP_PENUM_COUNT, SP_PENUM_SUM,
   SP_PENUM_ANY, SP_PENUM_ALL, SP_PENUM_NONE,
   SP_PENUM_FIND_INDEX, SP_PENUM_TAKE_WHILE, SP_PENUM_DROP_WHILE,
   SP_PENUM_EACH_WITH_INDEX
@@ -12114,17 +12114,9 @@ static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
     case SP_PENUM_EACH_WITH_INDEX:
       for (sp_int i = 0; i < n; i++) sp_penum_call2(blk, src->data[i], sp_box_int(i));
       return recv;
-    case SP_PENUM_MAP: case SP_PENUM_FLAT_MAP: {
+    case SP_PENUM_MAP: {
       sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
-      for (sp_int i = 0; i < n; i++) {
-        sp_RbVal r = sp_penum_call1(blk, src->data[i]);
-        /* flat_map splices a returned array one level deep */
-        if (op == SP_PENUM_FLAT_MAP && r.tag == SP_TAG_OBJ && sp_poly_is_array_kind(r.cls_id)) {
-          sp_int m = sp_poly_arr_len(r);
-          for (sp_int j = 0; j < m; j++) sp_PolyArray_push(out, sp_poly_arr_get(r, j));
-        }
-        else sp_PolyArray_push(out, r);
-      }
+      for (sp_int i = 0; i < n; i++) sp_PolyArray_push(out, sp_penum_call1(blk, src->data[i]));
       return sp_box_poly_array(out);
     }
     case SP_PENUM_SELECT: case SP_PENUM_REJECT: {

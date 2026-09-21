@@ -270,6 +270,7 @@ int desugar_lazy_method_call(Compiler *c);
 int desugar_value_callable_forwards(Compiler *c);
 int desugar_builtins(Compiler *c);
 int desugar_builtin_enum_calls(Compiler *c);
+int fold_static_is_a(Compiler *c);
 int narrow_empty_array_args_by_yield(Compiler *c);
 int builtin_enum_name_index(const char *name);
 int an_class_includes_enumerable(Compiler *c, int ci);

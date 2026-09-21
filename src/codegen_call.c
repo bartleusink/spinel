@@ -17111,7 +17111,6 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (emit_predicate_expr(c, id, b)) return;
   if (emit_find_index_poly_expr(c, id, b)) return;
   if (emit_grep_expr(c, id, b)) return;
-  if (emit_flat_map_expr(c, id, b)) return;
   if (emit_poly_uniq_block(c, id, b)) return;
   if (emit_takewhile_with_index(c, id, b)) return;
   if (emit_iter_value_expr(c, id, b)) return;

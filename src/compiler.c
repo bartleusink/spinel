@@ -1540,7 +1540,6 @@ const char *poly_enum_op_for(const char *name) {
   static const struct { const char *nm, *op; } PEN[] = {
     {"each","SP_PENUM_EACH"}, {"each_with_index","SP_PENUM_EACH_WITH_INDEX"},
     {"map","SP_PENUM_MAP"}, {"collect","SP_PENUM_MAP"},
-    {"flat_map","SP_PENUM_FLAT_MAP"}, {"collect_concat","SP_PENUM_FLAT_MAP"},
     {"select","SP_PENUM_SELECT"}, {"filter","SP_PENUM_SELECT"},
     {"find_all","SP_PENUM_SELECT"}, {"reject","SP_PENUM_REJECT"},
     {"find","SP_PENUM_FIND"}, {"detect","SP_PENUM_FIND"},

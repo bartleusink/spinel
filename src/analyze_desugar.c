@@ -2537,6 +2537,14 @@ static void bi_subtree_blank(NodeTable *nt, int id) {
   nt_node_set_type(nt, id, "NilNode");
 }
 
+/* does any DefNode among the program's own nodes carry this name? (the
+   scopes are not built when desugar_builtins runs) */
+static int program_defines_name(const NodeTable *nt, int n0, const char *name) {
+  for (int id = 0; id < n0; id++)
+    if (nt_kind(nt, id) == NK_DefNode && nt_str(nt, id, "name") && sp_streq(nt_str(nt, id, "name"), name)) return 1;
+  return 0;
+}
+
 int desugar_builtins(Compiler *c) {
   if (sp_builtin_enum_names_n == 0) return 0;
   NodeTable *nt = (NodeTable *)c->nt;
@@ -2606,6 +2614,12 @@ int desugar_builtins(Compiler *c) {
       { char gn[256]; snprintf(gn, sizeof gn, "__enum_%s", name); nt_node_set_str(nt, def, "name", gn); }
       if (bi >= 0) gdef[bi] = def;
     }
+    /* the module node and its `Enumerable` constant leave the program too:
+       orphaned but still a ConstantReadNode, the constant made every
+       program that mentioned a builtin carry the class machinery (the
+       prologue scan walks the table by id) */
+    bi_subtree_blank(nt, cp);
+    nt_node_set_type(nt, st, "NilNode");
     changed = 1;
   }
   if (!changed) { free(gdef); free(nb); return 0; }
@@ -2632,6 +2646,14 @@ int desugar_builtins(Compiler *c) {
       if (er >= 0 && nt_kind(nt, er) == NK_CallNode && nt_ref(nt, er, "block") < 0) cn0 = nt_str(nt, er, "name");
     }
     if (cn0 && sp_streq(cn0, "with_object")) cn0 = "each_with_object";
+    /* collect_concat is flat_map under another name: the call takes the
+       name the definition has (a program that defines collect_concat
+       itself keeps its call) */
+    if (cn0 && sp_streq(cn0, "collect_concat") && builtin_enum_name_index("flat_map") >= 0 &&
+        !program_defines_name(nt, n0, "collect_concat")) {
+      cn0 = "flat_map";
+      nt_node_set_str(nt, id, "name", cn0);
+    }
     int bi = builtin_enum_name_index(cn0);
     if (bi < 0 || gdef[bi] < 0) continue;
     int copy = nt_clone_subtree(nt, gdef[bi]);
@@ -2647,6 +2669,97 @@ int desugar_builtins(Compiler *c) {
   comp_grow_node_arrays(c);
   free(gdef); free(nb);
   return 1;
+}
+
+/* `if v.is_a?(Array)` / `kind_of?` on a local whose type has settled is
+   decided here: a typed array is one, a scalar, a hash, an object or a
+   range is not, and the arm not taken leaves the program (blanked, so the
+   passes that walk the table by id stop typing what it wrote). A boxed
+   value, a boxed array (which may be nil, #4567) and an unresolved local
+   keep the run-time test. The fixpoint's optimistic rounds are left alone:
+   a type that is still moving must not decide an arm away.
+   builtins/enumerable.rb's flat_map is the case this exists for: with both
+   arms typed, `out << v` beside `out.concat(v)` made every result a boxed
+   array where the emitter it replaced answered the element's own kind. */
+int fold_static_is_a(Compiler *c) {
+  if (g_infer_optimistic) return 0;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  int changed = 0;
+  /* an `elsif` is the IfNode its parent's `subsequent` names: its
+     replacement has to stay an ElseNode there, which is what the parent's
+     emitter reads after its own arm */
+  unsigned char *is_elsif = (unsigned char *)calloc((size_t)(n0 ? n0 : 1), 1);
+  for (int id = 0; is_elsif && id < n0; id++) {
+    if (nt_kind(nt, id) != NK_IfNode) continue;
+    int sub = nt_ref(nt, id, "subsequent");
+    if (sub >= 0 && sub < n0 && nt_kind(nt, sub) == NK_IfNode) is_elsif[sub] = 1;
+  }
+  for (int id = 0; id < n0; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_IfNode && k != NK_UnlessNode) continue;
+    int pred = nt_ref(nt, id, "predicate");
+    if (pred < 0 || nt_kind(nt, pred) != NK_CallNode || nt_ref(nt, pred, "block") >= 0) continue;
+    const char *nm = nt_str(nt, pred, "name");
+    if (!nm || (!sp_streq(nm, "is_a?") && !sp_streq(nm, "kind_of?"))) continue;
+    int recv = nt_ref(nt, pred, "receiver");
+    if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) continue;
+    int args = nt_ref(nt, pred, "arguments");
+    int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    if (an != 1 || !av || nt_kind(nt, av[0]) != NK_ConstantReadNode) continue;
+    const char *kn = nt_str(nt, av[0], "name");
+    if (!kn || !sp_streq(kn, "Array")) continue;
+    const char *vn = nt_str(nt, recv, "name");
+    Scope *s = vn ? comp_scope_of(c, recv) : NULL;
+    LocalVar *lv = s ? scope_local(s, vn) : NULL;
+    if (!lv) continue;
+    TyKind t = lv->type;
+    if (t == TY_UNKNOWN || t == TY_POLY || t == TY_POLY_ARRAY || t == TY_NIL || t == TY_VOID) continue;
+    int ans = ty_is_array(t) || ty_is_obj_array(t);
+    if (k == NK_UnlessNode) ans = !ans;
+    int then_s = nt_ref(nt, id, "statements");
+    int els = nt_ref(nt, id, k == NK_IfNode ? "subsequent" : "else_clause");
+    int keep = ans ? then_s : els;
+    int drop = ans ? els : then_s;
+    if (keep >= 0 && nt_kind(nt, keep) == NK_ElseNode) keep = nt_ref(nt, keep, "statements");
+    if (keep >= 0 && nt_kind(nt, keep) != NK_StatementsNode) {
+      /* an `elsif` chain: the surviving arm is the next IfNode itself */
+      int st = nt_new_node(nt, "StatementsNode");
+      if (st < 0) break;
+      nt_node_set_arr(nt, st, "body", &keep, 1);
+      keep = st;
+    }
+    bi_subtree_blank(nt, pred);
+    if (drop >= 0) bi_subtree_blank(nt, drop);
+    nt_node_set_ref(nt, id, "predicate", -1);
+    nt_node_set_ref(nt, id, "statements", -1);
+    nt_node_set_ref(nt, id, k == NK_IfNode ? "subsequent" : "else_clause", -1);
+    if (is_elsif && is_elsif[id]) {
+      if (keep < 0) { keep = nt_new_node(nt, "StatementsNode"); if (keep < 0) break; }
+      nt_node_set_type(nt, id, "ElseNode");
+      nt_node_set_ref(nt, id, "statements", keep);
+    }
+    else if (keep >= 0) {
+      nt_node_set_type(nt, id, "BeginNode");
+      nt_node_set_ref(nt, id, "statements", keep);
+    }
+    else nt_node_set_type(nt, id, "NilNode");
+    /* The locals of this scope were typed with the dropped arm's evidence
+       in, and an empty-literal write carries a local's previous type from
+       round to round (infer_write_types), so the type would never move:
+       `out = []` beside `out << v` stayed a boxed array after `out.concat(v)`
+       became its only fill. Forget them; the next round re-derives each from
+       the evidence that is left. */
+    for (int i = 0; i < s->nlocals; i++) {
+      LocalVar *l = &s->locals[i];
+      if (l->is_param || l->is_block_param || l->rbs_seeded) continue;
+      l->type = TY_UNKNOWN; l->gc_root = (int)TY_UNKNOWN;
+    }
+    changed = 1;
+  }
+  free(is_elsif);
+  if (changed) comp_grow_node_arrays(c);
+  return changed;
 }
 
 /* `recv.m(args) { }` with `m` a builtins name, on a receiver the builtin

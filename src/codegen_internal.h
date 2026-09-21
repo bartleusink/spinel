@@ -750,7 +750,6 @@ int emit_takewhile_with_index(Compiler *c, int id, Buf *b);
 int emit_transform_hash_expr(Compiler *c, int id, Buf *b);
 int emit_bsearch_expr(Compiler *c, int id, Buf *b);
 int emit_poly_uniq_block(Compiler *c, int id, Buf *b);
-int emit_flat_map_expr(Compiler *c, int id, Buf *b);
 int emit_gsub_block_expr(Compiler *c, int id, Buf *b);
 int emit_sum_block_expr(Compiler *c, int id, Buf *b);
 int emit_sum_block_poly_expr(Compiler *c, int id, Buf *b);

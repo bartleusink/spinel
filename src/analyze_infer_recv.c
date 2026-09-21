@@ -596,9 +596,6 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       { *out = fold_seed_typed(fold_seed_infer_ty(c, argv[0]), TY_INT) ? TY_INT : TY_POLY; return 1; }
     if (nt_ref(nt, id, "block") < 0 && sp_streq(name, "sum") && argc == 0)
       { *out = TY_INT; return 1; }
-    if (nt_ref(nt, id, "block") >= 0 &&
-        (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat")))
-      { *out = TY_POLY_ARRAY; return 1; }
     {
       if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {
         int body = nt_ref(nt, block, "body");
@@ -800,15 +797,6 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         if (c->arr_want && id < c->node_cap && ty_is_ptr_array(c->arr_want[id]))
           { *out = c->arr_want[id]; return 1; }
         { *out = ty_array_of(bt); return 1; }
-      }
-      if (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat")) {
-        int body = nt_ref(nt, block, "body");
-        int bn = 0;
-        const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-        TyKind bret = bn > 0 ? infer_type(c, bb[bn - 1]) : TY_UNKNOWN;
-        /* block returns an array -> flatten one level keeps its element type;
-           a scalar block return behaves like map (each wrapped element). */
-        { *out = ty_is_array(bret) ? bret : ty_array_of(bret); return 1; }
       }
       if (sp_streq(name, "to_h") && argc == 0) {
         /* array.to_h { |x| [k, v] } -> a boxed-value hash, keyed by the

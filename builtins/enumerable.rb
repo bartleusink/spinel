@@ -160,4 +160,21 @@ module Enumerable
       each
     end
   end
+
+  def flat_map
+    if block_given?
+      out = []
+      each do |x|
+        v = yield x
+        if v.is_a?(Array)
+          out.concat(v)
+        else
+          out << v
+        end
+      end
+      out
+    else
+      each
+    end
+  end
 end

@@ -1458,9 +1458,18 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   }
   if (nx_own && as_expr && g_ie_next_var && !nx_tail_stmt && bn3 > 0) {
     for (int k3 = 0; k3 < bn3 - 1; k3++) emit_stmt(c, bd3[k3], b, 0);
-    buf_printf(b, "%s = ", nxbuf);
-    if (g_ie_res_poly) emit_boxed(c, bd3[bn3 - 1], b);
-    else emit_expr(c, bd3[bn3 - 1], b);
+    /* the tail's prelude stays inside the splice, after the parameter
+       bindings: hoisted to the enclosing statement, an array literal tail
+       (`{ |x| next [] if x == 2; [x] }`) was built from the parameter's
+       slot before the element was bound into it */
+    { Buf tb; memset(&tb, 0, sizeof tb);
+      Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
+      if (g_ie_res_poly) emit_boxed(c, bd3[bn3 - 1], &tb);
+      else emit_expr(c, bd3[bn3 - 1], &tb);
+      g_pre = svp3; g_indent = svi3;
+      buf_printf(b, "%s = ", nxbuf);
+      if (tb.p) buf_puts(b, tb.p);
+      free(tb.p); }
     buf_puts(b, "; ");
   }
   else if (as_expr && !nx_own && bn3 > 0 &&
