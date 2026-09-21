@@ -8314,6 +8314,9 @@ else {
       else if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
       else emit_expr(c, v, b);
     }
+    /* a boxed constant slot (widened under promote, or a union) takes the
+       value boxed, as the plain ConstantWriteNode does */
+    else if (cv->type == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
     else emit_expr(c, v, b);
     buf_puts(b, ";\n");
     return;
@@ -12124,13 +12127,15 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
          nil, &&= when present. Compare with == / != to avoid `!x != NIL`. */
       buf_printf(b, "if (sp_IntArray_get(_t%d, _t%d) %s SP_INT_NIL) sp_IntArray_set(_t%d, _t%d, ",
                  ta, tb, is_or ? "==" : "!=", ta, tb);
-      emit_expr(c, v, b);
+      { Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, v, &vb);
+        emit_typed_sink_text(c, v, TY_INT, vb.p ? vb.p : "0", b); free(vb.p); }
       buf_puts(b, ")");
     }
     else if (rt == TY_FLOAT_ARRAY) {
       buf_printf(b, "if (%ssp_float_is_nil(sp_FloatArray_get(_t%d, _t%d))) sp_FloatArray_set(_t%d, _t%d, ",
                  is_or ? "" : "!", ta, tb, ta, tb);
-      emit_expr(c, v, b);
+      { Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, v, &vb);
+        emit_typed_sink_text(c, v, TY_FLOAT, vb.p ? vb.p : "0.0", b); free(vb.p); }
       buf_puts(b, ")");
     }
     else if (rt == TY_STR_ARRAY) {

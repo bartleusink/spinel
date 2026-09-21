@@ -10694,6 +10694,14 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
       return 1;
     }
+    /* the same for an int `+`, `-`, `*` the inference typed poly under
+       promote (#4681): sp_poly_add / sub / mul promote past the word */
+    if (g_promote_mode && rt == TY_INT && a0 == TY_INT && res == TY_POLY &&
+        (sp_streq(name, "+") || sp_streq(name, "-") || sp_streq(name, "*"))) {
+      buf_printf(b, "sp_poly_%s(", sp_streq(name, "+") ? "add" : sp_streq(name, "-") ? "sub" : "mul");
+      emit_boxed(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      return 1;
+    }
     /* Re-derive result type when cache may be stale due to block-param widening */
     TyKind eff_res = res;
     if (eff_res != TY_INT && eff_res != TY_FLOAT && eff_res != TY_BIGINT) {

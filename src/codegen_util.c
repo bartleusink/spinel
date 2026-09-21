@@ -1503,6 +1503,20 @@ void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b) {
   }
   emit_expr(c, node, b);
 }
+/* A value written into a typed scalar slot -- an Integer or Float array's
+   element, a typed accumulator -- from an expression the inference typed
+   boxed: under --int-overflow=promote an arithmetic node whose operands are
+   not constants is poly (it may promote), while the slot it lands in stays
+   typed (a typed Array does not widen), so the value is converted at the
+   sink; a Bignum that does not fit raises there. Any other expression is
+   emitted as it is. `text` is the already-rendered expression. */
+void emit_typed_sink_text(Compiler *c, int node, TyKind slot, const char *text, Buf *b) {
+  TyKind vt = node >= 0 ? comp_ntype(c, node) : TY_UNKNOWN;
+  if (vt == TY_POLY && slot == TY_INT) buf_printf(b, "sp_poly_to_i(%s)", text);
+  else if (vt == TY_POLY && slot == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", text);
+  else if (vt == TY_BIGINT && slot == TY_INT) buf_printf(b, "sp_bigint_to_int(%s)", text);
+  else buf_puts(b, text);
+}
 int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {
   if (!lv) return 0;
   TyKind t = lv->type;
