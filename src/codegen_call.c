@@ -16741,8 +16741,9 @@ static int push_arg_keeps_slot(Compiler *c, int id, TyKind art) {
   return push_arg_var_read(nt, av[0]) && comp_ntype(c, av[0]) == TY_INT;
 }
 /* True if the push receiver at `recv` is a local or ivar read and every
-   argument keeps that slot, so the hoisted temp needs no root. */
-static int push_recv_in_slot(Compiler *c, int recv, int argc, const int *argv, TyKind art) {
+   argument keeps that slot, so the hoisted temp needs no root. Shared with
+   the unshift/prepend arms in codegen_call_recv.c. */
+int push_recv_in_slot(Compiler *c, int recv, int argc, const int *argv, TyKind art) {
   if (!push_arg_var_read(c->nt, recv)) return 0;
   for (int a = 0; a < argc; a++)
     if (!push_arg_keeps_slot(c, argv[a], art)) return 0;
