@@ -336,8 +336,14 @@ int obj_conv_method(Compiler *c, TyKind t, const char *conv, TyKind want, int *d
   if (mi < 0) return -1;
   Scope *um = &c->scopes[mi];
   /* only a no-parameter method whose static return IS the slot's type
-     converts; any other shape is not this protocol */
-  if (um->ret != want || um->nparams != 0) return -1;
+     converts -- or one whose answer is BOXED, which is the same conversion
+     described the way the analysis happens to describe it (a #to_int
+     returning a plain `1` is poly under --int-overflow=promote). The answer
+     is judged where it is used, exactly as the runtime bridge judges its
+     own; refusing it here instead left the raw object pointer in the scalar
+     slot and the generated C did not compile. Any other shape -- a #to_int
+     answering a String -- is not this protocol. */
+  if ((um->ret != want && um->ret != TY_POLY) || um->nparams != 0) return -1;
   if (def_out) *def_out = def;
   return mi;
 }
@@ -414,11 +420,22 @@ static void emit_obj_conv_call(Compiler *c, int node, TyKind t, int def, const c
   conv_hold_end(tmp);
 }
 static void emit_obj_conv_call_inline(Compiler *c, int node, TyKind t, int def, const char *conv, Buf *b) {
+  /* a boxed answer is judged, not merely read: a conversion that hands back
+     something of the wrong kind is CRuby's TypeError, which is what these
+     two raise -- the same judgement the bridge row makes for its own half */
+  int mi_c = comp_method_in_chain(c, def, conv, NULL);
+  const char *unbox = NULL;
+  if (mi_c >= 0 && c->scopes[mi_c].ret == TY_POLY)
+    unbox = sp_streq(conv, "to_int") ? "sp_poly_arg_int_chk("
+          : (sp_streq(conv, "to_str") || sp_streq(conv, "to_path")) ? "sp_poly_arg_str("
+          : NULL;
+  if (unbox) buf_puts(b, unbox);
   buf_printf(b, "sp_%s_%s(", c->classes[def].c_name, mc(conv));
   if (!comp_ty_value_obj(c, t)) buf_printf(b, "(sp_%s *)", c->classes[def].c_name);
   buf_puts(b, "(");
   emit_expr(c, node, b);
   buf_puts(b, "))");
+  if (unbox) buf_puts(b, ")");
 }
 
 static int emit_obj_conv(Compiler *c, int node, const char *conv, TyKind want,
@@ -437,9 +454,31 @@ static int emit_obj_conv(Compiler *c, int node, const char *conv, TyKind want,
      time, where the author can act on it, rather than emitting a raise -- and
      where the raw object pointer used to land in the scalar slot and stop the
      C build with a message about a generated symbol. */
-  if (comp_method_in_chain(c, cid, conv, NULL) >= 0) return 0;  /* wrong shape: old path */
   const char *cn = class_ruby_name(c, cid);
   char msg[256];
+  /* The class DOES define the method, but its answer is statically of
+     another kind -- `def to_int = "no"`. That call can only ever raise, the
+     same way a missing method can, so it is refused here too rather than
+     left to the old path, where the raw object pointer landed in the scalar
+     slot and the C build stopped with a message about a generated symbol.
+     CRuby names the offending kind, so this does as well. */
+  { int wmi = comp_method_in_chain(c, cid, conv, NULL);
+    if (wmi >= 0 && c->scopes[wmi].nparams == 0) {
+      /* CRuby names the answer's CLASS, so the diagnostic does too rather
+         than printing the analysis's own lowercase tag */
+      TyKind wr = (TyKind)c->scopes[wmi].ret;
+      const char *wn = wr == TY_STRING ? "String" : wr == TY_INT ? "Integer"
+                     : wr == TY_FLOAT ? "Float" : wr == TY_BOOL ? "Boolean"
+                     : wr == TY_NIL ? "NilClass" : wr == TY_SYMBOL ? "Symbol"
+                     : wr == TY_RATIONAL ? "Rational" : wr == TY_BIGINT ? "Integer"
+                     : ty_is_array(wr) ? "Array" : ty_is_hash(wr) ? "Hash"
+                     : ty_name(wr);
+      snprintf(msg, sizeof msg, "can't convert %s to %s (%s#%s gives %s)",
+               cn ? cn : "Object", into, cn ? cn : "the class", conv, wn);
+      unsupported_feature(c, node, msg);
+    }
+    if (wmi >= 0) return 0;  /* another shape entirely (parameters): old path */
+  }
   snprintf(msg, sizeof msg, "no implicit conversion of %s into %s (%s defines no #%s)",
            cn ? cn : "Object", into, cn ? cn : "the class", conv);
   unsupported_feature(c, node, msg);
