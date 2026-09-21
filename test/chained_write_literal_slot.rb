@@ -60,3 +60,25 @@ def hstr
   [a.equal?(b), a, b]
 end
 p hstr
+
+# Under --int-overflow=promote the elements of the returned array are boxed
+# while the declared return is still the typed array, so the conversion
+# helper runs. It converted with sp_poly_to_i, whose answer for nil is 0, and
+# a nullable local came back as 0 rather than nil.
+def nilable(x)
+  s0 = s1 = nil
+  if x != 0
+    s0 = 9
+    s1 = 1
+  end
+  return [s0, s1]
+end
+p nilable(1)
+p nilable(0)
+def nilable_f(x)
+  a = nil
+  a = 1.5 if x != 0
+  return [a]
+end
+p nilable_f(1)
+p nilable_f(0)

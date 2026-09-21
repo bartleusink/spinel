@@ -1408,6 +1408,14 @@ end
 # defines (SP_THREADS above all), and a mismatched one links and then misbehaves
 # at run time, because the generated TU writes its own externs and nothing
 # cross-checks them.
+# The probe's `#include` is spelled with printf's octal escape, so that no `#`
+# reaches the Makefile at all. There is no spelling of a literal one that every
+# make reads alike: before 4.3 a `#` inside a function invocation starts a
+# comment and has to be written `\#`, and 4.3 both stopped treating it as a
+# comment and stopped unescaping it, so `\#` resolves to a backslash and a hash
+# there. The pack builds with whatever make the RECIPIENT has, so it uses
+# neither: `\043` is printf's, not make's, and every version passes it through
+# untouched to a printf that writes the same byte.
 # The make-time check a THREADED pack carries. The program uses Thread, so its
 # runtime is compiled with -DSP_THREADS and needs pthread from the compiler
 # that builds it -- the recipient's $(CC), which may be a cross compiler for a
@@ -1420,7 +1428,7 @@ def pack_pthread_probe(name)
   "# This program uses Thread, so its runtime needs pthread from $(CC)'s target.\n" \
   "# Asked of $(CC) itself: a cross compiler for a target without pthread must\n" \
   "# say so here, not forty files in.\n" \
-  "SP_PTHREAD := $(shell printf '#include <pthread.h>\\nstatic void *f(void *a){return a;}\\nint main(void){pthread_t t;return pthread_create(&t,0,f,0)!=0;}\\n' > .sp_pthread_probe.c && $(CC) -pthread .sp_pthread_probe.c -o .sp_pthread_probe >/dev/null 2>&1 && echo yes; rm -f .sp_pthread_probe.c .sp_pthread_probe)\n" \
+  "SP_PTHREAD := $(shell printf '\\043include <pthread.h>\\nstatic void *f(void *a){return a;}\\nint main(void){pthread_t t;return pthread_create(&t,0,f,0)!=0;}\\n' > .sp_pthread_probe.c && $(CC) -pthread .sp_pthread_probe.c -o .sp_pthread_probe >/dev/null 2>&1 && echo yes; rm -f .sp_pthread_probe.c .sp_pthread_probe)\n" \
   "ifneq ($(SP_PTHREAD),yes)\n" \
   "$(error #{name} uses Thread (Thread/Mutex/Queue/...) and $(CC) has no pthread: it cannot be built for this target)\n" \
   "endif\n"

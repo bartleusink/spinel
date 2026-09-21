@@ -9136,7 +9136,16 @@ static int bi_reaches(const BiPair *pairs, int np, const char *var, const char *
 static void bi_promote(Compiler *c, int write_id, const char *lname) {
   Scope *s = comp_scope_of(c, write_id);
   LocalVar *lv = s ? scope_local(s, lname) : NULL;
-  if (lv && !lv->rbs_seeded && (lv->type == TY_UNKNOWN || lv->type == TY_INT)) lv->type = TY_BIGINT;
+  if (!lv || lv->rbs_seeded) return;
+  /* A parameter is typed from its call sites; one nothing has bound carries
+     no evidence that the loop's `x = x + x` is integer growth at all. Such
+     a parameter belongs to a method reached only through `method(:name)`
+     and Method#call, whose arguments arrive boxed and may be Floats: widened
+     to Bignum here, the thunk refused the Float (#4695). A parameter
+     bound int from a call site still widens; a body local derives its type
+     from the body the scan is reading and widens from unknown as before. */
+  if (lv->is_param && lv->type == TY_UNKNOWN) return;
+  if (lv->type == TY_UNKNOWN || lv->type == TY_INT) lv->type = TY_BIGINT;
 }
 
 static void bi_scan_loop_node(Compiler *c, int id, const BiPair *pairs, int np) {
