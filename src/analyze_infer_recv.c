@@ -1539,6 +1539,16 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       (sp_streq(name, "to_s") || sp_streq(name, "inspect")) &&
       !an_user_defines_method(c, name))
     { *out = TY_STRING; return 1; }
+  /* #hash on a boxed receiver is always the Integer sp_rbval_hash_key
+     answers -- a user #hash in the program is reached through
+     sp_obj_hash_hook inside it and its answer is folded to the key -- so the
+     static type is int whatever a user #hash of the program returns. Left to
+     the user-method union it was the union's poly (every int is poly under
+     --int-overflow=promote), and `h ^= x.hash` handed an sp_int to
+     sp_poly_bitop's sp_RbVal parameter: `require "set"` did not build there,
+     since Set#hash is exactly that loop (#4728). */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && sp_streq(name, "hash"))
+    { *out = TY_INT; return 1; }
   /* #name is a class name (a String) for a boxed Class and the method name (a
      Symbol) for a boxed Method, so where the program builds Method objects at
      all the static result is poly (#3692) */
