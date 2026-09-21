@@ -3644,9 +3644,7 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
            before that: the hash is built before the call rejects it. */
         if (!sp_streq(name, "round")) {
           buf_printf(b, "(void)_t%d; ", tr);
-          for (int e = 0; e < kw.nelem; e++) {
-            buf_puts(b, "(void)("); emit_boxed(c, kw.elem[e], b); buf_puts(b, "); ");
-          }
+          emit_round_kw_effects(c, &kw, b);
           if (argc == 2)
             buf_puts(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
                         " (given 2, expected 0..1)\"); ");

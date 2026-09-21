@@ -7940,11 +7940,10 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
           if (!sp_streq(name, "round")) {
             /* the hash is built before the call rejects it */
-            for (int e = 0; e < kw.nelem; e++) {
-              buf_puts(b, "(void)("); emit_boxed(c, kw.elem[e], b); buf_puts(b, "); ");
-            }
-            buf_printf(b, "(void)_t%d; sp_raise_cls(\"ArgumentError\", \"wrong number of"
-                          " arguments (given 2, expected 0..1)\"); (sp_int)0; })", tn);
+            emit_round_kw_effects(c, &kw, b);
+            buf_printf(b, "(void)_t%d; (void)_t%d;"
+                          " sp_raise_cls(\"ArgumentError\", \"wrong number of"
+                          " arguments (given 2, expected 0..1)\"); (sp_int)0; })", tr, tn);
           }
           else {
             int tm = emit_round_kw_binds(c, &kw, b);
@@ -7954,9 +7953,8 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
           }
         }
         else if (!sp_streq(name, "round")) {
-          for (int e = 0; e < kw.nelem; e++) {
-            buf_puts(b, "(void)("); emit_boxed(c, kw.elem[e], b); buf_puts(b, "); ");
-          }
+          emit_round_kw_effects(c, &kw, b);
+          buf_printf(b, "(void)_t%d; ", tr);
           buf_puts(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of Hash"
                       " into Integer\"); (sp_int)0; })");
         }
@@ -7965,9 +7963,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
              reading the keywords at all -- `1.round(half: :bogus)` is 1,
              where `1.round(0, half: :bogus)` is an ArgumentError. They are
              still evaluated: the hash is built before the call ignores it. */
-          for (int e = 0; e < kw.nelem; e++) {
-            buf_puts(b, "(void)("); emit_boxed(c, kw.elem[e], b); buf_puts(b, "); ");
-          }
+          emit_round_kw_effects(c, &kw, b);
           buf_printf(b, "_t%d; })", tr);
         }
       }
@@ -8423,9 +8419,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       if (has_kwh && !sp_streq(name, "round")) {
         buf_printf(b, "({ (void)(%s); ", r);
         if (argc == 2) { buf_puts(b, "(void)("); emit_int_expr(c, argv[0], b); buf_puts(b, "); "); }
-        for (int e = 0; e < kw.nelem; e++) {
-          buf_puts(b, "(void)("); emit_boxed(c, kw.elem[e], b); buf_puts(b, "); ");
-        }
+        emit_round_kw_effects(c, &kw, b);
         if (argc == 2)
           buf_puts(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
                       " (given 2, expected 0..1)\"); 0.0; })");
@@ -8441,7 +8435,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
            settled at run time, by the same helpers #4701 gave the boxed path,
            so the two spellings of a mode cannot disagree. */
         const char *hty = kw.half >= 0 ? nt_type(c->nt, kw.half) : NULL;
-        int lit = !kw.nunknown && kw.nelem <= 1 && (kw.nelem == 0 || !kw.is_splat[0]) &&
+        int lit = !kw.nunknown && kw.nelem <= 1 && kw.nsplat == 0 &&
                   (kw.half < 0 ||
                    (hty && (sp_streq(hty, "SymbolNode") || sp_streq(hty, "NilNode"))));
         const char *hm = (lit && hty && sp_streq(hty, "SymbolNode"))
@@ -12754,12 +12748,11 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
          arity is what CRuby complains about first. The keyword values are
          still evaluated: the hash is built before the call rejects it. */
       if (!sp_streq(name, "round")) {
-        for (int e = 0; e < kw.nelem; e++) {
-          buf_puts(b, "(void)("); emit_boxed(c, kw.elem[e], b); buf_puts(b, "); ");
-        }
+        emit_round_kw_effects(c, &kw, b);
         if (argc == 2)
-          buf_puts(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
-                      " (given 2, expected 0..1)\");");
+          buf_printf(b, "(void)_t%d;"
+                        " sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
+                        " (given 2, expected 0..1)\");", tn);
         else
           /* CRuby's words for a Rational are its own, and which receiver
              this is only the run time knows */

@@ -147,3 +147,19 @@ begin
 rescue ArgumentError => e
   puts "iceil2: #{e.message}"
 end
+
+# a keyword hash longer than any fixed buffer: the reader used to cap the
+# elements it looked at, and a hash past the cap was read as EMPTY -- its
+# `half:` silently dropped and its unknown keywords let through. CRuby names
+# the unknown ones (it lists all; the message here keeps the first eight) and
+# honours a mode that arrives after many others.
+def many_unknown
+  2.5.round(half: :even, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, k6: 6, k7: 7, k8: 8,
+            k9: 9, k10: 10, k11: 11, k12: 12, k13: 13, k14: 14, k15: 15, k16: 16,
+            k17: 17, k18: 18, k19: 19, k20: 20, k21: 21, k22: 22, k23: 23, k24: 24,
+            k25: 25, k26: 26, k27: 27, k28: 28, k29: 29, k30: 30, k31: 31, k32: 32,
+            k33: 33, k34: 34, k35: 35)
+rescue ArgumentError => e
+  e.message[0, 24]
+end
+puts "many: #{many_unknown}"

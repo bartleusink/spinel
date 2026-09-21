@@ -709,17 +709,21 @@ void emit_frozen_literal_close(Buf *b, int id);
    `round` takes no keyword but `half:`, and CRuby names every other one. A
    key spelled some other way leaves the set unreadable, and nothing may be
    called an unknown keyword on the strength of what cannot be read. */
-#define ROUND_KW_MAX 32
 typedef struct {
-  int half;                    /* value node of the last literal `half:`, or -1 */
+  int node;                   /* the KeywordHashNode itself */
+  int half;                   /* value node of the last literal `half:`, or -1 */
   int nelem;
-  int elem[ROUND_KW_MAX];     /* every element's value node, in source order */
-  int is_splat[ROUND_KW_MAX]; /* a `**` source: its keys are read at run time */
-  int opaque[ROUND_KW_MAX];   /* a key spelled some other way: claim nothing */
+  int nsplat;                 /* how many `**` sources it carries */
   char unknown[256];          /* the ArgumentError message, or empty */
   int nunknown;
 } RoundKw;
+/* What one element is: its value node, and which of the three kinds of key it
+   was written with. Read from the node each time rather than cached in the
+   struct, so a call may carry any number of keywords -- a fixed cap meant a
+   hash past it was read as empty, which silently dropped its `half:` and let
+   an unknown keyword through. */
 void round_kw_read(Compiler *c, int kwh, RoundKw *o);
+void emit_round_kw_effects(Compiler *c, const RoundKw *kw, Buf *b);
 int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b);
 
 void emit_str_literal_n(Buf *b, const char *content, size_t len, int frozen);
