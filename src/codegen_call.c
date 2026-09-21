@@ -22377,7 +22377,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && sp_streq(name, "<<") && argc == 1 &&
       comp_ntype(c, recv) == TY_POLY) {
     int t = ++g_tmp;
-    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t); emit_expr(c, recv, b); buf_puts(b, "; ");
+    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
+    /* the hoisted receiver is rooted across its argument and the dispatch:
+       sp_poly_shl can reach a user-defined <<, which can reassign the slot
+       the receiver was read from, so the slot-keeping rule of the array
+       arms (push_recv_in_slot) does not hold here */
+    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
     buf_printf(b, "sp_poly_shl(_t%d, ", t);
     emit_boxed(c, argv[0], b);
     buf_puts(b, "); })");
