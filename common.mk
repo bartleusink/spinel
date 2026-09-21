@@ -40,13 +40,21 @@ OPT     ?= $(COPT)
 ifeq ($(shell uname -s),Linux)
 LDFLAGS += -lcrypt
 endif
-CFLAGS   = $(OPT) -Wno-all -Wno-unknown-warning-option -Wno-alloc-size-larger-than -Wno-format-truncation
+# A Float `a * b - c` is two IEEE operations in Ruby, each rounded to
+# double; clang (-ffp-contract=on) and gcc (=fast) fuse the pair written in
+# one C expression into a single fused multiply-add that rounds once, and
+# the program answers a double a few ULP from CRuby's, silently. Off on
+# every C line: CFLAGS (the PCH, the tests, optcarrot) and SEC_FLAGS (the
+# runtime objects, the packages, bench) -- src/main.c says the same on the
+# generated program's own command line.
+FP_FLAGS = -ffp-contract=off
+CFLAGS   = $(OPT) -Wno-all -Wno-unknown-warning-option -Wno-alloc-size-larger-than -Wno-format-truncation $(FP_FLAGS)
 
 # The product build -- bin/spinel, libspinel_rt.a, and the generated
 # programs -- uses CFLAGS and never used LTO, so there is no LTO toggle.
 
 # Per-function sections let the linker strip unused bigint/regexp code.
-SEC_FLAGS = -ffunction-sections -fdata-sections
+SEC_FLAGS = -ffunction-sections -fdata-sections $(FP_FLAGS)
 # The target's word width, asked of the C compiler: 32 or 64. A 32-bit
 # target (`make CC='cc -m32'` on a 64-bit host, or a 32-bit host) gets a
 # 32-bit sp_int (lib/sp_types.h) and two things a Ruby needs there: 64-bit
