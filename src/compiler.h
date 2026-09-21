@@ -97,6 +97,11 @@ typedef struct {
                        some element of which can be the sentinel, so reading an
                        element or binding a block parameter from it carries it
                        out (#3505) */
+  int bounded_counter; /* (codegen, lazily) 1: an Integer local that only ever
+                          takes a small literal or `+= / -= <small literal>`
+                          inside iterator blocks over containers (never a
+                          while/until/loop), so it cannot overflow the word
+                          and its adds need no check; -1: not; 0: unknown */
   int poly_dispatch_widened; /* (params) a receiver that settled on no type
                        reaches this parameter with an argument that settled on
                        none either, so the value arrives BOXED and the arm's

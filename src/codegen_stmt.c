@@ -1342,6 +1342,103 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
 /* `x op= v` on a local. `lval` is the slot's C lvalue -- `lv_x` for a plain
    local, the cell/capture deref for a captured one -- so the typed arms below
    are the same either way. */
+/* Is `node` inside a block a container iterator runs (not a while/until,
+   not `loop`, not a lambda/proc body), walking up to the scope's def? The
+   walk follows parents through the scope's node range, which the table does
+   not index directly: the nearest enclosing BlockNode is found by scanning
+   for a block whose body subtree holds the node. */
+static int cg_subtree_contains(const NodeTable *nt, int root, int id, int depth) {
+  if (root < 0 || depth > 200) return 0;
+  if (root == id) return 1;
+  const SpNode *nd = &nt->nodes[root];
+  for (int i = 0; i < nd->nr; i++) if (cg_subtree_contains(nt, nd->r[i].ref, id, depth + 1)) return 1;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++) if (cg_subtree_contains(nt, nd->a[i].ids[j], id, depth + 1)) return 1;
+  return 0;
+}
+static int node_in_iter_block(Compiler *c, int node, int scope_idx) {
+  const NodeTable *nt = c->nt;
+  int inner_loop = 0, in_block = 0;
+  /* a block-taking call whose body holds the node, nearest first: nodes are
+     numbered pre-order, so the innermost such call has the largest id below */
+  for (int id = node - 1; id >= 0; id--) {
+    if (c->nscope[id] != scope_idx) continue;
+    NodeKind k = nt_kind(nt, id);
+    if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode) {
+      int body = nt_ref(nt, id, "statements");
+      if (body >= 0 && cg_subtree_contains(nt, body, node, 0)) return 0;
+    }
+    if (k == NK_LambdaNode) {
+      int body = nt_ref(nt, id, "body");
+      if (body >= 0 && cg_subtree_contains(nt, body, node, 0)) return 0;
+    }
+    if (k == NK_CallNode) {
+      int blk = nt_ref(nt, id, "block");
+      if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
+      int body = nt_ref(nt, blk, "body");
+      if (body < 0 || !cg_subtree_contains(nt, body, node, 0)) continue;
+      const char *nm = nt_str(nt, id, "name");
+      if (nm && (sp_streq(nm, "loop") || sp_streq(nm, "proc") || sp_streq(nm, "lambda") ||
+                 sp_streq(nm, "catch") || sp_streq(nm, "new") || sp_streq(nm, "fork") ||
+                 sp_streq(nm, "define_method") || sp_streq(nm, "instance_exec") ||
+                 sp_streq(nm, "instance_eval"))) return 0;
+      in_block = 1;
+    }
+  }
+  (void)inner_loop;
+  return in_block;
+}
+/* An Integer local that only ever takes a small literal, or `+=` / `-=` a
+   small literal inside a container iterator's block, cannot leave the word:
+   an iterator's trip count is bounded by a container's length (a few
+   billion at the very most), and a step of that size per turn stays a long
+   way from 2^63. Such a counter's adds need neither the overflow branch nor
+   the nil test, which is the difference between a C loop the compiler can
+   keep tight and one it cannot: a Ruby-defined find_index paid twice the
+   emitter's time on its `i += 1` alone. Decided once per local. */
+static int local_is_bounded_counter(Compiler *c, int id, const char *nm, LocalVar *lv) {
+  if (!lv || lv->type != TY_INT || lv->is_param || lv->is_block_param || lv->rbs_seeded || lv->nullable_int) return 0;
+  if (lv->bounded_counter) return lv->bounded_counter > 0;
+  const NodeTable *nt = c->nt;
+  Scope *sc = comp_scope_of(c, id);
+  int si = sc ? (int)(sc - c->scopes) : -1;
+  int ok = si >= 0, writes = 0;
+  for (int n = 0; n < nt->count && ok; n++) {
+    if (c->nscope[n] != si) continue;
+    NodeKind k = nt_kind(nt, n);
+    if (k != NK_LocalVariableWriteNode && k != NK_LocalVariableOperatorWriteNode &&
+        k != NK_LocalVariableOrWriteNode && k != NK_LocalVariableAndWriteNode &&
+        k != NK_LocalVariableTargetNode && k != NK_RequiredParameterNode &&
+        k != NK_OptionalParameterNode) continue;
+    const char *wn = nt_str(nt, n, "name");
+    if (!wn || !sp_streq(wn, nm)) continue;
+    writes++;
+    if (k == NK_LocalVariableWriteNode) {
+      int v = nt_ref(nt, n, "value");
+      long long lit;
+      if (v < 0 || nt_kind(nt, v) != NK_IntegerNode) { ok = 0; break; }
+      lit = nt_int(nt, v, "value", 0);
+      if (lit < -1000000 || lit > 1000000) { ok = 0; break; }
+      continue;
+    }
+    if (k == NK_LocalVariableOperatorWriteNode) {
+      const char *op = nt_str(nt, n, "binary_operator");
+      int v = nt_ref(nt, n, "value");
+      long long lit;
+      if (!op || (!sp_streq(op, "+") && !sp_streq(op, "-"))) { ok = 0; break; }
+      if (v < 0 || nt_kind(nt, v) != NK_IntegerNode) { ok = 0; break; }
+      lit = nt_int(nt, v, "value", 0);
+      if (lit < 0 || lit > 1000000) { ok = 0; break; }
+      if (!node_in_iter_block(c, n, si)) { ok = 0; break; }
+      continue;
+    }
+    ok = 0;   /* ||=, &&=, a massign target, a parameter */
+  }
+  if (writes == 0) ok = 0;
+  lv->bounded_counter = ok ? 1 : -1;
+  return ok;
+}
+
 static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
                               const char *lval) {
   const NodeTable *nt = c->nt;
@@ -1377,6 +1474,11 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
      binary form: a raw C `lv_x *= y` silently wrapped where `x * y` raised. */
   if (t == TY_INT) {
     const char *fn = int_arith_fn(op);
+    /* a loop-bounded counter's `+= k` is a plain C add (see above) */
+    if (fn && (sp_streq(op, "+") || sp_streq(op, "-")) && local_is_bounded_counter(c, id, nm, lv)) {
+      buf_printf(b, "%s = %s %s ", lval, lval, op); emit_expr(c, v, b); buf_puts(b, ";\n");
+      return;
+    }
     if (fn) {
       TyKind vt = comp_ntype(c, v);
       int isdivmod = sp_streq(op, "/") || sp_streq(op, "%");
