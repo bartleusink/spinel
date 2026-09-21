@@ -2022,6 +2022,7 @@ static const char *sp_poly_class_name(sp_RbVal v) {
         case SP_BUILTIN_ADDRINFO: return SPL("Addrinfo");
         case SP_BUILTIN_SOCKOPT: return SPL("Socket::Option");
         case SP_BUILTIN_PROCESS_STATUS: return SPL("Process::Status");
+        case SP_BUILTIN_YIELDER: return SPL("Enumerator::Yielder");
         case SP_BUILTIN_EXCEPTION: return sp_exc_class_name((volatile struct sp_Exception_s *)v.v.p);
         default: { sp_Class c = {v.cls_id}; return sp_class_to_s(c); }
       }
@@ -4059,6 +4060,9 @@ static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
   /* a user class's own #<< comes before every builtin reading of the
      operator -- the object is not an array and not an integer (#3502) */
   if (sp_poly_is_user_obj(a)) return sp_poly_binop_bad("<<", a, b);
+  /* a generator's yielder captured by a proc: Fiber.yield on the generator's
+     own fiber, which is the one the proc runs on */
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_YIELDER) { sp_Fiber_yield(b); return a; }
   /* Dispatch by recv cls_id: an IntArray / PolyArray / etc. boxed
      into a poly slot still wants Array#<< (push), not Integer#<<
      (bit-shift). Falls through to bit-shift only when the recv is

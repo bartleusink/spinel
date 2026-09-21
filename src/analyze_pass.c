@@ -5307,6 +5307,17 @@ int desugar_block_capture_wrap(Compiler *c) {
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     if (is_proc_create(c, id)) continue;             /* a proc literal is not an iterator */
+    /* A generator's block runs once on its own fiber and its parameter is the
+       yielder: wrapped in a lambda, `y << v` in a block the body passes to a
+       user `each` stopped being a Fiber.yield and became Integer#<< on a
+       laundered pointer, and the Enumerator answered []. (A Fiber or Thread
+       body keeps the wrap: its parameter is an ordinary value, and a proc
+       literal inside may capture it.) */
+    if (a_is_fiber_or_gen_create(c, id)) {
+      int gr = nt_ref(nt, id, "receiver");
+      const char *grn = gr >= 0 ? nt_str(nt, gr, "name") : NULL;
+      if (grn && sp_streq(grn, "Enumerator")) continue;
+    }
     int blk = nt_ref(nt, id, "block");
     if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
     if (nt_int(nt, blk, "cap_wrapped", 0)) continue;   /* fixpoint: wrap once */

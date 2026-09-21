@@ -6231,6 +6231,13 @@ static int desugar_yielder_block_arg(Compiler *c) {
     const char *yname = block_param_name(c, eblk, 0);
     int ebody = nt_ref(nt, eblk, "body");
     if (!yname || ebody < 0) continue;
+    /* The yielder is a value of its own (the fiber under the Yielder id when
+       a proc inside the body captures it), never a container: its `<<` is
+       a Fiber.yield. Pin it boxed so the push evidence on `y << [x, i]` in
+       such a proc cannot make it an array. */
+    { Scope *ysc = comp_scope_of(c, eblk);
+      LocalVar *ylv = ysc ? scope_local_intern(ysc, yname) : NULL;
+      if (ylv && !ylv->rbs_seeded) { ylv->type = TY_POLY; ylv->rbs_seeded = 1; ylv->is_block_param = 1; } }
     /* `y.to_proc` names the same channel the yielder is: a call through it
        pushes, and `&y.to_proc` is `&y`. Neither had an arm, so the explicit
        spelling raised NoMethodError (#3844). Rewritten before the `&y` loop

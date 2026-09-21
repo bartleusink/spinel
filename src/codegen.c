@@ -4311,8 +4311,20 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   }
   else if (bp0) {
     const char *bpn = rename_local(bp0);
-    buf_printf(pb, "    sp_RbVal lv_%s = _fb->resumed_value;\n", bpn);
+    /* a generator's parameter is the yielder: as a value (a proc inside the
+       body captured it) it is the fiber itself under the Yielder id, whose
+       `<<` the runtime answers with Fiber.yield; the body's own `y << v` is
+       lowered to Fiber.yield directly (g_yielder_name) */
+    if (as_gen) buf_printf(pb, "    sp_RbVal lv_%s = sp_box_obj((void *)_fb, SP_BUILTIN_YIELDER);\n", bpn);
+    else buf_printf(pb, "    sp_RbVal lv_%s = _fb->resumed_value;\n", bpn);
     buf_printf(pb, "    SP_GC_ROOT_RBVAL(lv_%s);\n", bpn);
+    /* captured by a lifted proc: it lives in a cell, seeded from the slot */
+    { LocalVar *blv = encl ? scope_local(encl, bp0) : NULL;
+      if (blv && blv->is_cell && !nameset_has(&caps, bp0)) {
+        buf_printf(pb, "    sp_RbVal *_cell_%s = (sp_RbVal *)sp_gc_alloc(sizeof(sp_RbVal), NULL, sp_cell_scan_rbval);\n", bp0);
+        buf_printf(pb, "    SP_GC_ROOT(_cell_%s);\n", bp0);
+        buf_printf(pb, "    *_cell_%s = lv_%s;\n", bp0, bpn);
+      } }
   }
 
   /* Declare fiber-body locals (those written in the body, not captured) */

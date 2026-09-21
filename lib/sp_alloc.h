@@ -634,6 +634,12 @@ void *sp_pl_realloc(void *p, size_t newn);   /* lib/sp_slab.c: a slab block know
                                            that asserts every id is distinct will
                                            flag any future collision at compile
                                            time. */
+#define SP_BUILTIN_YIELDER       (-49)  /* Enumerator::Yielder: the generator's
+                                          block parameter as a VALUE, for a
+                                          proc inside the body that captures
+                                          it. v.p is the generator's own sp_Fiber;
+                                          `y << v` on it is Fiber.yield (the
+                                          proc runs on that fiber). */
 
 static inline sp_RbVal sp_box_int(sp_int v)    { sp_RbVal r; r.tag = SP_TAG_INT;  r.cls_id = 0; r.v.i = v; return r; }
 /* A NULL char* IS Ruby nil throughout the string paths (the nullable-string
