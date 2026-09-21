@@ -9862,18 +9862,6 @@ static sp_RbVal sp_bm_receiver(sp_BoundMethod *m) {
   return sp_box_nil();
 }
 
-/* Float#round(half: mode) where the mode is only known at run time (#3646).
-   A nil mode is the default (round half up, away from zero). */
-static double sp_round_half_mode(double x, sp_sym mode) {
-  const char *m = (mode == (sp_sym)-1) ? NULL : sp_sym_to_s(mode);
-  if (!m || !m[0]) return round(x);
-  if (strcmp(m, "even") == 0) return sp_round_half_even(x);
-  if (strcmp(m, "down") == 0) return sp_round_half_down(x);
-  if (strcmp(m, "up") == 0) return round(x);
-  sp_raise_cls("ArgumentError", sp_sprintf("invalid rounding mode: %s", m));
-  return 0.0;
-}
-
 /* `round(half: :even)` on a BOXED number. sp_poly_round_n answers the
    half-up rule the bare `round` has; the tie-break mode is a keyword the
    typed Float and Integer paths already honour, and a boxed receiver has to
@@ -9926,7 +9914,82 @@ static sp_RbVal sp_poly_round_half(sp_RbVal v, sp_int n, sp_RbVal mode) {
   }
   sp_poly_flo_domain_ck(x);
   double f = pow(10, (double)(-n));
-  return sp_box_int(isinf(f) ? 0 : sp_float_fit_i(sp_round_half_c(x / f, md) * f));
+  /* sp_box_f_to_int, not sp_float_fit_i: the keyword-less sp_poly_round_n
+     answers a Bignum past the machine word (#4688), and the tie-break mode
+     cannot be what decides whether the same value is representable. */
+  return isinf(f) ? sp_box_int(0) : sp_box_f_to_int(sp_round_half_c(x / f, md) * f);
+}
+/* `round(**opts)`: the `half:` of a keyword hash the compiler could not read
+   through. A hash without one answers nil -- the plain half-up default --
+   and any other key is CRuby's unknown-keyword ArgumentError, since `round`
+   takes no other. A key is named the way CRuby names it: a Symbol as :text,
+   anything else by its inspect. */
+static sp_RbVal sp_round_half_kwsplat(sp_RbVal h) {
+  if (!(h.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(h.cls_id))) return sp_box_nil();
+  sp_RbVal mode = sp_box_nil();
+  char unk[256]; unk[0] = 0; int nunk = 0;
+  sp_int n = sp_poly_length(h);
+  for (sp_int i = 0; i < n; i++) {
+    sp_RbVal k = sp_box_nil(), v = sp_box_nil();
+    sp_poly_hash_pair_i(h, i, &k, &v);
+    const char *kn = k.tag == SP_TAG_SYM ? sp_sym_to_s((sp_sym)k.v.i) : NULL;
+    if (kn && strcmp(kn, "half") == 0) { mode = v; continue; }
+    if (nunk < 8) {
+      size_t at = strlen(unk);
+      snprintf(unk + at, sizeof unk - at, "%s%s%s", nunk ? ", " : "",
+               kn ? ":" : "", kn ? kn : sp_poly_inspect(k));
+    }
+    nunk++;
+  }
+  if (nunk)
+    sp_raise_cls("ArgumentError",
+                 sp_sprintf("unknown keyword%s: %s", nunk > 1 ? "s" : "", unk));
+  return mode;
+}
+
+/* Float#round(ndigits, half: mode) on a TYPED receiver, where the mode is a
+   value rather than a name the compiler could read -- a String, a Symbol out
+   of a variable, a `**` hash. The literal-mode arms pick their rule at
+   compile time and go through sp_float_prec_op; these answer the same, with
+   the rule decided here, so `half: m` and `half: :even` agree.
+   Split by the class CRuby gives the result: Float above the decimal point,
+   Integer at or below it, and a boxed choice when the digit count is only
+   known at run time. */
+static double sp_float_round_half_f(double x, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  return sp_float_prec_op(x, nd, md == 0 ? SP_PREC_HALF_EVEN
+                                : md == 2 ? SP_PREC_HALF_DOWN : SP_PREC_ROUND);
+}
+static sp_int sp_float_round_half_i(double x, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  if (isinf(x)) sp_raise_cls("FloatDomainError", x > 0 ? "Infinity" : "-Infinity");
+  if (isnan(x)) sp_raise_cls("FloatDomainError", "NaN");
+  if (nd == 0) return sp_float_fit_i(sp_round_half_c(x, md));
+  double f = pow(10, (double)(-nd));
+  return isinf(f) ? 0 : sp_float_fit_i(sp_round_half_c(x / f, md) * f);
+}
+/* promote mode's answer for the no-digits form: an Integer too wide for the
+   machine word widens to a Bignum rather than failing, exactly as the
+   keyword-less `round` does (#4688). Only this shape widens -- a NEGATIVE
+   digit count still rounds by dividing and multiplying in double, which
+   loses bits past 2**53, so it keeps raising until that is done in Bignum. */
+static sp_RbVal sp_float_round_half_p(double x, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  sp_poly_flo_domain_ck(x);
+  return sp_box_f_to_int(sp_round_half_c(x, md));
+}
+static sp_RbVal sp_float_round_half_v(double x, sp_int nd, sp_RbVal mode) {
+  if (nd > 0) return sp_box_float(sp_float_round_half_f(x, nd, mode));
+  return sp_box_int(sp_float_round_half_i(x, nd, mode));
+}
+
+/* Integer#round(ndigits, half: mode): the mode is checked whenever a digit
+   count is there, even where the rounding itself has no tie to break
+   (`1.round(0, half: :bogus)` is an ArgumentError). The no-digits form is
+   the one CRuby answers without looking at the keywords at all. */
+static sp_int sp_int_round_half_v(sp_int v, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  return sp_int_round_half(v, nd, md < 0 ? 1 : md);
 }
 
 /* `rescue *list`: the clause matches when the raised class is (or descends
