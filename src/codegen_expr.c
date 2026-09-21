@@ -551,6 +551,18 @@ static int fold_int_const_name(Compiler *c, const char *name, long long *out, in
 void emit_int_divisor(Compiler *c, int node, Buf *b) {
   long long v;
   if (fold_int_node(c, node, &v, 0)) { buf_printf(b, "%lldLL", v); return; }
+  /* The callers hand this straight to sp_imod, whose divisor is an sp_int.
+     A boxed operand is an sp_RbVal struct, so emitting it raw did not
+     produce a wrong number -- it produced C that does not compile, and
+     `17.modulo(x)` stopped building the moment x was boxed. The strict
+     conversion is the one the sibling arms use for the same position
+     (Integer#remainder reaches sp_iremainder through it), so a boxed value
+     that is not an integer raises CRuby's TypeError rather than being read
+     as one. */
+  if (comp_ntype(c, node) == TY_POLY) {
+    buf_puts(b, "sp_poly_arg_int_chk("); emit_expr(c, node, b); buf_puts(b, ")");
+    return;
+  }
   emit_expr(c, node, b);
 }
 
