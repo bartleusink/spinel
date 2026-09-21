@@ -11731,7 +11731,14 @@ char *codegen_program(const NodeTable *nt) {
      `main`. */
   buf_puts(body, "static int _sp_main_argc; static char **_sp_main_argv;"
                  " static int _sp_main_rc;\n");
-  buf_puts(body, "static void _sp_main_body(void){\n");
+  /* NOT static: on ELF, backtrace_symbols names a frame through the dynamic
+     symbol table (--debug links with -rdynamic), where a static function does
+     not appear -- so the demangler never saw the name it knows as `<main>`
+     and the rescued backtrace lost its outermost frame. macOS symbolises from
+     the full table, which is why only the Linux lanes showed it. The `_sp_`
+     spelling is already reserved, so nothing can collide with it as an
+     external. */
+  buf_puts(body, "void _sp_main_body(void){\n");
   buf_puts(body, "    SP_GC_SAVE();\n");
   main_frame_ins = body->len;
   if (g_re_init_needed) buf_puts(body, "    sp_tu_init();\n");

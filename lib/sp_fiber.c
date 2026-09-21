@@ -424,10 +424,14 @@ static size_t sp_main_stack_bytes(void) {
     const char *e = getenv("SPINEL_MAIN_STACK");
     size_t v = e && *e ? sp_fiber_stack_parse(e) : 0;
     if (v) sp_main_stack_from_env = 1;
-    /* 32-bit address space is not free; 64-bit address space is */
+    /* A 64-bit address space is wide, but the reservation is not free
+       everywhere: with overcommit disabled the mapping is charged against
+       commit even though MAP_NORESERVE asks otherwise, so the default is a
+       size that is defensible to pay for outright rather than the largest
+       one the address space would hold. 32-bit space is scarcer still. */
     sp_main_stack_size = v ? v
                           : (sizeof(void *) < 8 ? (size_t)24 << 20
-                                                : (size_t)256 << 20);
+                                                : (size_t)64 << 20);
   }
   long p = sysconf(_SC_PAGESIZE); size_t page = p > 0 ? (size_t)p : 4096;
   size_t sz = (sp_main_stack_size + page - 1) / page * page;
