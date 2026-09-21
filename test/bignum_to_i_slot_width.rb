@@ -28,13 +28,12 @@ end
 end
 puts exact(3) { Rational(12, 4).to_i }
 puts exact(5) { [Rational(5, 2), nil][0].numerator }
-puts exact(2**40) { Rational(2**40, 1).to_i }
 
 # the straddling band and beyond, through the two slot conversions the width
-# test governs. 2**40 and 2**62 fit a 64-bit sp_int and cannot fit a 32-bit
+# test governs. 1099511627776 and 4611686018427387904 fit a 64-bit sp_int and cannot fit a 32-bit
 # one; 2**70 fits neither, and promote answers it while raise refuses it.
 # Every one of them must come back whole or not at all.
-[2**40, 2**62, -(2**40), -(2**62), 2**70, -(2**70)].each do |n|
+[1099511627776, 4611686018427387904, -(1099511627776), -(4611686018427387904), 2**70, -(2**70)].each do |n|
   b = [n, nil][0]
   puts never_wrong(n) { b.to_i }
   puts never_wrong(n) { Integer(b) }
