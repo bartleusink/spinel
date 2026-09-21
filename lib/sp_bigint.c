@@ -5710,11 +5710,19 @@ intptr_t sp_bigint_bit_length(sp_Bigint *b) {
   mp_limb top = z->p[n - 1];
   int topbits = 0;
   for (mp_limb t = top; t; t >>= 1) topbits++;
-  /* Receiver is always a non-negative bignum today: a bignum +/- result isn't
-     yet typed as TY_BIGINT, so no negative value can reach bit_length. CRuby's
-     (-m).bit_length == (m-1).bit_length rule belongs with the change that closes
-     that gap, so it and its test land together. */
-  return (mrb_int)(n - 1) * (mrb_int)DIG_SIZE + topbits;
+  mrb_int len = (mrb_int)(n - 1) * (mrb_int)DIG_SIZE + topbits;
+  /* bit_length measures the TWO'S-COMPLEMENT magnitude, so a negative value
+     is (m-1).bit_length rather than m's: (-(2**100)).bit_length is 100 where
+     (2**100).bit_length is 101. Subtracting one shortens a magnitude only
+     when it is exactly a power of two, which is the test below -- done on
+     the limbs rather than by building |b|-1, so the function still allocates
+     nothing and cannot collect a caller's unrooted operand. */
+  if (sp_bigint_sign(b) < 0) {
+    int pow2 = (top & (top - 1)) == 0;
+    for (size_t i = 0; pow2 && i + 1 < n; i++) if (z->p[i]) pow2 = 0;
+    if (pow2) len--;
+  }
+  return len;
 }
 
 /* --- Bignum receiver conveniences (#2025) ------------------------------- */
