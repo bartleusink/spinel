@@ -9901,15 +9901,20 @@ else {
          ensure bodies run (accepting the catch/throw-class register hazard). */
       int bargs = nt_ref(nt, id, "arguments");
       int bvargc = 0; const int *bvargs = bargs >= 0 ? nt_arr(nt, bargs, "arguments", &bvargc) : NULL;
+      int light = strncmp(g_brk_ser_var, "_brklt", 6) == 0;   /* a wrapper with no setjmp scope */
       int brk_goto = (g_ensure_depth == g_brk_ensure_base) &&
                      (g_exc_frame_depth == g_brk_exc_base) &&
-                     strncmp(g_brk_ser_var, "_brkser", 7) == 0;
-      const char *sfx = brk_goto ? g_brk_ser_var + 7 : NULL;   /* wrapper temp id */
+                     (strncmp(g_brk_ser_var, "_brkser", 7) == 0 || light);
+      const char *sfx = brk_goto ? g_brk_ser_var + (light ? 6 : 7) : NULL;   /* wrapper temp id */
       emit_indent(b, indent);
       /* leaving the block pops the handler for every rescue body opened inside
          it; the throw longjmps, so pop before it (the value persists). */
       if (!brk_goto) emit_cur_exc_restore(b, g_brk_exc_base);
-      if (brk_goto) buf_printf(b, "sp_brk_val[_brkslot%s - 1] = ", sfx);
+      /* a light wrapper (no serial-addressed scope) takes the value in its
+         own temp; a throw has no scope to address there, which is what the
+         wrapper's gate guarantees cannot be needed */
+      if (brk_goto && light) buf_printf(b, "_brkv%s = ", sfx);
+      else if (brk_goto) buf_printf(b, "sp_brk_val[_brkslot%s - 1] = ", sfx);
       else buf_printf(b, "sp_brk_throw(%s, ", g_brk_ser_var);
       if (bvargc == 0) buf_puts(b, "sp_box_nil()");
       else if (bvargc == 1) emit_boxed(c, bvargs[0], b);

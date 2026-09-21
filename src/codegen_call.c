@@ -10877,10 +10877,64 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
    type widened to poly at inference; the call's NORMAL (no-break) type is
    recovered for the inner emission and boxed. b == NULL emits the call in
    statement position (the value temp is simply left unread). */
+/* A block whose every `break` is delivered by the same-function goto: no
+   proc literal, no nested block-taking call, no yield or forwarded block
+   (any of which may carry the break out of the spliced body as a
+   sp_brk_throw), no begin/rescue/ensure or while inside it (a break that
+   crosses a frame longjmps). */
+static int brk_block_direct_only(const NodeTable *nt, int node, int depth) {
+  if (node < 0 || depth > 200) return 1;
+  NodeKind k = nt_kind(nt, node);
+  /* a yield splices the CALLER's block, whose breaks address the caller's
+     own wrapper (by its name, see g_yield_blk_brk_fallback), not this one */
+  if (k == NK_LambdaNode || k == NK_BlockArgumentNode ||
+      k == NK_BeginNode || k == NK_RescueModifierNode || k == NK_WhileNode ||
+      k == NK_UntilNode || k == NK_ForNode || k == NK_DefNode) return 0;
+  if (k == NK_CallNode) {
+    if (nt_ref(nt, node, "block") >= 0) return 0;
+    const char *nm = nt_str(nt, node, "name");
+    if (nm && (sp_streq(nm, "proc") || sp_streq(nm, "lambda") || sp_streq(nm, "loop") ||
+               sp_streq(nm, "catch") || sp_streq(nm, "method") || sp_streq(nm, "new") ||
+               sp_streq(nm, "binding") || sp_streq(nm, "instance_exec") || sp_streq(nm, "instance_eval")))
+      return 0;
+  }
+  const SpNode *nd = &nt->nodes[node];
+  for (int i = 0; i < nd->nr; i++)
+    if (!brk_block_direct_only(nt, nd->r[i].ref, depth + 1)) return 0;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (!brk_block_direct_only(nt, nd->a[i].ids[j], depth + 1)) return 0;
+  return 1;
+}
+/* The wrapper below can skip its sp_brk_push + setjmp when the iterator
+   splices the block as a C loop and every break in it is the goto: a typed
+   container or Integer receiver's builtin iterator, or an inlined yielding
+   user method. Anything else (a boxed receiver dispatching to a user each
+   that lifts the block, an Enumerator driven by the runtime) keeps the
+   serial-addressed scope. */
+static int brk_wrapper_light(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int blk = nt_ref(nt, id, "block");
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  if (!brk_block_direct_only(nt, nt_ref(nt, blk, "body"), 0)) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (call_user_yield_mi(c, id) >= 0) {
+    /* an inlined yielding method splices this block at its yields; the proc
+       and lowered forms call it as a proc, whose break is a throw */
+    Scope *m = &c->scopes[call_user_yield_mi(c, id)];
+    if (m->is_proc_form || m->is_lowered_yield || !m->yields) return 0;
+    return m->body >= 0 && brk_block_direct_only(nt, m->body, 0);
+  }
+  if (recv < 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  return (ty_is_array(rt) && rt != TY_POLY_ARRAY) || ty_is_hash(rt) ||
+         rt == TY_RANGE || rt == TY_INT || rt == TY_STRING;
+}
 void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   int wrecv = nt_ref(nt, id, "receiver");
   const char *wname = nt_str(nt, id, "name");
+  int light = brk_wrapper_light(c, id);
   /* A builtin self-returning iterator (each / each_with_index / ...) has no
      value-producing emitter: run it as a statement and use the receiver as
      the no-break result. A user method resolving through the inliner takes
@@ -10928,20 +10982,23 @@ void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
   }
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "int _t%d = sp_gc_nroots; (void)_t%d;\n", tG, tG);
-  emit_indent(g_pre, g_indent);
-  buf_printf(g_pre, "sp_int _brkser%d = sp_brk_push(); (void)_brkser%d;\n", tS, tS);
-  emit_indent(g_pre, g_indent);
-  buf_printf(g_pre, "_brkslot%d = sp_brk_top;\n", tS);
-  emit_indent(g_pre, g_indent);
-  buf_puts(g_pre, "if (setjmp(sp_brk_stack[sp_brk_top - 1]) == 0) {\n");
-  g_indent++;
+  /* The body is rendered into a side buffer first, under the light name when
+     the gate allows it. A break the body could deliver only by a throw (an
+     emitter that runs the block under a frame of its own, select!'s
+     compaction frame) shows up in that text as sp_brk_throw(_brklt..), and
+     the wrapper takes the serial-addressed form after all: the two forms
+     differ only in the preamble, the landing, and the name the breaks
+     address, which is rewritten in the text. */
   TyKind sv_cache = c->ntype[id]; c->ntype[id] = normal_ty;
-  char servar[24]; snprintf(servar, sizeof servar, "_brkser%d", tS);
+  char servar[24]; snprintf(servar, sizeof servar, light ? "_brklt%d" : "_brkser%d", tS);
   const char *sv_ser = g_brk_ser_var; g_brk_ser_var = servar;
   int sv_ebase = g_brk_ensure_base; g_brk_ensure_base = g_ensure_depth;
   int sv_bexc = g_brk_exc_base; g_brk_exc_base = g_exc_frame_depth;
   int sv_skip = g_brk_skip_id; g_brk_skip_id = id;
   Buf inner; memset(&inner, 0, sizeof inner);
+  Buf body; memset(&body, 0, sizeof body);
+  Buf *sv_pre = g_pre; g_pre = &body;
+  g_indent++;
   /* A no-value normal type (a yield method ending in puts/nil) runs as a
      statement with nil as the no-break result. */
   int stmt_form = self_ret || !is_scalar_ret(normal_ty);
@@ -10955,29 +11012,71 @@ void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
   else {
     emit_call(c, id, &inner);   /* emits the loop into g_pre, result expr into inner */
   }
-  g_brk_ser_var = sv_ser; g_brk_ensure_base = sv_ebase; g_brk_exc_base = sv_bexc; g_brk_skip_id = sv_skip;
-  c->ntype[id] = sv_cache;
-  if (spilled_argov) g_n_argov--;
   Buf boxed; memset(&boxed, 0, sizeof boxed);
   if (inner.p && inner.p[0]) emit_boxed_text(c, normal_ty, inner.p, &boxed);
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "_t%d = %s;\n", tR, boxed.p && boxed.p[0] ? boxed.p : "sp_box_nil()");
-  emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_brk_top--;\n");
-  free(inner.p); free(boxed.p);
   g_indent--;
-  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\nelse {\n");
-  /* the goto delivery lands here too; restore every depth to the entry
-     snapshot (correct for both paths -- after an ensure-running longjmp the
-     handlers have already popped down to these) */
-  emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "_brklbl%d: __attribute__((unused));\n", tS);
-  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_gc_nroots = _t%d;\n", tG);
-  emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_exc_top = _brkexc%d; sp_catch_top = _brkcat%d; sp_brk_top = _brkslot%d;\n",
-             tS, tS, tS);
-  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "_t%d = sp_brk_val[sp_brk_top - 1];\n", tR);
-  emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_brk_top--;\n");
-  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  g_pre = sv_pre;
+  g_brk_ser_var = sv_ser; g_brk_ensure_base = sv_ebase; g_brk_exc_base = sv_bexc; g_brk_skip_id = sv_skip;
+  c->ntype[id] = sv_cache;
+  if (spilled_argov) g_n_argov--;
+  free(inner.p); free(boxed.p);
+  char thrown[32]; snprintf(thrown, sizeof thrown, "sp_brk_throw(_brklt%d", tS);
+  if (light && body.p && strstr(body.p, thrown)) {
+    /* the light guess was wrong: rename the breaks onto the scoped form */
+    char from1[24], to1[40], from2[24], to2[24];
+    snprintf(from1, sizeof from1, "_brkv%d = ", tS);
+    snprintf(to1, sizeof to1, "sp_brk_val[_brkslot%d - 1] = ", tS);
+    snprintf(from2, sizeof from2, "_brklt%d", tS);
+    snprintf(to2, sizeof to2, "_brkser%d", tS);
+    Buf rw; memset(&rw, 0, sizeof rw);
+    const char *pp = body.p;
+    while (*pp) {
+      if (strncmp(pp, from1, strlen(from1)) == 0) { buf_puts(&rw, to1); pp += strlen(from1); }
+      else if (strncmp(pp, from2, strlen(from2)) == 0 && !isdigit((unsigned char)pp[strlen(from2)])) { buf_puts(&rw, to2); pp += strlen(from2); }
+      else buf_putn(&rw, pp++, 1);
+    }
+    free(body.p); body = rw;
+    light = 0;
+  }
+  if (light) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_RbVal _brkv%d = sp_box_nil(); (void)_brkv%d; sp_int _brklt%d = 0; (void)_brklt%d;\n", tS, tS, tS, tS);
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "{\n");
+    buf_puts(g_pre, body.p ? body.p : "");
+    /* the no-break path steps over the landing; the goto lands on it */
+    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "goto _brkend%d;\n", tS);
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "_brklbl%d: __attribute__((unused));\n", tS);
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_gc_nroots = _t%d;\n", tG);
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "_t%d = _brkv%d;\n", tR, tS);
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "_brkend%d: __attribute__((unused));\n", tS);
+  }
+  else {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_int _brkser%d = sp_brk_push(); (void)_brkser%d;\n", tS, tS);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "_brkslot%d = sp_brk_top;\n", tS);
+    emit_indent(g_pre, g_indent);
+    buf_puts(g_pre, "if (setjmp(sp_brk_stack[sp_brk_top - 1]) == 0) {\n");
+    buf_puts(g_pre, body.p ? body.p : "");
+    emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_brk_top--;\n");
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\nelse {\n");
+    /* the goto delivery lands here too; restore every depth to the entry
+       snapshot (correct for both paths -- after an ensure-running longjmp the
+       handlers have already popped down to these) */
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "_brklbl%d: __attribute__((unused));\n", tS);
+    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_gc_nroots = _t%d;\n", tG);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "sp_exc_top = _brkexc%d; sp_catch_top = _brkcat%d; sp_brk_top = _brkslot%d;\n",
+               tS, tS, tS);
+    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "_t%d = sp_brk_val[sp_brk_top - 1];\n", tR);
+    emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_brk_top--;\n");
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  }
+  free(body.p);
   if (b) buf_printf(b, "_t%d", tR);
   else { emit_indent(g_pre, g_indent); buf_printf(g_pre, "(void)_t%d;\n", tR); }
 }
