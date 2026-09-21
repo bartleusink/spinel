@@ -5375,6 +5375,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       if (is_lengthlike) {
         buf_printf(b, "if (_t%d.tag == SP_TAG_SYM) _t%d = %ssp_str_length(sp_sym_to_s((sp_sym)_t%d.v.i))%s; else ", tv, tr, bopen, tv, bclose);
         buf_printf(b, "if (_t%d.tag == SP_TAG_STR) _t%d = %s(sp_int)sp_str_length(_t%d.v.s)%s; else ", tv, tr, bopen, tv, bclose);
+        /* A handle answers File#size through the runtime's own dispatch,
+           which knows whether it is a File (fstat) or an IO (CRuby's
+           NoMethodError). This chain is built when a user class owns the
+           name too, and its default arm raised for the File the same
+           program keeps beside those objects in one Hash (#4734). */
+        if (sp_streq(name, "size"))
+          buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_IO) _t%d = %ssp_poly_size(_t%d)%s; else ",
+                     tv, tv, tr, bopen, tv, bclose);
       }
       /* a string/symbol-tagged poly value answers empty? directly (#1438) */
       if (is_empty) {
@@ -16971,7 +16979,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     if (nr2 >= 0 && nn2 && (sp_streq(nn2, "!") || sp_streq(nn2, "!=")) &&
         nc2 == (sp_streq(nn2, "!") ? 0 : 1) && ty_is_object(comp_ntype(c, nr2))) {
       int nd = ty_object_class(comp_ntype(c, nr2)), ndef = nd;
-      if (comp_method_in_chain(c, nd, nn2, &ndef) >= 0) {
+      int nmi2 = comp_method_in_chain(c, nd, nn2, &ndef);
+      if (nmi2 >= 0) {
         /* A value-type object is passed BY VALUE (sp_X, not sp_X *): casting
            it to a pointer is not a conversion the C compiler accepts, so a
            class with ivars that defines #! did not build (#3819). */
@@ -16981,7 +16990,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_puts(b, "(");
         emit_expr(c, nr2, b);
         buf_puts(b, ")");
-        if (nc2 == 1) { buf_puts(b, ", "); emit_expr(c, nv2[0], b); }
+        if (nc2 == 1) {
+          buf_puts(b, ", ");
+          /* The callee's parameter decides the argument's form, as the
+             general call path decides it: a parameter widened to poly (a
+             `!=` also called with a String, every int slot under
+             --int-overflow=promote) takes the boxed value, where this site
+             handed it the raw int (#4733). */
+          if (c->scopes[nmi2].nparams >= 1) emit_arg_or_default(c, &c->scopes[nmi2], 0, nv2[0], b);
+          else emit_expr(c, nv2[0], b);
+        }
         buf_puts(b, ")");
         return;
       }
@@ -22426,8 +22444,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && argc == 1 && comp_ntype(c, recv) == TY_POLY &&
       (sp_streq(name, "&") || sp_streq(name, "|") || sp_streq(name, "^"))) {
     int bop = sp_streq(name, "&") ? 0 : sp_streq(name, "|") ? 1 : 2;
-    buf_puts(b, "sp_poly_bitop("); emit_boxed(c, recv, b); buf_puts(b, ", ");
-    emit_boxed(c, argv[0], b); buf_printf(b, ", %d)", bop);
+    int t = ++g_tmp;
+    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
+    /* the hoisted receiver is rooted across its argument and the dispatch:
+       a heap receiver (an array, a Bignum, a user object whose own operator
+       sp_poly_bitop reaches) is held by nothing else while the argument runs */
+    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+    buf_printf(b, "sp_poly_bitop(_t%d, ", t);
+    emit_boxed(c, argv[0], b); buf_printf(b, ", %d); })", bop);
     return;
   }
   /* `poly >> n`: through sp_poly_shr, which keeps a bignum receiver in bignum
@@ -22435,11 +22459,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
      turning the shift arithmetic and diverging a masked xorshift from CRuby for
      good (#3371). sp_poly_shr also carries the Proc#>> composition arm. */
   if (recv >= 0 && argc == 1 && comp_ntype(c, recv) == TY_POLY && sp_streq(name, ">>")) {
-    buf_puts(b, "sp_poly_shr(");
-    emit_boxed(c, recv, b);
-    buf_puts(b, ", ");
+    int t = ++g_tmp;
+    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
+    /* as the bit-operator arm above: a Bignum, Proc or user-object receiver
+       is held by nothing else while the argument runs */
+    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+    buf_printf(b, "sp_poly_shr(_t%d, ", t);
     emit_boxed(c, argv[0], b);
-    buf_puts(b, ")");
+    buf_puts(b, "); })");
     return;
   }
 

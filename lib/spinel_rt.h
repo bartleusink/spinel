@@ -4759,6 +4759,25 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
      as its live value rather than falling through to the array kinds and out
      the nil default, which is what `s = +""; s << "abc"; s[0, 2]` did (#4279). */
   if (sp_poly_is_strbuf(a)) return sp_poly_slice(sp_poly_strbuf_deref(a), start, len);
+  /* An Integer answers `n[start, len]`, the len-bit field starting at bit
+     `start` -- the two-argument form of the bit read, which the typed arms
+     have had all along. A boxed receiver fell past this to the nil default
+     below, so `[255, nil][0][0, 4]` was nil where CRuby says 15, and the
+     value went on being used as a number (#4738). The int-typed nil keeps
+     the default: `nil[0, 4]` is a missing method, not a bit field. */
+  if (a.tag == SP_TAG_INT) {
+    if (a.v.i == SP_INT_NIL) return sp_box_nil();
+    return sp_box_int(sp_int_bit_range(a.v.i, start, len));
+  }
+  if (a.tag == SP_TAG_BIGINT) {
+    sp_Bigint *n = (sp_Bigint *)a.v.p;
+    if (!n) return sp_box_nil();
+    if (start < 0 || len < 0) return sp_box_int(0);
+    { sp_Bigint *sh = sp_bigint_shr(n, (int64_t)start);
+      sp_Bigint *m = sp_bigint_sub(sp_bigint_shl(sp_bigint_new_int(1), (int64_t)len),
+                                   sp_bigint_new_int(1));
+      return sp_box_int(sp_bigint_to_int(sp_bigint_and(sh, m))); }
+  }
   if (a.tag != SP_TAG_OBJ) return sp_box_nil();
   /* arr[start, negative] is nil in CRuby (the slice helpers would return []) */
   if (len < 0 && sp_poly_is_array_kind(a.cls_id)) return sp_box_nil();

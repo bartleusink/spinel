@@ -4791,11 +4791,14 @@ else {
         return 1;
       }
       if (sp_streq(name, "slice!") && argc == 2) {
-        /* the receiver is held across the start and the length, as the typed arm holds it */
+        /* the receiver is held across the start and the length, as the typed
+           arm holds it; the start and the length are converted as it converts
+           them -- a boxed one (every int local under --int-overflow=promote)
+           was handed to the sp_int parameters as the box (#4733) */
         Buf rsp;
         int csp = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rsp);
         buf_printf(b, "sp_PolyArray_slice_bang(%s, ", rsp.p);
-        emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+        emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
         free(rsp.p);
         if (csp) buf_puts(b, "; })");
         return 1;
@@ -9926,12 +9929,18 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
         else emit_unbox_text(c, sc->ivar_types[i], vtxt, b);
         buf_puts(b, ";}\nelse");
       }
+      /* The value is the right-hand side in its own type -- except where the
+         call site is typed boxed (the analyzer answers the store poly when
+         the member is; under --int-overflow=promote every int slot is), in
+         which case it is the boxed copy: the raw sp_int landed in an
+         sp_RbVal local otherwise (#4733). */
       buf_printf(b, " { if (_t%d.tag == SP_TAG_INT)"
                     " sp_raise_cls(\"IndexError\", sp_sprintf(\"offset %%lld too %%s for struct(size:%d)\","
                     " (long long)_t%d.v.i, _t%d.v.i < 0 ? \"small\" : \"large\"));"
                     " sp_raise_cls(\"NameError\", sp_sprintf(\"no member '%%s' in struct\", sp_poly_to_s(_t%d)));"
                     " } _t%d; })",
-                 tk0, sc->nivars, tk0, tk0, tk0, tvraw);
+                 tk0, sc->nivars, tk0, tk0, tk0,
+                 (comp_ntype(c, id) == TY_POLY && tvraw != tv) ? tv : tvraw);
       return 1;
     }
     if (sp_streq(name, "[]") && argc == 1) {
