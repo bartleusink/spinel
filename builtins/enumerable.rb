@@ -458,4 +458,53 @@ module Enumerable
       each
     end
   end
+
+  # inject and reduce are the same method under two names in CRuby (an
+  # `alias`, not a delegation, so overriding one leaves the other alone) --
+  # written here as two independent definitions rather than one canonicalized
+  # to the other, the same way a user class's own override of just one name
+  # leaves the other on Enumerable. Only the arity-0 block form
+  # (`inject { |acc, x| ... }`) is a rewrite target: the seeded form
+  # (`inject(seed) { }`), the symbol forms (`inject(:+)`, `inject(seed, :+)`)
+  # and the bare argless call all have no parameter here, so they stay on the
+  # existing arity-checked C emitter (desugar_builtin_enum_calls), the same
+  # carve-out find_index/count have for the forms their definitions likewise
+  # do not cover.
+  def inject
+    if block_given?
+      acc = first
+      skip = true
+      each do |x|
+        if skip
+          skip = false
+        else
+          acc = yield(acc, x)
+        end
+      end
+      acc
+    else
+      # unreached by the rewrite (desugar_builtin_enum_calls keeps every
+      # blockless call -- the seeded/symbol forms and the bare argless call
+      # alike -- on the existing emitter, which already raises this);
+      # kept correct here for the same reason the other blockless arms are.
+      raise ArgumentError, "wrong number of arguments (given 0, expected 1..2)"
+    end
+  end
+
+  def reduce
+    if block_given?
+      acc = first
+      skip = true
+      each do |x|
+        if skip
+          skip = false
+        else
+          acc = yield(acc, x)
+        end
+      end
+      acc
+    else
+      raise ArgumentError, "wrong number of arguments (given 0, expected 1..2)"
+    end
+  end
 end

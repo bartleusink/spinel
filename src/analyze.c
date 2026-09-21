@@ -4598,6 +4598,15 @@ static int desugar_reduce_method_symbol(Compiler *c) {
     nt_node_set_ref(nt, blk, "parameters", bparams);
     nt_node_set_ref(nt, blk, "body", blkbody);
     nt_node_set_ref(nt, id, "block", blk);
+    /* Marks this block as SYNTHESIZED from a symbol argument, not written by
+       the program: builtins/enumerable.rb's Ruby definition (0 extra args,
+       a real block) would otherwise claim it too, once the seedless form
+       drops its argument below and looks identical to a genuine 0-arg block
+       call -- and its plain `yield` has no fold emitter's fallback for a
+       symbol naming no real method (`[1, 2].inject(:nope)` must answer
+       CRuby's NoMethodError, not fail the C build). See
+       desugar_builtin_enum_calls's carve-out. */
+    nt_node_set_int(nt, id, "sym_fold", 1);
     /* drop the symbol argument, keeping any leading init */
     if (an == 2) nt_node_set_arr(nt, argn, "arguments", av, 1);
     else nt_node_set_ref(nt, id, "arguments", -1);
