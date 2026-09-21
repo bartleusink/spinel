@@ -43,6 +43,31 @@ int comp_nil_chain_bottom(const NodeTable *nt, int v) {
   return -1;
 }
 
+/* The same chain, ending in any literal whose identity a program cannot
+   observe -- a number, a symbol, nil or a boolean. `a = b = 0` writes 0 to
+   both, so each target should take it in its OWN slot type; taking the inner
+   write's value instead assigns b's slot to a, and where b widened to Bignum
+   that is an sp_Bigint * going into a's sp_int. A String literal is left out
+   on purpose: `a = b = "x"` makes a and b the same object, which re-emitting
+   the literal per target would not preserve. Returns the terminal literal
+   node, or -1. */
+int comp_scalar_literal_chain_bottom(const NodeTable *nt, int v) {
+  int depth = 0;
+  while (v >= 0 && depth < 64) {
+    const char *t = nt_type(nt, v);
+    if (!t) return -1;
+    if (sp_streq(t, "IntegerNode") || sp_streq(t, "FloatNode") ||
+        sp_streq(t, "SymbolNode") || sp_streq(t, "NilNode") ||
+        sp_streq(t, "TrueNode") || sp_streq(t, "FalseNode"))
+      return depth > 0 ? v : -1;
+    if (!sp_streq(t, "LocalVariableWriteNode") &&
+        !sp_streq(t, "InstanceVariableWriteNode")) return -1;
+    v = nt_ref(nt, v, "value");
+    depth++;
+  }
+  return -1;
+}
+
 Compiler *comp_new(const NodeTable *nt) {
   Compiler *c = calloc(1, sizeof(Compiler));
   if (!c) return NULL;

@@ -711,6 +711,7 @@ int comp_ternary_arms(const NodeTable *nt, int id, int *then_node, int *else_nod
    (`a = b = nil` seen from a's value)? Returns the terminal NilNode id or -1.
    Shared by analyze (write-type collection) and codegen (chain lowering). */
 int comp_nil_chain_bottom(const NodeTable *nt, int v);
+int comp_scalar_literal_chain_bottom(const NodeTable *nt, int v);
 
 /* Scopes. */
 Scope *comp_scope_new(Compiler *c, const char *name, int def_node);
