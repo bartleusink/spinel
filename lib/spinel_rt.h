@@ -2472,9 +2472,10 @@ static SP_NOINLINE sp_int sp_poly_arg_int_obj(sp_RbVal v);   /* the object arm, 
 /* Does this Bignum fit the Integer slot? The width is sp_int's, not a
    64-bit constant: under -m32 sp_int is 32 bits, so a 40-bit value passed a
    `<= 63` test and was then silently cut by the cast -- the very shape of
-   wrong answer these arms exist to remove. SP_INT_NIL is the nil sentinel
-   and cannot be a value. */
-static int sp_brat_int_fits(sp_Bigint *b) {
+   wrong answer the arms below exist to remove. SP_INT_NIL is the nil
+   sentinel and cannot be a value (-2**63 has bit_length 63 and fits the
+   width, but collides with it). */
+static int sp_bigint_fits_int(sp_Bigint *b) {
   if (sp_bigint_bit_length(b) > (sp_int)(sizeof(sp_int) * 8 - 1)) return 0;
   return (sp_int)sp_bigint_to_int(b) != SP_INT_NIL;
 }
@@ -2492,7 +2493,7 @@ static SP_NOINLINE sp_int sp_poly_to_i_cold(sp_RbVal v) {
      #2024. */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL && v.v.p) {
     sp_Bigint *q = sp_brat_trunc_b((sp_BigRational *)v.v.p);
-    if (sp_brat_int_fits(q)) return (sp_int)sp_bigint_to_int(q);
+    if (sp_bigint_fits_int(q)) return (sp_int)sp_bigint_to_int(q);
     sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   }
   /* a Time read out of a container: its to_i is the epoch second (#3699) */
@@ -2924,10 +2925,9 @@ static sp_int sp_poly_Integer(sp_RbVal v) {
   if (v.tag == SP_TAG_INT) return v.v.i;
   if (v.tag == SP_TAG_BIGINT) {
     /* the Integer slot cannot carry a Bignum: the value when it fits, a
-       loud RangeError otherwise, never a number cut to 64 bits */
+       loud RangeError otherwise, never a number cut to the slot's width */
     sp_Bigint *bg = (sp_Bigint *)v.v.p;
-    sp_int n = (sp_int)sp_bigint_to_int(bg);
-    if (sp_bigint_bit_length(bg) <= 63 && n != SP_INT_NIL) return n;
+    if (sp_bigint_fits_int(bg)) return (sp_int)sp_bigint_to_int(bg);
     sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   }
   if (v.tag == SP_TAG_FLT) {
@@ -3339,7 +3339,7 @@ static sp_int sp_poly_int_bit(sp_RbVal v, sp_int i) {
    a boxed Bignum's to_i gives when it does not -- never a NoMethodError for
    a name Rational has. */
 static sp_int sp_brat_part_i(sp_Bigint *b) {
-  if (sp_brat_int_fits(b)) return (sp_int)sp_bigint_to_int(b);
+  if (sp_bigint_fits_int(b)) return (sp_int)sp_bigint_to_int(b);
   sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   return 0;
 }
@@ -12304,8 +12304,7 @@ static sp_int sp_poly_Integer_ex(sp_RbVal v, sp_int base, int raise) {
   if (r.tag == SP_TAG_NIL) return SP_INT_NIL;
   if (r.tag == SP_TAG_BIGINT) {
     sp_Bigint *bg = (sp_Bigint *)r.v.p;
-    sp_int n = (sp_int)sp_bigint_to_int(bg);
-    if (sp_bigint_bit_length(bg) <= 63 && n != SP_INT_NIL) return n;
+    if (sp_bigint_fits_int(bg)) return (sp_int)sp_bigint_to_int(bg);
     if (raise) sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
     return SP_INT_NIL;
   }
