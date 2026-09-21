@@ -5377,6 +5377,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       if (is_lengthlike) {
         buf_printf(b, "if (_t%d.tag == SP_TAG_SYM) _t%d = %ssp_str_length(sp_sym_to_s((sp_sym)_t%d.v.i))%s; else ", tv, tr, bopen, tv, bclose);
         buf_printf(b, "if (_t%d.tag == SP_TAG_STR) _t%d = %s(sp_int)sp_str_length(_t%d.v.s)%s; else ", tv, tr, bopen, tv, bclose);
+        /* A handle answers File#size through the runtime's own dispatch,
+           which knows whether it is a File (fstat) or an IO (CRuby's
+           NoMethodError). This chain is built when a user class owns the
+           name too, and its default arm raised for the File the same
+           program keeps beside those objects in one Hash (#4734). */
+        if (sp_streq(name, "size"))
+          buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_IO) _t%d = %ssp_poly_size(_t%d)%s; else ",
+                     tv, tv, tr, bopen, tv, bclose);
       }
       /* a string/symbol-tagged poly value answers empty? directly (#1438) */
       if (is_empty) {
