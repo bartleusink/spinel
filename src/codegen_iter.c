@@ -1496,10 +1496,18 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     /* the tail's own prelude stays INSIDE the splice, after the parameter
        bindings above it: hoisted to the enclosing statement, a forwarded
        proc's yield read the block parameter before it was bound */
-    { Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
-      if (want_poly && ty_is_object(comp_ntype(c, bd3[bn3 - 1]))) emit_boxed(c, bd3[bn3 - 1], b);
-      else emit_expr(c, bd3[bn3 - 1], b);
-      g_pre = svp3; g_indent = svi3; }
+    /* the expression itself is rendered aside first: an emitter writes its
+       prelude while it is part-way through the expression text, and with
+       the prelude buffer being `b` that text would have landed in the
+       middle of a call's argument list (a proc-forwarded yield's rooted
+       argument temp, #4662) */
+    { Buf tb; memset(&tb, 0, sizeof tb);
+      Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
+      if (want_poly && ty_is_object(comp_ntype(c, bd3[bn3 - 1]))) emit_boxed(c, bd3[bn3 - 1], &tb);
+      else emit_expr(c, bd3[bn3 - 1], &tb);
+      g_pre = svp3; g_indent = svi3;
+      if (tb.p) buf_puts(b, tb.p);
+      free(tb.p); }
     buf_puts(b, "; ");
   }
   else if (as_expr && !nx_own && want_poly && bn3 > 0 &&
@@ -1528,9 +1536,12 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     /* the tail's prelude stays inside the splice here too: a forwarded
        proc's `f.call(__fwd)` read its parameter's slot ahead of the binding
        when the read was hoisted to the enclosing statement */
-    { Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
-      emit_boxed(c, bd3[bn3 - 1], b);
-      g_pre = svp3; g_indent = svi3; }
+    { Buf tb; memset(&tb, 0, sizeof tb);
+      Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
+      emit_boxed(c, bd3[bn3 - 1], &tb);
+      g_pre = svp3; g_indent = svi3;
+      if (tb.p) buf_puts(b, tb.p);
+      free(tb.p); }
     buf_puts(b, "; ");
   }
   else {

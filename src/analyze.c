@@ -9074,7 +9074,12 @@ static void mark_empty_literal_args(Compiler *c) {
      stable across it: freeze so the per-class method lookups below (called for
      every CallNode * every class) hit the O(1) hash index instead of the
      unfrozen O(nscopes) linear reverse scan -- the dominant analyze cost on
-     large apps (lobsters: ~72% of compile time was this triple loop). */
+     large apps (lobsters: ~72% of compile time was this triple loop). The
+     state on entry is put back on exit: this also runs inside the fixpoint,
+     after a builtin call is rewritten (b29ec9a7), where the index is frozen
+     already, and leaving it unfrozen there made every lookup of the rest of
+     the analysis a linear scan over the scopes (#4662). */
+  int was_frozen = comp_scope_index_is_frozen();
   comp_scope_index_set_frozen(1);
   /* The per-call fallback below resolved an unmatched name by probing every
      class (comp_method_in_class + comp_cmethod_in_class for k in 0..nclasses).
@@ -9161,7 +9166,7 @@ static void mark_empty_literal_args(Compiler *c) {
   }
   free(mm);
   free(nix);
-  comp_scope_index_set_frozen(0);
+  comp_scope_index_set_frozen(was_frozen);
 }
 /* An empty `{}` compared against a hash-typed peer takes that peer's variant,
    so the two sides share a representation and `==` can compare contents
