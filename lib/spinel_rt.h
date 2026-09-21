@@ -4791,10 +4791,11 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
      `start` -- the two-argument form of the bit read, which the typed arms
      have had all along. A boxed receiver fell past this to the nil default
      below, so `[255, nil][0][0, 4]` was nil where CRuby says 15, and the
-     value went on being used as a number (#4738). The int-typed nil keeps
+     value went on being used as a number (#4742). The int-typed nil keeps
      the default: `nil[0, 4]` is a missing method, not a bit field. */
   if (a.tag == SP_TAG_INT) {
-    if (a.v.i == SP_INT_NIL) return sp_box_nil();
+    /* the sentinel IS nil, and nil has no `[]` */
+    if (a.v.i == SP_INT_NIL) sp_raise_poly_nomethod("[]", sp_box_nil());
     return sp_box_int(sp_int_bit_range(a.v.i, start, len));
   }
   if (a.tag == SP_TAG_BIGINT) {
@@ -4806,7 +4807,18 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
                                    sp_bigint_new_int(1));
       return sp_box_int(sp_bigint_to_int(sp_bigint_and(sh, m))); }
   }
-  if (a.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* A Symbol has `[]`: it answers its NAME sliced, as a String. Falling to
+     the default below made `[:sym, nil][0][0, 4]` nil, which then went on
+     being used as one. */
+  if (a.tag == SP_TAG_SYM)
+    return sp_box_nullable_str(sp_str_sub_range(sp_sym_to_s((sp_sym)a.v.i), start, len));
+  /* Everything else here -- nil, a Float, true, false -- simply has no `[]`,
+     and CRuby says so. The default used to answer nil for all of them, so a
+     receiver that was never sliceable produced a value indistinguishable
+     from an in-range miss, and the program carried it forward. (The Integer
+     arm above notes the same thing about nil: a missing method, not a bit
+     field.) */
+  if (a.tag != SP_TAG_OBJ) sp_raise_poly_nomethod("[]", a);
   /* arr[start, negative] is nil in CRuby (the slice helpers would return []) */
   if (len < 0 && sp_poly_is_array_kind(a.cls_id)) return sp_box_nil();
   /* bm[a, b]: a boxed bound Method called with two int arguments (optcarrot's
