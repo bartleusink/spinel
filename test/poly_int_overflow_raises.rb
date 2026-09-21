@@ -1,3 +1,6 @@
+# spinel: int64 -- the operand must sit just under the sp_int maximum, which
+# is a different number at each width; the 32-bit slot cannot hold 2**62 at
+# all, so there is no portable spelling of "one multiply from overflowing".
 # raise/wrap-mode only: integer arithmetic on a BOXED receiver overflows the
 # machine word the same way the typed path does -- loudly.
 #

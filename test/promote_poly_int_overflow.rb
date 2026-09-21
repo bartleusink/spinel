@@ -1,3 +1,5 @@
+# spinel: int64 -- see poly_int_overflow_raises.rb: the operand has to sit
+# just under the sp_int maximum, which no portable literal can name.
 # promote answers the same overflow with a Bignum, boxed or typed: the slot
 # the number went through cannot change what the number is.
 n = [2**62, nil][0]
