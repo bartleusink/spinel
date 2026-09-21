@@ -877,6 +877,13 @@ const char *array_index_bad_class(Compiler *c, int id);
 extern int g_poly_builtin_arm;  /* emitting a poly dispatch's builtin arm */
 void emit_complex_coerce(Compiler *c, int node, Buf *b);
 void emit_brk_wrapped_call(Compiler *c, int id, Buf *b);
+/* 1 if a break-carrying call at `id` can skip the serial-addressed setjmp
+   scope (every break in its block is a same-function goto); 0 if it needs
+   the real sp_brk_push/setjmp/sp_brk_throw wrapper, which -- like a begin/
+   rescue's setjmp -- makes a local written before the throw and read after
+   indeterminate unless declared volatile (see begin_volatile_names). */
+int brk_wrapper_light(Compiler *c, int id);
+int brk_wrapper_surely_light(Compiler *c, int id);
 void emit_array_splice(Compiler *c, int id, int recv, TyKind rt, int start_node, int len_node, int range_node, int rhs_node, Buf *b);
 int splice_to_ary_mi(Compiler *c, TyKind rhs_ty);
 TyKind emit_splice_to_ary_src(Compiler *c, int rhs_node, TyKind rhs_ty, int mi, int ta, Buf *b, Buf *out);

@@ -10728,6 +10728,19 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
                  nt_str(nt, id, "name") && sp_streq(nt_str(nt, id, "name"), g_dm_subst_name);
   TyKind vty = is_subst ? comp_ntype(c, g_dm_subst_node) : comp_ntype(c, id);
   int want_poly = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
+  TyKind tail_slot_ty = g_result_var ? g_result_ty : g_ret_type;
+  /* A bare `nil` in tail position feeding a nullable Integer/Float slot is
+     that type's sentinel (the nil join of ty_unify), not the plain `0`
+     emit_expr gives nil in every other numeric context: an Enumerable
+     method written `return i if match; ...; nil` (find_index) fell through
+     this generic value path and answered 0 instead of nil for "not found"
+     on a typed receiver. Mirrors the local-write carve-out above. */
+  if (!want_poly && sp_streq(ty, "NilNode") &&
+      (tail_slot_ty == TY_INT || tail_slot_ty == TY_FLOAT)) {
+    buf_puts(b, nil_sentinel(tail_slot_ty));
+    buf_puts(b, ";\n");
+    return;
+  }
   if (want_poly && vty != TY_POLY) emit_boxed(c, is_subst ? g_dm_subst_node : id, b);
   else if (!g_result_var && emit_ret_hash_widen_conv(c, g_ret_type, vty, is_subst ? g_dm_subst_node : id, b)) { }
   else if (!g_result_var && emit_ret_poly_array_conv(c, g_ret_type, vty, is_subst ? g_dm_subst_node : id, b)) { }

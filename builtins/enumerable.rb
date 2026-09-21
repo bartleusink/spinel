@@ -305,6 +305,47 @@ module Enumerable
     end
   end
 
+  def find_index
+    # An accumulator + break, not `return i if yield(x)`: a `return` inside
+    # a block only reaches out of an INLINED copy of this method (a plain C
+    # goto within one function). A receiver known only at run time (a poly
+    # value, or one an instantiated class might itself answer `each` for)
+    # is walked through the generic, non-inlined clone instead, where the
+    # block is a real materialized Proc called across an actual function
+    # boundary that a goto cannot cross -- `return` silently landed back in
+    # the clone's own unconditional trailing `nil` no matter what the block
+    # found. `break`'s non-local exit is built to cross that boundary (the
+    # same mechanism find/min_by/any? already rely on), so it is exit this
+    # is written in.
+    if block_given?
+      idx = nil
+      i = 0
+      each do |x|
+        if yield(x)
+          idx = i
+          break
+        end
+        i += 1
+      end
+      idx
+    else
+      # unreached by the rewrite (desugar_builtin_enum_calls keeps the
+      # value-argument form `find_index(v)` and the blockless Enumerator
+      # form on the emitter); kept correct here for the same reason the
+      # other blockless arms are.
+      idx = nil
+      i = 0
+      each do |x|
+        if x
+          idx = i
+          break
+        end
+        i += 1
+      end
+      idx
+    end
+  end
+
   def take_while
     if block_given?
       out = []

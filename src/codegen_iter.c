@@ -708,6 +708,14 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     buf_printf(b, " _t%d = %s;\n", rtag, default_value(rt));
     const char *sv_rv = g_result_var; g_result_var = rvbuf;
     int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
+    /* g_result_ty is the slot type a tail statement reads to pick its own
+       nil sentinel (a bare `nil` feeding a nullable Integer/Float slot,
+       #4692-class): every OTHER place that sets g_result_var (begin/rescue)
+       keeps it in sync, and this inliner did not, so a body whose only
+       fall-through value was a literal `nil` (find_index's "not found" arm)
+       read whatever g_result_ty happened to hold from an outer, unrelated
+       context and picked that type's default instead of this call's. */
+    TyKind sv_rty = g_result_ty; g_result_ty = rt;
     if (m_has_ret) {
       snprintf(inl_lbl, sizeof inl_lbl, "_yret%d", tag);
       g_method_pr_label = inl_lbl; g_method_pr_var = rvbuf; g_ret_type = rt;
@@ -724,7 +732,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       emit_indent(b, din); buf_puts(b, "}\n");
       emit_indent(b, din); buf_printf(b, "_yret%d: ;\n", tag);
     }
-    g_result_var = sv_rv; g_result_poly = sp;
+    g_result_var = sv_rv; g_result_poly = sp; g_result_ty = sv_rty;
     emit_indent(b, din); buf_printf(b, "_t%d;\n", rtag);
   }
   else {

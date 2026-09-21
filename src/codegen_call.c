@@ -10924,7 +10924,7 @@ static int brk_block_direct_only(const NodeTable *nt, int node, int depth) {
    user method. Anything else (a boxed receiver dispatching to a user each
    that lifts the block, an Enumerator driven by the runtime) keeps the
    serial-addressed scope. */
-static int brk_wrapper_light(Compiler *c, int id) {
+int brk_wrapper_light(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   int blk = nt_ref(nt, id, "block");
   if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
@@ -10941,6 +10941,28 @@ static int brk_wrapper_light(Compiler *c, int id) {
   TyKind rt = comp_ntype(c, recv);
   return (ty_is_array(rt) && rt != TY_POLY_ARRAY) || ty_is_hash(rt) ||
          rt == TY_RANGE || rt == TY_INT || rt == TY_STRING;
+}
+/* The volatile analysis's question (scope_has_begin): will this wrapper
+   surely take the light form? The gate above is a prediction the wrapper
+   itself verifies after rendering the body (an emitter that runs the block
+   under a frame of its own makes the break a throw, and the wrapper falls
+   back to the setjmp scope), so a local read across the wrapper needs
+   volatile unless the iterator is one known to splice the block as a
+   plain loop: a builtin container walk by name, or an inlined yielding
+   user method (whose breaks are gotos by construction). */
+int brk_wrapper_surely_light(Compiler *c, int id) {
+  if (!brk_wrapper_light(c, id)) return 0;
+  if (call_user_yield_mi(c, id) >= 0) return 1;
+  const char *nm = nt_str(c->nt, id, "name");
+  static const char *const plain[] = {
+    "each", "each_with_index", "each_with_object", "each_index", "each_key", "each_value",
+    "each_pair", "each_char", "each_byte", "each_line", "reverse_each", "times", "upto",
+    "downto", "step", "map", "collect", "select", "filter", "reject", "flat_map", "collect_concat",
+    "sum", "count", "any?", "all?", "none?", "one?", "find", "detect", "find_index", "each_slice",
+    "each_cons", "min_by", "max_by", "sort_by", "group_by", "partition", "filter_map",
+    "take_while", "drop_while", "inject", "reduce", NULL };
+  for (int i = 0; plain[i]; i++) if (nm && sp_streq(nm, plain[i])) return 1;
+  return 0;
 }
 void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;

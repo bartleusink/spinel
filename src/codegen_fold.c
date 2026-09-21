@@ -4959,16 +4959,25 @@ static void emit_pred_cond(Buf *b, int pred_kind, const char *cond, int acc, int
     default: buf_printf(b, "if (%s) _t%d++;\n", cond, acc); break;
   }
 }
-/* find_index / index / rindex WITH A BLOCK on a poly receiver.
+/* index / rindex WITH A BLOCK on a poly receiver.
    The typed-array emitter is keyed on the storage kind, so a value only known
    to be an array at run time never reached it and the call fell through to the
    unresolved-call raise -- while every sibling name (find, select, count) had
-   a poly loop of its own. Same loop, answering the index or nil (#3409). */
+   a poly loop of its own. Same loop, answering the index or nil (#3409).
+   find_index used to be here too: now a Ruby definition (builtins/
+   enumerable.rb), it goes through the generic __enum_find_index__ dispatch
+   the same way find/detect/count do. Leaving it here raced that dispatch --
+   this loop is unconditionally hoisted into g_pre ahead of the runtime
+   is_a? guard the dispatch builds when some instantiated class defines its
+   own find_index (any Enumerable includer does now that Enumerable#find_index
+   is real, `require "set"` among them), corrupting the guarded branch's temps
+   even on a receiver no such class ever holds: a poly-typed method answering
+   different array types per call site answered nil for every element once
+   Set was merely required, nowhere near the call site or the value itself. */
 int emit_find_index_poly_expr(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
-  if (!name || !(sp_streq(name, "find_index") || sp_streq(name, "index") ||
-                 sp_streq(name, "rindex"))) return 0;
+  if (!name || !(sp_streq(name, "index") || sp_streq(name, "rindex"))) return 0;
   int block = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
   int recv = nt_ref(nt, id, "receiver");
   if (block < 0 || recv < 0) return 0;
