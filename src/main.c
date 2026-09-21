@@ -33,6 +33,7 @@
 #include <sys/wait.h>
 
 extern int g_no_root_elision;
+extern int g_no_root_frame;
 extern int g_opt_level;
 extern int g_require_gate_cli;
 extern int g_inline_hot;
@@ -385,6 +386,9 @@ int main(int argc, char **argv) {
     /* keep every GC root, so a suspected miscompile can be bisected against
        the same binary rather than against a different build. */
     else if (sp_streq(a, "--no-root-elision")) { g_no_root_elision = 1; i++; }
+    /* keep the per-root registration (one cleanup-attribute root per local)
+       instead of the per-function root frame: the same bisecting hatch. */
+    else if (sp_streq(a, "--no-root-frame")) { g_no_root_frame = 1; i++; }
     else if (sp_streq(a, "--force")) { g_force_overwrite = 1; i++; }
     else if (sp_streq(a, "--inline-hot"))    { g_inline_hot = 1; i++; }
     /* Compile without forcing the small leaf methods inline: a smaller binary

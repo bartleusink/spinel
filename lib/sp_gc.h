@@ -105,6 +105,32 @@ static inline void sp_gc_cleanup(int *p) { sp_gc_nroots = *p; }
 #define SP_GC_ROOT_STR(v) int __attribute__((cleanup(_sp_gc_root_pop))) _SP_GC_CONCAT(_sp_gcr_, __COUNTER__) = _sp_gc_root_push((void**)((uintptr_t)&(v) | (uintptr_t)2))
 #define SP_GC_RESTORE() sp_gc_nroots = _gc_saved
 
+/* ---- root frames ----
+   A generated function registers ONE entry for all of its roots instead of
+   one per root: a stack struct headed by sp_gc_frame_hdr, followed by nv
+   sp_RbVal slots that are the homes of the function's boxed temporaries, then
+   np entries in the same tagged-pointer encoding as the root array itself
+   (SP_GC_ENTRY_*) for the locals rooted at function scope. Tag 3 -- the one
+   value the per-root tags 1 and 2 never combine to -- marks the entry, so the
+   walkers' existing `& 3` test already routes it to sp_gc_mark_root_entry.
+
+   The per-root form costs the C compiler an address-taken stack slot, a
+   bounds check and a cleanup-attribute pop duplicated on every scope exit;
+   on a large generated TU those were a third of clang's unoptimised IR and
+   most of its peak memory. The frame is one alloca, zeroed once at entry
+   (a zero slot is INT 0, which marks nothing), popped by SP_GC_SAVE's cleanup
+   with everything above it. A slot keeps its last value until the function
+   returns, so an object a dead temporary named is held that much longer --
+   an over-approximation of liveness, never an under-approximation. The
+   layout is decoded in sp_gc_mark_frame; the generated struct is
+   `{ sp_gc_frame_hdr h; sp_RbVal v[nv]; void **p[np]; }`, either array
+   omitted when its count is 0. */
+typedef struct { int nv; int np; } sp_gc_frame_hdr;
+#define SP_GC_ROOT_FRAME(f) ((void)_sp_gc_root_push((void**)((uintptr_t)&(f) | (uintptr_t)3)))
+#define SP_GC_ENTRY_PTR(v)   ((void**)&(v))
+#define SP_GC_ENTRY_RBVAL(v) ((void**)((uintptr_t)&(v) | (uintptr_t)1))
+#define SP_GC_ENTRY_STR(v)   ((void**)((uintptr_t)&(v) | (uintptr_t)2))
+
 /* ---- write barrier ----
    A generational mark walks the young objects and whatever the roots reach; an
    old object it does not walk can still be the only thing holding a young one.
@@ -635,11 +661,26 @@ static inline void sp_cell_scan_procint(void *p) {
 }
 /* A low-bit-tagged root entry is an sp_RbVal* (see SP_GC_ROOT_RBVAL);
    an untagged entry is a plain void** to a direct GC pointer. */
-static inline void sp_gc_mark_root_entry(void **e) {
+static inline void sp_gc_mark_root_entry_flat(void **e) {
   uintptr_t u = (uintptr_t)e;
   if (u & (uintptr_t)1) { sp_mark_rbval(*(sp_RbVal *)(u & ~(uintptr_t)1)); }
   else if (u & (uintptr_t)2) { sp_mark_string(*(const char **)(u & ~(uintptr_t)2)); }
   else { void *o = *e; if (o) sp_gc_mark(o); }
+}
+/* A root frame (tag 3, see SP_GC_ROOT_FRAME): the boxed slots first, then the
+   tagged entries, each of which is a per-root entry relocated into the frame
+   -- never another frame. An entry the function has not reached yet is still
+   the zero the frame started with, and is skipped. */
+static inline void sp_gc_mark_frame(const sp_gc_frame_hdr *h) {
+  const sp_RbVal *v = (const sp_RbVal *)(h + 1);
+  for (int i = 0; i < h->nv; i++) sp_mark_rbval(v[i]);
+  void **const *p = (void **const *)(v + h->nv);
+  for (int i = 0; i < h->np; i++) if (p[i]) sp_gc_mark_root_entry_flat(p[i]);
+}
+static inline void sp_gc_mark_root_entry(void **e) {
+  uintptr_t u = (uintptr_t)e;
+  if ((u & (uintptr_t)3) == (uintptr_t)3) sp_gc_mark_frame((const sp_gc_frame_hdr *)(u & ~(uintptr_t)3));
+  else sp_gc_mark_root_entry_flat(e);
 }
 
 #endif

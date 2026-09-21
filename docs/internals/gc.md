@@ -38,6 +38,24 @@ The low two bits of the stored address are a tag:
 `SP_GC_SAVE()` snapshots the root depth for a whole function; `SP_GC_RESTORE()`
 returns to it.
 
+Tag 3 -- the one value tags 1 and 2 never combine to -- is a **root frame**
+(`SP_GC_ROOT_FRAME`): one entry standing for all of a generated function's
+roots. It points at a stack struct headed by `sp_gc_frame_hdr`, followed by
+`nv` `sp_RbVal` slots that are the homes of the function's boxed temporaries
+and `np` entries in the encoding above for the locals rooted at function scope.
+The emitters still write one `SP_GC_ROOT*` per local; a pass over the finished
+function (`gc_frame_build` in `src/codegen.c`) moves what it can prove
+function-scoped into the frame, because each per-root form cost the C compiler
+an address-taken slot, a bounds check and a cleanup pop duplicated on every
+scope exit -- a third of clang's unoptimised IR and most of its peak memory on
+a large generated TU. The frame is zeroed once at entry, popped by
+`SP_GC_SAVE`'s cleanup, and a slot keeps its last value until the function
+returns: an over-approximation of liveness, never an under-approximation.
+Roots the pass leaves in place (a root nested inside a loop body, a temporary
+whose address is taken, the runtime's own C) keep the per-root macro; the two
+forms coexist. `--no-root-frame` keeps every root in the per-root form, for
+bisecting.
+
 Beyond the root array the mark walk consults three hook groups, in this order:
 
 1. **fibers** -- `sp_gc_mark_suspended_fibers_hook`: the saved root stacks of
