@@ -255,6 +255,7 @@ SP_TLS sp_Fiber *sp_fiber_current = &sp_fiber_root;    /* extern: read by the ge
    Installed once, only when nothing else has claimed the signal (the GC
    verifier's fault reporter, for one). */
 #include <signal.h>
+#include <stdio.h>
 static void sp_fiber_fault_write(const char *s) { size_t n = strlen(s); while (n) { ssize_t w = write(2, s, n); if (w <= 0) break; s += w; n -= (size_t)w; } }
 static void sp_fiber_fault_write_num(size_t v) { char b[24]; int i = (int)sizeof b; b[--i] = 0; do { b[--i] = (char)('0' + v % 10); v /= 10; } while (v); sp_fiber_fault_write(b + i); }
 static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
@@ -264,17 +265,30 @@ static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
   /* The thread's own stack ran past its end: the fault lands in the OS guard
      just below it. Read as an ordinary segfault this killed the process where
      CRuby raises SystemStackError and lets a rescue continue. The raise is
-     the generated TU's (it owns the exception stack); with no hook installed,
-     or no handler armed to catch it, the report below still stands. */
+     the generated TU's (it owns the exception stack). */
   if (sp_stack_overflow_raise_fn && a && sp_thread_stack_lo &&
       a < sp_thread_stack_lo && a >= sp_thread_stack_lo - (ptrdiff_t)(1 << 20) &&
       (!f || f == &sp_fiber_root || !f->stack)) {
-    /* unblock the signal first: this handler does not return, and the mask
-       it was entered with would otherwise stay blocked in the frame we jump
-       to (on Linux longjmp does not restore it) */
+    /* unblock the signal first: this raise does not return, and the mask it
+       was entered with would otherwise stay blocked in the frame we jump to
+       (on Linux longjmp does not restore it) */
     sigset_t m; sigemptyset(&m); sigaddset(&m, SIGSEGV); sigaddset(&m, SIGBUS);
     pthread_sigmask(SIG_UNBLOCK, &m, 0);
-    sp_stack_overflow_raise_fn();   /* does not return */
+    sp_stack_overflow_raise_fn();   /* returns only if no handler is armed */
+    /* Nothing to rescue it: report it as the uncaught exception it is and
+       leave, rather than letting the default disposition kill the process on
+       a signal with nothing said. Writing a fixed string and _exit are all
+       this handler may do -- the allocator is not safe to re-enter from a
+       signal, and the stack a formatter would want is the one that just ran
+       out. */
+    /* what the program already printed is still in stdout's buffer, and
+       _exit does not flush it: a run that printed a hundred lines and then
+       overflowed would otherwise show none of them. The at_exit hooks do NOT
+       run here -- they are Ruby code, and the stack they would run on is the
+       one that just ran out. */
+    fflush(stdout);
+    sp_fiber_fault_write("stack level too deep (SystemStackError)\n");
+    _exit(1);
   }
   if (f && f != &sp_fiber_root && f->stack && a >= f->stack && a < f->stack + sp_fiber_guard()) {
     sp_fiber_fault_write("spinel: fiber stack overflow: a green thread, Fiber or Enumerator body ran past the ");

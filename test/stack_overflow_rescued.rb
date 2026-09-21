@@ -48,3 +48,23 @@ begin
 rescue SystemStackError
   puts "bare rescue passed it through"
 end
+
+# The guard must not fire on a recursion that is merely deep. Machine-generated
+# code recurses far further than hand-written code does -- a compiled function
+# body calls its callee directly, ten thousand frames down -- and a guard that
+# mistook that for an overflow would refuse programs that are fine.
+def countdown(n) = n <= 0 ? 0 : 1 + countdown(n - 1)
+p countdown(10_000)
+
+def fac(n) = n <= 1 ? 1 : n * fac(n - 1)
+p fac(20)
+
+# ...and a deep recursion that is rescued still leaves the stack usable for the
+# next deep one, rather than each rescue costing a little of it
+2.times do
+  begin
+    deep(0)
+  rescue SystemStackError
+    p countdown(10_000)
+  end
+end
