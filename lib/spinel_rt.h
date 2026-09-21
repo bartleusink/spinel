@@ -5723,7 +5723,11 @@ static void _sp_poly_msort(sp_PolyArray *a, int (*cmp)(const void *, const void 
   if (src != a->data) memcpy(a->data, src, (size_t)a->len * sizeof(sp_RbVal));
 }
 /* max/min over boxed elements: numerics/strings via sp_poly_cmp, int arrays
-   lexicographically. Returns nil for an empty array. */
+   lexicographically. Returns nil for an empty array. A failed comparison is
+   worded the way Array#min/#max word it, `acc <=> new`: "comparison of
+   <accumulator's class> with <new element> failed" (CRuby's literal-array
+   VM shortcut says it the other way round, but `a = [1, "a"]; a.min` and
+   minmax do not). */
 static sp_RbVal sp_PolyArray_max(sp_PolyArray *a) {sp_gc_wb((void*)a); 
   if (!a || a->len == 0) return sp_box_nil();
   SP_GC_ROOT(a);  /* sp_poly_cmp can allocate; keep a (and best, which is one of
@@ -5732,7 +5736,7 @@ static sp_RbVal sp_PolyArray_max(sp_PolyArray *a) {sp_gc_wb((void*)a);
   for (sp_int i = 1; i < a->len; i++) {
     sp_bool ok = FALSE;
     sp_int r = sp_poly_order_cmp(a->data[i], best, &ok);
-    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(a->data[i]), sp_cmperr_desc(best)));
+    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(best), sp_cmperr_desc(a->data[i])));
     if (r > 0) best = a->data[i];
   }
   return best;
@@ -5745,7 +5749,7 @@ static sp_RbVal sp_PolyArray_min(sp_PolyArray *a) {sp_gc_wb((void*)a);
   for (sp_int i = 1; i < a->len; i++) {
     sp_bool ok = FALSE;
     sp_int r = sp_poly_order_cmp(a->data[i], best, &ok);
-    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(a->data[i]), sp_cmperr_desc(best)));
+    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(best), sp_cmperr_desc(a->data[i])));
     if (r < 0) best = a->data[i];
   }
   return best;
@@ -5817,7 +5821,7 @@ static void *sp_PtrArray_minmax_obj(sp_PtrArray *a, int cls_id, int want_max) {s
     sp_RbVal bi = sp_box_nullable_obj(a->data[i], cls_id);
     sp_RbVal bb = sp_box_nullable_obj(best, cls_id);
     sp_int r = sp_poly_order_cmp(bi, bb, &ok);
-    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(bi), sp_cmperr_desc(bb)));
+    if (!ok) sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(bb), sp_cmperr_desc(bi)));
     if (want_max ? (r > 0) : (r < 0)) best = a->data[i];
   }
   return best;
