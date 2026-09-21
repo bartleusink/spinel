@@ -2,6 +2,13 @@
  * See sp_fiber.h. The collector roots, sp_gc_alloc, and sp_raise_cls live
  * in the generated TU and are reached by name; fiber-local storage is
  * self-contained here. */
+/* pthread_getattr_np (sp_thread_stack_bounds, below) is a GNU extension:
+   glibc declares it only under _GNU_SOURCE, and clang 16+ (and gcc 14+)
+   make the implicit declaration an error rather than a warning. Before
+   the first include, as sp_cold.c does for statx. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "sp_fiber.h"
 #include <stdlib.h>
 #include <string.h>
