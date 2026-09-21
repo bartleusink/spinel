@@ -2025,6 +2025,16 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   int sv_lens = g_loop_ensure_base;
   g_loop_ensure_base = g_ensure_depth;
   g_c_loop_depth++;
+  /* A `next <v>` in this body leaves THIS loop's iteration, so the value slot
+     an enclosing collecting block opened (g_ie_next_var, a `then` / `map` /
+     inject body's destination) is not its target: left set, the inner next
+     assigned the outer block's slot before its continue, which built only
+     when the two kinds agreed and was then right by accident, the tail
+     overwriting it (#4748). The slot's kind goes with it. g_ie_res_poly
+     stays: the while-as-value emitter sets it for its own `break` value, which
+     the break emitter reads inside this body. */
+  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
+  g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
   int has_redo = subtree_has_own_redo(c->nt, body);
   int lbl = 0;
   if (has_redo) {
@@ -2045,6 +2055,7 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   emit_stmts(c, body, b, indent);
   if (has_redo) g_redo_depth--;
   g_c_loop_depth--;
+  g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
   g_loop_exc_base = sv_lexc;
   g_loop_ensure_base = sv_lens;
 }
