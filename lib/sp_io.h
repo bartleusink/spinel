@@ -46,6 +46,13 @@ typedef struct {
                                   descriptor; every entry point tests this
                                   flag (SP_IO_OPEN) and the parks re-test it
                                   on the way back (#4546) */
+  unsigned char is_file;       /* opened by File.open / File.new (a path the
+                                  program named): the handle is a File, and
+                                  answers the names Integer-sized files own
+                                  and IO does not -- #size, #truncate. A
+                                  pipe end, a socket, IO.for_fd, popen and
+                                  the standard streams are IO, whatever
+                                  path string they carry (#4706) */
   int fno_plus1;               /* IO.for_fd(fd, autoclose: false) wraps a dup(2)
                                   of fd so close/fin never touch the caller's
                                   descriptor; this carries the ORIGINAL fd (+1,

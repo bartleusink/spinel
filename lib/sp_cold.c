@@ -1944,6 +1944,7 @@ sp_File *sp_File_open_flags_perm(const char *path, sp_int fl, sp_int perm) {SP_G
                 : (((int)fl & O_APPEND) ? "a+" : "r+");
   sp_File *f = sp_io_fdopen(fd, m);
   f->path = path;
+  f->is_file = 1;
   return f;
 }
 sp_File *sp_File_open_flags(const char *path, sp_int fl) {
@@ -1983,6 +1984,7 @@ sp_File *sp_File_open_perm(const char *path, const char *mode, sp_int perm) {SP_
   sp_File *f = sp_io_fdopen(fd, fm);
   f->path = path;
   f->mode = m;
+  f->is_file = 1;
   return f;
 }
 void sp_file_stat_scan(void *p) {
@@ -2203,6 +2205,19 @@ sp_int sp_stat_pred(sp_File *f, sp_int kind) {SP_GC_ROOT(f);
    does -- the class-method form truncates by path and cannot serve a handle
    whose path is gone or absent. Buffered bytes are flushed first so the file
    is cut at the size the program believes it has written. */
+/* File#size on a handle: fstat(2) of the descriptor, as CRuby reads it --
+   the path may have been renamed or unlinked since the open. */
+sp_int sp_File_size(sp_File *f) {SP_GC_ROOT(f);
+  SP_IO_OPEN(f);
+  struct stat st;
+  fflush(f->fp);
+  if (fstat(fileno(f->fp), &st) != 0) sp_file_raise_errno("rb_file_size", f->path ? f->path : "");
+  if ((off_t)(sp_int)st.st_size != st.st_size) {
+    sp_raise_cls("RangeError", "file size out of range for Integer");
+    return 0;
+  }
+  return (sp_int)st.st_size;
+}
 sp_int sp_File_truncate(sp_File *f, sp_int n) {SP_GC_ROOT(f);
   SP_IO_OPEN(f);
   if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
