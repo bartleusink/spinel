@@ -1132,11 +1132,9 @@ static TyKind infer_call_inner(Compiler *c, int id);
    since codegen's dispatch switches over them all. */
 static TyKind an_self_call_ret(Compiler *c, Scope *self, const char *name, int mi, int id) {
   TyKind r = method_call_ret(c, mi, id);
-  for (int k = 0; k < c->nclasses; k++) {
-    int is_desc = 0;
-    for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-      if (p == self->class_id) { is_desc = 1; break; }
-    if (!is_desc) continue;
+  int nd = 0; const int *ds = comp_descendants(c, self->class_id, &nd);
+  for (int di = 0; di < nd; di++) {
+    int k = ds[di];
     int dmi = self->is_cmethod ? comp_cmethod_in_class(c, k, name) :
                                  comp_method_in_class(c, k, name);
     if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
@@ -3867,11 +3865,9 @@ else {
          keys compared nil, #3237). Instance methods included. */
       {
         TyKind r = TY_UNKNOWN; int found = 0;
-        for (int k = 0; k < c->nclasses; k++) {
-          int is_desc = 0;
-          for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
-            if (p == self->class_id) { is_desc = 1; break; }
-          if (!is_desc) continue;
+        int nd = 0; const int *ds = comp_descendants(c, self->class_id, &nd);
+        for (int di = 0; di < nd; di++) {
+          int k = ds[di];
           int dmi = self->is_cmethod ? comp_cmethod_in_class(c, k, name)
                                      : comp_method_in_class(c, k, name);
           if (dmi < 0) continue;
