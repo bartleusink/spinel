@@ -4715,7 +4715,10 @@ else {
       /* poly method dispatch: unify the return type over every class that
          defines `name` (the runtime cls_id picks the impl). */
       TyKind r = TY_UNKNOWN; int found = 0, nat_found = 0;
-      for (int k = 0; k < c->nclasses; k++) {
+      int npc = 0;
+      const PolyCand *pcs = comp_poly_candidates(c, name, &npc);
+      for (int pi = 0; pi < npc; pi++) {
+        int k = pcs[pi].cls;
         if (an_builtin_only) continue;   /* the builtin answer alone is wanted */
         if (c->classes[k].is_native_class) {
           /* A native class no reachable code constructs is no candidate: its
@@ -4738,7 +4741,7 @@ else {
           }
           continue;
         }
-        int mi = comp_method_in_chain(c, k, name, NULL);
+        int mi = pcs[pi].mi;
         /* A candidate whose own return has not been derived yet contributes
            nothing: "not known yet" is not an answer, and taking it as one is
            permanent. `def zero?; @value.zero?; end` on a union receiver
@@ -4750,8 +4753,8 @@ else {
            the method's return does settle it unifies in on a later round. */
         if (mi >= 0 && c->scopes[mi].ret == TY_UNKNOWN) continue;
         if (mi >= 0) { r = found ? ty_unify(r, c->scopes[mi].ret) : c->scopes[mi].ret; found = 1; continue; }
-        int rdcls = -1;
-        if (comp_reader_in_chain(c, k, name, &rdcls)) {
+        int rdcls = pcs[pi].rdcls;
+        if (rdcls >= 0) {
           /* resolve alias so `alias_method :required?, :required` reads the
              backing @required, not a bogus @required? */
           const char *rname = comp_resolve_alias(c, k, name);

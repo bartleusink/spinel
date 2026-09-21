@@ -888,6 +888,13 @@ int        comp_sg_reader_const(Compiler *c, int call_id); /* const class idx fo
 int        comp_sg_const_candidates(Compiler *c, int class_id, const char *base, int *out, int max);
 int        comp_sg_reader_candidates(Compiler *c, int call_id, int *out, int max); /* Stage-2 distinct consts */
 int        comp_is_nested_int_array_literal(Compiler *c, int node); /* `[[ints],...]` literal */
+/* One class that may answer a poly-dispatched `name`: a user class with the
+   method (`mi`) or a reader (`rdcls`, the class holding the attr), or a native
+   class (`native`, arity checked by the consumer). See comp_poly_candidates. */
+typedef struct { int cls; int mi; int rdcls; int native; } PolyCand;
+const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n);
+extern unsigned comp_table_gen;
+void comp_poly_candidates_reset(void);
 /* Walk the chain for an attr reader/writer; returns 1 and the owning class. */
 int        comp_reader_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
 int        comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
