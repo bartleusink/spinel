@@ -2877,15 +2877,6 @@ int desugar_builtin_enum_calls(Compiler *c) {
     if ((sp_streq(name, "any?") || sp_streq(name, "all?") ||
          sp_streq(name, "none?") || sp_streq(name, "one?")) &&
         nt_ref(nt, id, "block") < 0) continue;
-    /* any?/all?/none?/one? on a poly (boxed) array receiver: the typed
-       emitter re-reads the array's length every turn, so a block that
-       shrinks or grows the receiver mid-walk sees exactly the elements
-       CRuby does (#4301's sibling, boxed_predicate_mutation.rb); the
-       definition's `each` on a poly array does not re-check the length
-       this way and walked past a cleared array as trailing nils. */
-    if ((rt == TY_POLY || rt == TY_POLY_ARRAY) &&
-        (sp_streq(name, "any?") || sp_streq(name, "all?") ||
-         sp_streq(name, "none?") || sp_streq(name, "one?"))) continue;
     /* find/detect reachable from an optional/keyword parameter's default
        value: see find_calls_in_param_defaults. */
     if (in_default && in_default[id] &&
