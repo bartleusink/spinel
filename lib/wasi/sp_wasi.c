@@ -28,6 +28,7 @@
 /* processes */
 pid_t fork(void) { errno = ENOSYS; return -1; }
 int execvp(const char *f, char *const a[]) SP_WASI_NOSYS(f, a)
+int execv(const char *f, char *const a[]) SP_WASI_NOSYS(f, a)
 int execl(const char *p, const char *a, ...) SP_WASI_NOSYS(p, a)
 pid_t waitpid(pid_t p, int *st, int fl) { (void)p; (void)st; (void)fl; errno = ECHILD; return -1; }
 pid_t wait(int *st) { (void)st; errno = ECHILD; return -1; }
