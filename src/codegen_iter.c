@@ -3444,7 +3444,13 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     if (sp_streq(name, "reverse_each"))
       buf_printf(b, "for (sp_int _t%d = _t%d - 1; _t%d >= 0; _t%d--) {\n", ti, tn, ti, ti);
     else
-      buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) {\n", ti, ti, tn, ti);
+      /* the length is read again every turn, as the typed loops read theirs:
+         a block that shrinks the receiver (`a.clear`, `a.pop`) stops the
+         walk where the array now ends, where the hoisted count walked on
+         past it and yielded nils, and one that grows it is followed (every
+         Ruby-defined Enumerable method iterates through this loop on a
+         boxed receiver) */
+      buf_printf(b, "for (sp_int _t%d = 0; (void)_t%d, _t%d < sp_poly_arr_len_ex(_t%d); _t%d++) {\n", ti, tn, ti, ta, ti);
     /* multi-param: auto-splat each poly element into params. Ruby splats only
        when the element is itself an Array (sp_poly_each_elem already renders a
        hash pair as a 2-element array, so |k, v| over a hash still splats); a

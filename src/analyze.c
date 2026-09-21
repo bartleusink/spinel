@@ -15122,6 +15122,60 @@ void analyze_program(Compiler *c) {
     }
     msym_names[msym_n++] = msym;
   }
+  /* The evidence for those parameters: what the program passes at every
+     DYNAMIC call of a Method value (`.call` / `.()` / `[]` on a receiver
+     typed Method or boxed), per position, over the whole program. A
+     captured method reached only out of a container cannot be tied to one
+     site, so the union over all of them stands in: optcarrot's dispatch
+     table is called as `@store[addr][addr, value]` with two Integers, so its
+     handlers keep sp_int parameters, while `exports.fetch(name).call(*args)`
+     splats a boxed array and widens every position. A position no dynamic
+     site reaches keeps the int default it always had. */
+  TyKind dyn_arg[16];
+  int dyn_seen[16];
+  for (int k = 0; k < 16; k++) { dyn_arg[k] = TY_UNKNOWN; dyn_seen[k] = 0; }
+  if (msym_n > 0) {
+    for (int id = 0; id < c->nt->count; id++) {
+      if (nt_kind(c->nt, id) != NK_CallNode) continue;
+      const char *nm = nt_str(c->nt, id, "name");
+      if (!nm || (!sp_streq(nm, "call") && !sp_streq(nm, "()") && !sp_streq(nm, "[]"))) continue;
+      int r = nt_ref(c->nt, id, "receiver");
+      if (r < 0) continue;
+      TyKind rt = c->ntype[r];
+      if (rt != TY_METHOD && rt != TY_POLY) continue;
+      int a = nt_ref(c->nt, id, "arguments");
+      int an = 0; const int *av = a >= 0 ? nt_arr(c->nt, a, "arguments", &an) : NULL;
+      /* `[]` on a boxed value is mostly a Hash or Array read (`h[:k]`,
+         `row["name"]`), which is no evidence about a Method: count it only
+         with numeric arguments, the shape a dispatch table is called in
+         (`@store[addr][addr, value]`). A Method called through `[]` with
+         another kind is not seen here and keeps the int default. */
+      if (sp_streq(nm, "[]") && rt != TY_METHOD) {
+        int numeric = an > 0;
+        for (int k = 0; k < an && numeric; k++) {
+          TyKind at = c->ntype[av[k]];
+          if (at != TY_INT && at != TY_FLOAT) numeric = 0;
+        }
+        if (!numeric) continue;
+      }
+      int splat = 0;
+      for (int k = 0; k < an; k++) {
+        const char *aty = nt_type(c->nt, av[k]);
+        if (aty && (sp_streq(aty, "SplatNode") || sp_streq(aty, "BlockArgumentNode") ||
+                    sp_streq(aty, "KeywordHashNode") || sp_streq(aty, "ForwardingArgumentsNode"))) splat = 1;
+      }
+      if (splat) {
+        for (int k = 0; k < 16; k++) { dyn_arg[k] = TY_POLY; dyn_seen[k] = 1; }
+        continue;
+      }
+      for (int k = 0; k < an && k < 16; k++) {
+        TyKind at = c->ntype[av[k]];
+        if (at == TY_UNKNOWN || at == TY_VOID) at = TY_POLY;
+        dyn_arg[k] = dyn_seen[k] ? ty_unify(dyn_arg[k], at) : at;
+        dyn_seen[k] = 1;
+      }
+    }
+  }
   int msym_pinned = 0;
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
@@ -15140,9 +15194,31 @@ void analyze_program(Compiler *c) {
          `method(:ip)` appeared anywhere in the program (#4451). An UNKNOWN
          return still defaults to int, as before, so the method is emitted
          with a value rather than as void. */
+      /* POLY, not int, for a method whose parameters nothing typed: the
+         bound-Method ABI describes each argument's kind and carries the poly
+         ones boxed, so it never needed the int guess -- and the guess is
+         wrong for every program that puts a Float, a boolean or a hash in
+         one. A Float read as an integer is how the bit pattern of NaN came
+         to be compared as a number (#4597). This is the judgement #4451
+         already made for the RETURN of these same methods.
+
+         A synthesized __bam_ wrapper keeps the int: it is not a user method
+         with no evidence but a wrapper around a builtin whose C signature
+         the adapter emission fixes, and its bind site stamps a legacy sig to
+         match. Widening it left the stamp describing a poly parameter that
+         no call site asks for, and the Method stopped being callable at
+         all. */
+      int is_bam_wrap = sc->name && strncmp(sc->name, "__bam_", 6) == 0;
       for (int i = 0; i < sc->nparams; i++) {
         LocalVar *p = sc->pnames[i] ? scope_local(sc, sc->pnames[i]) : NULL;
-        if (p && p->type == TY_UNKNOWN) { p->type = TY_INT; msym_pinned = 1; }
+        if (p && p->type == TY_UNKNOWN) {
+          /* the position's evidence (above): Integer-only keeps the int
+             lane, anything else rides the boxed channel; a bam wrapper's
+             signature is fixed by the adapter emission */
+          TyKind ev = (i < 16 && dyn_seen[i]) ? dyn_arg[i] : TY_INT;
+          p->type = (is_bam_wrap || ev == TY_INT) ? TY_INT : TY_POLY;
+          msym_pinned = 1;
+        }
       }
       if (sc->ret == TY_UNKNOWN) { sc->ret = TY_INT; msym_pinned = 1; }
     }

@@ -8,7 +8,7 @@ keyword: no raise
 arity: ArgumentError: wrong number of arguments (given 1, expected 2)
 cmethod: NoMethodError
 slice: no raise
-ptr_to_untyped: TypeError: wrong argument type String (expected Integer)
+ptr_to_untyped: no raise
 ptr_mismatch: TypeError: wrong argument type Array (expected String)
 ptr_mismatch2: TypeError: wrong argument type String (expected Array)
 unbound_call: NoMethodError

@@ -2106,6 +2106,8 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -Eq 'sp_StrStrHash \* *lv_s' "$$tmp/hn.c" || { echo "infer-test: FAIL (a returned Hash.new lost the variant its caller narrowed it to)"; grep -oE 'sp_[A-Za-z]+Hash \* *lv_s' "$$tmp/hn.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_StrIntHash \* *lv_i' "$$tmp/hn.c" || { echo "infer-test: FAIL (a returned Hash.new lost its narrowed value type)"; grep -oE 'sp_[A-Za-z]+Hash \* *lv_i' "$$tmp/hn.c" | head -1; ok=0; }; \
 	grep -Eq 'sp_PolyPolyHash \* *sp_free_hash' "$$tmp/hn.c" || { echo "infer-test: FAIL (a returned Hash.new that nothing narrows lost the widest variant)"; ok=0; }; \
+	$(SPINEL) test/infer/method_capture_dispatch_int.rb -c --no-line-map -o "$$tmp/mcd.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile method_capture_dispatch_int)"; exit 1; }; \
+	grep -Eq 'sp_Bus_poke_ram\(sp_Bus \*self, sp_int lv_addr, sp_int lv_data\)' "$$tmp/mcd.c" || { echo "infer-test: FAIL (a captured method called only with Integers through a dispatch table lost its sp_int parameters)"; grep -E 'sp_Bus_poke_ram\(' "$$tmp/mcd.c" | head -1; ok=0; }; \
 	$(SPINEL) test/infer/dead_constructor_no_arm.rb -c --no-line-map -o "$$tmp/dc.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile dead_constructor_no_arm)"; exit 1; }; \
 	grep -q 'sp_poly_add' "$$tmp/dc.c" && { echo "infer-test: FAIL (a class constructed only in dead code widened a poly receiver's field read to poly)"; ok=0; }; \
 	grep -Eq 'sp_int_add\(\(\{ sp_RbVal _t[0-9]+ = lv_d; sp_int _t[0-9]+ = (0|SP_INT_NIL); switch' "$$tmp/dc.c" || { echo "infer-test: FAIL (the field read of a boxed receiver did not stay an int switch, or its receiver is rooted for an arm that cannot run)"; ok=0; }; \

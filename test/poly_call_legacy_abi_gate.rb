@@ -6,10 +6,16 @@
 # position's type against it. A target that cannot ride the cast -- a
 # float return, a keyword parameter, a rest parameter, a class
 # method that needs its receiving class, an argument count that does not match
-# the signature, a pointer of the wrong kind (a String parameter fed an
-# IntArray, or an object of another class), or a pointer fed to an untyped
-# `sp_int` parameter -- falls through to NoMethodError instead of reading (or
-# being read as) the wrong C type: garbage or a segfault.
+# the signature, or a pointer of the wrong kind (a String parameter fed an
+# IntArray, or an object of another class) -- falls through to NoMethodError
+# instead of reading (or being read as) the wrong C type: garbage or a
+# segfault.
+#
+# A parameter nothing typed is no longer one of those cases. It used to be
+# pinned to `sp_int`, so a String handed to it would have been read as an
+# integer and the gate refused the call; it is poly now, which is what the
+# bound-Method ABI carries anyway, so the call goes through and answers what
+# CRuby answers (`ptr_to_untyped` below).
 #
 # A pointer-typed target parameter and a matching pointer argument DO ride the
 # cast (the pointer is laundered through the sp_int slot), so that keeps
