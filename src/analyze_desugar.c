@@ -2253,11 +2253,14 @@ int desugar_sort_by_with_index(Compiler *c) {
    blockless form answers an Enumerator that keeps its source (`(1..6)
    .each_slice(2)` inspects as `1..6:each_slice(2)`, not as its elements). */
 static int enum_via_to_a_name(const char *n) {
-  /* take_while, drop_while, flat_map, collect_concat and minmax_by were
-     here: they are Ruby definitions now (builtins/enumerable.rb) whose
-     `each` walks a Hash or a Range as it is, an endless Range included */
+  /* take_while, drop_while, flat_map, collect_concat, minmax_by, grep and
+     grep_v were here: they are Ruby definitions now (builtins/enumerable.rb)
+     whose `each` walks a Hash or a Range as it is, an endless Range
+     included, and neither arm of grep/grep_v is ever an Enumerator (both
+     compute immediately), so unlike find_index/minmax below they have no
+     remaining form that still wants this hop. */
   static const char *always[] = {
-    "grep", "grep_v", "chunk_while", "slice_when",
+    "chunk_while", "slice_when",
     "slice_before", "slice_after", "sort", "minmax", "zip",
     "find_index", "uniq", NULL
   };

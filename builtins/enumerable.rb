@@ -507,4 +507,31 @@ module Enumerable
       raise ArgumentError, "wrong number of arguments (given 0, expected 1..2)"
     end
   end
+
+  # Unlike most Enumerable methods here, grep/grep_v are never an Enumerator
+  # blockless: both arms compute immediately, `pattern === x` deciding
+  # membership and the block (when given) transforming what's kept. Written
+  # against `each` and a plain `===`, so any pattern CRuby's `===` accepts
+  # (a class, a Range, a Regexp, a value compared by `==`, an object
+  # defining its own `===`) works the same way here, without a per-pattern
+  # C fold to keep in step.
+  def grep(pattern)
+    out = []
+    if block_given?
+      each { |x| out << yield(x) if pattern === x }
+    else
+      each { |x| out << x if pattern === x }
+    end
+    out
+  end
+
+  def grep_v(pattern)
+    out = []
+    if block_given?
+      each { |x| out << yield(x) unless pattern === x }
+    else
+      each { |x| out << x unless pattern === x }
+    end
+    out
+  end
 end
