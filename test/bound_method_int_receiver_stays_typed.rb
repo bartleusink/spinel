@@ -1,3 +1,4 @@
+# spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
 # `<Integer>.method(:sym)` binds the receiver into a synthesized wrapper whose
 # receiver parameter is typed by the adapter emission; the bind site stores the
 # receiver raw and the thunk ABI reads it as an sp_int only while the parameter

@@ -168,7 +168,7 @@ int sp_X509_Store_set_default_paths(sp_X509_Store *s) {
    a security default to drift out of step. Answers the slot index with the
    slot claimed, or -1 with the reason in sp_ssl_last_error.
    `cert_store` is an optional Ruby X509::Store object; if non-NIL, its
-   native X509_STORE is extracted and adopted by the SSL_CTX. */
+   native X509_STORE is referenced by the SSL_CTX (SSL_CTX_set1_cert_store, so the store stays the handle's and is reusable). */
 static int sp_ssl_setup(sp_int fd, const char *hostname, sp_int verify, sp_RbVal cert_store) {
   int i = sp_ssl_slot();
   if (i < 0) { sp_ssl_note("too many TLS connections"); return -1; }
