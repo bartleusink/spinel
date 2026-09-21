@@ -6679,6 +6679,32 @@ static int masgn_hoist_part(Compiler *c, int node, TyKind t, Buf *hb) {
   buf_puts(hb, "\n");
   return tmp;
 }
+/* Where an instance-variable target of a multiple assignment lives: the
+   class of the enclosing method (`self->iv_x`, or the class-level `civ_` slot
+   of a class method), a class body's module-level slot, or the top-level
+   pseudo-class global. Fills `lhs` with the C lvalue and *cid with the class
+   whose ivar table types it; 0 when the target has no home (the value is
+   still evaluated). The single write knew every home; the multiple
+   assignment's arms only knew the method's class, so `@x, @y = pair` at
+   the top level wrote `self->iv_x` into a function with no self, and the
+   arms reached through a typed or boxed array skipped the store outright. */
+static int masgn_ivar_home(Compiler *c, int id, const char *ivnm, char *lhs, size_t n, int *cid) {
+  Scope *sc = comp_scope_of(c, id);
+  int cc = sc ? sc->class_id : -1;
+  if (cc >= 0) {
+    if (sc->is_cmethod) snprintf(lhs, n, "civ_%s_%s", c->classes[cc].name, ivnm + 1);
+    else snprintf(lhs, n, "%s%siv_%s", g_self, g_self_deref, iv_c(ivnm + 1));
+    *cid = cc;
+    return 1;
+  }
+  if (sc && sc->is_cmethod) return 0;
+  if (g_class_body_id >= 0) cc = g_class_body_id;
+  else cc = comp_class_index(c, "Toplevel");
+  if (cc < 0) return 0;
+  snprintf(lhs, n, "civ_%s_%s", c->classes[cc].name, ivnm + 1);
+  *cid = cc;
+  return 1;
+}
 /* The frozen guard a single ivar write makes, on a line of its own, when the
    class has one; the guard's text ends in the separator an inline caller
    continues from. Consumes `fb`. */
@@ -8669,6 +8695,7 @@ else {
     int ln = 0;
     const int *lefts = nt_arr(nt, id, "lefts", &ln);
     int value = nt_ref(nt, id, "value");
+    char iv_lhs[320]; int iv_home_cid = -1;   /* an ivar target's home (masgn_ivar_home) */
     const char *vty = nt_type(nt, value);
     /* `r, w = IO.pipe` -> make a pipe, bind both ends as IO handles. */
     if (ln == 2 && vty && sp_streq(vty, "CallNode") && nt_str(nt, value, "name") &&
@@ -8725,6 +8752,10 @@ else {
           const char *gnm_r = nt_str(nt, rest_inner, "name");
           if (gnm_r) rest_gvar = comp_resolve_gvar(c, gnm_r + 1);
         }
+        /* a splat into anything else has no store below: say so rather
+           than leave the slot nil (`@a, *@rest = xs` answered nil for @rest) */
+        else if (!sp_streq(nt_type(nt, rest_inner), "SplatNode"))
+          unsupported(c, id, "multiple assignment: a splat target that is not a local or global variable");
       }
     }
     if (!els) {
@@ -8774,6 +8805,20 @@ else {
         }
         for (int i = 0; i < ln; i++) {
           const char *lty = nt_type(nt, lefts[i]);
+          /* an instance-variable target: the first takes the value, the rest
+             nil, in the slot's own representation */
+          if (lty && sp_streq(lty, "InstanceVariableTargetNode") && nt_str(nt, lefts[i], "name") &&
+              masgn_ivar_home(c, id, nt_str(nt, lefts[i], "name"), iv_lhs, sizeof iv_lhs, &iv_home_cid)) {
+            int ix = comp_ivar_index(&c->classes[iv_home_cid], nt_str(nt, lefts[i], "name"));
+            TyKind ivt = ix >= 0 ? c->classes[iv_home_cid].ivar_types[ix] : TY_POLY;
+            emit_indent(b, indent);
+            buf_printf(b, "%s = ", iv_lhs);
+            if (i == 0) { if (ivt == TY_POLY && st != TY_POLY) emit_boxed(c, value, b); else emit_expr(c, value, b); }
+            else if (ivt == TY_POLY) buf_puts(b, "sp_box_nil()");
+            else buf_puts(b, nil_sentinel(ivt));
+            buf_puts(b, ";\n");
+            continue;
+          }
           if (!lty || !sp_streq(lty, "LocalVariableTargetNode")) continue;
           emit_indent(b, indent);
           const char *lvn = nt_str(nt, lefts[i], "name");
@@ -8859,19 +8904,15 @@ else {
             else buf_puts(b, gx);
             buf_puts(b, ";\n");
           }
-          else if (sp_streq(lty, "InstanceVariableTargetNode") &&
-                   rt_scope && rt_scope->class_id >= 0) {
+          else if (sp_streq(lty, "InstanceVariableTargetNode") && nt_str(nt, lefts[i], "name") &&
+                   masgn_ivar_home(c, id, nt_str(nt, lefts[i], "name"), iv_lhs, sizeof iv_lhs, &iv_home_cid)) {
             const char *ivnm = nt_str(nt, lefts[i], "name");
-            if (!ivnm) continue;
             emit_indent(b, indent);
             char get_expr[64]; snprintf(get_expr, sizeof get_expr, "sp_%sArray_get(_t%d, %dLL)", k, tarr, i);
             TyKind ivt = TY_UNKNOWN;
-            int iv_rt = comp_ivar_index(&c->classes[rt_scope->class_id], ivnm);
-            if (iv_rt >= 0) ivt = c->classes[rt_scope->class_id].ivar_types[iv_rt];
-            if (rt_scope->is_cmethod)
-              buf_printf(b, "civ_%s_%s = ", c->classes[rt_scope->class_id].name, ivnm + 1);
-            else
-              buf_printf(b, "%s%siv_%s = ", g_self, g_self_deref, iv_c(ivnm + 1));
+            int iv_rt = comp_ivar_index(&c->classes[iv_home_cid], ivnm);
+            if (iv_rt >= 0) ivt = c->classes[iv_home_cid].ivar_types[iv_rt];
+            buf_printf(b, "%s = ", iv_lhs);
             if (ivt == TY_POLY && elem != TY_POLY) {
               Buf bx; memset(&bx, 0, sizeof bx);
               emit_boxed_text(c, elem, get_expr, &bx);
@@ -8995,10 +9036,9 @@ else {
             }
             buf_puts(b, ";\n");
           }
-          else if (sp_streq(lty, "InstanceVariableTargetNode") &&
-                   rt_scope && rt_scope->class_id >= 0) {
+          else if (sp_streq(lty, "InstanceVariableTargetNode") && nt_str(nt, rights[j], "name") &&
+                   masgn_ivar_home(c, id, nt_str(nt, rights[j], "name"), iv_lhs, sizeof iv_lhs, &iv_home_cid)) {
             const char *ivnm2 = nt_str(nt, rights[j], "name");
-            if (!ivnm2) continue;
             emit_indent(b, indent);
             /* Same underflow clamp as the local-variable branch above: pick the
                post-splat source index as the max of the back-aligned and
@@ -9011,12 +9051,9 @@ else {
             char get_expr2[96];
             snprintf(get_expr2, sizeof get_expr2, "sp_%sArray_get(_t%d, _t%d)", k, tarr, tix);
             TyKind ivt2 = TY_UNKNOWN;
-            int iv_rt2 = comp_ivar_index(&c->classes[rt_scope->class_id], ivnm2);
-            if (iv_rt2 >= 0) ivt2 = c->classes[rt_scope->class_id].ivar_types[iv_rt2];
-            if (rt_scope->is_cmethod)
-              buf_printf(b, "civ_%s_%s = ", c->classes[rt_scope->class_id].name, ivnm2 + 1);
-            else
-              buf_printf(b, "%s%siv_%s = ", g_self, g_self_deref, iv_c(ivnm2 + 1));
+            int iv_rt2 = comp_ivar_index(&c->classes[iv_home_cid], ivnm2);
+            if (iv_rt2 >= 0) ivt2 = c->classes[iv_home_cid].ivar_types[iv_rt2];
+            buf_printf(b, "%s = ", iv_lhs);
             if (ivt2 == TY_POLY && elem != TY_POLY) {
               Buf bx2; memset(&bx2, 0, sizeof bx2);
               emit_boxed_text(c, elem, get_expr2, &bx2);
@@ -9066,19 +9103,15 @@ else {
               else buf_puts(b, mge); }
             buf_puts(b, ";\n");
           }
-          else if (sp_streq(lty, "InstanceVariableTargetNode") &&
-                   rt_scope_p && rt_scope_p->class_id >= 0) {
+          else if (sp_streq(lty, "InstanceVariableTargetNode") && nt_str(nt, lefts[i], "name") &&
+                   masgn_ivar_home(c, id, nt_str(nt, lefts[i], "name"), iv_lhs, sizeof iv_lhs, &iv_home_cid)) {
             const char *ivnm = nt_str(nt, lefts[i], "name");
-            if (!ivnm) continue;
-            int iv_rt = comp_ivar_index(&c->classes[rt_scope_p->class_id], ivnm);
+            int iv_rt = comp_ivar_index(&c->classes[iv_home_cid], ivnm);
             if (iv_rt < 0) continue;
-            TyKind ivt = c->classes[rt_scope_p->class_id].ivar_types[iv_rt];
+            TyKind ivt = c->classes[iv_home_cid].ivar_types[iv_rt];
             emit_indent(b, indent);
             char get_expr[64]; snprintf(get_expr, sizeof get_expr, "sp_poly_massign_get(_t%d, %dLL)", tarr, i);
-            if (rt_scope_p->is_cmethod)
-              buf_printf(b, "civ_%s_%s = ", c->classes[rt_scope_p->class_id].name, ivnm + 1);
-            else
-              buf_printf(b, "%s%siv_%s = ", g_self, g_self_deref, iv_c(ivnm + 1));
+            buf_printf(b, "%s = ", iv_lhs);
             if (ivt != TY_POLY) {
               Buf bx; memset(&bx, 0, sizeof bx);
               emit_unbox_text(c, ivt, get_expr, &bx);
@@ -9360,19 +9393,28 @@ else {
         if (!ivnm) continue;
         Scope *iv_sc = comp_scope_of(c, id);
         int iv_cid = iv_sc ? iv_sc->class_id : -1;
-        if (iv_cid < 0 && g_class_body_id >= 0) iv_cid = g_class_body_id;
+        /* outside any class: a class body's module-level slot, or the
+           top-level pseudo-class global, the same homes the single write
+           has (`@x, @y = pair` at the top level wrote `self->iv_x` into a
+           function with no self, and the C did not build) */
+        int iv_global = 0;
+        if (iv_cid < 0 && !(iv_sc && iv_sc->is_cmethod)) {
+          if (g_class_body_id >= 0) { iv_cid = g_class_body_id; iv_global = 1; }
+          else if (comp_class_index(c, "Toplevel") >= 0) { iv_cid = comp_class_index(c, "Toplevel"); iv_global = 1; }
+          else continue;   /* no home for it: the value was evaluated above */
+        }
         TyKind ivt = TY_UNKNOWN;
         if (iv_cid >= 0) {
           int iv_idx = comp_ivar_index(&c->classes[iv_cid], ivnm);
           if (iv_idx >= 0) ivt = c->classes[iv_cid].ivar_types[iv_idx];
         }
-        if (!(iv_sc && iv_sc->is_cmethod) && iv_cid >= 0) {
+        if (!(iv_sc && iv_sc->is_cmethod) && !iv_global && iv_cid >= 0) {
           Buf fb; memset(&fb, 0, sizeof fb);
           emit_frozen_obj_guard(c, iv_cid, g_self ? g_self : "self", &fb);
           masgn_guard_line(&fb, b, indent);
         }
         emit_indent(b, indent);
-        if (iv_sc && iv_sc->is_cmethod && iv_cid >= 0)
+        if (((iv_sc && iv_sc->is_cmethod) || iv_global) && iv_cid >= 0)
           buf_printf(b, "civ_%s_%s = ", c->classes[iv_cid].name, ivnm + 1);
         else
           buf_printf(b, "%s%siv_%s = ", g_self, g_self_deref, iv_c(ivnm + 1));
@@ -9652,19 +9694,13 @@ else {
           buf_printf(b, "cst_%s = _t%d;\n", rnm_j, tmps[ridx]);
         }
       }
-      else if (sp_streq(lty, "InstanceVariableTargetNode") && rnm_j) {
-        Scope *iv_sc2 = comp_scope_of(c, id);
-        int iv_cid2 = iv_sc2 ? iv_sc2->class_id : -1;
+      else if (sp_streq(lty, "InstanceVariableTargetNode") && rnm_j &&
+               masgn_ivar_home(c, id, rnm_j, iv_lhs, sizeof iv_lhs, &iv_home_cid)) {
         TyKind ivt2 = TY_UNKNOWN;
-        if (iv_cid2 >= 0) {
-          int iv_idx2 = comp_ivar_index(&c->classes[iv_cid2], rnm_j);
-          if (iv_idx2 >= 0) ivt2 = c->classes[iv_cid2].ivar_types[iv_idx2];
-        }
+        { int iv_idx2 = comp_ivar_index(&c->classes[iv_home_cid], rnm_j);
+          if (iv_idx2 >= 0) ivt2 = c->classes[iv_home_cid].ivar_types[iv_idx2]; }
         emit_indent(b, indent);
-        if (iv_sc2 && iv_sc2->is_cmethod && iv_cid2 >= 0)
-          buf_printf(b, "civ_%s_%s = ", c->classes[iv_cid2].name, rnm_j + 1);
-        else
-          buf_printf(b, "%s%siv_%s = ", g_self, g_self_deref, iv_c(rnm_j + 1));
+        buf_printf(b, "%s = ", iv_lhs);
         if (ridx >= 0 && ridx < en) {
           TyKind valt2 = (ridx < en) ? comp_ntype(c, els[ridx]) : TY_UNKNOWN;
           if (ivt2 == TY_POLY && valt2 != TY_POLY) {
