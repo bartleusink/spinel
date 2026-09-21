@@ -626,6 +626,12 @@ __attribute__((noreturn)) void unsupported_feature(Compiler *c, int id, const ch
 const char *sp_re_literal_error(const char *src, int len, int flags);
 /* Returns a negative cls_id for well-known builtin class/module names,
    or 0 if the name is not a recognized builtin class. */
+/* The boxed side channel's slot count, as lib/sp_proc.h defines it: the
+   emitters that publish arguments into it and the arity they decline past
+   must agree with the runtime, not carry their own copy of the number. */
+#ifndef SP_PROC_ARG_SLOTS
+#define SP_PROC_ARG_SLOTS 64
+#endif
 int builtin_class_id(const char *name);
 int is_builtin_class_name(const char *n);
 int is_builtin_module_name(const char *n);

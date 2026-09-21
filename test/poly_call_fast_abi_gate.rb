@@ -1,6 +1,14 @@
 # Regression: the NO-user-`call` poly `.call` fast path and the poly `[]`
 # runtime arms must apply the same per-position legacy sp_int ABI gate as the
-# shadowed pre-arm. This file deliberately defines no user class `call`, so
+# shadowed pre-arm.
+#
+# Five counts that used to be refused here are answered now: the boxed side
+# channel carries SP_PROC_ARG_SLOTS arguments rather than a hard-coded 16, so
+# a 17-parameter target is callable and a 20-argument call on a 16-parameter
+# one reaches the target to be told its own ArgumentError -- both what CRuby
+# answers, verified against it. The refusals that remain are about a
+# per-position TYPE the target cannot read, which is what this file is for;
+# a count the channel can carry is no longer one of them. This file deliberately defines no user class `call`, so
 # the fast path in emit_call_body is selected -- poly_call_legacy_abi_gate.rb
 # covers the user-`call` pre-arm.
 #

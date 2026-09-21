@@ -30,7 +30,14 @@ typedef struct sp_Proc { void *fn; void *cap; void (*cap_scan)(void *); sp_int a
 typedef struct { sp_Proc *target; sp_int arity; sp_int nargs; sp_RbVal args[16]; } sp_Curry;
 
 sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args);   /* defined in the generated TU */
-extern SP_TLS sp_RbVal _sp_proc_poly_args[16];                   /* defined in the generated TU */
+/* The proc calling convention's boxed side channel: how many arguments it
+   carries. Every publisher, the GC scan that keeps them alive, and the gates
+   that decline a longer call read this one name -- a second copy of the
+   number in any of them is a call whose arguments are published and never
+   marked, or marked and never passed. Machine-generated code reaches 17
+   parameters and the old 16 refused it outright. */
+#define SP_PROC_ARG_SLOTS 64
+extern SP_TLS sp_RbVal _sp_proc_poly_args[SP_PROC_ARG_SLOTS];    /* defined in the generated TU */
 extern SP_TLS sp_RbVal _sp_proc_poly_ret;                        /* defined in the generated TU */
 
 /* The lineage root of a proc: dups/clones of one proc share it, so Proc#== /
@@ -193,11 +200,11 @@ static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound
 /* Stamp the bind site's thunk (0 for none) and the counts it binds. */
 static inline sp_BoundMethod *sp_bm_set_thunk(sp_BoundMethod *m, sp_int thunk, sp_int tmin, sp_int tmax) { m->thunk = sp_bm_fn_opaque(thunk); m->thunk_min = tmin; m->thunk_max = tmax; return m; }
 /* Whether a call passing `argc` arguments takes the thunk: a bound Method
-   with one, the count within the side-channel's 16 slots. A count the
+   with one, the count within the side-channel's slots. A count the
    signature cannot bind is the thunk's own ArgumentError, in CRuby's words,
    so the range is not tested here. */
 static inline sp_bool sp_bm_thunk_ok(sp_BoundMethod *m, sp_int argc) {
-  return m && !m->unbound && m->thunk && argc <= 16;
+  return m && !m->unbound && m->thunk && argc <= SP_PROC_ARG_SLOTS;
 }
 /* Box the raw sp_int a legacy-ABI Method returned according to the Ruby return
    the bind site recorded. A plain Integer return is SP_BM_RET_INT; a String or

@@ -33,8 +33,8 @@ adapter_arity: -1
 3
 6
 6
-splat_over: NoMethodError
-toproc_splat_over: NoMethodError
+splat_over: ArgumentError: wrong number of arguments (given 20, expected 16)
+toproc_splat_over: ArgumentError: wrong number of arguments (given 20, expected 16)
 6
 ptr_arg: TypeError: wrong argument type String (expected Integer)
 ptr_splat: TypeError: wrong argument type String (expected Integer)
@@ -87,9 +87,9 @@ kwrest_gap_opt_call: NoMethodError
 kwrest_gap2_call: ArgumentError
 bool_arg_call: TypeError: wrong argument type FalseClass (expected Integer)
 bool_arg_proc: TypeError: wrong argument type FalseClass (expected Integer)
-toproc_many_params: NoMethodError
-toproc_many_params_fixed: NoMethodError
-toproc_rest_over: NoMethodError
+toproc_many_params: no raise
+toproc_many_params_fixed: no raise
+toproc_rest_over: no raise
 kwrest_toproc_empty: NoMethodError
 kwrest_toproc_kw: NoMethodError
 [1, 2, 3]
