@@ -9690,6 +9690,7 @@ static void scan_prologue_features(Compiler *c) {
 typedef struct {
   Buf *pre;
   const char *yield_self_fallback;
+  const char *yield_self_fallback2, *yield_self_deref_fallback2; int yield_emitting_class_fallback2;
   const char *yield_self_deref_fallback;
   const char *block_param_name;
   const char *yielder_name;
@@ -9747,6 +9748,7 @@ static void emit_unit_state_save(EmitUnitState *s) {
   s->ie_class_id = g_ie_class_id; s->dm_subst_node = g_dm_subst_node; s->exc_frame_depth = g_exc_frame_depth;
   s->pre = g_pre;
   s->yield_self_fallback = g_yield_self_fallback;
+  s->yield_self_fallback2 = g_yield_self_fallback2; s->yield_self_deref_fallback2 = g_yield_self_deref_fallback2; s->yield_emitting_class_fallback2 = g_yield_emitting_class_fallback2;
   s->yield_self_deref_fallback = g_yield_self_deref_fallback;
   s->block_param_name = g_block_param_name;
   s->yielder_name = g_yielder_name;
@@ -9792,6 +9794,7 @@ static void emit_unit_state_restore(const EmitUnitState *s) {
   g_ie_class_id = s->ie_class_id; g_dm_subst_node = s->dm_subst_node; g_exc_frame_depth = s->exc_frame_depth;
   g_pre = s->pre;
   g_yield_self_fallback = s->yield_self_fallback;
+  g_yield_self_fallback2 = s->yield_self_fallback2; g_yield_self_deref_fallback2 = s->yield_self_deref_fallback2; g_yield_emitting_class_fallback2 = s->yield_emitting_class_fallback2;
   g_yield_self_deref_fallback = s->yield_self_deref_fallback;
   g_block_param_name = s->block_param_name;
   g_yielder_name = s->yielder_name;

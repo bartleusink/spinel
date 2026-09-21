@@ -371,6 +371,9 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   const char *saved_self_fb = g_yield_self_fallback;
   const char *saved_deref_fb = g_yield_self_deref_fallback;
   int saved_emcls_fb = g_yield_emitting_class_fallback;
+  const char *saved_self_fb2 = g_yield_self_fallback2;
+  const char *saved_deref_fb2 = g_yield_self_deref_fallback2;
+  int saved_emcls_fb2 = g_yield_emitting_class_fallback2;
   /* The inlined callee's own yields splice this call site's block; only a
      yield in spliced CALLER code belongs to an enclosing lowered method.
      Park the lowered context for emit_block_invoke and clear it for the
@@ -391,11 +394,18 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_yield_slot_ty_fallback = g_yield_slot_ty;
   g_current_scope_is_lowered = 0;
   g_lowered_blk_name = NULL;
-  g_yield_self_fallback = g_self;
-  g_yield_self_deref_fallback = g_self_deref;
-  /* captured here, BEFORE the receiver-context switch below, so it holds the
-     caller's class for the spliced (caller-code) block body */
-  g_yield_emitting_class_fallback = g_emitting_class_id;
+  /* the block that was current keeps its own self one level out; a literal
+     block written here runs under the self of this call site */
+  if (block != saved_block) {
+    g_yield_self_fallback2 = saved_self_fb;
+    g_yield_self_deref_fallback2 = saved_deref_fb;
+    g_yield_emitting_class_fallback2 = saved_emcls_fb;
+    g_yield_self_fallback = g_self;
+    g_yield_self_deref_fallback = g_self_deref;
+    /* captured here, BEFORE the receiver-context switch below, so it holds the
+       caller's class for the spliced (caller-code) block body */
+    g_yield_emitting_class_fallback = g_emitting_class_id;
+  }
   g_block_id = block;
   /* a forwarded outer block keeps ITS definition depth; a literal block is
      call-site code at the depth BEFORE this inline's renames */
@@ -758,6 +768,8 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_yield_proc_ref_fallback = saved_ypr_fb;
   g_yield_slot_ty_fallback = saved_yslot_fb;
   g_yield_self_fallback = saved_self_fb;
+  g_yield_self_fallback2 = saved_self_fb2; g_yield_self_deref_fallback2 = saved_deref_fb2;
+  g_yield_emitting_class_fallback2 = saved_emcls_fb2;
   g_yield_self_deref_fallback = saved_deref_fb;
   g_yield_emitting_class_fallback = saved_emcls_fb;
   g_yield_lowered_fallback = saved_low_fb;
@@ -1393,11 +1405,17 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
      block resolves against the caller's class, not the receiver's. */
   const char *sv_bself = g_self, *sv_bderef = g_self_deref;
   int sv_bemcls = g_emitting_class_id;
+  const char *sv_ysf = g_yield_self_fallback, *sv_ysdf = g_yield_self_deref_fallback;
+  int sv_yecf = g_yield_emitting_class_fallback;
   if (g_yield_self_fallback) {
     g_self = g_yield_self_fallback;
     g_self_deref = g_yield_self_deref_fallback;
     g_emitting_class_id = g_yield_emitting_class_fallback;
   }
+  /* the block one level out is now g_block_id: its self comes with it */
+  g_yield_self_fallback = g_yield_self_fallback2;
+  g_yield_self_deref_fallback = g_yield_self_deref_fallback2;
+  g_yield_emitting_class_fallback = g_yield_emitting_class_fallback2;
   /* ... and the caller's lowered context: a `yield` in this spliced caller
      code binds the enclosing lowered method's proc, not this inline. */
   int sv_blow = g_current_scope_is_lowered;
@@ -1575,6 +1593,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   }
   if (yalias_open) { emit_indent(b, indent); buf_puts(b, "}\n"); }
   g_self = sv_bself; g_self_deref = sv_bderef;
+  g_yield_self_fallback = sv_ysf; g_yield_self_deref_fallback = sv_ysdf; g_yield_emitting_class_fallback = sv_yecf;
   g_emitting_class_id = sv_bemcls;
   g_current_scope_is_lowered = sv_blow;
   g_lowered_blk_name = sv_blbn;

@@ -168,9 +168,19 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
   const char *saved_self_fb = g_yield_self_fallback;
   const char *saved_deref_fb = g_yield_self_deref_fallback;
   int saved_emcls_fb = g_yield_emitting_class_fallback;
-  g_yield_self_fallback = g_self;
-  g_yield_self_deref_fallback = g_self_deref;
-  g_yield_emitting_class_fallback = g_emitting_class_id;
+  const char *saved_self_fb2 = g_yield_self_fallback2;
+  const char *saved_deref_fb2 = g_yield_self_deref_fallback2;
+  int saved_emcls_fb2 = g_yield_emitting_class_fallback2;
+  if (!fwd_block) {
+    /* a literal block runs under this call site's self; the block that was
+       current keeps its own self one level out (see codegen_iter.c) */
+    g_yield_self_fallback2 = saved_self_fb;
+    g_yield_self_deref_fallback2 = saved_deref_fb;
+    g_yield_emitting_class_fallback2 = saved_emcls_fb;
+    g_yield_self_fallback = g_self;
+    g_yield_self_deref_fallback = g_self_deref;
+    g_yield_emitting_class_fallback = g_emitting_class_id;
+  }
   g_block_id = fwd_block ? saved_block : block;
   g_block_nren = fwd_block ? saved_bnren : saved_nren;
   g_block_param_name = m->blk_param;
@@ -306,6 +316,8 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
   g_block_param_name = saved_bpn;
   g_yield_block_fallback = saved_yfb;
   g_yield_self_fallback = saved_self_fb;
+  g_yield_self_fallback2 = saved_self_fb2; g_yield_self_deref_fallback2 = saved_deref_fb2;
+  g_yield_emitting_class_fallback2 = saved_emcls_fb2;
   g_yield_self_deref_fallback = saved_deref_fb;
   g_yield_emitting_class_fallback = saved_emcls_fb;
   return 1;

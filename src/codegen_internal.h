@@ -151,6 +151,9 @@ int subtree_has_side_effect(Compiler *c, int id);
    passed block can chain back to the outermost caller's block. */
 extern int  g_yield_block_fallback;
 extern const char *g_yield_self_fallback;        /* see codegen_util.c */
+extern const char *g_yield_self_fallback2;
+extern const char *g_yield_self_deref_fallback2;
+extern int g_yield_emitting_class_fallback2;
 extern const char *g_yield_self_deref_fallback;
 extern int g_yield_emitting_class_fallback;
 /* Name of the `&block` parameter of the method currently being inlined, so

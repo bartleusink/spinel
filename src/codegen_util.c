@@ -406,6 +406,17 @@ int  g_yield_block_fallback_nren = 0;
    read the CALLER's @map). Maintained by the inliners exactly like
    g_yield_block_fallback. */
 const char *g_yield_self_fallback = NULL;
+/* The same three for the block one level further out (g_yield_block_fallback):
+   when a spliced block's own `yield` chains to that block, its body runs
+   under THIS self, not the spliced block's. Recorded at every inline from
+   the level-one values it replaces, and moved down a level as the splice
+   moves g_block_id out (emit_block_invoke). Without it a block passed
+   through a forwarding method into an inlined callee resolved its bare
+   calls against the intermediate receiver's class: `r.cnt { |i| big?(i) }`
+   with `def cnt(&) = @items.count(&)` folded `big?` to NoMethodError. */
+const char *g_yield_self_fallback2 = NULL;
+const char *g_yield_self_deref_fallback2 = NULL;
+int g_yield_emitting_class_fallback2 = -1;
 const char *g_yield_self_deref_fallback = NULL;
 /* Companion to g_yield_self_fallback: the CALLER's emitting-class, so a
    block body spliced into an inlined callee resolves its implicit-self
