@@ -2808,6 +2808,16 @@ int desugar_builtin_enum_calls(Compiler *c) {
        typed emitter of these names, which is what lets a prefix be taken
        from an infinite one; the definition's `each` would materialize it */
     int lazy_driven = rt == TY_ENUMERATOR && sp_streq(name, "take_while");
+    /* Range overrides these in CRuby with an O(1) answer read off the
+       endpoints, never calling each -- observable, not only faster: a Float
+       range cannot iterate at all, and `(1.0..5.0).minmax` answers. Those
+       keep their typed emitter on a Range receiver. */
+    int range_own = (rt == TY_RANGE || rt == TY_FLOAT_RANGE || rt == TY_STR_RANGE) &&
+                    (sp_streq(name, "min") || sp_streq(name, "max") || sp_streq(name, "minmax") ||
+                     sp_streq(name, "sum") || sp_streq(name, "count") || sp_streq(name, "size") ||
+                     sp_streq(name, "first") || sp_streq(name, "last") || sp_streq(name, "include?") ||
+                     sp_streq(name, "member?"));
+    if (range_own && nt_ref(nt, id, "block") < 0) continue;
     if (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE || rt == TY_FLOAT_RANGE ||
         rt == TY_STR_RANGE || (rt == TY_ENUMERATOR && !lazy_driven)) ok = 1;
     /* an empty `[]` / `{}` receiver has no type until its use decides one,
