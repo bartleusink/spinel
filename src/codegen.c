@@ -1080,6 +1080,20 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
       if (depth == 0 && g_yield_block_fallback >= 0 && nt_type(c->nt, tail) &&
           sp_streq(nt_type(c->nt, tail), "YieldNode")) { tblk = g_yield_block_fallback; continue; }
       bt = comp_ntype(c, tail);
+      /* The tail is not the only value the block can produce: `next v` leaves
+         it early with one, and that value is as much this site's answer as
+         the tail is. Read from the tail alone, a block whose tail is `nil`
+         typed the whole splice TY_NIL, and the nil arm below throws the
+         splice's value away and hands back a constant -- so
+         `{ |i| next 7 if i == 1; nil }` answered nil for the 7 as well.
+
+         `next` only, through the very helper yield_value_type joins with the
+         tail for the analysis. A `break` leaves the ITERATOR rather than the
+         block, so its value belongs to the iterator call and not to this
+         splice; counting it widened blocks that carry one and put an sp_int
+         where the slot was an sp_RbVal. */
+      { TyKind nx = block_next_value_ty(c, bbody);
+        if (nx != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? nx : ty_unify(bt, nx); }
       break;
     }
     if (bt != t && bt != TY_UNKNOWN) {

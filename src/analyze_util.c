@@ -1085,7 +1085,7 @@ static int yvt_callee_index(Compiler *c, int cid) {
    TY_UNKNOWN when there is none. The block's value is its tail joined with
    these: `{ |i| next 7 if i == 1; nil }` answers 7 or nil, and typing it from
    the tail alone made the yield nil, so `n += 1 if yield x` never counted. */
-static TyKind block_next_value_ty(Compiler *c, int node) {
+TyKind block_next_value_ty(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   if (node < 0) return TY_UNKNOWN;
   NodeKind k = nt_kind(nt, node);
