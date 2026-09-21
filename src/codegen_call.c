@@ -17635,17 +17635,23 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int left = nt_ref(c->nt, rid, "left");
       int right = nt_ref(c->nt, rid, "right");
       int excl = (int)(nt_int(c->nt, rid, "flags", 0) & 4) ? 1 : 0;
+      TyKind lty = left >= 0 ? comp_ntype(c, left) : TY_UNKNOWN;
+      TyKind rty = right >= 0 ? comp_ntype(c, right) : TY_UNKNOWN;
+      /* A boxed endpoint (a value out of a poly slot; under
+         --int-overflow=promote every Integer local and method answer)
+         is read through the checked unbox, which raises CRuby's TypeError
+         for a non-Integer, where the gate refused the program (#4766). */
       if (left >= 0 && right >= 0 &&
-          comp_ntype(c, left) == TY_INT && comp_ntype(c, right) == TY_INT) {
+          (lty == TY_INT || lty == TY_POLY) && (rty == TY_INT || rty == TY_POLY)) {
         /* Evaluate left and right into temps in source order so a
            side-effecting endpoint (e.g. caller(foo()..bar())) runs each
            call exactly once, left before right. */
         int lt = ++g_tmp, rt = ++g_tmp;
-        Buf lb = expr_buf(c, left);
+        Buf lb; memset(&lb, 0, sizeof lb); emit_int_expr(c, left, &lb);
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_int _t%d = %s;\n", lt, lb.p ? lb.p : "0");
         free(lb.p);
-        Buf rb = expr_buf(c, right);
+        Buf rb; memset(&rb, 0, sizeof rb); emit_int_expr(c, right, &rb);
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_int _t%d = %s;\n", rt, rb.p ? rb.p : "0");
         free(rb.p);
