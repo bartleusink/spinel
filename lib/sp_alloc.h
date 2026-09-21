@@ -999,6 +999,9 @@ sp_Bigint *sp_bigint_new_int(int64_t v);
 int64_t sp_bigint_to_int(sp_Bigint *b);
 sp_Bigint *sp_bigint_gcd(sp_Bigint *a, sp_Bigint *b);
 sp_Bigint *sp_bigint_div(sp_Bigint *a, sp_Bigint *b);
+sp_Bigint *sp_bigint_add(sp_Bigint *a, sp_Bigint *b);
+sp_Bigint *sp_bigint_mul(sp_Bigint *a, sp_Bigint *b);
+int sp_bigint_cmp(sp_Bigint *a, sp_Bigint *b);
 char *sp_str_alloc_ext(size_t len);   /* non-inline sp_str_alloc; see sp_alloc.c */
 const char *sp_bigint_to_s(sp_Bigint *b);
 double sp_bigint_to_double(sp_Bigint *b);
@@ -1008,6 +1011,11 @@ sp_RbVal sp_brat_from_bigint(sp_Bigint *n);
 const char *sp_brat_to_s(sp_BigRational *r);
 const char *sp_brat_inspect(sp_BigRational *r);
 sp_float sp_brat_to_f(sp_BigRational *r);
+/* the exact integer quotients, each rounding the way its method does */
+sp_Bigint *sp_brat_trunc_b(sp_BigRational *r);
+sp_Bigint *sp_brat_floor_b(sp_BigRational *r);
+sp_Bigint *sp_brat_ceil_b(sp_BigRational *r);
+sp_Bigint *sp_brat_round_b(sp_BigRational *r);
 
 /* ---- Marshal.dump/load helpers (lib/sp_marshal.c calls these): 0
    optcarrot uses. sp_marv_hash_new/set stay in spinel_rt.h instead of

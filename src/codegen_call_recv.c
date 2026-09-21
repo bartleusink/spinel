@@ -13102,7 +13102,9 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     /* Same guard as #to_s above: a user class defining the conversion wins
        through poly dispatch. sp_poly_to_i answers 0 for an object, so a
        wrapper's `value.to_i` silently read zero. */
-    if (sp_streq(name, "to_i") || sp_streq(name, "to_f")) {
+    /* `to_int` is the same method by its other name (#2317): a boxed
+       Rational answered NoMethodError for it while answering to_i fine. */
+    if (sp_streq(name, "to_i") || sp_streq(name, "to_int") || sp_streq(name, "to_f")) {
       int has_user_conv = 0;
       if (!g_poly_builtin_arm)
         for (int k = 0; k < c->nclasses && !has_user_conv; k++)
@@ -13111,7 +13113,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         /* sp_poly_to_i_meth: this is the METHOD, named by the program, so an
            object without it is NoMethodError rather than the conversion
            protocol's TypeError. */
-        buf_printf(b, "%s(", sp_streq(name, "to_i")
+        buf_printf(b, "%s(", !sp_streq(name, "to_f")
                               ? (comp_ntype(c, id) == TY_POLY ? "sp_poly_to_i_meth_v" : "sp_poly_to_i_meth")
                               : "sp_poly_to_f");
         emit_expr(c, recv, b); buf_puts(b, ")"); return 1;

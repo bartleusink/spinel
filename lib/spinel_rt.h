@@ -2469,13 +2469,32 @@ static SP_INLINE sp_int sp_poly_to_i(sp_RbVal v) {
   return sp_poly_to_i_cold(v);
 }
 static SP_NOINLINE sp_int sp_poly_arg_int_obj(sp_RbVal v);   /* the object arm, below */
+/* Does this Bignum fit the Integer slot? The width is sp_int's, not a
+   64-bit constant: under -m32 sp_int is 32 bits, so a 40-bit value passed a
+   `<= 63` test and was then silently cut by the cast -- the very shape of
+   wrong answer these arms exist to remove. SP_INT_NIL is the nil sentinel
+   and cannot be a value. */
+static int sp_brat_int_fits(sp_Bigint *b) {
+  if (sp_bigint_bit_length(b) > (sp_int)(sizeof(sp_int) * 8 - 1)) return 0;
+  return (sp_int)sp_bigint_to_int(b) != SP_INT_NIL;
+}
 static SP_NOINLINE sp_int sp_poly_to_i_cold(sp_RbVal v) {
   if (v.tag == SP_TAG_BIGINT) return sp_i64_to_int(sp_bigint_to_int((sp_Bigint *)v.v.p));   /* a 32-bit sp_int refuses what does not fit (RangeError); 64-bit keeps its wrap */
   if (v.tag == SP_TAG_STR) return (sp_int)strtoll(v.v.s ? v.v.s : sp_str_empty, NULL, 10);
   if (v.tag == SP_TAG_BOOL) return v.v.b ? 1 : 0;
   /* a boxed Rational truncates toward zero, as Rational#to_i does */
   if (sp_poly_is_rational(v) && v.v.p) { sp_Rational _r = *(sp_Rational *)v.v.p; return _r.den ? _r.num / _r.den : 0; }
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL) return (sp_int)sp_brat_to_f((sp_BigRational *)v.v.p);
+  /* A Bignum-numerator Rational truncates toward zero too, but the quotient
+     may be wider than the slot. Through sp_brat_to_f and a cast it saturated
+     silently, and a negative one landed on INTPTR_MIN -- the nil sentinel --
+     so the value came back as nil. The quotient is exact in bigint; past the
+     word it is the same loud RangeError a boxed Bignum's to_i gives, pending
+     #2024. */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL && v.v.p) {
+    sp_Bigint *q = sp_brat_trunc_b((sp_BigRational *)v.v.p);
+    if (sp_brat_int_fits(q)) return (sp_int)sp_bigint_to_int(q);
+    sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+  }
   /* a Time read out of a container: its to_i is the epoch second (#3699) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p) return (sp_int)((sp_Time *)v.v.p)->tv_sec;
   /* A USER object (builtin-backed ones carry a negative cls_id and are handled
@@ -2917,6 +2936,11 @@ static sp_int sp_poly_Integer(sp_RbVal v) {
     return (sp_int)v.v.f;
   }
   if (v.tag == SP_TAG_STR) return (sp_int)sp_str_to_i_strict(v.v.s ? v.v.s : sp_str_empty);
+  /* Integer(Rational) truncates toward zero, as Rational#to_i does: the
+     conversion had no Rational arm at all and called a number it can convert
+     unconvertible. A Bignum-numerator one answers the slot's RangeError. */
+  if (sp_poly_is_rational(v) && v.v.p) { sp_Rational _r = *(sp_Rational *)v.v.p; return _r.den ? _r.num / _r.den : 0; }
+  if (sp_poly_is_brat(v) && v.v.p) return sp_poly_to_i(v);
   /* a user object converts through its own #to_int / #to_str / #to_i */
   if (sp_poly_is_user_obj(v)) return sp_poly_Integer_ex(v, 0, 1);
   sp_raise_cls("TypeError", sp_sprintf("can't convert %s into Integer", sp_convert_src_name(v)));
@@ -3119,6 +3143,10 @@ static sp_RbVal sp_poly_to_i_meth_v(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
   if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return v;
   if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(v.v.f); }
+  /* a Bignum-numerator Rational's quotient is itself a Bignum, and this slot
+     holds one (#4688) */
+  if (sp_poly_is_brat(v) && v.v.p)
+    return sp_box_bigint(sp_brat_trunc_b((sp_BigRational *)v.v.p));
   return sp_box_int(sp_poly_to_i(v));
 }
 static inline sp_int sp_float_fit_i(sp_float v) {
@@ -3191,12 +3219,12 @@ static sp_bool sp_poly_negative_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return 
 /* abs of a negative int goes through SP_POLY_INT_OP(sub, 0, x): plain -x is
    UB for INT_MIN; promote mode boxes it as a bigint, wrap mode keeps the
    documented wrapping C arithmetic. fabs covers -0.0 -> 0.0 too. */
-static sp_RbVal sp_poly_abs(sp_RbVal v) { if (v.tag == SP_TAG_INT) { if (v.v.i >= 0) return v; return SP_POLY_INT_OP(sub, (sp_int)0, v.v.i); } if (v.tag == SP_TAG_FLT) return sp_box_float(fabs(v.v.f)); if (v.tag == SP_TAG_BIGINT) { sp_Bigint *b = (sp_Bigint *)v.v.p; return sp_bigint_sign(b) < 0 ? sp_box_bigint(sp_bigint_sub(sp_bigint_new_int(0), b)) : v; } if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs_v(*(sp_Complex *)v.v.p); if (sp_poly_is_rational(v)) return sp_box_rational(sp_rational_abs(sp_poly_as_rational(v))); sp_raise_poly_nomethod("abs", v); }
+static sp_RbVal sp_poly_abs(sp_RbVal v) { if (v.tag == SP_TAG_INT) { if (v.v.i >= 0) return v; return SP_POLY_INT_OP(sub, (sp_int)0, v.v.i); } if (v.tag == SP_TAG_FLT) return sp_box_float(fabs(v.v.f)); if (v.tag == SP_TAG_BIGINT) { sp_Bigint *b = (sp_Bigint *)v.v.p; return sp_bigint_sign(b) < 0 ? sp_box_bigint(sp_bigint_sub(sp_bigint_new_int(0), b)) : v; } if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs_v(*(sp_Complex *)v.v.p); if (sp_poly_is_rational(v)) return sp_box_rational(sp_rational_abs(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) { sp_BigRational *_br = (sp_BigRational *)v.v.p; return sp_bigint_sign(_br->num) < 0 ? sp_box_brat(sp_bigint_sub(sp_bigint_new_int(0), _br->num), _br->den) : v; } sp_raise_poly_nomethod("abs", v); }
 static sp_RbVal sp_poly_abs2(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs2_v(*(sp_Complex *)v.v.p); if (sp_poly_numeric_p(v)) { sp_RbVal a = sp_poly_abs(v); return sp_poly_mul(a, a); } sp_raise_poly_nomethod("abs2", v); }
 /* No-arg floor/ceil/round/truncate return Integer in Ruby: an int/bigint tag
    is already its own floor (returned unchanged, lossless for bigints), a
    float converts through the matching libm rounding. */
-static sp_RbVal sp_poly_floor(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(floor(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_floor_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("floor", v); }
+static sp_RbVal sp_poly_floor(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(floor(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_floor_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_floor_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("floor", v); }
 /* a NULL char* carried under SP_TAG_STR is the empty string (as in
    sp_poly_to_i / sp_poly_eq): bytesize 0, ord raises CRuby's ArgumentError. */
 static sp_int sp_poly_bytesize(sp_RbVal v) { if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_bytesize_m(v.v.s) : 0; sp_raise_poly_nomethod("bytesize", v); }
@@ -3306,13 +3334,22 @@ static sp_int sp_poly_int_bit(sp_RbVal v, sp_int i) {
 /* Rational#numerator / #denominator on a boxed value: a Rational reports its
    reduced parts; an Integer is n/1. Both commit to sp_int (analyze's TY_INT),
    matching the typed Rational path. */
-static sp_int sp_poly_numerator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).num; if (v.tag == SP_TAG_INT) return v.v.i; sp_raise_poly_nomethod("numerator", v); }
-static sp_int sp_poly_denominator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).den; if (v.tag == SP_TAG_INT) return 1; sp_raise_poly_nomethod("denominator", v); }
+/* A BigRational's parts are Bignums and this slot is an sp_int: the value
+   when it fits (a denominator almost always does), the same loud RangeError
+   a boxed Bignum's to_i gives when it does not -- never a NoMethodError for
+   a name Rational has. */
+static sp_int sp_brat_part_i(sp_Bigint *b) {
+  if (sp_brat_int_fits(b)) return (sp_int)sp_bigint_to_int(b);
+  sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+  return 0;
+}
+static sp_int sp_poly_numerator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).num; if (sp_poly_is_brat(v) && v.v.p) return sp_brat_part_i(((sp_BigRational *)v.v.p)->num); if (v.tag == SP_TAG_INT) return v.v.i; sp_raise_poly_nomethod("numerator", v); }
+static sp_int sp_poly_denominator(sp_RbVal v) { if (sp_poly_is_rational(v)) return sp_poly_as_rational(v).den; if (sp_poly_is_brat(v) && v.v.p) return sp_brat_part_i(((sp_BigRational *)v.v.p)->den); if (v.tag == SP_TAG_INT) return 1; sp_raise_poly_nomethod("denominator", v); }
 /* String#getbyte on a poly value; nil (not 0) for an out-of-range index, per
    CRuby, so the result is boxed. */
 static sp_RbVal sp_poly_getbyte(sp_RbVal v, sp_int i) { if (v.tag != SP_TAG_STR) sp_raise_poly_nomethod("getbyte", v); const char *s = v.v.s; if (!s) return sp_box_nil(); sp_int bl = (sp_int)sp_str_byte_len(s); if (i < 0) i += bl; if (i < 0 || i >= bl) return sp_box_nil(); return sp_box_int((sp_int)(unsigned char)s[i]); }
-static sp_RbVal sp_poly_ceil(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(ceil(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_ceil_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("ceil", v); }
-static sp_RbVal sp_poly_round(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(round(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_round_i(sp_poly_as_rational(v))); sp_raise_poly_nomethod("round", v); }
+static sp_RbVal sp_poly_ceil(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(ceil(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_ceil_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_ceil_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("ceil", v); }
+static sp_RbVal sp_poly_round(sp_RbVal v) { if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(round(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_round_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_round_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("round", v); }
 /* Numeric#round(ndigits): a Float stays Float when n > 0 (rounded to n decimal
    places) and becomes Integer when n <= 0; an Integer is unchanged for n >= 0
    and rounded to a power of ten for n < 0. Mirrors the scalar Float#round(n)
@@ -3373,7 +3410,7 @@ static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
   }
   sp_raise_poly_nomethod(nm, v);
 }
-static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return sp_poly_io_truncate(v, SP_INT_NIL); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } sp_raise_poly_nomethod("truncate", v); }
+static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return sp_poly_io_truncate(v, SP_INT_NIL); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_trunc_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("truncate", v); }
 /* forward: generic array length/element (defined later in this header) and
    the array-kind predicate for cross-kind value equality. */
 static sp_int sp_poly_length(sp_RbVal v);

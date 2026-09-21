@@ -3847,6 +3847,50 @@ sp_RbVal sp_box_brat(sp_Bigint *num, sp_Bigint *den) {
   p->num = num; p->den = den;
   return sp_box_obj(p, SP_BUILTIN_BIG_RATIONAL);
 }
+/* Rational#to_i / #floor / #ceil / #round on a Bignum-numerator Rational.
+   Every one of these used to go through sp_brat_to_f and a cast to sp_int:
+   past the machine word the cast saturates, and a negative value lands on
+   INTPTR_MIN -- which IS the nil sentinel, so Rational(-(2**70), 3).to_i
+   answered nil rather than a number. The quotient is exact in bigint.
+   sp_box_brat keeps the denominator positive, so the sign is the
+   numerator's, and both operands below are non-negative where that matters
+   (sp_bigint_div floors, which is only the same as truncating then). */
+sp_Bigint *sp_brat_trunc_b(sp_BigRational *r) {        /* toward zero */
+  sp_Bigint *n = r->num; SP_GC_ROOT(n);
+  sp_Bigint *d = r->den; SP_GC_ROOT(d);
+  sp_Bigint *z = sp_bigint_new_int(0); SP_GC_ROOT(z);
+  int neg = sp_bigint_sign(n) < 0;
+  sp_Bigint *a = n; SP_GC_ROOT(a);
+  if (neg) a = sp_bigint_sub(z, n);
+  sp_Bigint *q = sp_bigint_div(a, d); SP_GC_ROOT(q);
+  return neg ? sp_bigint_sub(z, q) : q;
+}
+sp_Bigint *sp_brat_floor_b(sp_BigRational *r) {        /* toward -infinity */
+  return sp_bigint_div(r->num, r->den);                /* mpz_mdiv already floors */
+}
+sp_Bigint *sp_brat_ceil_b(sp_BigRational *r) {         /* toward +infinity */
+  sp_Bigint *d = r->den; SP_GC_ROOT(d);
+  sp_Bigint *z = sp_bigint_new_int(0); SP_GC_ROOT(z);
+  sp_Bigint *n = sp_bigint_sub(z, r->num); SP_GC_ROOT(n);
+  sp_Bigint *q = sp_bigint_div(n, d); SP_GC_ROOT(q);
+  return sp_bigint_sub(z, q);
+}
+sp_Bigint *sp_brat_round_b(sp_BigRational *r) {        /* nearest, half away from zero */
+  sp_Bigint *n = r->num; SP_GC_ROOT(n);
+  sp_Bigint *d = r->den; SP_GC_ROOT(d);
+  sp_Bigint *z = sp_bigint_new_int(0); SP_GC_ROOT(z);
+  sp_Bigint *one = sp_bigint_new_int(1); SP_GC_ROOT(one);
+  int neg = sp_bigint_sign(n) < 0;
+  sp_Bigint *a = n; SP_GC_ROOT(a);
+  if (neg) a = sp_bigint_sub(z, n);
+  sp_Bigint *q = sp_bigint_div(a, d); SP_GC_ROOT(q);
+  sp_Bigint *qd = sp_bigint_mul(q, d); SP_GC_ROOT(qd);
+  sp_Bigint *rem = sp_bigint_sub(a, qd); SP_GC_ROOT(rem);
+  sp_Bigint *dbl = sp_bigint_add(rem, rem); SP_GC_ROOT(dbl);
+  if (sp_bigint_cmp(dbl, d) >= 0) q = sp_bigint_add(q, one);
+  return neg ? sp_bigint_sub(z, q) : q;
+}
+
 /* Lift a bignum (or an int) to a big Rational num/1. */
 sp_RbVal sp_brat_from_bigint(sp_Bigint *n) {SP_GC_ROOT(n);   /* the denominator below allocates */
   return sp_box_brat(n, sp_bigint_new_int(1));
