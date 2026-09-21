@@ -24983,6 +24983,21 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, "; sp_poly_is_a(_t%d, _cl%d); })", o, _clt);
         return;
       }
+      /* The same question with the class carried as a VALUE -- a parameter,
+         a local, an element read: `pattern === x` inside `def grep(pattern)`
+         -- has no name to fold on, so it goes to sp_poly_is_a at run time,
+         which reads the operand's class off its tag and walks the builtin
+         and user chains alike (`Integer === 5`, `Numeric === 2.5`, a user
+         class, `Object`). It used to fall through to the missing-method
+         gate, which took `arr.grep(Integer)` down with it the moment the
+         literal became a parameter. */
+      if (!rcn2) {
+        int o = ++g_tmp;
+        buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_RbVal _t%d = ", o); emit_boxed(c, argv[0], b);
+        buf_printf(b, "; sp_poly_is_a(_t%d, _cl%d); })", o, _clt);
+        return;
+      }
     }
     /* klass.is_a?/kind_of?(Module|Class|Object|BasicObject) */
     if (argc == 1 && (sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") || sp_streq(name, "instance_of?"))) {
