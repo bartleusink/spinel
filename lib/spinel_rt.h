@@ -9710,6 +9710,31 @@ static void sp_exc_print_uncaught(const char *cls, const char *msg) {
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
 #else
+/* The C stack ran out. Unlike the handler-stack exhaustion below, this one
+   CAN be rescued: the frames that filled the stack are about to be unwound,
+   and the handler that catches it sits in one of them.
+   Called from the SIGSEGV handler, on the alternate signal stack, so nothing
+   here may allocate or take a lock -- sp_raise_cls does both. These are the
+   three plain stores sp_raise_cls ends with, and the same longjmp: the
+   landing pad reads the class and message from the slots, and restores the
+   root watermark itself. With no handler armed there is nothing to jump to,
+   so the caller's report stands and the process dies as before. */
+static void sp_raise_stack_overflow(void) {
+  if (sp_exc_top <= 0) return;   /* nothing armed: let the handler report */
+  sp_exc_msg[sp_exc_top-1] = (&("\xff" "stack level too deep")[1]);
+  sp_exc_cls[sp_exc_top-1] = "SystemStackError";
+  sp_exc_obj[sp_exc_top-1] = NULL;
+  sp_pending_exc_obj = NULL;
+  sp_pending_cause = NULL;
+  sp_inflight_cause = NULL;
+  sp_explicit_cause = NULL;
+  sp_explicit_cause_set = 0;
+  sp_last_exc_cls = "SystemStackError";
+  sp_unwind_kind = SP_UNWIND_NONE;
+  sp_handler_stacks_unwind();
+  sp_poly_recur_unwind();
+  longjmp(sp_exc_stack[sp_exc_top-1], 1);
+}
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
   /* Launder the message onto the string heap and root the copy before anything
      below allocates. `msg` is the caller's own pointer and comes in one of two
