@@ -1287,7 +1287,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_byref_lent_slot.rb \
                   test/gc_minor_barrier_holders.rb \
                   test/bound_method_fresh_receiver.rb \
-                  test/thread_new_args_rooted_across_fiber_alloc.rb
+                  test/thread_new_args_rooted_across_fiber_alloc.rb \
+                  test/gc_root_frame_slots.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every

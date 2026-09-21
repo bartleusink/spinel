@@ -2774,6 +2774,259 @@ static void gc_roots_take_back(Compiler *c, Scope *s, Buf *b, size_t fn_off) {
   }
 }
 
+/* ---- root frames ----
+
+   Every root the emitters write costs the C compiler three things: taking
+   the local's address pins it to a stack slot, the push carries a bounds
+   check and a branch, and the cleanup attribute duplicates the pop on every
+   exit of the declaring scope. On a large generated TU those were a third of
+   clang's unoptimised IR and most of its peak memory (a 900k-line TU peaked
+   at 5.9 GB), and every rooted local widened the frame the function keeps
+   for its whole run.
+
+   This pass reads the finished function -- the same way the elision and the
+   write-barrier scans do, since the roots come from several hundred emission
+   sites -- and moves the roots it can prove function-scoped into one stack
+   struct registered by a single SP_GC_ROOT_FRAME entry (lib/sp_gc.h):
+
+   - a boxed temporary `sp_RbVal _tN = ...; SP_GC_ROOT_RBVAL(_tN);` has the
+     frame slot `_gcf.v[k]` as its home: the declaration becomes a store,
+     every mention names the slot, the root line goes. Slots are shared
+     between temporaries whose declaring blocks are disjoint, which is what
+     C scoping already guarantees for the names, so a function's slot count
+     is its deepest nesting, not its temporary count. A temporary whose
+     address is taken, that carries a qualifier, that is declared more than
+     once or in a form this scan does not read keeps its per-root macro --
+     the two forms coexist, each self-contained.
+   - a root at the function's top scope (`SP_GC_ROOT*(lv_x)` at brace depth
+     1: the prologue's locals) becomes an entry in the frame's pointer array,
+     in the root array's own encoding, so the mark path is the one it had.
+     A root nested any deeper is left alone: its variable dies with its
+     block, and the cleanup pop is what keeps a loop from accumulating them.
+
+   The frame is zeroed once at entry (a zero slot is INT 0), so a slot holds
+   its last value until the function returns: over-approximate liveness,
+   never under. Exceptions land on the depth an exception frame recorded
+   before its setjmp, which was already below this function's entry. */
+int g_no_root_frame = 0;
+
+typedef struct { char name[24]; int rooted, decls, addr, bad, slot; } FrameTemp;
+typedef struct { FrameTemp *v; int n, cap; } FrameTemps;
+
+static int frame_idch(char c) { return isalnum((unsigned char)c) || c == '_'; }
+/* `_t<digits>`: the emitters' temporary names. */
+static size_t frame_temp_len(const char *p, size_t end) {
+  size_t k = 0;
+  if (end < 3 || p[0] != '_' || p[1] != 't' || !isdigit((unsigned char)p[2])) return 0;
+  k = 2;
+  while (k < end && isdigit((unsigned char)p[k])) k++;
+  if (k < end && frame_idch(p[k])) return 0;
+  return k;
+}
+static FrameTemp *frame_temp(FrameTemps *ts, const char *nm, size_t n, int create) {
+  for (int i = 0; i < ts->n; i++)
+    if (strlen(ts->v[i].name) == n && !strncmp(ts->v[i].name, nm, n)) return &ts->v[i];
+  if (!create || n >= sizeof ts->v[0].name) return NULL;
+  if (ts->n == ts->cap) {
+    ts->cap = ts->cap ? ts->cap * 2 : 64;
+    ts->v = realloc(ts->v, sizeof *ts->v * (size_t)ts->cap);
+  }
+  FrameTemp *t = &ts->v[ts->n++];
+  memset(t, 0, sizeof *t);
+  memcpy(t->name, nm, n); t->name[n] = '\0'; t->slot = -1;
+  return t;
+}
+/* The end of the string/char literal, comment or preprocessor line starting
+   at i, or i when nothing does: the scans below must not read braces or
+   names out of a `#line` file name or a string constant. */
+static size_t frame_skip_noncode(const char *p, size_t i, size_t end) {
+  char c = p[i];
+  if (c == '"' || c == '\'') {
+    size_t j = i + 1;
+    while (j < end && p[j] != c) { if (p[j] == '\\' && j + 1 < end) j++; j++; }
+    return j < end ? j + 1 : end;
+  }
+  if (c == '#' && (i == 0 || p[i-1] == '\n')) {
+    size_t j = i;
+    while (j < end && p[j] != '\n') j++;
+    return j;
+  }
+  if (c == '/' && i + 1 < end && p[i+1] == '*') {
+    size_t j = i + 2;
+    while (j + 1 < end && !(p[j] == '*' && p[j+1] == '/')) j++;
+    return j + 1 < end ? j + 2 : end;
+  }
+  if (c == '/' && i + 1 < end && p[i+1] == '/') {
+    size_t j = i;
+    while (j < end && p[j] != '\n') j++;
+    return j;
+  }
+  return i;
+}
+/* Does the text before i end with `word` as a whole word (spaces between
+   allowed)? Returns the offset where that word starts, or 0 for no. */
+static size_t frame_preceded_by(const char *p, size_t i, size_t lo, const char *word) {
+  size_t n = strlen(word);
+  while (i > lo && p[i-1] == ' ') i--;
+  if (i < lo + n || strncmp(p + i - n, word, n)) return 0;
+  if (i - n > lo && frame_idch(p[i-n-1])) return 0;
+  return i - n;
+}
+
+/* First scan: every temporary that is rooted, how it is declared and whether
+   its address is taken. */
+static void frame_collect(const char *p, size_t beg, size_t end, FrameTemps *ts) {
+  size_t i = beg;
+  while (i < end) {
+    size_t j = frame_skip_noncode(p, i, end);
+    if (j != i) { i = j; continue; }
+    if (!frame_idch(p[i]) || isdigit((unsigned char)p[i])) { i++; continue; }
+    size_t k = i;
+    while (k < end && frame_idch(p[k])) k++;
+    if (k - i == 16 && !strncmp(p + i, "SP_GC_ROOT_RBVAL", 16) && k < end && p[k] == '(') {
+      size_t m = k + 1, tl = frame_temp_len(p + m, end - m);
+      if (tl) {
+        FrameTemp *t = frame_temp(ts, p + m, tl, 1);
+        if (t) {
+          if (m + tl + 1 < end && p[m + tl] == ')' && p[m + tl + 1] == ';') t->rooted++;
+          else t->bad = 1;
+        }
+        i = m + tl; continue;
+      }
+    }
+    size_t tl = frame_temp_len(p + i, end - i);
+    if (tl) {
+      FrameTemp *t = frame_temp(ts, p + i, tl, 1);
+      if (t) {
+        size_t q = i;
+        while (q > beg && p[q-1] == ' ') q--;
+        if (q > beg && p[q-1] == '&') t->addr = 1;
+        size_t d = frame_preceded_by(p, i, beg, "sp_RbVal");
+        if (d) {
+          /* a qualifier in front (volatile, const, static) is a form this
+             scan does not carry over */
+          size_t r = d;
+          while (r > beg && p[r-1] == ' ') r--;
+          if (r > beg && frame_idch(p[r-1])) t->bad = 1;
+          size_t a = k;
+          while (a < end && p[a] == ' ') a++;
+          if (a < end && p[a] == ';') t->decls++;
+          else if (a < end && p[a] == '=' && (a + 1 >= end || p[a+1] != '=')) {
+            /* a brace initialiser has no assignment form */
+            size_t v = a + 1;
+            while (v < end && p[v] == ' ') v++;
+            if (v < end && p[v] == '{') t->bad = 1; else t->decls++;
+          }
+          else t->bad = 1;
+        }
+      }
+      i = k; continue;
+    }
+    i = k;
+  }
+}
+static int frame_convertible(FrameTemp *t) {
+  return t && t->rooted > 0 && t->decls == 1 && !t->addr && !t->bad;
+}
+
+#define FRAME_DEPTH_MAX 1024
+
+/* The rewrite. Returns 1 when a frame was inserted; the buffer is untouched
+   otherwise. `ins` is the offset just past the SP_GC_SAVE statement -- the
+   function's top scope, where the frame is declared and from where the body
+   is read. */
+static int gc_frame_build(Buf *b, size_t ins) {
+  if (ins >= b->len) return 0;
+  const char *p = b->p;
+  size_t end = b->len;
+  FrameTemps ts; memset(&ts, 0, sizeof ts);
+  frame_collect(p, ins, end, &ts);
+  int any = 0;
+  for (int i = 0; i < ts.n; i++) if (frame_convertible(&ts.v[i])) { any = 1; break; }
+  if (!any && !strstr(p + ins, "SP_GC_ROOT")) { free(ts.v); return 0; }
+
+  Buf nb; memset(&nb, 0, sizeof nb);
+  int depth = 1, wm = 0, peak = 0, np = 0;
+  int saved[FRAME_DEPTH_MAX];
+  size_t i = ins;
+  while (i < end) {
+    size_t j = frame_skip_noncode(p, i, end);
+    if (j != i) { buf_putn(&nb, p + i, j - i); i = j; continue; }
+    char c = p[i];
+    if (c == '{') {
+      if (depth < FRAME_DEPTH_MAX) saved[depth] = wm;
+      depth++; buf_putn(&nb, p + i, 1); i++; continue;
+    }
+    if (c == '}') {
+      depth--;
+      /* past the bound the slots are simply not shared, which is still right */
+      if (depth >= 1 && depth < FRAME_DEPTH_MAX) wm = saved[depth];
+      buf_putn(&nb, p + i, 1); i++; continue;
+    }
+    if (!frame_idch(c) || isdigit((unsigned char)c)) { buf_putn(&nb, p + i, 1); i++; continue; }
+    size_t k = i;
+    while (k < end && frame_idch(p[k])) k++;
+    size_t n = k - i;
+    /* a root statement: a converted temporary's is dropped, a top-scope
+       one moves into the frame's entries, any other stays */
+    if (n >= 10 && !strncmp(p + i, "SP_GC_ROOT", 10) && k < end && p[k] == '(' &&
+        (n == 10 || (n == 16 && !strncmp(p + i, "SP_GC_ROOT_RBVAL", 16)) ||
+         (n == 14 && !strncmp(p + i, "SP_GC_ROOT_STR", 14)))) {
+      size_t m = k + 1, tl = n == 16 ? frame_temp_len(p + m, end - m) : 0;
+      if (tl && m + tl + 1 < end && p[m + tl] == ')' && p[m + tl + 1] == ';' &&
+          frame_convertible(frame_temp(&ts, p + m, tl, 0))) {
+        if (nb.len && nb.p[nb.len-1] == ' ') nb.len--;
+        i = m + tl + 2; continue;
+      }
+      if (depth == 1) {
+        size_t q = m; int pd = 1;
+        while (q < end && pd) { if (p[q] == '(') pd++; else if (p[q] == ')') pd--; q++; }
+        if (pd == 0 && q < end && p[q] == ';') {
+          buf_printf(&nb, "_gcf.p[%d] = SP_GC_ENTRY_%s(", np++,
+                     n == 16 ? "RBVAL" : n == 14 ? "STR" : "PTR");
+          buf_putn(&nb, p + m, q - 1 - m);
+          buf_puts(&nb, ");");
+          i = q + 1; continue;
+        }
+      }
+      buf_putn(&nb, p + i, n); i = k; continue;
+    }
+    size_t tl = frame_temp_len(p + i, end - i);
+    FrameTemp *t = tl ? frame_temp(&ts, p + i, tl, 0) : NULL;
+    if (frame_convertible(t)) {
+      int decl = frame_preceded_by(p, i, ins, "sp_RbVal") != 0;
+      if (decl) {
+        /* the type went into the output already; the slot is the home */
+        size_t r = nb.len;
+        while (r > 0 && nb.p[r-1] == ' ') r--;
+        if (r >= 8 && !strncmp(nb.p + r - 8, "sp_RbVal", 8)) nb.len = r - 8;
+        t->slot = wm++;
+        if (wm > peak) peak = wm;
+        size_t a = k;
+        while (a < end && p[a] == ' ') a++;
+        if (a < end && p[a] == ';') buf_puts(&nb, "(void)");
+      }
+      else if (t->slot < 0) { t->slot = wm++; if (wm > peak) peak = wm; }
+      buf_printf(&nb, "_gcf.v[%d]", t->slot);
+      i = k; continue;
+    }
+    buf_putn(&nb, p + i, n); i = k;
+  }
+  free(ts.v);
+  if (peak == 0 && np == 0) { free(nb.p); return 0; }
+  Buf out; memset(&out, 0, sizeof out);
+  buf_putn(&out, p, ins);
+  buf_puts(&out, "    struct { sp_gc_frame_hdr h;");
+  if (peak) buf_printf(&out, " sp_RbVal v[%d];", peak);
+  if (np) buf_printf(&out, " void **p[%d];", np);
+  buf_printf(&out, " } _gcf = {{%d, %d}}; SP_GC_ROOT_FRAME(_gcf);\n", peak, np);
+  buf_putn(&out, nb.p ? nb.p : "", nb.len);
+  free(nb.p);
+  free(b->p);
+  *b = out;
+  return 1;
+}
+
 /* ---- write barrier insertion ----
 
    A reference stored into an object that has already been promoted can be the
@@ -3410,6 +3663,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   g_yield_proc_ref = sv_ypr9; g_yield_slot_ty = sv_yst9;
   buf_puts(b, "}\n");
   if (!g_no_root_elision) gc_roots_take_back(c, s, b, gc_save_off);
+  if (!g_no_root_frame) gc_frame_build(b, gc_save_off + gc_save_len);
   gc_save_take_back(b, gc_save_off, gc_save_len);
 }
 
@@ -4198,6 +4452,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   Buf *pb = &body_buf;
   buf_printf(pb, "static void %s(sp_Fiber *_fb) {\n", fname);
   buf_puts(pb, "    SP_GC_SAVE();\n");
+  size_t fib_frame_ins = pb->len;
 
   /* Save global emission state */
   Buf *sv_pre = g_pre; int sv_indent = g_indent, sv_nren = g_nren, sv_block = g_block_id;
@@ -4434,6 +4689,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   }
 
   buf_puts(pb, "}\n");
+  if (!g_no_root_frame) gc_frame_build(pb, fib_frame_ins);
   g_c_loop_depth = sv_fib_loopd;
   g_ensure_depth = sv_fib_ensd; g_loop_ensure_base = sv_fib_lensb;
 
@@ -5288,6 +5544,7 @@ else if (orecv >= 0 && onm) {
   Buf *pb = &proc_body_buf;
   buf_printf(pb, "static sp_int _proc_%d(void *_cap, sp_int argc, sp_int *args) {\n", pid);
   buf_puts(pb, "    SP_GC_SAVE();\n");
+  size_t proc_frame_ins = pb->len;
   if (ncap == 0 && !cap_self && !cap_cls && !ret_proc) buf_puts(pb, "    (void)_cap;\n");
   buf_puts(pb, "    (void)args;\n");
   buf_puts(pb, "    (void)argc;\n");
@@ -5705,6 +5962,7 @@ else if (orecv >= 0 && onm) {
     buf_puts(pb, "  return 0;\n");
   }
   buf_puts(pb, "}\n");
+  if (!g_no_root_frame) gc_frame_build(pb, proc_frame_ins);
   buf_puts(&g_procs, proc_body_buf.p ? proc_body_buf.p : "");
   free(proc_body_buf.p);
   g_c_loop_depth = sv_loopd; g_in_proc_body = sv_inproc;
@@ -11385,12 +11643,15 @@ char *codegen_program(const NodeTable *nt) {
         int stmts = nt_ref(c->nt, tbody[k], "statements");
         end_count++;
         buf_printf(body, "static void sp_end_fn_%d(void) { SP_GC_SAVE();\n", end_count);
+        size_t end_frame_ins = body->len;
         EMIT_COLLECT_UNIT(emit_stmts(c, stmts, body, 1));
         buf_puts(body, "}\n");
+        if (!g_no_root_frame) gc_frame_build(body, end_frame_ins);
       }
     }
   }
 
+  size_t main_frame_ins = 0;
   if (g_ext_init_name) {
     /* Layer-1 extension emission (ext-design.md): the toplevel body brackets
        into the host-callable init function instead of main, and a tiny
@@ -11409,6 +11670,7 @@ char *codegen_program(const NodeTable *nt) {
       "  return 1;\n}\n", g_ext_init_name);
     buf_printf(body, "void %s(void){\n", g_ext_init_name);
     buf_puts(body, "    SP_GC_SAVE();\n");
+    main_frame_ins = body->len;
     if (g_re_init_needed) buf_puts(body, "    sp_tu_init();\n");
     if (g_uses_threads) buf_puts(body, "    sp_sched_init();\n");
     if (g_uses_program_name) buf_puts(body, "    sp_program_name = sp_str_empty;\n");
@@ -11416,6 +11678,7 @@ char *codegen_program(const NodeTable *nt) {
   else {
   buf_puts(body, "int main(int argc,char**argv){\n");
   buf_puts(body, "    SP_GC_SAVE();\n");
+  main_frame_ins = body->len;
   if (g_re_init_needed) buf_puts(body, "    sp_tu_init();\n");
   /* Adopt the main thread and chain the scheduler's GC root hook. Placed after
      sp_tu_init so it chains whatever globals hook that installed. */
@@ -11510,6 +11773,7 @@ char *codegen_program(const NodeTable *nt) {
   if (g_ext_init_name) buf_puts(body, "}\n");
   else if (g_needs_at_exit) buf_puts(body, "  return sp_at_exit_run(0);\n}\n");
   else buf_puts(body, "  return 0;\n}\n");
+  if (!g_no_root_frame) gc_frame_build(body, main_frame_ins);
 
   emit_regex_section(c, &b);
   if (g_proc_protos.len) { buf_puts(&b, g_proc_protos.p); buf_puts(&b, "\n"); }
