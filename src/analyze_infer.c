@@ -1601,8 +1601,18 @@ static TyKind infer_call_inner(Compiler *c, int id) {
      1-arg call node makes a wide call graph explode (#2707). */
   if (a0 == TY_INT && sp_streq(name, "**") && recv >= 0 && argc == 1 &&
       infer_type(c, recv) == TY_INT) {
-    long long exp;
-    if (infer_const_int_node(nt, argv[0], &exp) && exp < 0) return TY_RATIONAL;
+    long long base, exp;
+    int cexp = infer_const_int_node(nt, argv[0], &exp);
+    if (cexp && exp < 0) return TY_RATIONAL;
+    /* --int-overflow=promote: an int `**` whose operands are not both known
+       constants can escape the word at run time and promote to a Bignum
+       (codegen lowers it to sp_poly_pow), the `<<` rule below. A const-const
+       pair is exact -- an overflowing one answered TY_BIGINT above, the rest
+       fit an int. A typed exponent -- a block parameter, an element -- kept
+       the int helper, which raises in the mode whose contract is to promote
+       (#4679). */
+    if (g_promote_mode && !(cexp && infer_const_int_node(nt, recv, &base)))
+      return TY_POLY;
   }
   /* Integer with a Rational/Complex operand: ** Complex is Complex; ** Rational
      is a Float (by design, see codegen); fdiv is Float, div is the Integer floor. */
