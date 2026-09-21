@@ -13501,6 +13501,21 @@ static void expand_static_splat_args(Compiler *c) {
   }
 }
 
+/* Whether a synthesized `__bam_N` wrapper binds a RECEIVER in its first
+   parameter (`def __bam_N(__bam_r, ...) = __bam_r.sym(...)`), as opposed to
+   the receiverless Kernel wrapper (`def __bam_N(__bam_r, ...) = Integer(__bam_r, ...)`)
+   whose first parameter is an ordinary argument. */
+static int bam_wrapper_binds_receiver(Compiler *c, Scope *sc) {
+  const NodeTable *nt = c->nt;
+  if (!sc->name || strncmp(sc->name, "__bam_", 6) != 0 || sc->body < 0) return 0;
+  int n = 0; const int *st = nt_arr(nt, sc->body, "body", &n);
+  if (n != 1 || !nt_type(nt, st[0]) || !sp_streq(nt_type(nt, st[0]), "CallNode")) return 0;
+  int recv = nt_ref(nt, st[0], "receiver");
+  if (recv < 0) return 0;
+  const char *rty = nt_type(nt, recv), *rnm = nt_str(nt, recv, "name");
+  return rty && sp_streq(rty, "LocalVariableReadNode") && rnm && sp_streq(rnm, "__bam_r");
+}
+
 void analyze_program(Compiler *c) {
   comp_poly_candidates_reset();
   comp_descendants_reset();
@@ -15658,6 +15673,19 @@ void analyze_program(Compiler *c) {
       /* the blockless answer of an `if block_given?` tail (#4659) widens
          with the rest: its else arm is emitted on the widened locals */
       if (sc->ret_noblock == TY_INT && !is_spaceship && !sc->is_lowered_yield) sc->ret_noblock = TY_POLY;
+      /* The receiver parameter of a synthesized `<Integer>.method(:sym)`
+         wrapper (`__bam_N(__bam_r, ...) = __bam_r.sym(...)`) stays typed as
+         well: its bind site stores the receiver raw and the thunk ABI
+         (bm_self_ctype) declares the slot sp_int only while the parameter IS
+         TY_INT, so a widened one had the callee read a 16-byte box out of a
+         pointer-sized slot -- junk cls_id, and every call ended in
+         NoMethodError or a TypeError naming an empty class (#4765). The
+         same treatment as a block parameter; the wrapper's own arithmetic on
+         it follows the typed contract. A boxed self slot in the thunk ABI
+         would be the fuller form. A receiverless Kernel wrapper
+         (`method(:String)`, `__bam_r` is its first ARGUMENT) widens with the
+         rest: its poly signature is what a promote call site rides. */
+      int is_bam_recv = bam_wrapper_binds_receiver(c, sc);
       for (int i = 0; i < sc->nlocals; i++) {
         /* Skip block params: they are typed by the iterated collection's
            element type (an IntArray yields int elements), and the block
@@ -15666,6 +15694,7 @@ void analyze_program(Compiler *c) {
            and inconsistent reads (e.g. `x.even?` keeps the stale poly type
            while `x*2` sees the retyped int). Method params still widen. */
         if (sc->locals[i].is_block_param) continue;
+        if (is_bam_recv && sc->locals[i].name && sp_streq(sc->locals[i].name, "__bam_r")) continue;
         if (sc->locals[i].type == TY_INT) sc->locals[i].type = TY_POLY;
       }
     }
