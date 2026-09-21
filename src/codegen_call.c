@@ -22428,8 +22428,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && argc == 1 && comp_ntype(c, recv) == TY_POLY &&
       (sp_streq(name, "&") || sp_streq(name, "|") || sp_streq(name, "^"))) {
     int bop = sp_streq(name, "&") ? 0 : sp_streq(name, "|") ? 1 : 2;
-    buf_puts(b, "sp_poly_bitop("); emit_boxed(c, recv, b); buf_puts(b, ", ");
-    emit_boxed(c, argv[0], b); buf_printf(b, ", %d)", bop);
+    int t = ++g_tmp;
+    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
+    /* the hoisted receiver is rooted across its argument and the dispatch:
+       a heap receiver (an array, a Bignum, a user object whose own operator
+       sp_poly_bitop reaches) is held by nothing else while the argument runs */
+    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+    buf_printf(b, "sp_poly_bitop(_t%d, ", t);
+    emit_boxed(c, argv[0], b); buf_printf(b, ", %d); })", bop);
     return;
   }
   /* `poly >> n`: through sp_poly_shr, which keeps a bignum receiver in bignum
@@ -22437,11 +22443,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
      turning the shift arithmetic and diverging a masked xorshift from CRuby for
      good (#3371). sp_poly_shr also carries the Proc#>> composition arm. */
   if (recv >= 0 && argc == 1 && comp_ntype(c, recv) == TY_POLY && sp_streq(name, ">>")) {
-    buf_puts(b, "sp_poly_shr(");
-    emit_boxed(c, recv, b);
-    buf_puts(b, ", ");
+    int t = ++g_tmp;
+    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
+    /* as the bit-operator arm above: a Bignum, Proc or user-object receiver
+       is held by nothing else while the argument runs */
+    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+    buf_printf(b, "sp_poly_shr(_t%d, ", t);
     emit_boxed(c, argv[0], b);
-    buf_puts(b, ")");
+    buf_puts(b, "); })");
     return;
   }
 
