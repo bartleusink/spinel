@@ -12588,6 +12588,57 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   }
   /* Numeric#round(ndigits) on a poly: the digit-taking form the no-arg
      numeric path cannot express. A user `round` still wins (poly dispatch). */
+  /* `round(half: :even)` -- with or without a digits argument -- on a boxed
+     receiver. The keyword hash is not a positional argument: read as one it
+     reached the digits slot and raised "no implicit conversion of Hash into
+     Integer", where the typed Float and Integer paths have honoured the
+     tie-break mode all along. Peel it off the positional view here, exactly
+     as the typed arm does, so a value that went through a container answers
+     what the same value answers when it did not. */
+  if (recv >= 0 && rt == TY_POLY && (argc == 1 || argc == 2) &&
+      (sp_streq(name, "round") || sp_streq(name, "ceil") ||
+       sp_streq(name, "floor") || sp_streq(name, "truncate")) &&
+      nt_ref(nt, id, "block") < 0 &&
+      nt_type(nt, argv[argc - 1]) &&
+      sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
+    int has_user_kw = 0;
+    if (!g_poly_builtin_arm)
+    for (int kk = 0; kk < c->nclasses && !has_user_kw; kk++)
+      if (comp_poly_arm_defines_n(c, kk, name, argc) ||
+          (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user_kw = 1;
+    if (!has_user_kw) {
+      /* only #round takes a tie-break mode; the other three reject a keyword
+         outright, with CRuby's words (the typed arm does the same, #3646) */
+      if (!sp_streq(name, "round")) {
+        buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
+        buf_puts(b, "); sp_raise_cls(\"TypeError\","
+                    " \"no implicit conversion of Hash into Integer\"); sp_box_nil(); })");
+        return 1;
+      }
+      int hv = kwh_lookup(nt, argv[argc - 1], "half");
+      int nd = (argc == 2) ? argv[0] : -1;
+      buf_puts(b, "sp_poly_round_half(");
+      emit_expr(c, recv, b);
+      buf_puts(b, ", ");
+      if (nd >= 0) emit_int_expr(c, nd, b); else buf_puts(b, "0");
+      buf_puts(b, ", ");
+      /* a nil mode is the plain half-up default; a symbol (literal or only
+         known at run time) selects the rule */
+      if (hv < 0 || (nt_type(nt, hv) && sp_streq(nt_type(nt, hv), "NilNode")))
+        buf_puts(b, "(sp_sym)-1");
+      else if (comp_ntype(c, hv) == TY_SYMBOL) emit_expr(c, hv, b);
+      else {
+        /* a mode read out of a container arrives boxed; nil there is the
+           default rule, as `half: nil` is */
+        int tm2 = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", tm2);
+        emit_boxed(c, hv, b);
+        buf_printf(b, "; _t%d.tag == SP_TAG_SYM ? (sp_sym)_t%d.v.i : (sp_sym)-1; })", tm2, tm2);
+      }
+      buf_puts(b, ")");
+      return 1;
+    }
+  }
   if (recv >= 0 && rt == TY_POLY && argc == 1 &&
       (sp_streq(name, "round") || sp_streq(name, "ceil") ||
        sp_streq(name, "floor") || sp_streq(name, "truncate")) &&

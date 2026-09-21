@@ -4835,6 +4835,17 @@ else {
       }
       /* Numeric#round(ndigits) on a boxed value: Float when n > 0, Integer
          when n <= 0 -- either way a boxed poly (sp_poly_round_n). */
+      /* `round(half: :even)` and `round(n, half: :even)` answer a number
+         just as the digits-only form does: the trailing keyword hash is the
+         tie-break mode, not an argument that makes the call valueless. Typed
+         as void, the emitted call was evaluated for effect and its value
+         dropped -- `z.round(2, half: :even)` answered nil. */
+      if ((argc == 1 || argc == 2) &&
+          (sp_streq(name, "round") || sp_streq(name, "ceil") ||
+           sp_streq(name, "floor") || sp_streq(name, "truncate")) &&
+          nt_type(nt, argv[argc - 1]) &&
+          sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode"))
+        return an_poly_concrete(c, name, TY_POLY);
       if (argc == 1 && (sp_streq(name, "round") || sp_streq(name, "ceil") ||
                         sp_streq(name, "floor") || sp_streq(name, "truncate")))
         return an_poly_concrete(c, name, TY_POLY);

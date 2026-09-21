@@ -1,0 +1,17 @@
+8388609
+2
+3
+2
+3
+3
+2.35
+2.35
+2.35
+-20
+25
+20
+2
+floor: no implicit conversion of Hash into Integer
+ceil: no implicit conversion of Hash into Integer
+truncate: no implicit conversion of Hash into Integer
+bogus: invalid rounding mode: bogus

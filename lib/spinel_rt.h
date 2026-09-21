@@ -9777,6 +9777,41 @@ static double sp_round_half_mode(double x, sp_sym mode) {
   return 0.0;
 }
 
+/* `round(half: :even)` on a BOXED number. sp_poly_round_n answers the
+   half-up rule the bare `round` has; the tie-break mode is a keyword the
+   typed Float and Integer paths already honour, and a boxed receiver has to
+   give the same answers or the same program means two things depending on
+   whether its value went through a container. An Integer receiver has no
+   tie to break at n >= 0, and a Rational keeps sp_poly_round_n's arms. */
+sp_int sp_int_round_half(sp_int v, sp_int nd, int mode);
+static sp_RbVal sp_poly_round_half(sp_RbVal v, sp_int n, sp_sym mode) {
+  if (v.tag == SP_TAG_INT) {
+    /* an Integer has a tie to break only below the decimal point, and the
+       typed path's helper already knows the rule (0 even / 1 up / 2 down) */
+    if (n >= 0) return v;
+    const char *m = (mode == (sp_sym)-1) ? NULL : sp_sym_to_s(mode);
+    int md = 1;
+    if (m && m[0]) {
+      if (strcmp(m, "even") == 0) md = 0;
+      else if (strcmp(m, "down") == 0) md = 2;
+      else if (strcmp(m, "up") != 0)
+        sp_raise_cls("ArgumentError", sp_sprintf("invalid rounding mode: %s", m));
+    }
+    return sp_box_int(sp_int_round_half(v.v.i, n, md));
+  }
+  if (v.tag != SP_TAG_FLT) return sp_poly_round_n(v, n);
+  double x = v.v.f;
+  if (n > 0) {
+    double f = pow(10, (double)n);
+    if (isinf(f)) return sp_box_float(x);
+    double r = sp_round_half_mode(x * f, mode) / f;
+    return sp_box_float((x != 0.0 && r == 0.0) ? 0.0 : r);   /* +0.0 normalize */
+  }
+  sp_poly_flo_domain_ck(x);
+  double f = pow(10, (double)(-n));
+  return sp_box_int(isinf(f) ? 0 : sp_float_fit_i(sp_round_half_mode(x / f, mode) * f));
+}
+
 /* `rescue *list`: the clause matches when the raised class is (or descends
    from) one named in the list. A non-class element is a TypeError, and an
    empty list matches nothing, so the exception keeps propagating (#3712). */
