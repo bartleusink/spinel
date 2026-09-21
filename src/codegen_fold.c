@@ -625,18 +625,17 @@ int emit_hash_reduce_scalar_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
-/* hash.flat_map / filter_map / partition { |k, v| ... } -> a poly array.
-   flat_map concatenates the per-entry block arrays; filter_map keeps truthy
-   block values; partition returns [matching_pairs, remaining_pairs]. */
+/* hash.flat_map / partition { |k, v| ... } -> a poly array.
+   flat_map concatenates the per-entry block arrays; partition returns
+   [matching_pairs, remaining_pairs]. */
 int emit_hash_transform_expr(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   int block = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
   if (block < 0) return 0;
   const char *name = nt_str(nt, id, "name");
   int is_flat = sp_streq(name, "flat_map") || sp_streq(name, "collect_concat");
-  int is_fmap = sp_streq(name, "filter_map");
   int is_part = sp_streq(name, "partition");
-  if (!is_flat && !is_fmap && !is_part) return 0;
+  if (!is_flat && !is_part) return 0;
   int argc = 0; { int ar = nt_ref(nt, id, "arguments"); if (ar >= 0) nt_arr(nt, ar, "arguments", &argc); }
   if (argc != 0) return 0;
   int recv = nt_ref(nt, id, "receiver");
@@ -656,7 +655,7 @@ int emit_hash_transform_expr(Compiler *c, int id, Buf *b) {
   /* Per-entry temporaries are declared and GC-rooted once, before the loop, and
      reassigned each iteration (the root tracks the stack slot, not the value).
      _tp is the [k, v] pair (partition); _tbv is the boxed block value
-     (filter_map / flat_map). */
+     (flat_map). */
   int tm = is_part ? ++g_tmp : 0, tr = is_part ? ++g_tmp : 0, tres = ++g_tmp;
   int tp = is_part ? ++g_tmp : 0;
   int tbv = is_part ? 0 : ++g_tmp;
@@ -684,18 +683,14 @@ int emit_hash_transform_expr(Compiler *c, int id, Buf *b) {
     buf_printf(g_pre, "if (%s) sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d)); else sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d));\n",
                cond, tm, tp, tr, tp);
   }
-  else {  /* filter_map / flat_map: snapshot the block value into _tbv first */
+  else {  /* flat_map: snapshot the block value into _tbv first */
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "_t%d = ", tbv);
     if (bret == TY_POLY) buf_puts(g_pre, vb ? vb : "sp_box_nil()");
     else { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, bret, vb ? vb : "", &bx);
            buf_puts(g_pre, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); }
     buf_puts(g_pre, ";\n");
-    if (is_fmap) {
-      emit_indent(g_pre, g_indent + 1);
-      buf_printf(g_pre, "if (sp_poly_truthy(_t%d)) sp_PolyArray_push(_t%d, _t%d);\n", tbv, tres, tbv);
-    }
-    else if (ty_is_array(bret) || bret == TY_POLY_ARRAY) {  /* flat_map, array value */
+    if (ty_is_array(bret) || bret == TY_POLY_ARRAY) {  /* flat_map, array value */
       int tj = ++g_tmp;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_poly_arr_len(_t%d); _t%d++) sp_PolyArray_push(_t%d, sp_poly_arr_get(_t%d, _t%d));\n",
@@ -1354,69 +1349,6 @@ int emit_flat_map_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
-/* recv.filter_map { |x| body } -- map, then drop falsy results. The result is a
-   poly array (the body is often a nilable `expr if cond`); each truthy boxed
-   value is kept. Output matches CRuby for both nilable and concrete bodies. */
-int emit_filter_map_expr(Compiler *c, int id, Buf *b) {
-  const NodeTable *nt = c->nt;
-  const char *name = nt_str(nt, id, "name");
-  if (!name || !sp_streq(name, "filter_map")) return 0;
-  int block = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
-  int recv = nt_ref(nt, id, "receiver");
-  if (block < 0 || !nt_type(nt, block) || !sp_streq(nt_type(nt, block), "BlockNode") || recv < 0) return 0;
-  TyKind rt = comp_ntype(c, recv);
-  if (!ty_is_array(rt)) return 0;  /* range filter_map: a later slice */
-  const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
-  if (!k) return 0;
-  int body = nt_ref(nt, block, "body");
-  int bn = 0;
-  const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-  if (bn < 1) return 0;
-  const char *p0 = block_param_name(c, block, 0);
-  if (p0) p0 = rename_local(p0);
-
-  int ta = ++g_tmp, tres = ++g_tmp, ti = ++g_tmp;
-  Buf rb; memset(&rb, 0, sizeof rb);
-  emit_expr(c, recv, &rb);
-  TyKind et = ty_array_elem(rt);
-  emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tres, tres);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, k, ta, ti);
-
-  Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
-  LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
-  TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
-  int din = g_indent + 1;
-  char es_fm[64]; snprintf(es_fm, sizeof es_fm, "sp_%sArray_get(_t%d, _t%d)", k, ta, ti);
-  int splat = emit_iter_autosplat(c, block, rt, es_fm, din);
-  int use_shadow = !splat && clv0 && clv0->type != et && et != TY_UNKNOWN;
-  if (use_shadow) {
-    clv0->type = et;
-    for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]);
-    emit_indent(g_pre, din); buf_puts(g_pre, "{\n"); din++;
-    emit_indent(g_pre, din); emit_ctype(c, et, g_pre); buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, ta, ti);
-  }
-  else if (!splat && p0) { emit_indent(g_pre, din); buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, ta, ti); }
-
-  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, din);
-  int save = g_indent; g_indent = din;
-  Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, bb[bn - 1], &vb); g_indent = save;
-  TyKind vt = comp_ntype(c, bb[bn - 1]);
-  int tv = ++g_tmp;
-  emit_indent(g_pre, din); buf_printf(g_pre, "sp_RbVal _t%d = ", tv);
-  if (vt == TY_POLY) buf_puts(g_pre, vb.p ? vb.p : "sp_box_nil()");
-  else { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, vt, vb.p ? vb.p : "", &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
-  buf_puts(g_pre, ";\n"); free(vb.p);
-  emit_indent(g_pre, din); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tv);
-  emit_indent(g_pre, din); buf_printf(g_pre, "if (sp_poly_truthy(_t%d)) sp_PolyArray_push(_t%d, _t%d);\n", tv, tres, tv);
-  if (use_shadow) { din--; emit_indent(g_pre, din); buf_puts(g_pre, "}\n"); }
-  if (clv0) clv0->type = csaved0;
-  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-  buf_printf(b, "_t%d", tres);
-  return 1;
-}
-
 /* Whether `node` is a call the resolution gate will lower to its raising
    token: a settled receiver type, and no user class owns the name. Used to
    tell "the block names a method that does not exist" (compile it, let it
@@ -1463,7 +1395,7 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
        element type (e.g. the same name is poly in another block in this scope),
        its lv_ is declared at the wider C type. Shadow it with an et-typed local
        inside a fresh C block and re-infer the body, so the typed-array get
-       assigns into a matching lvalue. Mirrors emit_filter_map/emit_partition. */
+       assigns into a matching lvalue. */
     Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
     LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
     TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
@@ -3545,7 +3477,6 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
   const char *name = nt_str(nt, id, "name");
   if (!name) return 0;
   int is_map = sp_streq(name, "map") || sp_streq(name, "collect");
-  int is_fmap = sp_streq(name, "filter_map");
   int is_sel = sp_streq(name, "select") || sp_streq(name, "filter") ||
                sp_streq(name, "find_all");
   int is_rej = sp_streq(name, "reject");
@@ -3554,7 +3485,7 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
   int is_any = sp_streq(name, "any?"), is_all = sp_streq(name, "all?"), is_none = sp_streq(name, "none?");
   int is_each = sp_streq(name, "each");
   int is_toh = sp_streq(name, "to_h");
-  if (!(is_map || is_fmap || is_sel || is_rej || is_toa || is_cnt || is_any || is_all || is_none || is_each || is_toh)) return 0;
+  if (!(is_map || is_sel || is_rej || is_toa || is_cnt || is_any || is_all || is_none || is_each || is_toh)) return 0;
 
   int arr = -1, off = -1;
   if (!ewi_chain(c, id, &arr, &off)) return 0;
@@ -3611,7 +3542,7 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
   buf_puts(g_pre, ";\n");
 
   const char *rk = NULL;
-  if (is_map || is_fmap) {
+  if (is_map) {
     TyKind restype = comp_ntype(c, id);
     rk = (restype == TY_POLY_ARRAY) ? "Poly" : array_kind(restype);
     if (!rk) rk = "Poly";
@@ -3738,13 +3669,6 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
       else buf_puts(g_pre, tvb);
       buf_puts(g_pre, ");\n");
     }
-    else if (is_fmap) {
-      /* filter_map: keep the block value only when truthy (nil/false dropped) */
-      emit_indent(g_pre, din); buf_printf(g_pre, "if (%s) sp_%sArray_push(_t%d, ", truth, rk, tres);
-      if (sp_streq(rk, "Poly") && !vpoly) { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, bt, tvb, &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
-      else buf_puts(g_pre, tvb);
-      buf_puts(g_pre, ");\n");
-    }
     else if (is_sel || is_rej) {
       emit_indent(g_pre, din); buf_printf(g_pre, "if (%s%s) sp_PolyArray_push(_t%d, ", is_rej ? "!" : "", truth, tres);
       Buf bx; memset(&bx, 0, sizeof bx); char pe[32]; snprintf(pe, sizeof pe, "_t%d", tpair); emit_boxed_text(c, pair_ty, pe, &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
@@ -3768,7 +3692,7 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
 
   if (lv) lv->type = sv; if (li) li->type = si;
 
-  if (is_map || is_fmap || collect_pair || is_toh) buf_printf(b, "_t%d", tres);
+  if (is_map || collect_pair || is_toh) buf_printf(b, "_t%d", tres);
   else if (is_cnt) buf_printf(b, "_t%d", tcnt);
   else if (is_any || is_all || is_none) buf_printf(b, "_t%d", tflag);
   else buf_printf(b, "_t%d", ta);   /* each -> receiver */
@@ -4598,17 +4522,11 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     /* poly-typed receiver (e.g. `arr = nil` default): iterate via
        sp_poly_arr_len / sp_poly_arr_get and build a typed result array */
     int is_map2 = ty_iter_shape(name) == TY_ITER_MAP;
-    /* filter_map is map then compact, so it walks the same loop and differs
-       only in the push. Without an arm here a poly receiver fell past every
-       collector into the hash-face coercion, which reads an Array receiver as
-       a Hash and raises NoMethodError naming the method (#4007). */
-    int is_fmap2 = sp_streq(name, "filter_map");
-    if (!is_map2 && !is_fmap2) return 0;
+    if (!is_map2) return 0;
     TyKind restype2 = comp_ntype(c, id);
     int res_poly2 = (restype2 == TY_POLY_ARRAY);
     const char *rk2 = res_poly2 ? "Poly" : array_kind(restype2);
     if (!rk2) return 0;
-    if (is_fmap2 && !res_poly2) return 0;   /* the truthiness test needs the box */
     const char *p0p = block_param_name(c, block, 0); if (p0p) p0p = rename_local(p0p);
     int body2 = nt_ref(nt, block, "body");
     int bn2 = 0;
@@ -4694,18 +4612,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     else if (res_poly2) emit_boxed(c, bb2[bn2 - 1], &vb2);
     else emit_expr(c, bb2[bn2 - 1], &vb2);
     g_indent = saveIndent2;
-    if (is_fmap2) {
-      /* keep the block value only when truthy: nil and false are dropped */
-      int tfv2 = ++g_tmp;
-      emit_indent(g_pre, g_indent + 2);
-      buf_printf(g_pre, "sp_RbVal _t%d = %s;\n", tfv2, vb2.p && *vb2.p ? vb2.p : "sp_box_nil()");
-      emit_indent(g_pre, g_indent + 2);
-      buf_printf(g_pre, "if (sp_poly_truthy(_t%d)) sp_%sArray_push(_t%d, _t%d);\n", tfv2, rk2, tres2, tfv2);
-    }
-    else {
-      emit_indent(g_pre, g_indent + 2);
-      buf_printf(g_pre, "sp_%sArray_push(_t%d, %s);\n", rk2, tres2, vb2.p ? vb2.p : "");
-    }
+    emit_indent(g_pre, g_indent + 2);
+    buf_printf(g_pre, "sp_%sArray_push(_t%d, %s);\n", rk2, tres2, vb2.p ? vb2.p : "");
     free(vb2.p);
     emit_indent(g_pre, g_indent + 1);
     buf_puts(g_pre, "}\n");

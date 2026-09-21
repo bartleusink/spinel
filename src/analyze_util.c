@@ -1526,6 +1526,13 @@ TyKind method_call_ret(Compiler *c, int mi, int call_id) {
              sp_streq(nt_type(c->nt, av[0]), "ForwardingArgumentsNode"));
     }
     if (blk < 0 && !fwd) return c->scopes[mi].ret_noblock;
+    /* `m(&f)` with a proc value: whether there is a block is decided at run
+       time (the proc may be nil), so both arms are live and the call
+       answers their union. Typed from the block arm alone, the else arm's
+       Enumerator landed in the block arm's array slot and the C did not
+       build (a boxed receiver's `filter_map(&f)`). */
+    if (blk >= 0 && nt_kind(c->nt, blk) == NK_BlockArgumentNode)
+      return ty_unify(c->scopes[mi].ret, c->scopes[mi].ret_noblock);
   }
   return c->scopes[mi].ret;
 }

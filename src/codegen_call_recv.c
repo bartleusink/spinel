@@ -1188,7 +1188,6 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
        ((sp_streq(name, "reject") || sp_streq(name, "select") || sp_streq(name, "filter") ||
          sp_streq(name, "sort_by") ||
          sp_streq(name, "map") || sp_streq(name, "collect") || sp_streq(name, "flat_map") ||
-         sp_streq(name, "filter_map") ||
          sp_streq(name, "sum")) &&
         argc == 0 && nt_ref(nt, id, "block") >= 0))) {
     int ta = ++g_tmp;

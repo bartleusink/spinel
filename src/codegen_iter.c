@@ -872,11 +872,14 @@ static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
 static int call_targets_yielding_method(Compiler *c, int id);
 static int block_tail_needs_value_form(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
-  /* a tail `yield` whose block is a forwarded proc: the statement form is a
-     bare sp_proc_yield call whose value is dropped, and the splice is read
-     for it (`{ |x| yield x }` handed to an inlined callee from a method
-     called with `&proc`) */
-  if (nt_kind(nt, id) == NK_YieldNode) return g_yield_proc_ref != NULL || g_yield_proc_ref_fallback != NULL;
+  /* a tail `yield`: the splice is read for the block's value, and that is
+     whatever the yield's own block answers. The statement form drops it,
+     as a bare sp_proc_yield call when the block is a forwarded proc, and
+     as a statement-form splice of the inner block when it is a literal one:
+     an inner tail that is a value-less statement (`x if x != 2`, an
+     if-modifier) left the outer splice void (`{ |__fwd| yield __fwd }`, the
+     forward of a named &block, handed on to a builtin). */
+  if (nt_kind(nt, id) == NK_YieldNode) return 1;
   if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) return 0;
   const char *nm = nt_str(nt, id, "name");
   if (!nm) return 0;

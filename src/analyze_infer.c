@@ -855,10 +855,9 @@ int range_enum_redispatch(Compiler *c, int id) {
   /* count: the block / argument forms (bare count is size, handled natively). */
   if (sp_streq(name, "count")) return block >= 0 || argc >= 1;
   /* take/drop and reverse_each materialize transparently (the results carry
-     the range's own ints); filter_map has array block-param typing. */
+     the range's own ints). */
   if ((sp_streq(name, "take") || sp_streq(name, "drop")) && argc == 1) return 1;
   if (sp_streq(name, "reverse_each")) return 1;
-  if (sp_streq(name, "filter_map") && block >= 0) return 1;
   /* min(n)/max(n)/minmax with a count return arrays of the range's ints */
   if ((sp_streq(name, "min") || sp_streq(name, "max")) && argc >= 1) return 1;
   /* blockless all?/any?/none?/one?: a truthiness scan, which the materialized
@@ -3258,8 +3257,7 @@ else {
     /* reject/select/filter/map with a block over the materialized pairs: a
        generic Array (each_with_index.reject { |v, i| ... }, each_index.map { }). */
     if ((sp_streq(name, "reject") || sp_streq(name, "select") || sp_streq(name, "filter") ||
-         sp_streq(name, "map") || sp_streq(name, "collect") || sp_streq(name, "flat_map") ||
-         sp_streq(name, "filter_map")) &&
+         sp_streq(name, "map") || sp_streq(name, "collect") || sp_streq(name, "flat_map")) &&
         argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY_ARRAY;
     /* block forms over the materialized pairs: sort_by is a reordered Array;
        sum { } folds to a poly. */
@@ -4281,9 +4279,6 @@ else {
       int two_param = blk >= 0 && !block_param_is_multi(c, blk, 0) &&
                       block_param_name(c, blk, 0) && block_param_name(c, blk, 1);
       if (two_param && (sp_streq(name, "map") || sp_streq(name, "collect")))
-        return ty_array_of(bn > 0 ? yield_aware_elem_ty(c, bb[bn - 1]) : TY_UNKNOWN);
-      /* filter_map collects the truthy block values (like map, then compact) */
-      if (two_param && sp_streq(name, "filter_map"))
         return ty_array_of(bn > 0 ? yield_aware_elem_ty(c, bb[bn - 1]) : TY_UNKNOWN);
       if (sp_streq(name, "to_a") || sp_streq(name, "entries") ||
           (two_param && (sp_streq(name, "select") || sp_streq(name, "filter") || sp_streq(name, "reject"))))

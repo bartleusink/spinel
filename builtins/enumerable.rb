@@ -147,4 +147,17 @@ module Enumerable
       each
     end
   end
+
+  def filter_map
+    if block_given?
+      out = []
+      each do |x|
+        v = yield x
+        out << v if v
+      end
+      out
+    else
+      each
+    end
+  end
 end

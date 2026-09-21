@@ -597,8 +597,7 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (nt_ref(nt, id, "block") < 0 && sp_streq(name, "sum") && argc == 0)
       { *out = TY_INT; return 1; }
     if (nt_ref(nt, id, "block") >= 0 &&
-        (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat") ||
-         sp_streq(name, "filter_map")))
+        (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat")))
       { *out = TY_POLY_ARRAY; return 1; }
     {
       if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {
@@ -844,7 +843,6 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         { *out = TY_POLY; return 1; }  /* find(ifnone): the element or the proc's value */
       if (sp_streq(name, "find") || sp_streq(name, "detect"))
         { *out = ty_array_elem(rt); return 1; }  /* returns an element */
-      if (sp_streq(name, "filter_map")) { *out = TY_POLY_ARRAY; return 1; }  /* map then drop falsy */
     }
     /* grep/grep_v without a block filter by `pattern === e`, preserving the
        receiver's array type. */
