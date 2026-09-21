@@ -10671,7 +10671,21 @@ static int strbuf_container_stores_nonstring(Compiler *c, const char *contn, Sco
   }
   return 0;
 }
-static int strbuf_demand_container_stores(Compiler *c, const char *contn, Scope *conts) {
+/* Iterators whose block receives the ELEMENT as its first parameter. */
+static int strbuf_elem_first_iterator(const char *n) {
+  static const char *const names[] = {
+    "each", "each_with_index", "each_with_object", "each_entry", "reverse_each",
+    "cycle", "map", "collect", "map!", "collect!", "flat_map", "collect_concat",
+    "select", "filter", "select!", "filter!", "find_all", "reject", "reject!",
+    "delete_if", "keep_if", "filter_map", "find", "detect", "find_index",
+    "index", "rindex", "count", "any?", "all?", "none?", "one?", "sum",
+    "min_by", "max_by", "minmax_by", "sort_by", "sort_by!", "group_by",
+    "partition", "take_while", "drop_while", "uniq", "tally_by", "to_h",
+    NULL };
+  for (int i = 0; names[i]; i++) if (sp_streq(n, names[i])) return 1;
+  return 0;
+}
+static int strbuf_demand_container_stores_here(Compiler *c, const char *contn, Scope *conts) {
   const NodeTable *nt = c->nt;
   int changed = 0;
     /* every store into this container local (same scope): array/hash
@@ -10735,6 +10749,62 @@ static int strbuf_demand_container_stores(Compiler *c, const char *contn, Scope 
         }
       }
     }
+  return changed;
+}
+
+/* A container that is a PARAMETER has no stores of its own: they live at the
+   call sites, in whatever the callers pass. `def bang(a) = a.each { |w| w <<
+   "#" }` mutates the caller's elements through the parameter, so the demand
+   has to reach the caller's container -- and a caller that passes its own
+   parameter on carries it one level further. Without this the callee's block
+   param became a handle while the caller's array stayed typed, and the two
+   did not even agree on the element's C type. A literal argument is its own
+   store site: its string elements mark for the handle wrap directly. */
+static int an_call_targets_scope(Compiler *c, int u, int mi2, Scope *m2);
+static int strbuf_demand_param_container_stores(Compiler *c, const char *pn, Scope *ps, int depth) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  if (depth > 8 || !ps || !pn) return 0;
+  LocalVar *plv = scope_local(ps, pn);
+  if (!plv || !plv->is_param || plv->is_block_param) return 0;
+  int pj = an_param_idx(ps, pn);
+  if (pj < 0) return 0;
+  int mi = (int)(ps - c->scopes);
+  for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
+    if (nt_kind(nt, u) != NK_CallNode) continue;
+    if (!an_call_targets_scope(c, u, mi, ps)) continue;
+    int argsN = nt_ref(nt, u, "arguments");
+    int uargc = 0;
+    const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;
+    if (pj >= uargc) continue;
+    int an = uargv[pj];
+    NodeKind ak = nt_kind(nt, an);
+    if (ak == NK_LocalVariableReadNode) {
+      const char *avn = nt_str(nt, an, "name");
+      Scope *avs = avn ? comp_scope_of(c, an) : NULL;
+      LocalVar *alv = avs ? scope_local(avs, avn) : NULL;
+      if (!alv) continue;
+      if (alv->is_param && !alv->is_block_param)
+        changed |= strbuf_demand_param_container_stores(c, avn, avs, depth + 1);
+      else if (ty_is_array(alv->type) || ty_is_hash(alv->type) || alv->type == TY_UNKNOWN)
+        changed |= strbuf_demand_container_stores_here(c, avn, avs);
+    }
+    else if (ak == NK_ArrayNode) {
+      int en = 0; const int *el = nt_arr(nt, an, "elements", &en);
+      for (int e = 0; e < en; e++) {
+        int sn = el[e];
+        if (sn < 0 || c->strbuf_box[sn]) continue;
+        TyKind st = infer_type(c, sn);
+        if (st != TY_STRING && st != TY_STRBUF) continue;
+        c->strbuf_box[sn] = 1; changed = 1;
+      }
+    }
+  }
+  return changed;
+}
+static int strbuf_demand_container_stores(Compiler *c, const char *contn, Scope *conts) {
+  int changed = strbuf_demand_container_stores_here(c, contn, conts);
+  changed |= strbuf_demand_param_container_stores(c, contn, conts, 0);
   return changed;
 }
 
@@ -11301,15 +11371,35 @@ static int promote_shared_stored_strings(Compiler *c) {
   }
   /* iteration-variable mutation: `arr.each { |x| x << "!" }` mutates the
      ELEMENT through the block binding, so the container's stored strings
-     become handles and the block param binds the handle (#3227 P6). */
+     become handles and the block param binds the handle (#3227 P6). Every
+     iterator whose block's FIRST parameter is the element counts, not just
+     the two the C emitter binds directly: `arr.filter_map { |x| x << "?"; x }`
+     reaches the element through the Ruby-defined builtin's yield, and the
+     mutation was lost the same way (inject/each_slice/each_cons/zip bind
+     something else first and stay out). */
   for (int w = 0; w < nt->count; w++) {
     if (nt_kind(nt, w) != NK_CallNode) continue;
     const char *itn = nt_str(nt, w, "name");
-    if (!itn || (!sp_streq(itn, "each") && !sp_streq(itn, "each_with_index")))
-      continue;
+    if (!itn) continue;
     int blk4 = nt_ref(nt, w, "block");
     if (blk4 < 0) continue;
     int recv4 = nt_ref(nt, w, "receiver");
+    /* the builtin's own copy, once the call has been rewritten onto it:
+       `__enum_filter_map__N(arr) { |x| }` carries the container as its
+       first argument (desugar_builtin_enum_calls) */
+    if (recv4 < 0 && strncmp(itn, "__enum_", 7) == 0) {
+      const char *bn = itn + 7;
+      const char *sep = strstr(bn, "__");
+      char nb[128];
+      if (!sep || (size_t)(sep - bn) >= sizeof nb) continue;
+      memcpy(nb, bn, (size_t)(sep - bn)); nb[sep - bn] = 0;
+      if (!strbuf_elem_first_iterator(nb)) continue;
+      int a4 = nt_ref(nt, w, "arguments"); int an4 = 0;
+      const int *av4 = a4 >= 0 ? nt_arr(nt, a4, "arguments", &an4) : NULL;
+      if (an4 < 1) continue;
+      recv4 = av4[0];
+    }
+    else if (!strbuf_elem_first_iterator(itn)) continue;
     if (recv4 < 0 || nt_kind(nt, recv4) != NK_LocalVariableReadNode) continue;
     const char *contn4 = nt_str(nt, recv4, "name");
     Scope *conts4 = contn4 ? comp_scope_of(c, recv4) : NULL;
