@@ -3452,7 +3452,7 @@ else {
       g_pre = &epre; g_indent = 1;
       Buf ev; memset(&ev, 0, sizeof ev);
       if (rt == TY_POLY && et != TY_POLY) emit_boxed(c, e, &ev);
-      else emit_expr(c, e, &ev);
+      else emit_expr_slot(c, e, rt, &ev);
       g_pre = sv_pre0; g_indent = sv_ind0;
       if (epre.p) buf_puts(b, epre.p);
       buf_printf(b, "_t%d = %s;", t, ev.p ? ev.p : "");
@@ -3499,7 +3499,7 @@ else {
       g_pre = &rpre; g_indent = 1;
       Buf rv; memset(&rv, 0, sizeof rv);
       if (rt == TY_POLY && comp_ntype(c, r) != TY_POLY) emit_boxed(c, r, &rv);
-      else emit_expr(c, r, &rv);
+      else emit_expr_slot(c, r, rt, &rv);
       g_pre = sv_pre; g_indent = sv_ind;
       if (rpre.p) buf_puts(b, rpre.p);
       free(rpre.p);

@@ -1080,6 +1080,44 @@ static int yvt_callee_index(Compiler *c, int cid) {
   return rmi;
 }
 
+/* The value type of every `next` that leaves the block whose body is `node`
+   (a nested loop, block, lambda or def binds its own). A bare `next` is nil.
+   TY_UNKNOWN when there is none. The block's value is its tail joined with
+   these: `{ |i| next 7 if i == 1; nil }` answers 7 or nil, and typing it from
+   the tail alone made the yield nil, so `n += 1 if yield x` never counted. */
+static TyKind block_next_value_ty(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return TY_UNKNOWN;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NextNode) {
+    int a = nt_ref(nt, node, "arguments"); int an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (an == 0) return TY_NIL;
+    if (an > 1) return TY_POLY_ARRAY;
+    const char *aty = nt_type(nt, av[0]);
+    if (aty && sp_streq(aty, "SplatNode")) return TY_POLY_ARRAY;
+    return infer_type(c, av[0]);
+  }
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+      k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode)
+    return TY_UNKNOWN;
+  TyKind r = TY_UNKNOWN;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) {
+    TyKind t = block_next_value_ty(c, nt_ref_at(nt, node, i));
+    if (t != TY_UNKNOWN) r = (r == TY_UNKNOWN) ? t : ty_unify(r, t);
+  }
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) {
+      TyKind t = block_next_value_ty(c, ids[j]);
+      if (t != TY_UNKNOWN) r = (r == TY_UNKNOWN) ? t : ty_unify(r, t);
+    }
+  }
+  return r;
+}
+
 TyKind yield_value_type(Compiler *c, int mi) {
   for (int i = 0; i < g_yvt_depth; i++)
     if (g_yvt_mi[i] == mi) return TY_UNKNOWN;
@@ -1162,6 +1200,10 @@ TyKind yield_value_type(Compiler *c, int mi) {
       bt = return_node_type(c, bd[bn - 1]);
     else bt = infer_type(c, bd[bn - 1]);
     if (bt == TY_VOID) bt = TY_NIL;
+    {
+      TyKind nx = block_next_value_ty(c, bb);
+      if (nx != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? nx : ty_unify(bt, nx);
+    }
     /* A yield-inlined (or self-recursive-lowered) method is specialized per
        call site, so its internal block type is the first concrete block. A
        non-inlined method (an escaping &block called via the proc ABI) has one

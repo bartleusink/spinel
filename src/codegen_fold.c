@@ -948,8 +948,12 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
     int tcmp = ++g_tmp;
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "sp_int _t%d = %s;\n", tcmp, cb.p ? cb.p : "0");
+    /* an Integer block that also answers nil is the combined dispatch: nil
+       searches right (see the Array form) */
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "if (_t%d == 0) { _t%d = _t%d; break; }\n", tcmp, tres, tmid);
+    buf_printf(g_pre, "if (_t%d == SP_INT_NIL) { _t%d = _t%d + 1; }\n", tcmp, tlo, tmid);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "else if (_t%d == 0) { _t%d = _t%d; break; }\n", tcmp, tres, tmid);
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "else if (_t%d > 0) { _t%d = _t%d + 1; }\n", tcmp, tlo, tmid);
     emit_indent(g_pre, g_indent + 1);
@@ -3801,6 +3805,8 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
   if (!want_poly && bn > 0) {
     TyKind dt = comp_ntype(c, bb[bn - 1]);
     if (ty_is_array(dt) || ty_is_hash(dt)) g_ie_next_ty = dt;
+    /* an Integer or Float slot: a `next nil` spells the slot's sentinel */
+    else if (dt == TY_INT || dt == TY_FLOAT) g_ie_next_ty = dt;
   }
   g_c_loop_depth++;   /* the do{}while(0) wrapper makes `continue` valid */
   int sd = g_indent;

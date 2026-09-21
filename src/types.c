@@ -295,6 +295,17 @@ TyKind ty_unify(TyKind a, TyKind b) {
      may follow; bool and Symbol have no spare inhabitant and stay poly. */
   if (a == TY_NIL && b == TY_STRING) return b;
   if (b == TY_NIL && a == TY_STRING) return a;
+  /* An Integer or a Float that also sees nil stays a (nullable) scalar: the
+     slot's nil is the sentinel (SP_INT_NIL, the NaN payload), which the
+     search misses already leave there, and every consumer that can carry
+     it is guarded by the #3505 marking (nullable_int on the local, the
+     ivar, the return). `best = nil` followed by `best = x` in a search
+     loop used to box both, and every arithmetic on the way with it; the
+     Ruby definitions of the builtins wrote exactly that (matz, 2026-09-21:
+     the join follows the String's). A literal element still keeps its
+     container boxed, as with a String. */
+  if (a == TY_NIL && (b == TY_INT || b == TY_FLOAT)) return b;
+  if (b == TY_NIL && (a == TY_INT || a == TY_FLOAT)) return a;
   /* A poly array that also sees nil stays a (nullable) poly array: the
      sp_PolyArray* NULL encodes nil, and the poly-array method paths already
      NULL-guard, so a method returning `array | nil` need not widen to poly

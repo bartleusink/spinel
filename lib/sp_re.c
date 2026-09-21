@@ -496,7 +496,7 @@ else if (d == '\\') {
   }
   *out_io = out; *olen_io = olen; *cap_io = cap;
 }
-const char *sp_re_gsub(mrb_regexp_pattern *pat, const char *str, const char *rep) {SP_GC_ROOT_STR(str);SP_GC_ROOT_STR(rep);
+const char *sp_re_gsub(mrb_regexp_pattern *pat, const char *str, const char *rep) {SP_GC_ROOT_STR(str);SP_GC_ROOT_STR(rep);if(!str)sp_nil_recv("gsub");
   int64_t slen = (int64_t)sp_str_byte_len(str); size_t rlen = sp_str_byte_len(rep);
   size_t cap = (slen * 2) + (rlen * 4) + 64;
  /* Build into a plain malloc scratch: the buffer is grown with realloc
@@ -541,7 +541,7 @@ else {
   free(out);
   return res;
 }
-const char *sp_re_sub(mrb_regexp_pattern *pat, const char *str, const char *rep) {SP_GC_ROOT_STR(str);SP_GC_ROOT_STR(rep);
+const char *sp_re_sub(mrb_regexp_pattern *pat, const char *str, const char *rep) {SP_GC_ROOT_STR(str);SP_GC_ROOT_STR(rep);if(!str)sp_nil_recv("sub");
   int64_t slen = (int64_t)sp_str_byte_len(str); size_t rlen = sp_str_byte_len(rep);
   int caps[64];
   int n = re_exec(pat, str, slen, 0, caps, 64, sp_str_is_binary(str));
@@ -564,6 +564,7 @@ const char *sp_re_sub(mrb_regexp_pattern *pat, const char *str, const char *rep)
 }
 sp_StrArray *sp_re_scan(mrb_regexp_pattern *pat, const char *str) {
   SP_GC_ROOT_STR(str);
+  if (!str) sp_nil_recv("scan");   /* a nullable String's nil receiver */
   sp_StrArray *arr = sp_StrArray_new();
   SP_GC_ROOT(arr);
   int64_t slen = (int64_t)sp_str_byte_len(str); int64_t pos = 0; int caps[64];
@@ -597,7 +598,7 @@ static void split_push_slice(sp_StrArray *arr, const char *str, int64_t from, in
   sp_StrArray_push(arr, m);
 }
 
-sp_StrArray *sp_re_split_limit(mrb_regexp_pattern *pat, const char *str, sp_int limit) {SP_GC_ROOT_STR(str);
+sp_StrArray *sp_re_split_limit(mrb_regexp_pattern *pat, const char *str, sp_int limit) {SP_GC_ROOT_STR(str);if(!str)sp_nil_recv("split");
   sp_StrArray *arr = sp_StrArray_new();
   int64_t slen = (int64_t)sp_str_byte_len(str);
 
@@ -656,7 +657,7 @@ sp_StrArray *sp_re_split_limit(mrb_regexp_pattern *pat, const char *str, sp_int 
   return arr;
 }
 
-sp_StrArray *sp_re_split(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_STR(str);
+sp_StrArray *sp_re_split(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_STR(str);if(!str)sp_nil_recv("split");
   return sp_re_split_limit(pat, str, 0);
 }
 sp_int sp_re_rindex_opt(mrb_regexp_pattern *pat, const char *str)  {SP_GC_ROOT_STR(str); sp_int n = sp_re_rindex(pat, str); return n < 0 ? SP_INT_NIL : n; }
@@ -822,6 +823,7 @@ mrb_regexp_pattern *sp_re_union_array(sp_PolyArray *a) {
 }
 sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str) {
   SP_GC_ROOT_STR(str);
+  if (!str) sp_nil_recv("scan");
   sp_PolyArray *arr = sp_PolyArray_new();
   SP_GC_ROOT(arr);
   int64_t slen = (int64_t)sp_str_byte_len(str);

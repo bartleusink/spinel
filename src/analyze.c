@@ -12504,20 +12504,26 @@ int nullable_int_value(Compiler *c, int v) {
      that is absent yields nil, which is the sentinel in an int slot. */
   if (nt_kind(nt, v) == NK_StatementsNode) {
     int n = 0; const int *st = nt_arr(nt, v, "body", &n);
-    return st && n > 0 ? nullable_int_value(c, st[n - 1]) : 0;
+    return st && n > 0 ? nullable_int_value(c, st[n - 1]) : 1;   /* an empty body is nil */
   }
-  if (nt_kind(nt, v) == NK_ElseNode) return nullable_int_value(c, nt_ref(nt, v, "statements"));
+  if (nt_kind(nt, v) == NK_ElseNode) {
+    int es = nt_ref(nt, v, "statements");
+    return es < 0 || nullable_int_value(c, es);
+  }
   if (nt_kind(nt, v) == NK_IfNode || nt_kind(nt, v) == NK_UnlessNode) {
-    if (nullable_int_value(c, nt_ref(nt, v, "statements"))) return 1;
+    int ts = nt_ref(nt, v, "statements");
+    if (ts < 0 || nullable_int_value(c, ts)) return 1;   /* an empty arm is nil */
     int els = nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause");
     return els >= 0 ? nullable_int_value(c, els) : 1;
   }
   if (nt_kind(nt, v) == NK_CaseNode || nt_kind(nt, v) == NK_CaseMatchNode) {
     int nw = 0; const int *whens = nt_arr(nt, v, "conditions", &nw);
-    for (int w = 0; w < nw; w++)
-      if (nullable_int_value(c, nt_ref(nt, whens[w], "statements"))) return 1;
+    for (int w = 0; w < nw; w++) {
+      int ws = nt_ref(nt, whens[w], "statements");
+      if (ws < 0 || nullable_int_value(c, ws)) return 1;   /* an empty arm is nil */
+    }
     int els = nt_ref(nt, v, "else_clause");
-    return els >= 0 ? nullable_int_value(c, nt_ref(nt, els, "statements")) : 1;
+    return els >= 0 ? nullable_int_value(c, els) : 1;
   }
   if (nt_kind(nt, v) == NK_BeginNode) {
     if (nullable_int_value(c, nt_ref(nt, v, "statements"))) return 1;

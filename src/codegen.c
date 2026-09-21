@@ -953,6 +953,13 @@ int call_returns_nullable_int(Compiler *c, int node) {
   const char *nm = nt_str(nt, node, "name");
   if (!nm) return 0;
   int blk = nt_ref(nt, node, "block");
+  /* a proc's result comes back through the boxed slot and is read as the
+     sentinel when the proc answered nil (`-> { return; 456 }.call`): box it
+     back as nil */
+  if (sp_streq(nm, "call") || sp_streq(nm, "()") || sp_streq(nm, "[]") || sp_streq(nm, "yield")) {
+    int pr = nt_ref(nt, node, "receiver");
+    if (pr >= 0 && comp_ntype(c, pr) == TY_PROC) return 1;
+  }
   if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
   if (sp_streq(nm, "nonzero?") || sp_streq(nm, "infinite?") || sp_streq(nm, "getbyte")) return 1;
   /* String#index/rindex (search miss -> nil) and Array element removers
@@ -7694,13 +7701,18 @@ static void emit_obj_cmp_dispatch(Compiler *c, Buf *b) {
     if (builtin_guard)
       buf_printf(b, "      if (!(b.tag == SP_TAG_OBJ && b.cls_id == %s)) { *comparable = FALSE; return 0; }\n", builtin_guard);
     if (m->ret == TY_INT) {
-      buf_printf(b, "      *comparable = TRUE; return (sp_int)sp_%s_%s(%s(sp_%s *)a.v.p, %s);\n",
+      /* a `<=>` that also answers nil is a nullable Integer (the nil join):
+         its sentinel is the not-comparable answer */
+      buf_printf(b, "      sp_int _ri = (sp_int)sp_%s_%s(%s(sp_%s *)a.v.p, %s);\n",
                  dcn, mc("<=>"), self_vt ? "*" : "", dcn, argbuf);
+      if (m->ret_nullable_int) buf_puts(b, "      if (_ri == SP_INT_NIL) { *comparable = FALSE; return 0; }\n");
+      buf_puts(b, "      *comparable = TRUE; return _ri;\n");
     }
     else if (m->ret == TY_FLOAT) {
       /* a Float `<=>` result is a valid comparison (CRuby): use its sign */
       buf_printf(b, "      sp_float _rf = sp_%s_%s(%s(sp_%s *)a.v.p, %s);\n",
                  dcn, mc("<=>"), self_vt ? "*" : "", dcn, argbuf);
+      if (m->ret_nullable_int) buf_puts(b, "      if (sp_float_is_nil(_rf)) { *comparable = FALSE; return 0; }\n");
       buf_puts(b, "      *comparable = TRUE; return (_rf > 0) - (_rf < 0);\n");
     }
     else {
@@ -10890,6 +10902,7 @@ char *codegen_program(const NodeTable *nt) {
          where every int cvar is widened to poly. */
       const char *init = t == TY_RANGE ? "{0}"
                        : t == TY_POLY  ? "{SP_TAG_NIL, 0, {0}}"
+                       : t == TY_FLOAT ? "SP_FLOAT_NIL_CONST"   /* sp_float_nil() is a call, not a constant */
                        : default_value(t);
       buf_puts(&b, "static ");
       emit_ctype(c, t, &b);
@@ -10918,6 +10931,7 @@ char *codegen_program(const NodeTable *nt) {
       const char *init = (t == TY_RANGE || t == TY_TIME) ? "{0}"
                        : (t == TY_POLY) ? "{SP_TAG_NIL, 0, {0}}"
                        : (t == TY_INT)  ? "SP_INT_NIL"
+                       : (t == TY_FLOAT) ? "SP_FLOAT_NIL_CONST"
                        : (t == TY_STRING) ? "NULL"
                        : (is_scalar_ret(t)) ? default_value(t) : "0";
       buf_puts(&b, "static ");
@@ -11121,11 +11135,10 @@ char *codegen_program(const NodeTable *nt) {
                   integer zero -- `if $pgid` was truthy on a global nothing had
                   assigned, and `-$pgid` was -0 (#4248). */
                lv->type == TY_INT   ? "SP_INT_NIL" :
-               /* TY_FLOAT has the same gap and no fix here: its nil sentinel
-                  is a bit pattern read through a union, which is not a
-                  constant expression, so a float global still starts at 0.0.
-                  Closing it needs a runtime initializer rather than a
-                  different literal. */
+               /* the float sentinel's constant spelling (a NaN with the
+                  payload), since the union read of sp_float_nil() is not
+                  a constant expression */
+               lv->type == TY_FLOAT ? "SP_FLOAT_NIL_CONST" :
                lv->type == TY_STRING ? "NULL" : default_value(lv->type));
   }
   /* One slot per DISTINCT out-of-int64 literal, filled on first use. The
@@ -11163,7 +11176,9 @@ char *codegen_program(const NodeTable *nt) {
     emit_ctype(c, lv->type, &b);
     buf_printf(&b, " cst_%s = %s;\n", lv->name,
                lv->type == TY_RANGE ? "{0}" :
-               lv->type == TY_POLY  ? "{SP_TAG_NIL, 0, {0}}" : default_value(lv->type));
+               lv->type == TY_POLY  ? "{SP_TAG_NIL, 0, {0}}" :
+               lv->type == TY_FLOAT ? "SP_FLOAT_NIL_CONST" :   /* the constant spelling of the float sentinel */
+               default_value(lv->type));
     if (lv->init_guarded) buf_printf(&b, "static int sp_init_in_progress_%s;\n", lv->name);
   }
   if (c->ngvars || c->nconsts) buf_puts(&b, "\n");

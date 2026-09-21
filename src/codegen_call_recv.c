@@ -2429,8 +2429,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
             int tcmp = ++g_tmp;
             emit_indent(g_pre, g_indent + 1);
             buf_printf(g_pre, "sp_int _t%d = %s;\n", tcmp, cb.p ? cb.p : "0");
+            /* an Integer block that also answers nil (`x < 9 ? nil : ...`)
+               is CRuby's combined dispatch: the nil arm searches right */
             emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "if (_t%d == 0) { _t%d = sp_%sArray_get(_t%d, _t%d); break; }\n",
+            buf_printf(g_pre, "if (_t%d == SP_INT_NIL) { _t%d = _t%d + 1; }\n", tcmp, tlo, tmid);
+            emit_indent(g_pre, g_indent + 1);
+            buf_printf(g_pre, "else if (_t%d == 0) { _t%d = sp_%sArray_get(_t%d, _t%d); break; }\n",
                        tcmp, tres, k, trecv, tmid);
             emit_indent(g_pre, g_indent + 1);
             buf_printf(g_pre, "else if (_t%d < 0) { _t%d = _t%d - 1; }\n", tcmp, thi, tmid);

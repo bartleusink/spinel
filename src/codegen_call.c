@@ -1454,7 +1454,10 @@ int diagnose_eval_call(Compiler *c, int id) {
    matching sp_box_* wrote (strings live in v.s, other heap values in v.p). */
 void emit_proc_ret_unbox(Compiler *c, TyKind rty, Buf *b) {
   if (rty == TY_POLY || rty == TY_UNKNOWN) { buf_puts(b, "_sp_proc_poly_ret"); return; }
-  if (rty == TY_FLOAT)  { buf_puts(b, "sp_poly_to_f(_sp_proc_poly_ret)"); return; }
+  /* an Integer or a Float slot can carry nil (the nil join): a proc that
+     answers nil on one path and a number on another reads back the sentinel */
+  if (rty == TY_FLOAT)  { buf_puts(b, "sp_poly_to_f_or_nil(_sp_proc_poly_ret)"); return; }
+  if (rty == TY_INT) { buf_puts(b, "(_sp_proc_poly_ret.tag == SP_TAG_NIL ? SP_INT_NIL : sp_poly_slot_i(_sp_proc_poly_ret))"); return; }
   /* sp_poly_slot_i: this coercion is SPECULATIVE (see the comment above -- the
      proc's inferred return is what the call site wants, not what the body
      actually hands back, and a statement-position call discards it), so an
@@ -8614,6 +8617,11 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
                the C build stops at a line past the file's end with neither
                the method nor the call named (#4216). A non-token value
                emits unchanged. */
+            /* a nil member value into a scalar slot is the slot's sentinel
+               (the member joined nil with an Integer or a Float) */
+            else if ((cls->ivar_types[a] == TY_INT || cls->ivar_types[a] == TY_FLOAT) &&
+                     (nt_kind(nt, vnode) == NK_NilNode || comp_ntype(c, vnode) == TY_NIL))
+              emit_expr_slot(c, vnode, cls->ivar_types[a], &mv);
             else emit_unresolved_coerced(c, vnode, cls->ivar_types[a], &mv);
             if (arg_wants_root(c, cls->ivar_types[a], vnode))
               emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
@@ -9461,13 +9469,18 @@ static int user_cmp_needs_check(Compiler *c, int cid) {
   int mi = comp_method_in_chain(c, cid, "<=>", &def);
   if (mi < 0) return 0;   /* no user <=> reachable: keep the inline path */
   TyKind ret = (TyKind)c->scopes[mi].ret;
+  /* an Integer or Float `<=>` that also answers nil keeps its scalar slot
+     (the nil join) and carries the sentinel: that is the checked path too */
+  int nullable = c->scopes[mi].ret_nullable_int;
   for (int k = 0; k < c->nclasses; k++) {
     if (!is_descendant(c, k, cid)) continue;
     int kd = -1;
     int kmi = comp_method_in_chain(c, k, "<=>", &kd);
     if (kmi >= 0 && (TyKind)c->scopes[kmi].ret != TY_UNKNOWN)
       ret = ty_unify(ret, (TyKind)c->scopes[kmi].ret);
+    if (kmi >= 0 && c->scopes[kmi].ret_nullable_int) nullable = 1;
   }
+  if (nullable && (ret == TY_INT || ret == TY_FLOAT)) return 1;
   /* POLY/NIL may be nil at runtime; a statically non-numeric result
      (String/Symbol/Bool) is never a valid `<=>` value -> the checked path
      raises the Comparable ArgumentError instead of the inline `<op> 0` reading
@@ -15094,10 +15107,40 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
                  is what `[1].nope` hands NoMethodError#receiver (#3811) */
               sp_streq(_rvty, "ArrayNode") || sp_streq(_rvty, "HashNode") ||
               sp_streq(_rvty, "KeywordHashNode"));
+          /* a nullable scalar receiver (a String whose nil is NULL, an
+             Integer or a Float that also sees nil) names nil or its class at
+             run time: the slot's kind alone cannot say which the value is */
+          char gmsg[400];
+          {
+            int nullable_recv = recv >= 0 && (grt == TY_STRING ||
+                ((grt == TY_INT || grt == TY_FLOAT) && nullable_int_value(c, recv)));
+            if (nullable_recv) {
+              Buf rvb; memset(&rvb, 0, sizeof rvb);
+              if (recv_stageable) emit_expr(c, recv, &rvb);
+              else {
+                /* a receiver expression is evaluated once, into a temp */
+                int rvt = ++g_tmp;
+                /* rendered aside first: the receiver's own prelude lands in
+                   g_pre while it is emitted, ahead of this line (#4662) */
+                Buf rx; memset(&rx, 0, sizeof rx); emit_expr(c, recv, &rx);
+                emit_indent(g_pre, g_indent); emit_ctype(c, grt, g_pre);
+                buf_printf(g_pre, " _t%d = %s;\n", rvt, rx.p ? rx.p : "0");
+                free(rx.p);
+                buf_printf(&rvb, "_t%d", rvt);
+              }
+              const char *rv = rvb.p ? rvb.p : "0";
+              snprintf(gmsg, sizeof gmsg, "(%s%s%s ? \"undefined method '%s' for nil\" : \"undefined method '%s' for %s\")",
+                       grt == TY_FLOAT ? "sp_float_is_nil(" : "(", rv,
+                       grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL",
+                       nm ? nm : "?", nm ? nm : "?", rdesc);
+              free(rvb.p);
+            }
+            else snprintf(gmsg, sizeof gmsg, "\"undefined method '%s' for %s\"", nm ? nm : "?", rdesc);
+          }
           #define EMIT_GATE_MSG() do { \
             const char *_stagefn = gstage ? "sp_stage_recv_args_msg" : "sp_stage_recv_msg"; \
             if (recv_stageable) { \
-              buf_printf(b, "%s(\"undefined method '%s' for %s\", ", _stagefn, nm ? nm : "?", rdesc); \
+              buf_printf(b, "%s(%s, ", _stagefn, gmsg); \
               emit_boxed(c, recv, b); \
               if (gstage) { \
                 buf_printf(b, ", %d, (sp_RbVal[]){", gac); \
@@ -15108,13 +15151,12 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               buf_puts(b, ")"); \
             } \
             else if (gstage) { \
-              buf_printf(b, "sp_stage_args_msg(\"undefined method '%s' for %s\", %d, (sp_RbVal[]){", \
-                         nm ? nm : "?", rdesc, gac); \
+              buf_printf(b, "sp_stage_args_msg(%s, %d, (sp_RbVal[]){", gmsg, gac); \
               for (int gk = 0; gk < gac; gk++) { if (gk) buf_puts(b, ", "); emit_boxed(c, gav[gk], b); } \
               if (gac == 0) buf_puts(b, "sp_box_nil()"); \
               buf_puts(b, "})"); \
             } \
-            else buf_printf(b, "\"undefined method '%s' for %s\"", nm ? nm : "?", rdesc); \
+            else buf_puts(b, gmsg); \
           } while (0)
           if (sp_streq(dflt, "sp_box_nil()")) {
             buf_puts(b, "sp_raise_nomethod(");
@@ -30616,6 +30658,26 @@ else {
         return;
       } }
     int yes = ty_matches_class(eff_rt, nt_str(nt, argv[0], "name"), sp_streq(name, "instance_of?"));
+    /* A nullable scalar slot (a String whose nil is NULL, an Integer or a
+       Float that also sees nil) answers at run time: nil is a NilClass and
+       is not a String, whatever the slot's kind says. Object and its
+       ancestors hold for nil too. */
+    if (yes >= 0 && (eff_rt == TY_STRING ||
+                     ((eff_rt == TY_INT || eff_rt == TY_FLOAT) && nullable_int_value(c, recv)))) {
+      const char *kn = nt_str(nt, argv[0], "name");
+      int nilcls = kn && sp_streq(kn, "NilClass");
+      int univ = kn && (sp_streq(kn, "Object") || sp_streq(kn, "BasicObject") || sp_streq(kn, "Kernel"));
+      if (nilcls || (yes && !univ)) {
+        int tn = ++g_tmp;
+        buf_puts(b, "({ "); emit_ctype(c, eff_rt, b); buf_printf(b, " _t%d = ", tn); emit_expr(c, recv, b);
+        buf_printf(b, "; %s(", nilcls ? "" : "!");
+        if (eff_rt == TY_STRING) buf_printf(b, "_t%d == NULL", tn);
+        else if (eff_rt == TY_INT) buf_printf(b, "_t%d == SP_INT_NIL", tn);
+        else buf_printf(b, "sp_float_is_nil(_t%d)", tn);
+        buf_puts(b, "); })");
+        return;
+      }
+    }
     if (yes >= 0) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_printf(b, "), %d)", yes); return; }
   }
 

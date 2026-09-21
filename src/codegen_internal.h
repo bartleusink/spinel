@@ -130,6 +130,7 @@ int builtin_object_method_known(const char *m);
 int name_is_enumerable_module_method(const char *m);
 int scope_reads_callee(Compiler *c, int si);
 int sp_yield_site_type(const Compiler *c, int id, TyKind *out);
+TyKind block_next_value_ntype(const Compiler *c, int node);
 /* Argument-hoist overrides (see emit_args_filled): node id -> rooted temp
    name substituted by emit_expr. */
 #define MAX_ARG_OVERRIDE 64
@@ -402,6 +403,7 @@ const char *rename_local(const char *nm);
 
 
 void emit_expr(Compiler *c, int id, Buf *b);
+void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b);
 
 /* ---- forward decls ---- */
 

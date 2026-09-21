@@ -1414,7 +1414,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
      inline-each next-var machinery; blocks without `next` keep their exact
      previous emission. */
   int nx_own = subtree_has_own_next(nt, bbody);
-  const char *sv_nx2 = g_ie_next_var; int sv_poly2 = g_ie_res_poly;
+  const char *sv_nx2 = g_ie_next_var; int sv_poly2 = g_ie_res_poly; TyKind sv_nty2 = g_ie_next_ty;
   int sv_lexc2 = g_loop_exc_base;
   int sv_lens2 = g_loop_ensure_base;
   char nxbuf[32]; int nx_tmp = 0;
@@ -1426,6 +1426,10 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     g_c_loop_depth++;
     if (as_expr) {
       nx_bt = bn3 > 0 ? comp_ntype(c, bd3[bn3 - 1]) : TY_NIL;
+      /* the block's value is its tail OR a `next v`: a nil tail with an
+         Integer next is the nullable Integer, not nil */
+      { TyKind nxv = block_next_value_ntype(c, bbody);
+        if (nxv != TY_UNKNOWN && nxv != TY_VOID) nx_bt = ty_unify(nx_bt, nxv); }
       if (bn3 > 0) {
         const char *tty3 = nt_type(nt, bd3[bn3 - 1]);
         nx_tail_stmt = tty3 && (sp_streq(tty3, "IfNode") || sp_streq(tty3, "CaseNode") ||
@@ -1437,6 +1441,8 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       snprintf(nxbuf, sizeof nxbuf, "_t%d", nx_tmp);
       g_ie_next_var = nxbuf;
       g_ie_res_poly = (nx_bt == TY_POLY || (want_poly && ty_is_object(nx_bt)));
+      /* a `next nil` into an Integer or Float slot is the sentinel */
+      g_ie_next_ty = (nx_bt == TY_INT || nx_bt == TY_FLOAT) ? nx_bt : TY_UNKNOWN;
       if (g_ie_res_poly) buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); ", nx_tmp);
       else if (nx_bt == TY_INT || nx_bt == TY_BOOL || nx_bt == TY_SYMBOL)
         buf_printf(b, "sp_int _t%d = SP_INT_NIL; ", nx_tmp);
@@ -1452,7 +1458,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       buf_puts(b, "do { ");
     }
     else {
-      g_ie_next_var = NULL; g_ie_res_poly = 0;
+      g_ie_next_var = NULL; g_ie_res_poly = 0; g_ie_next_ty = TY_UNKNOWN;
       emit_indent(b, indent); buf_puts(b, "do {\n");
     }
   }
@@ -1465,7 +1471,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     { Buf tb; memset(&tb, 0, sizeof tb);
       Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
       if (g_ie_res_poly) emit_boxed(c, bd3[bn3 - 1], &tb);
-      else emit_expr(c, bd3[bn3 - 1], &tb);
+      else emit_expr_slot(c, bd3[bn3 - 1], nx_bt, &tb);
       g_pre = svp3; g_indent = svi3;
       buf_printf(b, "%s = ", nxbuf);
       if (tb.p) buf_puts(b, tb.p);
@@ -1562,7 +1568,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     g_loop_ensure_base = sv_lens2;
     if (as_expr) buf_printf(b, "} while(0); %s; ", g_ie_next_var ? nxbuf : "(void)0");
     else { emit_indent(b, indent); buf_puts(b, "} while(0);\n"); }
-    g_ie_next_var = sv_nx2; g_ie_res_poly = sv_poly2;
+    g_ie_next_var = sv_nx2; g_ie_res_poly = sv_poly2; g_ie_next_ty = sv_nty2;
   }
   for (int ya = 0; ya < yalias_n; ya++) {
     if (--yalias_lv[ya]->inline_alias == 0) yalias_lv[ya]->is_cell = 0;

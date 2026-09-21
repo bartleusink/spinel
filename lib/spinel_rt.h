@@ -2733,6 +2733,9 @@ static sp_float sp_poly_to_f(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return v.v.f
    nullable int/float already tests for (#3458). */
 static sp_int sp_poly_to_i_or_nil(sp_RbVal v) { return v.tag == SP_TAG_NIL ? SP_INT_NIL : sp_poly_to_i(v); }
 static sp_float sp_poly_to_f_or_nil(sp_RbVal v) { return v.tag == SP_TAG_NIL ? sp_float_nil() : sp_poly_to_f(v); }
+/* an Integer slot's nil, the sentinel, into a Float slot: the float sentinel,
+   not the sentinel's numeric value */
+static inline sp_float sp_int_to_f_or_nil(sp_int i) { return i == SP_INT_NIL ? sp_float_nil() : (sp_float)i; }
 static inline const char *sp_poly_to_s_or_nil(sp_RbVal v) { return v.tag == SP_TAG_NIL ? NULL : sp_poly_to_s(v); }
 /* Unbox to float? preserving nil as the float-nil sentinel. Used by the
    unpack1 literal-float-directive fast path: sp_str_unpack pads short input

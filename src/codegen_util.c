@@ -321,6 +321,42 @@ static int blk_param_call(const Compiler *c, int id) {
   const char *rn = nt_str(c->nt, r, "name");
   return rn && sp_streq(rn, g_block_param_name);
 }
+/* The cached value type of every `next` leaving the block body `node`: a
+   nested loop, block, lambda or def binds its own. TY_UNKNOWN when none.
+   The block's value is its tail joined with these, exactly as analyze's
+   yield_value_type joins them (block_next_value_ty). */
+TyKind block_next_value_ntype(const Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return TY_UNKNOWN;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NextNode) {
+    int a = nt_ref(nt, node, "arguments"); int an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (an == 0) return TY_NIL;
+    if (an > 1) return TY_POLY_ARRAY;
+    const char *aty = nt_type(nt, av[0]);
+    if (aty && sp_streq(aty, "SplatNode")) return TY_POLY_ARRAY;
+    return c->ntype[av[0]];
+  }
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+      k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode)
+    return TY_UNKNOWN;
+  TyKind r = TY_UNKNOWN;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) {
+    TyKind t = block_next_value_ntype(c, nt_ref_at(nt, node, i));
+    if (t != TY_UNKNOWN) r = (r == TY_UNKNOWN) ? t : ty_unify(r, t);
+  }
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) {
+      TyKind t = block_next_value_ntype(c, ids[j]);
+      if (t != TY_UNKNOWN) r = (r == TY_UNKNOWN) ? t : ty_unify(r, t);
+    }
+  }
+  return r;
+}
 int sp_yield_site_type(const Compiler *c, int id, TyKind *out) {
   if (g_block_id < 0 || id < 0) return 0;
   const char *ty = nt_type(c->nt, id);
@@ -346,6 +382,12 @@ int sp_yield_site_type(const Compiler *c, int id, TyKind *out) {
   /* only a CONCRETE per-site answer overrides the cache; an unresolved tail
      leaves the node's own (unified) type in place */
   if (bt == TY_UNKNOWN || bt == TY_VOID) return 0;
+  /* a `next v` leaves the block with v: the value is the tail OR any next
+     (`{ |i| next 7 if i == 1; nil }` is 7 or nil, not nil) */
+  {
+    TyKind nx = block_next_value_ntype(c, bbody);
+    if (nx != TY_UNKNOWN && nx != TY_VOID) bt = ty_unify(bt, nx);
+  }
   *out = bt;
   return 1;
 }
@@ -1444,6 +1486,23 @@ const char *local_init_value(Compiler *c, LocalVar *lv) {
   if (comp_ty_value_obj(c, lv->type)) return "{0}";
   return lv->type == TY_RANGE ? "(sp_Range){0}" : default_value(lv->type);
 }
+/* A value landing in a slot of type `slot`. An Integer or Float slot that
+   also sees nil is a nullable scalar (ty_unify's nil join), and its nil is
+   the sentinel: a bare `nil`, or a nil-typed expression (a void call, an
+   always-nil method), is spelled as that, where emit_expr renders the
+   numeric 0 that reads as a real value. Every other slot takes emit_expr. */
+void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b) {
+  if (node >= 0 && (slot == TY_INT || slot == TY_FLOAT)) {
+    const char *sent = slot == TY_INT ? "SP_INT_NIL" : "sp_float_nil()";
+    if (nt_kind(c->nt, node) == NK_NilNode) { buf_puts(b, sent); return; }
+    TyKind vt = comp_ntype(c, node);
+    if (vt == TY_NIL || vt == TY_VOID) {
+      buf_puts(b, "({ (void)("); emit_expr(c, node, b); buf_printf(b, "); %s; })", sent);
+      return;
+    }
+  }
+  emit_expr(c, node, b);
+}
 int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {
   if (!lv) return 0;
   TyKind t = lv->type;
@@ -1451,6 +1510,9 @@ int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {
      it was declared with the sentinel -- which declare_local does exactly when
      the local has no definite assignment anywhere. */
   int nil_init = lv->or_write_only && !lv->is_param && !lv->is_block_param;
+  /* ...or when some write leaves the sentinel in it (`a = nil; a ||= 10`):
+     the nil join keeps such a slot an sp_int, and its nil is the sentinel */
+  if (lv->nullable_int) nil_init = 1;
   switch (t) {
     case TY_STRING: case TY_BIGINT: case TY_OPENSTRUCT:
       buf_printf(out, "!%s", ref); return 1;
@@ -1501,10 +1563,16 @@ const char *raise_tail_value_c(Compiler *c, TyKind t) {
   return raise_tail_value(t);
 }
 
+/* The value a typed slot holds when Ruby's answer is nil: a declared but
+   unassigned local, a `next` with no value, an if with no else, a case no
+   arm matched, a bare return. For an Integer or a Float that is the
+   sentinel, since the nil join of ty_unify makes such a slot a nullable
+   scalar; 0 read as a truthy number there (the String's NULL was its nil
+   already). A counter an emitter starts at zero writes the literal. */
 const char *default_value(TyKind t) {
   switch (t) {
-    case TY_INT:    return "0";
-    case TY_FLOAT:  return "0.0";
+    case TY_INT:    return "SP_INT_NIL";
+    case TY_FLOAT:  return "sp_float_nil()";
     case TY_BOOL:   return "0";
     case TY_STRING: return "NULL";
     case TY_SYMBOL: return "((sp_sym)-1)";

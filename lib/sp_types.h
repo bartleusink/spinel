@@ -125,6 +125,11 @@ typedef bool sp_bool;
 static inline sp_float sp_float_nil(void) {
   union { uint64_t u; sp_float d; } x; x.u = SP_FLOAT_NIL_BITS; return x.d;
 }
+/* The same value as a CONSTANT expression, for a file-scope initializer
+   (a static ivar, a global) where the union read above is not one. The
+   payload argument is the low mantissa bits, so "0x1" is exactly
+   SP_FLOAT_NIL_BITS on gcc and clang, 32-bit lanes included. */
+#define SP_FLOAT_NIL_CONST (__builtin_nan("0x1"))
 static inline int sp_float_is_nil(sp_float v) {
   union { sp_float d; uint64_t u; } x; x.d = v; return x.u == SP_FLOAT_NIL_BITS;
 }

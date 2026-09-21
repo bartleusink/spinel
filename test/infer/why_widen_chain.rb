@@ -20,11 +20,12 @@ def load(n)
   end
   results
 end
-# (nil meeting an Integer widens; meeting a String it is the nullable String, #4567)
+# (nil meeting a Symbol widens; meeting a String, an Integer or a Float it
+# is the nullable form of that kind, #4567)
 def pick(n)
   return nil if n > 5
-  return 7 if n > 3
-  9
+  return :y if n > 3
+  :x
 end
 b = Bad.new(mk(ARGV.length))
 puts label(mk(ARGV.length)), b.to_s.to_s, load(ARGV.length).length, pick(ARGV.length).to_s

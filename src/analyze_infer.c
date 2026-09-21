@@ -6863,7 +6863,11 @@ TyKind infer_uncached(Compiler *c, int id) {
         continue;
       }
       if (!aty || !sp_streq(aty, "AssocNode")) return TY_UNKNOWN;
-      kt = ty_unify(kt, infer_type(c, nt_ref(nt, els[k], "key")));
+      {
+        TyKind kt_elem = infer_type(c, nt_ref(nt, els[k], "key"));
+        if (kt_elem == TY_NIL) kt_elem = TY_POLY;   /* a nil key keeps the hash poly-keyed (see the value below) */
+        kt = ty_unify(kt, kt_elem);
+      }
       int vnode = nt_ref(nt, els[k], "value");
       TyKind vt_elem = infer_type(c, vnode);
       /* A nested hash/array literal whose element kind is unresolved (a bare

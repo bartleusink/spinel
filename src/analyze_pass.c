@@ -1242,6 +1242,9 @@ int reconcile_locals_reading_ivars(Compiler *c) {
    of such rows once something decides their kind (#4484). */
 static TyKind push_elem_ty(Compiler *c, int node) {
   TyKind t = yield_aware_elem_ty(c, node);
+  /* a pushed nil keeps the container boxed, as a nil literal element does:
+     the scalar nil joins of ty_unify are for slots, not for typed storage */
+  if (t == TY_NIL) return TY_POLY;
   if (t == TY_UNKNOWN && node >= 0) {
     NodeKind k = nt_kind(c->nt, node);
     if (k == NK_ArrayNode || k == NK_HashNode || k == NK_KeywordHashNode) {
@@ -3101,10 +3104,12 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
        bind the param poly so it is declarable; the arg is emitted via
        emit_boxed (it diverges and yields nil). */
     if (at == TY_VOID) at = TY_POLY;
-    /* A nil arg narrows against an object param (NULL encodes nil) but widens
-       any non-object param to poly. Pass nil through to ty_unify only while
-       the param is still unknown or already an object. */
-    if (at == TY_NIL && p->type != TY_UNKNOWN && p->type != TY_NIL && !ty_is_object(p->type)) at = TY_POLY;
+    /* A nil arg narrows against an object param (NULL encodes nil), and
+       against a String, Integer or Float one, whose slots carry nil the same
+       way (NULL, SP_INT_NIL, the float sentinel: ty_unify's nil joins). Any
+       other non-object param widens to poly. */
+    if (at == TY_NIL && p->type != TY_UNKNOWN && p->type != TY_NIL && !ty_is_object(p->type) &&
+        p->type != TY_STRING && p->type != TY_INT && p->type != TY_FLOAT) at = TY_POLY;
     /* Two array parameters meet as the poly ARRAY, not the poly SCALAR: a
        param typed as one array kind at one call site and a different array
        kind at another is still a container, so its array methods (pop, <<)

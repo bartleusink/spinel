@@ -1164,7 +1164,10 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   }
 
   if (vty && sp_streq(vty, "NilNode") && lv) {
+    /* an Integer / Float slot's nil is its sentinel (the nil join of
+       ty_unify), not the truthy 0 default_value gives every other place */
     if (lv->type == TY_RANGE) buf_puts(b, "(sp_Range){0}");
+    else if (lv->type == TY_INT || lv->type == TY_FLOAT) buf_puts(b, nil_sentinel(lv->type));
     else buf_puts(b, default_value(lv->type));
   }
   else if (lv && lv->type == TY_STRBUF) {
@@ -1316,6 +1319,13 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   /* scalar/string slot with a poly RHS (`x = (a + b) * 2` over poly a/b, a
      string local read back from a poly call): unbox into the slot. */
   else if (lv && emit_poly_rhs_coerced(c, lv->type, v, b)) { }
+  /* nil into a scalar slot is the slot's own nil, the sentinel: the literal
+     read as 0 / 0.0 there, a truthy number (the nil join of an Integer or
+     Float local, see ty_unify). Any other nil-typed value is evaluated for
+     its effects and the sentinel stored. */
+  else if (lv && (lv->type == TY_INT || lv->type == TY_FLOAT) && comp_ntype(c, v) == TY_NIL) {
+    buf_puts(b, "({ (void)("); emit_expr(c, v, b); buf_printf(b, "); %s; })", nil_sentinel(lv->type));
+  }
   else if (lv && lv->type != TY_POLY && lv->type != TY_UNKNOWN &&
            comp_ntype(c, v) == TY_UNKNOWN) {
     /* a typed local assigned an unresolved call (the gate's raise-all token):
@@ -1662,6 +1672,17 @@ int static_isa_cond(Compiler *c, int pred) {
       (is_builtin_class_name(target_name) || is_builtin_module_name(target_name))) {
     const char *rnt = nt_type(nt, recv);
     if (!rnt || !sp_streq(rnt, "LocalVariableReadNode")) return -1;
+    /* a nullable scalar (a String whose nil is NULL, an Integer or a Float
+       that also sees nil) is answered at run time: the emitter tests the
+       slot's nil (see the is_a? fold in codegen_call.c). Object and its
+       ancestors hold for nil as well, so those stay folded. */
+    if ((rt == TY_STRING || ((rt == TY_INT || rt == TY_FLOAT) && nullable_int_value(c, recv))) &&
+        !sp_streq(target_name, "Object") && !sp_streq(target_name, "BasicObject") &&
+        !sp_streq(target_name, "Kernel")) {
+      int ans = ty_matches_class(rt, target_name, sp_streq(nm, "instance_of?"));
+      if (ans == 1 || sp_streq(target_name, "NilClass")) return -1;
+      return ans;
+    }
     return ty_matches_class(rt, target_name, sp_streq(nm, "instance_of?"));
   }
   int target = comp_class_index(c, target_name);
@@ -5329,8 +5350,28 @@ static void emit_tail_value(Compiler *c, int node, Buf *b) {
      for it: the same method returning nil through a String or bool slot is
      correct today because NULL and the poly box carry nil natively. So spell
      the sentinel here rather than let the numeric default stand (#3458). */
-  if ((g_ret_type == TY_INT || g_ret_type == TY_FLOAT) &&
-      nt_kind(c->nt, node) == NK_NilNode) { emit_ret_nil(c, g_ret_type, b); return; }
+  /* The begin/rescue result temp is such a slot too (g_result_ty), and so is
+     a nil-typed EXPRESSION landing in either: `$stdout.puts(x)` as the else
+     arm of an Integer-valued if answers nil in Ruby, while its emission is
+     the numeric 0 of a void call. Evaluate it, then spell the sentinel. */
+  {
+    TyKind slot = g_result_var ? g_result_ty : g_ret_type;
+    if (slot == TY_INT || slot == TY_FLOAT) {
+      if (nt_kind(c->nt, node) == NK_NilNode) { emit_ret_nil(c, slot, b); return; }
+      TyKind nvt = comp_ntype(c, node);
+      if (nvt == TY_NIL || nvt == TY_VOID) {
+        buf_puts(b, "({ (void)("); emit_expr(c, node, b); buf_puts(b, "); ");
+        emit_ret_nil(c, slot, b); buf_puts(b, "; })");
+        return;
+      }
+      /* an Integer value answered through a Float slot: its nil is the
+         Integer sentinel, which has to become the Float one */
+      if (slot == TY_FLOAT && nvt == TY_INT && nullable_int_value(c, node)) {
+        buf_puts(b, "sp_int_to_f_or_nil("); emit_expr(c, node, b); buf_puts(b, ")");
+        return;
+      }
+    }
+  }
   Buf tmp; memset(&tmp, 0, sizeof tmp);
   emit_expr(c, node, &tmp);
   const char *txt = tmp.p ? tmp.p : "";
@@ -7206,7 +7247,19 @@ else {
       snprintf(cond, sizeof cond, "lv_%s %s= (sp_sym)-1", en, is_or ? "=" : "!");
       emit_orw_guard(c, v, 0, cond, lhs, 0, indent, b);
     }
-    else if (!is_or) emit_orw_guard(c, v, 0, NULL, lhs, 0, indent, b);   /* a &&= v on an always-truthy var: always assign */
+    else if (!is_or) {
+      /* `x &&= v` assigns only when x is not nil: a slot that can hold nil
+         (a NULL pointer, a sentinel scalar) tests for it, one that cannot
+         is always truthy and always assigns */
+      Buf rb; memset(&rb, 0, sizeof rb); emit_local_ref(c, id, nm, &rb);
+      Buf nb; memset(&nb, 0, sizeof nb);
+      if (rb.p && local_nil_test(c, lv, rb.p, &nb)) {
+        snprintf(cond, sizeof cond, "!(%s)", nb.p);
+        emit_orw_guard(c, v, 0, cond, lhs, 0, indent, b);
+      }
+      else emit_orw_guard(c, v, 0, NULL, lhs, 0, indent, b);
+      free(nb.p); free(rb.p);
+    }
     else {
       /* `x ||= v` on a slot that can hold nil: test it. Only a slot with no
          nil representation at all is the no-op this used to assume for every
@@ -9997,7 +10050,9 @@ else {
           }
         }
         emit_indent(b, indent); buf_printf(b, "%s = ", g_ie_next_var);
-        if (g_ie_res_poly) emit_boxed(c, nv[0], b); else emit_expr(c, nv[0], b);
+        if (g_ie_res_poly) emit_boxed(c, nv[0], b);
+        else if (g_ie_next_ty == TY_INT || g_ie_next_ty == TY_FLOAT) emit_expr_slot(c, nv[0], g_ie_next_ty, b);
+        else emit_expr(c, nv[0], b);
         buf_puts(b, ";\n");
       }
     }
@@ -10267,8 +10322,9 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       else
         buf_printf(b, " _t%d = %s;\n", t, rt == TY_RANGE ? "(sp_Range){0}" : default_value(rt));
       int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
+      TyKind srt = g_result_ty; g_result_ty = rt;   /* the arms' nil is this slot's (a scalar's sentinel) */
       emit_begin(c, id, b, indent, rv);
-      g_result_poly = sp;
+      g_result_poly = sp; g_result_ty = srt;
       emit_indent(b, indent); emit_tail_lead(b);
       /* the begin's scalar result temp feeds a poly tail slot (return type or an
          outer poly result var widened under promote): box it to match. */
@@ -10600,6 +10656,8 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
              g_result_ty != TY_BOOL && g_result_ty != TY_SYMBOL &&
              default_value(g_result_ty) && default_value(g_result_ty)[0] == '(')
       buf_printf(b, ", %s)", default_value(g_result_ty));
+    else if (g_result_ty == TY_INT || g_result_ty == TY_FLOAT)
+      buf_printf(b, ", %s)", default_value(g_result_ty));   /* the nil sentinel */
     else buf_printf(b, ", (__typeof__(%s))0)", g_result_var);
   }
   else {
