@@ -16943,7 +16943,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     if (nr2 >= 0 && nn2 && (sp_streq(nn2, "!") || sp_streq(nn2, "!=")) &&
         nc2 == (sp_streq(nn2, "!") ? 0 : 1) && ty_is_object(comp_ntype(c, nr2))) {
       int nd = ty_object_class(comp_ntype(c, nr2)), ndef = nd;
-      if (comp_method_in_chain(c, nd, nn2, &ndef) >= 0) {
+      int nmi2 = comp_method_in_chain(c, nd, nn2, &ndef);
+      if (nmi2 >= 0) {
         /* A value-type object is passed BY VALUE (sp_X, not sp_X *): casting
            it to a pointer is not a conversion the C compiler accepts, so a
            class with ivars that defines #! did not build (#3819). */
@@ -16953,7 +16954,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_puts(b, "(");
         emit_expr(c, nr2, b);
         buf_puts(b, ")");
-        if (nc2 == 1) { buf_puts(b, ", "); emit_expr(c, nv2[0], b); }
+        if (nc2 == 1) {
+          buf_puts(b, ", ");
+          /* The callee's parameter decides the argument's form, as the
+             general call path decides it: a parameter widened to poly (a
+             `!=` also called with a String, every int slot under
+             --int-overflow=promote) takes the boxed value, where this site
+             handed it the raw int (#4733). */
+          if (c->scopes[nmi2].nparams >= 1) emit_arg_or_default(c, &c->scopes[nmi2], 0, nv2[0], b);
+          else emit_expr(c, nv2[0], b);
+        }
         buf_puts(b, ")");
         return;
       }

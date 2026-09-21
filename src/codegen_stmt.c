@@ -9690,7 +9690,15 @@ else {
             emit_boxed_text(c, valt, tmp_expr, &bxi);
             buf_puts(b, bxi.p ? bxi.p : "sp_box_nil()"); free(bxi.p);
           }
-          else buf_printf(b, "_t%d", tmps[i]);
+          else {
+            /* a typed element fed from a boxed right-hand side converts at
+               the sink, as the single store does (#4733) */
+            TyKind valt = tmpts ? tmpts[i] : comp_ntype(c, els[i]);
+            TyKind et = ty_array_elem(recv_t);
+            if (valt == TY_POLY && et == TY_INT) buf_printf(b, "sp_poly_to_i(_t%d)", tmps[i]);
+            else if (valt == TY_POLY && et == TY_FLOAT) buf_printf(b, "sp_poly_to_f(_t%d)", tmps[i]);
+            else buf_printf(b, "_t%d", tmps[i]);
+          }
           buf_puts(b, ");\n");
         }
         else if (recv_t == TY_POLY || recv_t == TY_UNKNOWN) {
@@ -9737,7 +9745,16 @@ else {
             emit_boxed_text(c, valt, tmp_expr2, &bxi2);
             buf_puts(b, bxi2.p ? bxi2.p : "sp_box_nil()"); free(bxi2.p);
           }
-          else buf_printf(b, "_t%d", tmps[i]);
+          else {
+            /* a typed value slot fed from a boxed right-hand side (a call's
+               poly answer, every int under --int-overflow=promote) converts
+               at the sink, as the single store does (#4733) */
+            TyKind valt = tmpts ? tmpts[i] : comp_ntype(c, els[i]);
+            TyKind hv = ty_hash_val(recv_t);
+            if (valt == TY_POLY && hv == TY_INT) buf_printf(b, "sp_poly_to_i(_t%d)", tmps[i]);
+            else if (valt == TY_POLY && hv == TY_FLOAT) buf_printf(b, "sp_poly_to_f(_t%d)", tmps[i]);
+            else buf_printf(b, "_t%d", tmps[i]);
+          }
           buf_puts(b, ");\n");
         }
         else { unsupported(c, id, "multiple assignment index target non-array/hash"); }
