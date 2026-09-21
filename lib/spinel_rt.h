@@ -7913,6 +7913,28 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE &&
       recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
     return sp_poly_arr_range(recv, *(sp_Range *)idx.v.p);
+  /* Integer#[range]: the bit field the range names. lo..hi is hi-lo+1 bits
+     from lo (an exclusive end one fewer), an endless range is everything
+     above lo, and a beginless one is CRuby's ArgumentError -- the field below
+     bit 0 has no end. The typed arms have answered this all along; a boxed
+     receiver matched nothing here and left by the trailing hash read, so
+     `b[..3]` was 1 where it should raise and `b[0..3]` was a wrong number. */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && idx.v.p &&
+      (recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT)) {
+    sp_Range rg = *(sp_Range *)idx.v.p;
+    if (rg.first == INTPTR_MIN)
+      sp_raise_cls("ArgumentError",
+                   "The beginless range for Integer#[] results in infinity");
+    { sp_int lo = rg.first;
+      sp_int len = (rg.last == INTPTR_MAX) ? 64 : (rg.last - lo + (rg.excl ? 0 : 1));
+      if (recv.tag == SP_TAG_INT) return sp_box_int(sp_int_bit_range(recv.v.i, lo, len));
+      /* a Bignum has no word to shift: read the field a bit at a time, which
+         is at most 64 of them and only on this cold path */
+      { sp_int out = 0, n = (len <= 0 || len > 64) ? 64 : len;
+        for (sp_int k = 0; k < n; k++)
+          if (sp_poly_int_bit(recv, lo + k)) out |= (sp_int)((uint64_t)1 << k);
+        return sp_box_int(out); } }
+  }
   sp_int i = (idx.tag == SP_TAG_INT) ? idx.v.i : 0;
   /* Struct#[n] is the nth MEMBER, in declaration order -- the order #to_h
      preserves -- not an array index (#3369). */
