@@ -32,6 +32,5 @@
 Math::DomainError
 20 21 22 23 
 20 19 18 
-RangeError
 18446744073709551614
 Integer

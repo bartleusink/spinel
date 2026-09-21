@@ -46,3 +46,5 @@ poly inf floor: FloatDomainError: Infinity
 4
 -3
 1200
+"s"
+boxed bignum to_i: RangeError

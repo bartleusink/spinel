@@ -49,3 +49,10 @@ d = -2
 p 1234.5678.round(d)
 p 7.5.div(2.0), 7.5.divmod(2.0)
 p poly(3.9).floor, poly(3.1).ceil, poly(3.5).round, poly(-3.9).truncate, poly(1234.5678).round(-2)
+
+# A boxed Bignum receiver's to_i: #4665 left it raising here pending #2024,
+# and moved out of poly_bignum_integer_surface when promote learned to answer
+# it. promote_float_to_int pins the answer on the other side.
+def poly_v(x) = x
+p poly_v("s")
+begin; poly_v(18446744073709551615).to_i; rescue => e; puts "boxed bignum to_i: #{e.class}"; end
