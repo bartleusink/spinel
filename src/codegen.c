@@ -11722,10 +11722,16 @@ char *codegen_program(const NodeTable *nt) {
      gave the process (sp_main_stack_run). It is emitted as its own function
      so the context switch has something to enter, and `main` shrinks to the
      trampoline that hands it over and returns what it left behind. argc/argv
-     move to file scope with it: they belong to the frame main keeps. */
-  buf_puts(body, "static int sp_main_argc; static char **sp_main_argv;"
-                 " static int sp_main_rc;\n");
-  buf_puts(body, "static void sp_main_body(void){\n");
+     move to file scope with it: they belong to the frame main keeps.
+
+     The names carry a leading underscore because a Ruby method compiles to
+     `sp_<name>`: `def main_body` would otherwise collide with the body
+     itself. The backtrace demangler knows _sp_main_body as `<main>` -- it is
+     where the top level runs now, and the frame the walk used to find as
+     `main`. */
+  buf_puts(body, "static int _sp_main_argc; static char **_sp_main_argv;"
+                 " static int _sp_main_rc;\n");
+  buf_puts(body, "static void _sp_main_body(void){\n");
   buf_puts(body, "    SP_GC_SAVE();\n");
   main_frame_ins = body->len;
   if (g_re_init_needed) buf_puts(body, "    sp_tu_init();\n");
@@ -11734,12 +11740,12 @@ char *codegen_program(const NodeTable *nt) {
   if (g_uses_threads) buf_puts(body, "    sp_sched_init();\n");
   /* The ARGV copy loop only matters if the program reads ARGV / ARGF / $*. */
   if (g_uses_argv)
-    buf_puts(body, "    { int argc = sp_main_argc; char **argv = sp_main_argv; sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
+    buf_puts(body, "    { int argc = _sp_main_argc; char **argv = _sp_main_argv; sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
   if (g_uses_program_name)
     /* argv[0] lives in the process's argument block, not the string heap, so it
      carries no marker byte -- and `$0` is an ordinary Ruby String the caller
      roots. Copy it in. */
-    buf_puts(body, "    sp_program_name = sp_main_argc > 0 ? sp_str_dup_external(sp_main_argv[0]) : sp_str_empty;\n");
+    buf_puts(body, "    sp_program_name = _sp_main_argc > 0 ? sp_str_dup_external(_sp_main_argv[0]) : sp_str_empty;\n");
   /* Enable the backtrace substrate (Exception#backtrace, Kernel#caller) in
      debug builds only: --debug compiles at -O0 with non-inlined methods, so
      the captured frames demangle to Class#method. Optimized/release builds
@@ -11821,17 +11827,17 @@ char *codegen_program(const NodeTable *nt) {
   if (g_needs_at_exit && g_ext_init_name) buf_puts(body, "  sp_at_exit_run(0);\n");
   if (g_ext_init_name) buf_puts(body, "}\n");
   else {
-    if (g_needs_at_exit) buf_puts(body, "  sp_main_rc = sp_at_exit_run(0);\n}\n");
-    else buf_puts(body, "  sp_main_rc = 0;\n}\n");
+    if (g_needs_at_exit) buf_puts(body, "  _sp_main_rc = sp_at_exit_run(0);\n}\n");
+    else buf_puts(body, "  _sp_main_rc = 0;\n}\n");
     buf_puts(body, "int main(int argc,char**argv){\n"
-                   "  sp_main_argc = argc; sp_main_argv = argv;\n");
+                   "  _sp_main_argc = argc; _sp_main_argv = argv;\n");
     /* an unoptimised build's frames are several times an -O2 one's, so the
        same Ruby depth costs several times the bytes; SPINEL_MAIN_STACK in the
        environment still wins over this */
     if (g_opt_level < 2)
       buf_puts(body, "  sp_main_stack_hint((size_t)1024 << 20);\n");
-    buf_puts(body, "  sp_main_stack_run(sp_main_body);\n"
-                   "  return sp_main_rc;\n}\n");
+    buf_puts(body, "  sp_main_stack_run(_sp_main_body);\n"
+                   "  return _sp_main_rc;\n}\n");
   }
   if (!g_no_root_frame) gc_frame_build(body, main_frame_ins);
 
