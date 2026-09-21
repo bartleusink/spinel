@@ -12643,36 +12643,83 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     for (int kk = 0; kk < c->nclasses && !has_user_kw; kk++)
       if (comp_poly_arm_defines_n(c, kk, name, argc) ||
           (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user_kw = 1;
+    /* Which keywords were written is a compile-time fact only while every
+       element is an `AssocNode` with a literal symbol key. A `**splat`, or a
+       key spelled some other way, leaves the set unknown: the mode still
+       comes from a literal `half:` if one is there, but nothing may be
+       called an unknown keyword on the strength of what cannot be read. */
+    int kwn = 0;
+    const int *kwe = nt_arr(nt, argv[argc - 1], "elements", &kwn);
+    int kw_opaque = 0;
+    for (int e = 0; e < kwn; e++) {
+      int key = nt_ref(nt, kwe[e], "key");
+      const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
+      if (!kty || !sp_streq(kty, "SymbolNode")) kw_opaque = 1;
+    }
     if (!has_user_kw) {
+      /* CRuby evaluates the receiver, the positional argument and every
+         keyword value before the call decides anything, so a call it then
+         rejects has still run their side effects. Hold each in a temp here
+         rather than emitting it inside the arm that may raise. */
+      int tv = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", tv);
+      emit_expr(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
+      int tn = -1;
+      if (argc == 2) {
+        tn = ++g_tmp;
+        buf_printf(b, "sp_int _t%d = ", tn);
+        emit_int_expr(c, argv[0], b);
+        buf_puts(b, "; ");
+      }
+      int thalf = -1;
+      char unknown[256]; unknown[0] = 0; int nunknown = 0;
+      for (int e = 0; e < kwn; e++) {
+        int key = nt_ref(nt, kwe[e], "key");
+        const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
+        const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
+        int val = nt_ref(nt, kwe[e], "value");
+        if (val < 0) continue;
+        int tk = ++g_tmp;
+        buf_printf(b, "sp_RbVal _t%d = ", tk);
+        emit_boxed(c, val, b);
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tk);
+        if (kn && sp_streq(kn, "half")) thalf = tk;   /* a repeated key: the last wins */
+        else if (kn && nunknown < 8) {
+          size_t at = strlen(unknown);
+          snprintf(unknown + at, sizeof unknown - at, "%s:%s", nunknown ? ", " : "", kn);
+          nunknown++;
+        }
+      }
       /* only #round takes a tie-break mode; the other three reject a keyword
-         outright, with CRuby's words (the typed arm does the same, #3646) */
+         outright, with CRuby's words (the typed arm does the same, #3646).
+         With a digit count as well the hash is a second argument, and the
+         arity is what CRuby complains about first. */
       if (!sp_streq(name, "round")) {
-        buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
-        buf_puts(b, "); sp_raise_cls(\"TypeError\","
-                    " \"no implicit conversion of Hash into Integer\"); sp_box_nil(); })");
+        if (argc == 2)
+          buf_puts(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
+                      " (given 2, expected 0..1)\");");
+        else
+          buf_puts(b, "sp_raise_cls(\"TypeError\","
+                      " \"no implicit conversion of Hash into Integer\");");
+        buf_puts(b, " sp_box_nil(); })");
         return 1;
       }
-      int hv = kwh_lookup(nt, argv[argc - 1], "half");
-      int nd = (argc == 2) ? argv[0] : -1;
-      buf_puts(b, "sp_poly_round_half(");
-      emit_expr(c, recv, b);
-      buf_puts(b, ", ");
-      if (nd >= 0) emit_int_expr(c, nd, b); else buf_puts(b, "0");
-      buf_puts(b, ", ");
-      /* a nil mode is the plain half-up default; a symbol (literal or only
-         known at run time) selects the rule */
-      if (hv < 0 || (nt_type(nt, hv) && sp_streq(nt_type(nt, hv), "NilNode")))
-        buf_puts(b, "(sp_sym)-1");
-      else if (comp_ntype(c, hv) == TY_SYMBOL) emit_expr(c, hv, b);
-      else {
-        /* a mode read out of a container arrives boxed; nil there is the
-           default rule, as `half: nil` is */
-        int tm2 = ++g_tmp;
-        buf_printf(b, "({ sp_RbVal _t%d = ", tm2);
-        emit_boxed(c, hv, b);
-        buf_printf(b, "; _t%d.tag == SP_TAG_SYM ? (sp_sym)_t%d.v.i : (sp_sym)-1; })", tm2, tm2);
+      /* `round` takes `half:` and nothing else: any other key is the
+         unknown-keyword ArgumentError, not a silently defaulted mode */
+      if (nunknown && !kw_opaque) {
+        buf_printf(b, "sp_raise_cls(\"ArgumentError\", \"unknown keyword%s: %s\");"
+                      " sp_box_nil(); })",
+                   nunknown > 1 ? "s" : "", unknown);
+        return 1;
       }
-      buf_puts(b, ")");
+      /* the mode reaches the helper as the value it was written as: a
+         Symbol, a String, nil for the default -- deciding which is the
+         helper's job, since only it knows whether the receiver cares */
+      buf_printf(b, "sp_poly_round_half(_t%d, ", tv);
+      if (tn >= 0) buf_printf(b, "_t%d", tn); else buf_puts(b, "0");
+      if (thalf >= 0) buf_printf(b, ", _t%d); })", thalf);
+      else buf_puts(b, ", sp_box_nil()); })");
       return 1;
     }
   }

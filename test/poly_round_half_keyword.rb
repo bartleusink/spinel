@@ -39,3 +39,48 @@ begin
 rescue ArgumentError => e
   puts "bogus: #{e.message}"
 end
+
+# `round` takes `half:` and nothing else: another key is the unknown-keyword
+# ArgumentError, not a silently defaulted mode.
+begin
+  y.round(foo: 1)
+rescue ArgumentError => e
+  puts "foo: #{e.message}"
+end
+begin
+  y.round(foo: 1, bar: 2)
+rescue ArgumentError => e
+  puts "foobar: #{e.message}"
+end
+# a mode that is neither a Symbol nor a String names itself in the message,
+# where mapping it to the default sentinel had rounded half up in silence
+begin
+  y.round(half: 1)
+rescue ArgumentError => e
+  puts "one: #{e.message}"
+end
+# CRuby reads a String as readily as a Symbol
+p y.round(half: "even")
+# an Integer receiver validates the mode too, even where it answers itself
+begin
+  i.round(0, half: :bogus)
+rescue ArgumentError => e
+  puts "int0: #{e.message}"
+end
+
+# the receiver, the positional argument and every keyword value are evaluated
+# before the call decides it cannot be made
+def probe(tag)
+  puts "probe #{tag}"
+  1
+end
+begin
+  y.ceil(half: probe(:kw))
+rescue TypeError => e
+  puts "ceil: #{e.message}"
+end
+begin
+  y.ceil(probe(:pos), half: probe(:kw2))
+rescue ArgumentError => e
+  puts "ceil2: #{e.message}"
+end
