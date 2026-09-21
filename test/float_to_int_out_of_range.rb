@@ -56,3 +56,17 @@ p poly(3.9).floor, poly(3.1).ceil, poly(3.5).round, poly(-3.9).truncate, poly(12
 def poly_v(x) = x
 p poly_v("s")
 begin; poly_v(18446744073709551615).to_i; rescue => e; puts "boxed bignum to_i: #{e.class}"; end
+
+# The tie-break keyword cannot be what decides whether a value is
+# representable: `round(half:)` raises here exactly as the bare `round` does.
+f = 1e20
+m = :even
+begin; f.round(half: :even); rescue RangeError => e; puts "kw: #{e.message}"; end
+begin; f.round(half: m); rescue RangeError => e; puts "kwdyn: #{e.message}"; end
+begin; f.round(half: "even"); rescue RangeError => e; puts "kwstr: #{e.message}"; end
+# a BOXED receiver answers the Bignum in either mode, keyword or not
+v = [1e20, nil][0]
+p v.round
+p v.round(half: :even)
+p v.round(half: m)
+p v.round(half: "even")

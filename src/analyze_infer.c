@@ -5635,14 +5635,17 @@ else {
        widen; `round(2)` stays a Float, and raise/wrap keep their sp_int so
        no hot loop boxes for this. */
     if (g_promote_mode) {
-      /* Only the shapes whose emitter this PR widened. A `half:` keyword is
-         served by a different arm that answers a Float or a raw int, so a
-         call carrying one is left exactly where it was -- peeling the keyword
-         off and treating the call as argument-less made the inference
-         disagree with that arm and the C stopped building. */
+      /* A trailing `half:` keyword only picks the tie-break mode, and the arm
+         that serves it answers the same Integer, so the same widening
+         applies: `f.round(half: :even)` cannot be the one form that fails
+         where `f.round` promotes. It is peeled off the positional count.
+         floor / ceil / truncate reject a keyword outright and keep the arm
+         that raises, so they stay where they were. */
       int pv_kw = argc >= 1 && nt_type(nt, argv[argc - 1]) &&
                   sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode");
-      if (!pv_kw) {
+      int pv_round_kw = pv_kw && sp_streq(name, "round");
+      if (!pv_kw || pv_round_kw) {
+        int pv_argc = argc - (pv_round_kw ? 1 : 0);
         if ((sp_streq(name, "to_i") || sp_streq(name, "to_int")) && argc == 0) return TY_POLY;
         /* No argument, or a literal 0 -- both reach the same emitter and are
            exact. A NEGATIVE literal does not: it rounds to a power of ten by
@@ -5652,8 +5655,8 @@ else {
            keeps raising until the rounding itself is done in Bignum. */
         if (sp_streq(name, "floor") || sp_streq(name, "ceil") ||
             sp_streq(name, "round") || sp_streq(name, "truncate")) {
-          if (argc == 0) return TY_POLY;
-          if (argc == 1) {
+          if (pv_argc == 0) return TY_POLY;
+          if (pv_argc == 1) {
             const char *pv_aty = nt_type(nt, argv[0]);
             if (pv_aty && sp_streq(pv_aty, "IntegerNode") &&
                 nt_int(nt, argv[0], "value", 0) == 0) return TY_POLY;

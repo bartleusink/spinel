@@ -84,3 +84,15 @@ begin
 rescue ArgumentError => e
   puts "ceil2: #{e.message}"
 end
+
+# a `**` source: the keys it carries are read at run time, where the mode was
+# left silently defaulted because the key set could not be seen
+hk = { half: :even }
+p y.round(**hk)
+p i.round(-1, **hk)
+p y.round(1, **hk)
+begin
+  y.round(**{ zz: 1 })
+rescue ArgumentError => e
+  puts "splat: #{e.message}"
+end

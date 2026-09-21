@@ -48,3 +48,10 @@ poly inf floor: FloatDomainError: Infinity
 1200
 "s"
 boxed bignum to_i: RangeError
+kw: float out of Integer range (Bignum promotion pending)
+kwdyn: float out of Integer range (Bignum promotion pending)
+kwstr: float out of Integer range (Bignum promotion pending)
+100000000000000000000
+100000000000000000000
+100000000000000000000
+100000000000000000000
