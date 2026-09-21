@@ -4599,6 +4599,21 @@ static sp_PolyArray *sp_PolyArray_slice(sp_PolyArray *a, sp_int start, sp_int le
 static sp_PolyArray *sp_PolyArray_slice_range(sp_PolyArray *a, sp_int start, sp_int end_, sp_int excl) { if (end_ < 0) end_ += a->len; if (start < 0) start += a->len; if (start < 0 || start > a->len) return NULL; /* a start outside [-len, len] is nil (#4524) */ sp_int n = end_ - start + (excl ? 0 : 1); if (n < 0) n = 0; return sp_PolyArray_slice(a, start, n); }
 /* 2-arg slice on a poly receiver: dispatch to the typed slice functions. */
 static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args);
+/* Call a bound Method whose stamped ABI a call site could not use: the site
+   publishes each argument boxed in the side channel and hands the laundered
+   copies over, and the trampoline picks the lane -- its per-target thunk, the
+   poly ABI, or the legacy scalar one -- raising the NoMethodError itself for a
+   target none of them fits. A site that classified its arguments statically
+   and found them un-castable (a Float where the target takes sp_int, a count
+   past the stamped arity) reaches that generality this way, instead of
+   refusing a call the Method can perfectly well take. */
+sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args);
+static sp_RbVal sp_bm_call_boxed(void *m, sp_int n) {
+  sp_int slots[16];
+  for (sp_int i = 0; i < n && i < 16; i++) slots[i] = _sp_proc_poly_args[i].v.i;
+  sp_method_proc_tramp(m, n < 16 ? n : 16, slots);
+  return _sp_proc_poly_ret;
+}
 static sp_RbVal sp_poly_callable_spread(sp_RbVal v, sp_RbVal arr);
 static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
   if (a.tag == SP_TAG_STR) return sp_box_nullable_str(sp_str_sub_range(a.v.s ? a.v.s : "", start, len));

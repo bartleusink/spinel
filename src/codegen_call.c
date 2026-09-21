@@ -20031,6 +20031,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        per call-site argument: bound positionally, the first argument went into
        the array pointer's slot and the call died (#3691). */
     int *atmp = eargc ? (int *)calloc((size_t)eargc, sizeof(int)) : NULL;
+    /* the same argument, kept in its own C type, so the decline path can box
+       it without evaluating the expression twice; -1 where there is none */
+    int *bxtmp = eargc ? (int *)calloc((size_t)eargc, sizeof(int)) : NULL;
+    for (int k = 0; k < eargc; k++) bxtmp[k] = -1;
+    /* only the unresolved-target lane can fall back to the trampoline */
+    int bm_want_boxed = !tm && adapter_argc < 0 && !poly_abi && splat_at2 < 0;
+    char (*bxref)[24] = eargc ? (char (*)[24])calloc((size_t)eargc, 24) : NULL;
     /* `m.call(*args)` into a rest parameter: the splat array IS that rest
        argument. Expanded positionally instead, its first element went into the
        array pointer's slot and the call read it as one (#3887). */
@@ -20078,7 +20085,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_puts(b, " ");
       }
       atmp2[rest_at] = trest;
-      free(atmp);
+      /* the rest lane rebuilds the argument vector and jumps to the shared
+         emission, which frees these again: drop them here and leave nothing
+         behind to free twice (the boxed lane does not run for a rest call) */
+      free(atmp); free(bxtmp); free(bxref);
+      bxtmp = NULL; bxref = NULL;
       atmp = atmp2;
       eargc = rest_at + 1;
       goto bm_emit_call;
@@ -20178,9 +20189,29 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         emit_adapter_arg_static(c, argv[k], _ak, b);
       }
       else if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) {
-        buf_printf(b, "sp_int _t%d = (sp_int)(uintptr_t)(", atmp[k]); emit_expr(c, argv[k], b); buf_puts(b, ")");
+        /* Hold the value in its own C type first, then launder. The raw
+           sp_int carries no class, and the generic trampoline this site
+           falls back to reads the BOXED argument channel -- so the boxed
+           form has to come from the same single evaluation, not from a
+           second one (an argument with a side effect must run once). */
+        TyKind pk = comp_ntype(c, argv[k]);
+        bxtmp[k] = ++g_tmp;
+        emit_ctype(c, pk, b); buf_printf(b, " _t%d = ", bxtmp[k]); emit_expr(c, argv[k], b); buf_puts(b, "; ");
+        emit_named_root(c, pk, "_t", bxtmp[k], b); buf_puts(b, " ");
+        buf_printf(b, "sp_int _t%d = (sp_int)(uintptr_t)(_t%d)", atmp[k], bxtmp[k]);
       }
-      else { buf_printf(b, "sp_int _t%d = ", atmp[k]); emit_expr(c, argv[k], b); }
+      else {
+        TyKind pk = comp_ntype(c, argv[k]);
+        if (bm_want_boxed && pk != TY_UNKNOWN && pk != TY_VOID) {
+          bxtmp[k] = ++g_tmp;
+          emit_ctype(c, pk, b); buf_printf(b, " _t%d = ", bxtmp[k]); emit_expr(c, argv[k], b); buf_puts(b, "; ");
+          emit_named_root(c, pk, "_t", bxtmp[k], b); buf_puts(b, " ");
+          buf_printf(b, "sp_int _t%d = ", atmp[k]);
+          if (pk == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", bxtmp[k]);
+          else buf_printf(b, "(sp_int)(_t%d)", bxtmp[k]);
+        }
+        else { buf_printf(b, "sp_int _t%d = ", atmp[k]); emit_expr(c, argv[k], b); }
+      }
       buf_puts(b, "; ");
     }
     /* A top-level def has a self-less C ABI (fn(args)); an object-bound method
@@ -20204,6 +20235,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        already class-checks the modeled ones. Skipping the stamped-ABI gate
        here keeps that shape from raising; the boxing below still applies. */
     int bm_over_arity_adapter = adapter_argc >= 0 && eargc > adapter_argc;
+    /* every argument kept a typed temp, so each can be boxed from the value
+       already evaluated -- the precondition for handing them to the
+       trampoline without evaluating anything a second time */
+    int bm_boxed_ok = bm_want_boxed && bxtmp && bxref && eargc <= 16;
+    for (int k = 0; k < eargc && bm_boxed_ok; k++) {
+      if (bxtmp[k] < 0) { bm_boxed_ok = 0; break; }
+      snprintf(bxref[k], 24, "_t%d", bxtmp[k]);
+    }
     int bm_sig_ok = bm_dyn && splat_at2 < 0 && !bm_over_arity_adapter &&
                     call_arg_sig(c, argv, eargc, bm_sig, sizeof bm_sig);
     /* the promote counterpart of the legacy gate below: a dynamic target
@@ -20215,7 +20254,26 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        does: the extra operands are ignored by the adapter's C function. */
     int bm_poly_gate = poly_abi && splat_at2 < 0 && !bm_over_arity_adapter;
     if (bm_dyn) {
-      if (bm_sig_ok) buf_printf(b, "!sp_bm_legacy_abi_ok(_t%d, %d, \"%s\") ? (sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_obj(_t%d, SP_BUILTIN_METHOD))), sp_box_nil()) : ", tr, eargc, bm_sig, name, tr);
+      if (bm_sig_ok) {
+        /* The stamped legacy cast does not fit this Method. That is not the
+           same as the Method being uncallable: its own thunk, or the poly
+           ABI, may take exactly these arguments -- a Float where the site
+           could only classify sp_int, a count the stamp does not carry. Hand
+           the boxed arguments to the generic trampoline, which picks a lane
+           and raises the NoMethodError itself when none fits, rather than
+           refusing here on the strength of one lane's answer (#4542). */
+        buf_printf(b, "!sp_bm_legacy_abi_ok(_t%d, %d, \"%s\") ? (", tr, eargc, bm_sig);
+        if (bm_boxed_ok) {
+          for (int k = 0; k < eargc; k++) {
+            buf_printf(b, "_sp_proc_poly_args[%d] = ", k);
+            emit_boxed_text(c, comp_ntype(c, argv[k]), bxref[k], b);
+            buf_puts(b, ", ");
+          }
+          buf_printf(b, "sp_bm_call_boxed(_t%d, %d)", tr, eargc);
+        }
+        else buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_obj(_t%d, SP_BUILTIN_METHOD))), sp_box_nil()", name, tr);
+        buf_puts(b, ") : ");
+      }
       buf_printf(b, "_t%d->legacy_ret == SP_BM_RET_POLY ? (", tr);
     }
     if (bm_poly_gate) {
@@ -20268,7 +20326,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     if (bm_poly_gate) buf_puts(b, ")");
     buf_puts(b, "; })");
     g_nren = pd_base;
-    free(atmp);
+    free(atmp); free(bxtmp); free(bxref);
     free(psrc);
     return;
   }

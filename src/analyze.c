@@ -15109,9 +15109,27 @@ void analyze_program(Compiler *c) {
          `method(:ip)` appeared anywhere in the program (#4451). An UNKNOWN
          return still defaults to int, as before, so the method is emitted
          with a value rather than as void. */
+      /* POLY, not int, for a method whose parameters nothing typed: the
+         bound-Method ABI describes each argument's kind and carries the poly
+         ones boxed, so it never needed the int guess -- and the guess is
+         wrong for every program that puts a Float, a boolean or a hash in
+         one. A Float read as an integer is how the bit pattern of NaN came
+         to be compared as a number (#4597). This is the judgement #4451
+         already made for the RETURN of these same methods.
+
+         A synthesized __bam_ wrapper keeps the int: it is not a user method
+         with no evidence but a wrapper around a builtin whose C signature
+         the adapter emission fixes, and its bind site stamps a legacy sig to
+         match. Widening it left the stamp describing a poly parameter that
+         no call site asks for, and the Method stopped being callable at
+         all. */
+      int is_bam_wrap = sc->name && strncmp(sc->name, "__bam_", 6) == 0;
       for (int i = 0; i < sc->nparams; i++) {
         LocalVar *p = sc->pnames[i] ? scope_local(sc, sc->pnames[i]) : NULL;
-        if (p && p->type == TY_UNKNOWN) { p->type = TY_INT; msym_pinned = 1; }
+        if (p && p->type == TY_UNKNOWN) {
+          p->type = is_bam_wrap ? TY_INT : TY_POLY;
+          msym_pinned = 1;
+        }
       }
       if (sc->ret == TY_UNKNOWN) { sc->ret = TY_INT; msym_pinned = 1; }
     }
