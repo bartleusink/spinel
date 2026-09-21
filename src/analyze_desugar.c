@@ -377,6 +377,13 @@ int desugar_reduce_proc_arg(Compiler *c) {
     if (nt_ref(nt, id, "receiver") < 0) continue;
     int blk = nt_ref(nt, id, "block");
     if (blk < 0 || nt_kind(nt, blk) != NK_BlockArgumentNode) continue;
+    /* This rewrite serves the C fold emitters, which read the block's body.
+       A receiver whose inject/reduce is the PROGRAM's own method -- a user
+       class that defines the name -- keeps its `&b`: the block would otherwise be
+       spliced into that method's body naming the caller's `b` from a frame
+       that no longer has it (`'lv_b' undeclared`). */
+    { TyKind rt0 = infer_type(c, nt_ref(nt, id, "receiver"));
+      if (ty_is_object(rt0)) continue; }
     int ex = nt_ref(nt, blk, "expression");
     if (ex < 0) continue;
     const char *exty = nt_type(nt, ex);
