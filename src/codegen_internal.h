@@ -702,6 +702,26 @@ int bytes_are_ascii7(const char *s, size_t n);
 void emit_frozen_literal_close(Buf *b, int id);
 /* Emit a Ruby string literal. len is the true byte count (may exceed strlen
    when the string contains embedded NUL bytes). */
+/* What a `round`-family call's trailing keyword hash says, as far as it can
+   be read at compile time. `half` is the node the tie-break mode was written
+   as; a `**` source's keys are only known at run time and are marked splat;
+   `unknown` is the ArgumentError message for the keys that are neither --
+   `round` takes no keyword but `half:`, and CRuby names every other one. A
+   key spelled some other way leaves the set unreadable, and nothing may be
+   called an unknown keyword on the strength of what cannot be read. */
+#define ROUND_KW_MAX 32
+typedef struct {
+  int half;                    /* value node of the last literal `half:`, or -1 */
+  int nelem;
+  int elem[ROUND_KW_MAX];     /* every element's value node, in source order */
+  int is_splat[ROUND_KW_MAX]; /* a `**` source: its keys are read at run time */
+  int opaque[ROUND_KW_MAX];   /* a key spelled some other way: claim nothing */
+  char unknown[256];          /* the ArgumentError message, or empty */
+  int nunknown;
+} RoundKw;
+void round_kw_read(Compiler *c, int kwh, RoundKw *o);
+int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b);
+
 void emit_str_literal_n(Buf *b, const char *content, size_t len, int frozen);
 void emit_str_literal(Buf *b, const char *content);
 void emit_str_literal_src(Buf *b, const char *content, size_t len, int frozen);

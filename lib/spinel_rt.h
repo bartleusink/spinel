@@ -9879,6 +9879,17 @@ static sp_RbVal sp_poly_round_half(sp_RbVal v, sp_int n, sp_RbVal mode) {
     if (n >= 0) return v;
     return sp_box_int(sp_int_round_half(v.v.i, n, md < 0 ? 1 : md));
   }
+  /* a Rational was handed to sp_poly_round_n, which rounds half up at every
+     precision: the mode was read, validated and then thrown away. The class
+     follows the digit count as the no-keyword arms choose it. */
+  if (sp_poly_is_rational(v)) {
+    sp_Rational rr = sp_poly_as_rational(v);
+    int rmd = md < 0 ? 1 : md;
+    if (n > 0) return sp_box_rational(sp_rational_round_prec_mode(rr, n, rmd));
+    if (n == 0) return sp_box_int(sp_rational_round_i_mode(rr, rmd));
+    { sp_Rational q = sp_rational_round_prec_mode(rr, n, rmd);
+      return sp_box_int(q.num / q.den); }
+  }
   if (v.tag != SP_TAG_FLT) return sp_poly_round_n(v, n);
   double x = v.v.f;
   if (n > 0) {
@@ -9956,6 +9967,28 @@ static sp_RbVal sp_float_round_half_p(double x, sp_RbVal mode) {
 static sp_RbVal sp_float_round_half_v(double x, sp_int nd, sp_RbVal mode) {
   if (nd > 0) return sp_box_float(sp_float_round_half_f(x, nd, mode));
   return sp_box_int(sp_float_round_half_i(x, nd, mode));
+}
+
+/* Rational#round(ndigits, half: mode) on a TYPED receiver. The three named
+   helpers answer the tie-break rules and sp_rational_round_prec_mode carries
+   one through a precision; these pick it from the mode as it was written.
+   Split by the class CRuby gives the result, the way the Float helpers are:
+   a positive precision keeps the Rational, at or below the decimal point the
+   answer is an Integer, and a digit count known only at run time chooses
+   there. */
+static sp_Rational sp_rational_round_half_r(sp_Rational a, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  return sp_rational_round_prec_mode(a, nd, md < 0 ? 1 : md);
+}
+static sp_int sp_rational_round_half_i(sp_Rational a, sp_int nd, sp_RbVal mode) {
+  int md = sp_round_half_code(mode);
+  if (nd == 0) return sp_rational_round_i_mode(a, md < 0 ? 1 : md);
+  { sp_Rational q = sp_rational_round_prec_mode(a, nd, md < 0 ? 1 : md);
+    return q.num / q.den; }
+}
+static sp_RbVal sp_rational_round_half_v(sp_Rational a, sp_int nd, sp_RbVal mode) {
+  if (nd > 0) return sp_box_rational(sp_rational_round_half_r(a, nd, mode));
+  return sp_box_int(sp_rational_round_half_i(a, nd, mode));
 }
 
 /* Integer#round(ndigits, half: mode): the mode is checked whenever a digit

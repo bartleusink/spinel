@@ -1794,6 +1794,77 @@ int bytes_are_ascii7(const char *s, size_t n) {
 void emit_frozen_literal_close(Buf *b, int id) {
   buf_printf(b, "\" }; _fzl_%d.d; })", id);
 }
+void round_kw_read(Compiler *c, int kwh, RoundKw *o) {
+  const NodeTable *nt = c->nt;
+  memset(o, 0, sizeof *o);
+  o->half = -1;
+  int n = 0;
+  const int *els = nt_arr(nt, kwh, "elements", &n);
+  /* more elements than there is room for, or one with no value at all:
+     read nothing, and the call keeps the plain default-mode arms */
+  if (n > ROUND_KW_MAX) return;
+  char names[256]; names[0] = 0;
+  for (int e = 0; e < n; e++) {
+    int val = nt_ref(nt, els[e], "value");
+    if (val < 0) { o->nelem = 0; o->nunknown = 0; o->half = -1; return; }
+    int key = nt_ref(nt, els[e], "key");
+    const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
+    o->elem[o->nelem] = val;
+    o->is_splat[o->nelem] = key < 0;
+    o->nelem++;
+    if (key < 0) continue;
+    const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
+    if (kn && sp_streq(kn, "half")) { o->half = val; continue; }  /* a repeated key: the last wins */
+    const char *ks = (!kn && kty && sp_streq(kty, "StringNode")) ? nt_str(nt, key, "content") : NULL;
+    if (!kn && !ks) { o->opaque[o->nelem - 1] = 1; continue; }  /* unreadable: claim nothing */
+    if (o->nunknown < 8) {
+      size_t at = strlen(names);
+      snprintf(names + at, sizeof names - at, "%s%s%s%s", o->nunknown ? ", " : "",
+               kn ? ":" : "\"", kn ? kn : ks, kn ? "" : "\"");
+    }
+    o->nunknown++;
+  }
+  if (o->nunknown)
+    snprintf(o->unknown, sizeof o->unknown, "unknown keyword%s: %s",
+             o->nunknown > 1 ? "s" : "", names);
+}
+
+/* Bind what CRuby evaluates before a `round`-family call decides anything --
+   every keyword value, in source order -- then settle the tie-break mode and
+   raise for an unknown keyword, which CRuby does only once the whole hash has
+   been read. Emits into an already-open statement expression; answers the
+   temp holding the mode, or -1 when the hash names none. */
+int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b) {
+  int tv[ROUND_KW_MAX], thalf = -1, has_splat = 0;
+  for (int e = 0; e < kw->nelem; e++) {
+    tv[e] = ++g_tmp;
+    buf_printf(b, "sp_RbVal _t%d = ", tv[e]);
+    emit_boxed(c, kw->elem[e], b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv[e]);
+    if (kw->is_splat[e]) has_splat = 1;
+    else if (!kw->opaque[e] && kw->elem[e] == kw->half) thalf = tv[e];
+  }
+  if (kw->nunknown) {
+    buf_puts(b, "sp_raise_cls(\"ArgumentError\", ");
+    emit_str_literal(b, kw->unknown);
+    buf_puts(b, "); ");
+  }
+  if (!has_splat) return thalf;
+  /* a `**` source is read in its place, so a `half:` on either side of it
+     wins by being later, as it does in the hash the call really builds */
+  int tm = ++g_tmp;
+  buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); ", tm, tm);
+  for (int e = 0; e < kw->nelem; e++) {
+    if (kw->is_splat[e])
+      buf_printf(b, "{ sp_RbVal _s%d = sp_round_half_kwsplat(_t%d);"
+                    " if (_s%d.tag != SP_TAG_NIL) _t%d = _s%d; } ",
+                 tv[e], tv[e], tv[e], tm, tv[e]);
+    else if (!kw->opaque[e] && kw->elem[e] == kw->half)
+      buf_printf(b, "_t%d = _t%d; ", tm, tv[e]);
+  }
+  return tm;
+}
+
 void emit_str_literal_n(Buf *b, const char *content, size_t len, int frozen) {
   const char *mk = frozen ? "\\xf1" : "\\xff";
   /* A frozen literal must carry a REAL sp_str_hdr: the 0xf1 marker promises

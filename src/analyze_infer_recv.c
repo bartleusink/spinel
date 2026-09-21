@@ -415,16 +415,20 @@ int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out) {
        to poly so the class is chosen from the runtime value. */
     if (sp_streq(name, "round") || sp_streq(name, "truncate") ||
         sp_streq(name, "floor") || sp_streq(name, "ceil")) {
-      if (argc == 1) {
+      /* a trailing `half:` keyword only picks the tie-break mode; peel it off
+         the positional count for the class choice, as the Float rule does.
+         Read as a positional argument it made `r.round(1, half: :even)` an
+         Integer, and with no arm answering that shape the call fell through
+         to a NoMethodError. */
+      int rr_argc = argc;
+      if (rr_argc >= 1 && nt_type(nt, argv[rr_argc - 1]) &&
+          sp_streq(nt_type(nt, argv[rr_argc - 1]), "KeywordHashNode")) rr_argc--;
+      if (rr_argc == 1) {
         if (nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "IntegerNode"))
           { *out = nt_int(nt, argv[0], "value", 0) > 0 ? TY_RATIONAL : TY_INT; return 1; }
-        /* round(half: :x) with no digits rounds to an Integer (#3047) */
-        if (sp_streq(name, "round") && nt_type(nt, argv[0]) &&
-            sp_streq(nt_type(nt, argv[0]), "KeywordHashNode"))
-          { *out = TY_INT; return 1; }
         { *out = TY_POLY; return 1; }
       }
-      { *out = TY_INT; return 1; }
+      { *out = TY_INT; return 1; }   /* no digits -> Integer */
     }
     if (sp_streq(name, "zero?") || sp_streq(name, "positive?") ||
         sp_streq(name, "negative?") || sp_streq(name, "finite?") ||
