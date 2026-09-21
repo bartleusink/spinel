@@ -2242,10 +2242,13 @@ int desugar_sort_by_with_index(Compiler *c) {
    blockless form answers an Enumerator that keeps its source (`(1..6)
    .each_slice(2)` inspects as `1..6:each_slice(2)`, not as its elements). */
 static int enum_via_to_a_name(const char *n) {
+  /* take_while, drop_while, flat_map, collect_concat and minmax_by were
+     here: they are Ruby definitions now (builtins/enumerable.rb) whose
+     `each` walks a Hash or a Range as it is, an endless Range included */
   static const char *always[] = {
-    "take_while", "drop_while", "grep", "grep_v", "chunk_while", "slice_when",
-    "slice_before", "slice_after", "sort", "minmax", "minmax_by", "zip",
-    "find_index", "uniq", "flat_map", "collect_concat", NULL
+    "grep", "grep_v", "chunk_while", "slice_when",
+    "slice_before", "slice_after", "sort", "minmax", "zip",
+    "find_index", "uniq", NULL
   };
   static const char *with_block[] = {
     "each_slice", "each_cons", "each_entry", "cycle", NULL
@@ -2280,12 +2283,11 @@ int desugar_enumerable_via_to_a(Compiler *c) {
         if (ernm && (sp_streq(ernm, "each") || sp_streq(ernm, "each_with_index") ||
                      sp_streq(ernm, "reverse_each"))) continue;
       } }
-    /* A one-sided Range cannot become an array at all, and find / detect /
-       take_while have their own walk from the bounded end: routing them
-       through to_a turned a working search into a RangeError (#3863). The
-       other names have no such walk and keep the (faithfully raising) hop. */
-    if (rt == TY_RANGE &&
-        (sp_streq(nm, "find") || sp_streq(nm, "detect") || sp_streq(nm, "take_while"))) {
+    /* A one-sided Range cannot become an array at all, and find / detect
+       have their own walk from the bounded end: routing them through to_a
+       turned a working search into a RangeError (#3863). The other names
+       have no such walk and keep the (faithfully raising) hop. */
+    if (rt == TY_RANGE && (sp_streq(nm, "find") || sp_streq(nm, "detect"))) {
       int rn7 = recv;
       while (rn7 >= 0 && nt_type(nt, rn7) && sp_streq(nt_type(nt, rn7), "ParenthesesNode")) {
         int pb7 = nt_ref(nt, rn7, "body"); int pn7 = 0;
@@ -2781,7 +2783,11 @@ int desugar_builtin_enum_calls(Compiler *c) {
   for (int id = 0; chained && id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) continue;
     const char *nm = nt_str(nt, id, "name");
-    if (!nm || !sp_streq(nm, "each")) continue;
+    /* `recv.m.with_index { |x, i| }` is the Enumerator chain the typed
+       emitters serve per name (as map.with_index is); rewritten, the inner
+       call answers a plain Enumerator over the elements and the chain
+       loses the method it came from */
+    if (!nm || (!sp_streq(nm, "each") && !sp_streq(nm, "with_index") && !sp_streq(nm, "each_with_index"))) continue;
     int er = nt_ref(nt, id, "receiver");
     if (er >= 0 && er < n0 && nt_kind(nt, er) == NK_CallNode && nt_ref(nt, er, "block") < 0) chained[er] = 1;
   }
@@ -2794,8 +2800,12 @@ int desugar_builtin_enum_calls(Compiler *c) {
     if (chained && chained[id]) continue;
     TyKind rt = infer_type(c, recv);
     int ok = 0;
+    /* an Enumerator over a generator is driven lazily through #next by the
+       typed emitter of these names, which is what lets a prefix be taken
+       from an infinite one; the definition's `each` would materialize it */
+    int lazy_driven = rt == TY_ENUMERATOR && sp_streq(name, "take_while");
     if (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE || rt == TY_FLOAT_RANGE ||
-        rt == TY_STR_RANGE || rt == TY_ENUMERATOR) ok = 1;
+        rt == TY_STR_RANGE || (rt == TY_ENUMERATOR && !lazy_driven)) ok = 1;
     /* an empty `[]` / `{}` receiver has no type until its use decides one,
        and this is that use */
     else if (rt == TY_UNKNOWN && (nt_kind(nt, recv) == NK_ArrayNode || nt_kind(nt, recv) == NK_HashNode)) ok = 1;

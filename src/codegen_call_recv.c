@@ -1240,18 +1240,15 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
      a container: coerce to a poly array and filter it into a fresh poly array,
      mirroring the find arm above (this TY_POLY receiver would otherwise skip to
      the loud NoMethodError). (#2930) */
-  /* find_all, take_while and drop_while ride the same loop. They differ only
-     in what the loop does with the predicate and in what the value is: those
-     three answer the plain Array of elements whatever the receiver is (CRuby's
-     Hash#find_all gives the [k, v] pairs, unlike Hash#select), so they skip
-     the sp_poly_kept_result hop that hands a Hash receiver a Hash back. */
+  /* find_all rides the same loop and answers the plain Array of elements
+     whatever the receiver is (CRuby's Hash#find_all gives the [k, v] pairs,
+     unlike Hash#select), so it skips the sp_poly_kept_result hop that hands
+     a Hash receiver a Hash back. */
   int pf_rej = sp_streq(name, "reject");
   int pf_sel = sp_streq(name, "select") || sp_streq(name, "filter");
   int pf_fa  = sp_streq(name, "find_all");
-  int pf_tw  = sp_streq(name, "take_while");
-  int pf_dw  = sp_streq(name, "drop_while");
   if (recv >= 0 && rt == TY_POLY && nt_ref(nt, id, "block") >= 0 && argc == 0 &&
-      (pf_rej || pf_sel || pf_fa || pf_tw || pf_dw)) {
+      (pf_rej || pf_sel || pf_fa)) {
     int fblock = nt_ref(nt, id, "block");
     const char *bp = block_param_name(c, fblock, 0); if (bp) bp = rename_local(bp);
     int fbody = nt_ref(nt, fblock, "body");
@@ -1259,7 +1256,6 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     if (fbn >= 1) {
       int keep_truthy = !pf_rej;  /* select/filter/find_all keep truthy */
       int trecv = ++g_tmp, ti = ++g_tmp, tres = ++g_tmp, tbox = ++g_tmp;
-      int tdrop = pf_dw ? ++g_tmp : 0;
       Buf rb = expr_buf(c, recv);
       /* Keep the receiver boxed as well as coerced: Hash#select answers a
          Hash, Array#select an Array, and only the runtime value says which
@@ -1274,19 +1270,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
                  trecv, tbox, name, trecv);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tres, tres);
-      if (pf_dw) {
-        emit_indent(g_pre, g_indent);
-        buf_printf(g_pre, "int _t%d = 1;\n", tdrop);
-      }
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
       char es[64]; snprintf(es, sizeof es, "sp_PolyArray_get(_t%d, _t%d)", trecv, ti);
-      if (pf_dw) {
-        /* drop_while stops asking once it has stopped dropping: the block
-           runs for the dropped prefix and the first kept element only */
-        emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, %s); continue; }\n", tdrop, tres, es);
-      }
       int splat = emit_iter_autosplat(c, fblock, TY_POLY_ARRAY, es, g_indent + 1);
       if (!splat && bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_RbVal lv_%s = %s;\n", bp, es); }
       Buf cb; memset(&cb, 0, sizeof cb);
@@ -1296,22 +1282,8 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         emit_cond(c, fbb[fbn - 1], &cb); g_indent = sv;
       }
       emit_indent(g_pre, g_indent + 1);
-      if (pf_tw) {
-        buf_printf(g_pre, "if (!(%s)) break;\n", cb.p ? cb.p : "0");
-        emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", tres, es);
-      }
-      else if (pf_dw) {
-        buf_printf(g_pre, "if (_t%d && (%s)) continue;\n", tdrop, cb.p ? cb.p : "0");
-        emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "_t%d = 0;\n", tdrop);
-        emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", tres, es);
-      }
-      else {
-        buf_printf(g_pre, "if (%s(%s)) sp_PolyArray_push(_t%d, %s);\n",
-                   keep_truthy ? "" : "!", cb.p ? cb.p : "0", tres, es);
-      }
+      buf_printf(g_pre, "if (%s(%s)) sp_PolyArray_push(_t%d, %s);\n",
+                 keep_truthy ? "" : "!", cb.p ? cb.p : "0", tres, es);
       free(cb.p);
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
       if (pf_sel || pf_rej) buf_printf(b, "sp_poly_kept_result(_t%d, _t%d)", tbox, tres);
@@ -2226,106 +2198,6 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
           emit_stmts(c, body, g_pre, g_indent + 1);
           emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
           buf_printf(b, "_t%d", trecv); return 1;
-        }
-      }
-    }
-    /* take_while / drop_while (works for typed and poly arrays alike) */
-    if ((sp_streq(name, "take_while") || sp_streq(name, "drop_while")) && argc == 0
-        && nt_ref(nt, id, "block") >= 0) {
-      int is_drop = sp_streq(name, "drop_while");
-      int tw_blk = nt_ref(nt, id, "block");
-      const char *tw_bp = block_param_name(c, tw_blk, 0); if (tw_bp) tw_bp = rename_local(tw_bp);
-      int tw_body = nt_ref(nt, tw_blk, "body");
-      int tw_bn = 0; const int *tw_bb = tw_body >= 0 ? nt_arr(nt, tw_body, "body", &tw_bn) : NULL;
-      if (tw_bn > 0) {
-        const char *ek = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
-        if (ek) {
-          TyKind et = ty_array_elem(rt);
-          int trecv = ++g_tmp, tout = ++g_tmp, ti = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s; ", trecv, rb.p ? rb.p : ""); free(rb.p);
-          /* rooted, as the each_index hoist above is, and as the TY_POLY arm of
-             this same pair of methods near the top of the file already is: the
-             length is the loop bound, the element comes out of the receiver on
-             every turn, and the block between two turns allocates */
-          emit_gc_root_tmp(c, rt, trecv, g_pre); buf_puts(g_pre, "\n");
-          emit_indent(g_pre, g_indent);
-          /* The result array is rooted for the same reason and by the same
-             precedent: the TY_POLY arm of this pair roots its own result
-             beside its receiver. It is built empty here and pushed into on
-             every kept turn, so nothing but this temporary holds it while the
-             block allocates. */
-          buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);\n", ek, tout, ek, tout);
-          if (is_drop) {
-            emit_indent(g_pre, g_indent);
-            buf_puts(g_pre, "{ sp_bool _dropping = 1;\n");
-          }
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
-                     ti, ti, ek, trecv, ti);
-          char es_tw[64]; snprintf(es_tw, sizeof es_tw, "sp_%sArray_get(_t%d, _t%d)", ek, trecv, ti);
-          if (is_drop) {
-            /* the block runs for the dropped prefix and the first kept
-               element only; the rest is kept without asking */
-            emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "if (!_dropping) { sp_%sArray_push(_t%d, %s); continue; }\n", ek, tout, es_tw);
-          }
-          if (emit_iter_autosplat(c, tw_blk, rt, es_tw, g_indent + 1)) { }
-          else if (tw_bp) {
-            /* The block parameter is an ordinary local, and its SLOT may have
-               widened to poly -- another method of the receiver's name being
-               widened is enough to get there. The loop then shadowed the
-               sp_RbVal slot with a const char * of the element type, while
-               everything READING the parameter (the predicate through
-               sp_poly_truthy, any use in the body) is compiled against the
-               slot's type. Bind the element boxed into the slot's own type
-               instead, the way the for-loop variable is since #4168 (#4188). */
-            Scope *twsc = comp_scope_of(c, tw_blk);
-            LocalVar *twlv = twsc ? scope_local(twsc, tw_bp) : NULL;
-            emit_indent(g_pre, g_indent + 1);
-            if (twlv && twlv->type == TY_POLY && et != TY_POLY && et != TY_UNKNOWN) {
-              buf_printf(g_pre, "sp_RbVal lv_%s = ", tw_bp);
-              emit_boxed_text(c, et, es_tw, g_pre);
-              buf_puts(g_pre, ";\n");
-            }
-            else {
-              emit_ctype(c, et, g_pre);
-              buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", tw_bp, ek, trecv, ti);
-            }
-          }
-          Buf cb; memset(&cb, 0, sizeof cb);
-          int tw_nx = emit_block_cond_next(c, tw_blk, g_indent + 1, &cb);
-          if (!tw_nx) {
-            for (int j = 0; j < tw_bn - 1; j++) emit_stmt(c, tw_bb[j], g_pre, g_indent + 1);
-            int sv = g_indent; g_indent = g_indent + 1;
-            cb = expr_buf(c, tw_bb[tw_bn - 1]); g_indent = sv;
-          }
-          /* a boxed block value is a struct, so `!(rbval)` is not valid C;
-             Ruby's truthiness is what the condition wants anyway */
-          if (!tw_nx && comp_ntype(c, tw_bb[tw_bn - 1]) == TY_POLY) {
-            Buf tb2; memset(&tb2, 0, sizeof tb2);
-            buf_printf(&tb2, "sp_poly_truthy(%s)", cb.p ? cb.p : "sp_box_nil()");
-            free(cb.p); cb = tb2;
-          }
-          if (is_drop) {
-            emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "if (_dropping && !(%s)) _dropping = 0;\n", cb.p ? cb.p : "0");
-            emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "if (!_dropping) sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d));\n",
-                       ek, tout, ek, trecv, ti);
-          }
-          else {
-            emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "if (!(%s)) break;\n", cb.p ? cb.p : "0");
-            emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d));\n",
-                       ek, tout, ek, trecv, ti);
-          }
-          free(cb.p);
-          emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-          if (is_drop) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n"); }
-          buf_printf(b, "_t%d", tout); return 1;
         }
       }
     }

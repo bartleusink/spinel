@@ -12155,7 +12155,7 @@ enum {
   SP_PENUM_EACH, SP_PENUM_MAP, SP_PENUM_SELECT, SP_PENUM_REJECT,
   SP_PENUM_FIND, SP_PENUM_SORT_BY, SP_PENUM_COUNT, SP_PENUM_SUM,
   SP_PENUM_ANY, SP_PENUM_ALL, SP_PENUM_NONE,
-  SP_PENUM_FIND_INDEX, SP_PENUM_TAKE_WHILE, SP_PENUM_DROP_WHILE,
+  SP_PENUM_FIND_INDEX,
   SP_PENUM_EACH_WITH_INDEX
 };
 /* Call `blk` with one element. Both channels are filled, as every other
@@ -12226,25 +12226,10 @@ static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
         }
         return sp_box_obj(h, SP_BUILTIN_POLY_POLY_HASH);
       }
-    }
-    /* fall through to the array form */
-    /* FALLTHROUGH */
-    case SP_PENUM_TAKE_WHILE:
-    case SP_PENUM_DROP_WHILE: {
+      /* the array form */
       sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
-      int dropping = 1;
       for (sp_int i = 0; i < n; i++) {
-        /* drop_while stops asking once it has stopped dropping: the block
-           runs for the dropped prefix and the first kept element only */
-        if (op == SP_PENUM_DROP_WHILE && !dropping) { sp_PolyArray_push(out, src->data[i]); continue; }
         int t = sp_poly_truthy(sp_penum_call1(blk, src->data[i]));
-        if (op == SP_PENUM_TAKE_WHILE) { if (!t) break; sp_PolyArray_push(out, src->data[i]); continue; }
-        if (op == SP_PENUM_DROP_WHILE) {
-          if (t) continue;
-          dropping = 0;
-          sp_PolyArray_push(out, src->data[i]);
-          continue;
-        }
         if (t == (op == SP_PENUM_SELECT)) sp_PolyArray_push(out, src->data[i]);
       }
       return sp_box_poly_array(out);

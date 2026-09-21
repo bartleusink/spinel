@@ -3736,6 +3736,15 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     Scope *cs = p0 ? comp_scope_of(c, id) : NULL;
     LocalVar *outer = (p0 && cs) ? scope_local(cs, p0) : NULL;
     int box_to_poly = outer && outer->type == TY_POLY && et != TY_POLY;
+    /* the parameter's own slot can be boxed while the receiver stays a typed
+       array (a widened slot, #4188): the element binds boxed into it, the
+       way the shadowed outer's would (the take_while of a Ruby definition
+       whose block parameter widened assigned a const char * to it) */
+    if (!box_to_poly && p0 && et != TY_POLY) {
+      Scope *bsc = comp_scope_of(c, block);
+      LocalVar *blv = bsc ? scope_local(bsc, p0_orig ? p0_orig : p0) : NULL;
+      if (blv && blv->type == TY_POLY) box_to_poly = 1;
+    }
     int ts = 0;
     if (outer) {
       /* Block params shadow outer variables in Ruby; save and restore */

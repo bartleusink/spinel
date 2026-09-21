@@ -213,7 +213,6 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
          materializing: the elements are the range's own ints (#3863) */
       if (nt_ref(nt, id, "block") >= 0 && argc == 0) {
         if (sp_streq(name, "find") || sp_streq(name, "detect")) { *out = TY_INT; return 1; }
-        if (sp_streq(name, "take_while")) { *out = TY_INT_ARRAY; return 1; }
       }
     }
   }
@@ -824,8 +823,7 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       if (sp_streq(name, "select") || sp_streq(name, "reject") ||
           sp_streq(name, "filter") || sp_streq(name, "find_all") ||
           sp_streq(name, "sort_by") ||
-          sp_streq(name, "sort_by!") ||
-          sp_streq(name, "take_while") || sp_streq(name, "drop_while"))
+          sp_streq(name, "sort_by!"))
         { *out = rt; return 1; }
       if ((sp_streq(name, "find") || sp_streq(name, "detect")) && argc >= 1)
         { *out = TY_POLY; return 1; }  /* find(ifnone): the element or the proc's value */

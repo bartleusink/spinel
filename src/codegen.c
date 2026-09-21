@@ -4952,6 +4952,13 @@ void emit_proc_literal(Compiler *c, int create, Buf *b) {
      called -- CRuby 4 delivers a break only for a block-converted proc, never
      an explicitly created one. A lambda's break is a return from the lambda. */
   int brk_proc = !is_lambda && !is_block_node && block_has_top_break(c, body);
+  /* A BLOCK lifted into a proc (the block of a boxed receiver's `each`
+     whose class list carries a Ruby each, say) keeps the break its writer
+     meant: the call site's break scope (g_brk_ser_var) is captured, and a
+     top-level `break` in the body throws to it, exactly as an inlined
+     block's does. It was emitted as a bare C `break` in a function with no
+     loop and the C did not build (#4665, the take_while of a builtin). */
+  int brk_blk = !is_lambda && is_block_node && g_brk_ser_var != NULL && block_has_top_break(c, body);
   /* a lambda whose body can top-level-break returns that value: box the ret */
   if (is_lambda && block_has_top_break(c, body)) ret = TY_POLY;
   /* A lambda with an early `return <e>` (possibly non-local, inside a nested
@@ -5154,7 +5161,7 @@ else if (orecv >= 0 && onm) {
      the cap struct itself first (sp_Proc_scan does not), then each cell --
      matching the sp_hashproc convention; marking only the cells would leave
      the cap struct unreachable and free it out from under the proc. */
-  if (ncap > 0 || cap_self || cap_cls || ret_proc) {
+  if (ncap > 0 || cap_self || cap_cls || ret_proc || brk_blk) {
     buf_printf(&g_procs, "typedef struct {");
     for (int i = 0; i < ncap; i++) {
       LocalVar *clv = scope_local(bs, caps.v[i]);
@@ -5167,6 +5174,7 @@ else if (orecv >= 0 && onm) {
     else if (cap_self) buf_puts(&g_procs, " void *__self;");
     if (cap_cls) buf_puts(&g_procs, " sp_Class __self_cls;");
     if (ret_proc) buf_puts(&g_procs, " sp_int _home;");  /* home method's proc-return id (sp_proc_home.id) */
+    if (brk_blk) buf_puts(&g_procs, " sp_int _brkhome;");  /* the call site's break serial (sp_brk_push) */
     buf_printf(&g_procs, " } _proc_cap_%d;\n", pid);
     buf_printf(&g_procs, "static void _proc_cap_scan_%d(void *p) {\n", pid);
     buf_printf(&g_procs, "  sp_gc_mark(p);\n");
@@ -5239,10 +5247,12 @@ else if (orecv >= 0 && onm) {
   const char *sv_bser = g_brk_ser_var; g_brk_ser_var = NULL;
   int sv_bskip = g_brk_skip_id; g_brk_skip_id = -1;
   int sv_pbk = g_proc_body_kind; const char *sv_pbh = g_proc_brk_home;
-  g_proc_body_kind = is_lambda ? 1 : (brk_proc ? 2 : 0);
+  g_proc_body_kind = is_lambda ? 1 : ((brk_proc || brk_blk) ? 2 : 0);
   /* serial -1 never matches a live scope: sp_brk_throw raises the CRuby
      LocalJumpError after evaluating the break value */
-  g_proc_brk_home = brk_proc ? "-1" : NULL;
+  char brk_acc[48] = "";
+  if (brk_blk) snprintf(brk_acc, sizeof brk_acc, "((_proc_cap_%d *)_cap)->_brkhome", pid);
+  g_proc_brk_home = brk_blk ? brk_acc : brk_proc ? "-1" : NULL;
   char cap_struct_name[32] = "";
   if (ncap > 0) { snprintf(cap_struct_name, sizeof cap_struct_name, "_proc_cap_%d", pid); g_cap_struct = cap_struct_name; g_cap_names = &caps; }
   else { g_cap_struct = NULL; g_cap_names = NULL; }
@@ -5693,7 +5703,7 @@ else if (orecv >= 0 && onm) {
   g_rescue_save_depth = sv_rsd;
   g_fn_pr_label = sv_fn_prl; g_fn_pr_var = sv_fn_prv; g_fn_ret_type = sv_fn_rt;
 
-  if (ncap == 0 && !cap_self && !cap_cls && !ret_proc) {
+  if (ncap == 0 && !cap_self && !cap_cls && !ret_proc && !brk_blk) {
     buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, NULL, NULL, %d, %s, %d, %s)",
                pid, meta_arity, is_lambda ? "TRUE" : "FALSE", meta_count, meta_args);
   }
@@ -5742,6 +5752,7 @@ else if (orecv >= 0 && onm) {
           buf_printf(g_pre, "_capv_%d->__self_cls = _sp_cls;\n", pid);
       }
       if (ret_proc) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->_home = _h.id;\n", pid); }
+      if (brk_blk) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->_brkhome = %s;\n", pid, sv_bser); }
     }
     buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, _capv_%d, _proc_cap_scan_%d, %d, %s, %d, %s)",
                pid, pid, pid, meta_arity, is_lambda ? "TRUE" : "FALSE", meta_count, meta_args);

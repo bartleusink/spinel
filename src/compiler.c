@@ -1547,8 +1547,7 @@ const char *poly_enum_op_for(const char *name) {
     {"sort_by","SP_PENUM_SORT_BY"},
     {"count","SP_PENUM_COUNT"},
     {"sum","SP_PENUM_SUM"}, {"any?","SP_PENUM_ANY"}, {"all?","SP_PENUM_ALL"},
-    {"none?","SP_PENUM_NONE"}, {"take_while","SP_PENUM_TAKE_WHILE"},
-    {"drop_while","SP_PENUM_DROP_WHILE"}, {NULL,NULL}
+    {"none?","SP_PENUM_NONE"}, {NULL,NULL}
   };
   if (!name) return NULL;
   for (int i = 0; PEN[i].nm; i++) if (sp_streq(name, PEN[i].nm)) return PEN[i].op;
@@ -1585,7 +1584,10 @@ int poly_container_read_p(const char *name) {
     /* the surface serves these now: each ends the dispatch in a runtime
        helper that lets the receiver answer for itself, so the call's type is
        the union rather than whichever user method owns the name */
-    "delete", "dig", "values_at", NULL };
+    "delete", "dig", "values_at",
+    /* a blockless each answers an Enumerator over the container; a class
+       with a Ruby each in the program left an Array on the raise default */
+    "each", NULL };
   if (!name) return 0;
   for (int i = 0; N[i]; i++) if (sp_streq(name, N[i])) return 1;
   return 0;

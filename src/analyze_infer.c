@@ -839,8 +839,7 @@ int range_enum_redispatch(Compiler *c, int id) {
        sp_streq(name, "sort_by") || sp_streq(name, "chunk_while") ||
        sp_streq(name, "slice_when") ||
        sp_streq(name, "chunk") ||
-       sp_streq(name, "sum") || sp_streq(name, "each_with_object") ||
-       sp_streq(name, "take_while") || sp_streq(name, "drop_while")))
+       sp_streq(name, "sum") || sp_streq(name, "each_with_object")))
     return 1;
   if ((sp_streq(name, "inject") || sp_streq(name, "reduce")) && block >= 0)
     return 1;
@@ -1536,13 +1535,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       infer_type(c, recv) == TY_POLY && !an_user_defines_or_reads(c, name))
     return TY_POLY;
   /* find_all is NOT the third spelling of select: Hash#select answers a Hash,
-     Hash#find_all the [k, v] pairs as an Array. take_while and drop_while
-     answer an Array the same way. All three are an array whatever the
-     receiver turns out to be. */
+     Hash#find_all the [k, v] pairs as an Array, whatever the receiver turns
+     out to be. */
   if (recv >= 0 && nt_ref(nt, id, "block") >= 0 && argc == 0 &&
-      (sp_streq(name, "find_all") || sp_streq(name, "take_while") ||
-       sp_streq(name, "drop_while")) &&
-      infer_type(c, recv) == TY_POLY)
+      sp_streq(name, "find_all") && infer_type(c, recv) == TY_POLY)
     return TY_POLY_ARRAY;
   /* `poly.each_slice(n) { }` / `each_cons(n) { }` answer the receiver, whatever
      kind it turns out to be -- an Array for an Array, the Hash itself for a
@@ -6953,6 +6949,11 @@ TyKind infer_uncached(Compiler *c, int id) {
        it, so one body serves every site (#3399). */
     if (getenv("SP_DBG_PF2")) fprintf(stderr, "[y] node=%d scope=%d pf=%d name=%s\n", id, ymi, (ymi>=0&&ymi<c->nscopes)?c->scopes[ymi].is_proc_form:-1, (ymi>=0&&ymi<c->nscopes&&c->scopes[ymi].name)?c->scopes[ymi].name:"?");
     if (ymi >= 0 && ymi < c->nscopes && c->scopes[ymi].is_proc_form) return TY_POLY;
+    /* A lowered method's block is a proc as well, and its yield is a call
+       on it: poly. Without this a lowered method no site ever gave a block
+       (its `if block_given?` arm is dead at every site, but compiled) had an
+       UNKNOWN yield in a condition, which the emitter refused. */
+    if (ymi >= 0 && ymi < c->nscopes && c->scopes[ymi].is_lowered_yield) return TY_POLY;
     /* When the block value diverges across call sites (string block at one,
        int at another) AND this yield is the value of an assignment (its result
        flows into a LOCAL), the local settles its type from the first site and

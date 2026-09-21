@@ -177,4 +177,31 @@ module Enumerable
       each
     end
   end
+
+  def take_while
+    if block_given?
+      out = []
+      each do |x|
+        break unless yield x
+        out << x
+      end
+      out
+    else
+      each
+    end
+  end
+
+  def drop_while
+    if block_given?
+      out = []
+      dropping = true
+      each do |x|
+        dropping = false if dropping && !yield(x)
+        out << x unless dropping
+      end
+      out
+    else
+      each
+    end
+  end
 end
