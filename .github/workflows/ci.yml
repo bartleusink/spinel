@@ -7,44 +7,67 @@ on:
     branches: [master]
 
 jobs:
+  # The corpus is what a job's wall time is made of (six minutes of the
+  # eight on a 4-vCPU runner), so each lane runs it as three parallel
+  # slices (make's TEST_SHARD=k/3, by position in the sorted list). Slice 1
+  # also carries the C-side test legs and, on Linux/gcc, the property gates,
+  # the benchmarks and optcarrot; the other slices run the corpus alone.
   posix:
-    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    name: ${{ matrix.os }} / ${{ matrix.cc }} (${{ matrix.shard }}/3)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            cc: gcc
-          - os: ubuntu-latest
-            cc: clang
+        os: [ubuntu-latest, macos-latest]
+        cc: [gcc, clang]
+        shard: [1, 2, 3]
+        exclude:
           - os: macos-latest
-            cc: clang
+            cc: gcc
     env:
       # `sccache <cc>` wrapper. sccache forwards through to the
       # underlying compiler when its cache misses, so this stays
-      # transparent. `SCCACHE_GHA_ENABLED=true` tells sccache to
-      # use the GitHub Actions cache as its storage backend (set
-      # up by the sccache-action step below). The test/bench rules
-      # use separate compile and link steps so the compile step is
-      # in sccache's cacheable pattern; the test compile also loads
-      # a precompiled spinel_rt.h (see PCH_ROOT in the Makefile),
-      # which cuts the compile even when sccache misses. sccache
-      # hashes the preprocessed source, so the gcc-implicit .gch
-      # never leaks into the cache key; for clang's -include-pch
-      # sccache declines to cache and forwards, which still gets
-      # the PCH speedup.
+      # transparent. The test/bench rules use separate compile and
+      # link steps so the compile step is in sccache's cacheable
+      # pattern; the test compile also loads a precompiled
+      # spinel_rt.h (see PCH_ROOT in the Makefile), which cuts the
+      # compile even when sccache misses. sccache hashes the
+      # preprocessed source, so the gcc-implicit .gch never leaks
+      # into the cache key; for clang's -include-pch sccache
+      # declines to cache and forwards, which still gets the PCH
+      # speedup.
+      #
+      # The store is sccache's own on-disk cache, carried between
+      # runs as ONE actions/cache entry per lane and slice (the
+      # steps below), not the GitHub cache service as sccache's
+      # backend (SCCACHE_GHA_ENABLED). That backend makes a service
+      # round trip per compile, and with twelve jobs each running
+      # four compiles a second the service answered "rate limit
+      # exceeded" to about half of them (run 35706592343): reads
+      # that fail are misses, writes that fail never land, and the
+      # corpus slices settled at a 35-75% hit rate. A restored disk
+      # cache answers every lookup locally.
       CC: sccache ${{ matrix.cc }}
-      SCCACHE_GHA_ENABLED: "true"
-      # Room for the slow GHA-backed server startup (default ~10s); keep it
-      # alive across steps. See the pre-start step below.
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
       SCCACHE_STARTUP_TIMEOUT: "30"
+      # Keep the server alive across steps. See the pre-start step below.
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      # The key never matches (it carries the run id), so the post step
+      # always saves this run's cache; the restore key picks up the newest
+      # earlier one for the same lane and slice, from this branch or from
+      # master. Old entries fall to the repository's cache eviction.
+      - name: Restore the sccache store
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: sccache-${{ matrix.os }}-${{ matrix.cc }}-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: sccache-${{ matrix.os }}-${{ matrix.cc }}-${{ matrix.shard }}-
 
       # Start the server once here so `make -j` clients don't race to start it.
       - name: Pre-start sccache server
@@ -84,20 +107,17 @@ jobs:
         # independent (tests diff output, not codegen), and the gcc -O1 leg still
         # exercises the optimizing path; the clang leg's job is that clang accepts
         # the emitted C and runs it, which -O0 covers.
-        # EVERY leg bypasses sccache here (CC override). The clang reason is
-        # old: sccache declines to cache -include-pch compiles, so the wrapper
-        # was pure client-spawn overhead. The gcc reason is measured, not
-        # assumed: a push that touches a lib/ header invalidates every
-        # per-test cache entry, and sccache's miss path preprocesses the TU,
-        # round-trips the GitHub cache service (a GET and a PUT per file) and
-        # compiles from the PREPROCESSED text, where the implicit .gch cannot
-        # help -- about 210ms of overhead per miss on top of a ~60ms real
-        # compile, times ~3,400 tests: the 5-minute job became 19 minutes
-        # exactly when a runtime header changed (runs 33369245440 and
-        # 33348246194). Unwrapped, cold and warm runs cost the same few
-        # minutes, which is the bound that matters; the compiler build above
-        # keeps the wrapper, where TUs are big and hits pay for themselves.
-        run: make -j$(getconf _NPROCESSORS_ONLN) test ${{ matrix.cc == 'clang' && 'OPT=-O0 CC=clang' || 'OPT=-O1 CC=gcc' }}
+        # The `CC=gcc` / `CC=clang` here does NOT take sccache off the
+        # per-test compiles, although 970112c6 meant it to: common.mk
+        # re-wraps a command-line CC with `override CC := sccache $(CC)`
+        # whenever sccache is on PATH, and the stats step below shows the
+        # result (91% hits, 1479 of 1621 executed compiles, on run
+        # 35701579214's gcc slice 1). That is what makes a slice run in
+        # ~120 s: the same slice compiled cold costs ~370 s, which is what
+        # the -m32 lane paid until it got the same wrapper. The override
+        # is kept as the spelling of the opt level per compiler; NO_CCACHE=1
+        # would be the way to actually unwrap.
+        run: make -j$(getconf _NPROCESSORS_ONLN) ${{ matrix.shard == 1 && 'test' || 'test-corpus' }} TEST_SHARD=${{ matrix.shard }}/3 ${{ matrix.cc == 'clang' && 'OPT=-O0 CC=clang' || 'OPT=-O1 CC=gcc' }}
 
       # Inference/allocation property gates. These assert the SHAPE of the
       # generated C -- that a slot keeps its typed representation, that the
@@ -107,7 +127,7 @@ jobs:
       # and stayed that way for weeks with CI green throughout. Linux/gcc only:
       # what they read is compiler- and OS-independent.
       - name: Run inference and allocation property gates
-        if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc'
+        if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc' && matrix.shard == 1
         run: make alloc-report-test infer-test spin-check
 
       # Benchmark integration test. Compiles every benchmark/*.rb through
@@ -122,7 +142,7 @@ jobs:
       # compiles), so it carries both bench and optcarrot to keep the
       # slowest job -- which sets the CI wall time -- the clang test run.
       - name: Run benchmark integration test
-        if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc'
+        if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc' && matrix.shard == 1
         run: make bench
 
       # End-to-end optcarrot integration test.  Linux only -- no
@@ -132,7 +152,7 @@ jobs:
       # `pack-for-spinel.rb` flow + Lan_Master.nes checksum 59662
       # contract that the standalone `make test` doesn't cover.
       - name: Run optcarrot integration test
-        if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc'
+        if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc' && matrix.shard == 1
         run: make optcarrot
 
       - name: sccache stats
@@ -149,13 +169,41 @@ jobs:
   # `# spinel: int64` in its first line and is filtered out (Makefile,
   # SPINEL_INT_BITS). Every generated program links -lcrypt, hence the
   # i386 libcrypt; gcc-multilib brings the 32-bit libc and libgcc.
+  #
+  # sccache, exactly as the posix lanes have it. Without it this lane
+  # compiled every per-test TU cold and its corpus slice took 370 s where
+  # the gcc lane's took 120 s (run 35701579214 on #4797): the -m32 compile
+  # itself costs the same as the 64-bit one (measured locally, cold, both
+  # 148 s for the same slice), the whole difference was the cache. The
+  # -m32 flag is part of sccache's key, so this lane's entries never
+  # collide with the 64-bit gcc lane's.
   linux32:
-    name: ubuntu-latest / gcc -m32
+    name: ubuntu-latest / gcc -m32 (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
-      CC: gcc -m32
+      CC: sccache gcc -m32
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_STARTUP_TIMEOUT: "30"
+      SCCACHE_IDLE_TIMEOUT: "0"
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Restore the sccache store
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: sccache-ubuntu-latest-gcc-m32-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: sccache-ubuntu-latest-gcc-m32-${{ matrix.shard }}-
+
+      - name: Pre-start sccache server
+        run: sccache --start-server
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -175,4 +223,8 @@ jobs:
         run: make -j$(getconf _NPROCESSORS_ONLN) all
 
       - name: Run the test corpus as 32-bit programs
-        run: make -j$(getconf _NPROCESSORS_ONLN) test-corpus OPT=-O1
+        run: make -j$(getconf _NPROCESSORS_ONLN) test-corpus TEST_SHARD=${{ matrix.shard }}/3 OPT=-O1
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
