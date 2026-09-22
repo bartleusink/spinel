@@ -3313,6 +3313,22 @@ int desugar_builtin_scalar_defs(Compiler *c) {
   }
   int n0 = nt->count;
   int changed = 0;
+  /* A program's own reopen of the container -- for ANY name, not only one
+     builtins/integer.rb migrated -- is registered by name the same way the
+     spliced generic is, in odef_name/odef_def below, so a concrete call
+     can rewrite onto a clone typed for that one call site (below, in the
+     per-call-site loop) instead of the single native-int
+     `sp_Integer_abs(sp_int self)` the class's ordinary compilation emits,
+     which cannot accept a Bignum receiver at all. That ordinary
+     compilation is left untouched -- the class stays in `nb` -- because
+     the poly dispatch's prim-reopen arm (class_is_prim_reopen,
+     codegen_call.c) still calls it for a run-time-typed receiver, and a
+     later def of the same name overwrites the table entry (blanking the
+     one it replaces), so the LAST reopen -- the program's own, when both a
+     spliced generic and a program's own def claim a name -- wins, matching
+     comp_method_in_chain's ordinary Ruby redefinition semantics. */
+  char **odef_name[SP_BX_N]; int *odef_def[SP_BX_N]; int odef_n[SP_BX_N], odef_cap[SP_BX_N];
+  for (int bx = 0; bx < SP_BX_N; bx++) { odef_name[bx] = NULL; odef_def[bx] = NULL; odef_n[bx] = 0; odef_cap[bx] = 0; }
   /* Splicing prepends the required file's content ahead of the program's
      own source (resolve_plain_requires), so the FIRST top-level
      ClassNode/ModuleNode for a given container is always the spliced
@@ -3323,10 +3339,10 @@ int desugar_builtin_scalar_defs(Compiler *c) {
      digits.rb probing found this the hard way, an own reopen consisting
      of exactly one builtin-named method converted along with the real
      one and shadowed EVERY call in the file, not just those after it.
-     Consuming only the first occurrence per container and passing every
-     later one through untouched sends a genuine reopen through the
-     ordinary open-class/poly path instead, where comp_method_in_chain
-     (desugar_builtin_scalar_calls) already defers to it. */
+     Consuming only the first occurrence per container as the spliced
+     generic and running every later one through the clone-registration
+     below (rather than the in-place transform reserved for the spliced
+     occurrence) keeps that distinction. */
   int bx_done[SP_BX_N] = { 0, 0, 0 };
   for (int i = 0; i < tn; i++) {
     int st = tb[i];
@@ -3337,55 +3353,139 @@ int desugar_builtin_scalar_defs(Compiler *c) {
     int bx = -1;
     for (int k = 0; k < SP_BX_N; k++) if (mn && sp_streq(mn, sp_bx_class_name[k])) { bx = k; break; }
     if (bx < 0 || sp_builtin_extra_names_n(bx) == 0) { nb[nbn++] = st; continue; }
-    if (bx_done[bx]) { nb[nbn++] = st; continue; }   /* a later reopen of the same container: a program's own, left as it was */
     int body = nt_ref(nt, st, "body");
     int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-    int all_builtin = bn > 0;
-    for (int k = 0; k < bn; k++)
-      if (nt_kind(nt, bb[k]) != NK_DefNode || sp_builtin_extra_name_index(bx, nt_str(nt, bb[k], "name")) < 0) all_builtin = 0;
-    if (!all_builtin) { nb[nbn++] = st; continue; }   /* a program's own reopen: left as it was */
-    bx_done[bx] = 1;
+    int all_builtin = 0;
+    if (!bx_done[bx] && bn > 0) {
+      all_builtin = 1;
+      for (int k = 0; k < bn; k++)
+        if (nt_kind(nt, bb[k]) != NK_DefNode || sp_builtin_extra_name_index(bx, nt_str(nt, bb[k], "name")) < 0) { all_builtin = 0; break; }
+    }
+    if (all_builtin) {
+      bx_done[bx] = 1;
+      for (int k = 0; k < bn; k++) {
+        int def = bb[k];
+        const char *name = nt_str(nt, def, "name");
+        int bi = sp_builtin_extra_name_index(bx, name);
+        int hi = bi_subtree_max(nt, def);
+        int pn = nt_ref(nt, def, "parameters");
+        if (pn < 0) { pn = nt_new_node(nt, "ParametersNode"); if (pn < 0) break; nt_node_set_ref(nt, def, "parameters", pn); }
+        int spself = nt_new_node(nt, "RequiredParameterNode"); if (spself < 0) break;
+        nt_node_set_str(nt, spself, "name", "__self");
+        { int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
+          int *nr = (int *)malloc(sizeof(int) * (size_t)(rn + 1));
+          if (!nr) break;
+          nr[0] = spself; for (int j = 0; j < rn; j++) nr[j + 1] = reqs[j];
+          nt_node_set_arr(nt, pn, "requireds", nr, rn + 1); free(nr); }
+        int dbody = nt_ref(nt, def, "body");
+        int lo = dbody >= 0 ? dbody : def;
+        for (int id = lo; id <= hi; id++) {
+          NodeKind kind = nt_kind(nt, id);
+          if (kind == NK_SelfNode) {
+            nt_node_set_type(nt, id, "LocalVariableReadNode");
+            nt_node_set_str(nt, id, "name", "__self");
+            nt_node_set_int(nt, id, "depth", 0);
+          }
+          else if (kind == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
+            const char *nm = nt_str(nt, id, "name");
+            if (!nm || bi_kernel_call_name(nm)) continue;
+            int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) break;
+            nt_node_set_str(nt, rd, "name", "__self");
+            nt_node_set_int(nt, rd, "depth", 0);
+            nt_node_set_ref(nt, id, "receiver", rd);
+          }
+        }
+        { char gn[256]; snprintf(gn, sizeof gn, "%s%s", sp_bx_prefix[bx], name); nt_node_set_str(nt, def, "name", gn); }
+        if (bi >= 0) gdef[bx][bi] = def;
+      }
+      bi_subtree_blank(nt, cp);
+      nt_node_set_type(nt, st, "NilNode");
+      changed = 1;
+      continue;
+    }
+    /* A program's own reopen: left fully intact (still in `nb`) for
+       ordinary class compilation and the poly dispatch's prim-reopen arm.
+       Each of its own simple-signature defs (no block, splat, or keyword
+       params -- the same restricted shape desugar_builtin_scalar_calls'
+       arity check already assumes) additionally gets a clone-based
+       generic registered by name, built from a CLONE of the def so the
+       original is never touched. */
+    nb[nbn++] = st;
     for (int k = 0; k < bn; k++) {
       int def = bb[k];
+      if (nt_kind(nt, def) != NK_DefNode) continue;
       const char *name = nt_str(nt, def, "name");
-      int bi = sp_builtin_extra_name_index(bx, name);
-      int hi = bi_subtree_max(nt, def);
-      int pn = nt_ref(nt, def, "parameters");
-      if (pn < 0) { pn = nt_new_node(nt, "ParametersNode"); if (pn < 0) break; nt_node_set_ref(nt, def, "parameters", pn); }
-      int spself = nt_new_node(nt, "RequiredParameterNode"); if (spself < 0) break;
+      if (!name) continue;
+      int pn0 = nt_ref(nt, def, "parameters");
+      if (pn0 >= 0 && (nt_ref(nt, pn0, "block") >= 0 || nt_ref(nt, pn0, "rest") >= 0 ||
+                       nt_ref(nt, pn0, "keyword_rest") >= 0)) continue;
+      if (pn0 >= 0) { int kwn = 0; nt_arr(nt, pn0, "keywords", &kwn); if (kwn > 0) continue; }
+      int clone = nt_clone_subtree(nt, def);
+      if (clone < 0) continue;
+      int hi = bi_subtree_max(nt, clone);
+      int pn = nt_ref(nt, clone, "parameters");
+      if (pn < 0) { pn = nt_new_node(nt, "ParametersNode"); if (pn < 0) continue; nt_node_set_ref(nt, clone, "parameters", pn); }
+      int spself = nt_new_node(nt, "RequiredParameterNode"); if (spself < 0) continue;
       nt_node_set_str(nt, spself, "name", "__self");
       { int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
         int *nr = (int *)malloc(sizeof(int) * (size_t)(rn + 1));
-        if (!nr) break;
+        if (!nr) continue;
         nr[0] = spself; for (int j = 0; j < rn; j++) nr[j + 1] = reqs[j];
         nt_node_set_arr(nt, pn, "requireds", nr, rn + 1); free(nr); }
-      int dbody = nt_ref(nt, def, "body");
-      int lo = dbody >= 0 ? dbody : def;
-      for (int id = lo; id <= hi; id++) {
-        NodeKind kind = nt_kind(nt, id);
+      int dbody = nt_ref(nt, clone, "body");
+      int lo = dbody >= 0 ? dbody : clone;
+      for (int id2 = lo; id2 <= hi; id2++) {
+        NodeKind kind = nt_kind(nt, id2);
         if (kind == NK_SelfNode) {
-          nt_node_set_type(nt, id, "LocalVariableReadNode");
-          nt_node_set_str(nt, id, "name", "__self");
-          nt_node_set_int(nt, id, "depth", 0);
+          nt_node_set_type(nt, id2, "LocalVariableReadNode");
+          nt_node_set_str(nt, id2, "name", "__self");
+          nt_node_set_int(nt, id2, "depth", 0);
         }
-        else if (kind == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
-          const char *nm = nt_str(nt, id, "name");
+        else if (kind == NK_CallNode && nt_ref(nt, id2, "receiver") < 0) {
+          const char *nm = nt_str(nt, id2, "name");
           if (!nm || bi_kernel_call_name(nm)) continue;
           int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) break;
           nt_node_set_str(nt, rd, "name", "__self");
           nt_node_set_int(nt, rd, "depth", 0);
-          nt_node_set_ref(nt, id, "receiver", rd);
+          nt_node_set_ref(nt, id2, "receiver", rd);
         }
       }
-      { char gn[256]; snprintf(gn, sizeof gn, "%s%s", sp_bx_prefix[bx], name); nt_node_set_str(nt, def, "name", gn); }
-      if (bi >= 0) gdef[bx][bi] = def;
+      { char gn[256]; snprintf(gn, sizeof gn, "%s%s", sp_bx_prefix[bx], name); nt_node_set_str(nt, clone, "name", gn); }
+      int bi = sp_builtin_extra_name_index(bx, name);
+      if (bi >= 0) {
+        if (gdef[bx][bi] >= 0) bi_subtree_blank(nt, gdef[bx][bi]);
+        gdef[bx][bi] = clone;
+      } else {
+        int j = -1;
+        for (int m = 0; m < odef_n[bx]; m++) if (sp_streq(odef_name[bx][m], name)) { j = m; break; }
+        if (j >= 0) {
+          if (odef_def[bx][j] >= 0) bi_subtree_blank(nt, odef_def[bx][j]);
+          odef_def[bx][j] = clone;
+        } else {
+          if (odef_n[bx] >= odef_cap[bx]) {
+            int newcap = odef_cap[bx] > 0 ? odef_cap[bx] * 2 : 8;
+            char **ng = (char **)realloc(odef_name[bx], sizeof(char *) * (size_t)newcap);
+            int *nd = (int *)realloc(odef_def[bx], sizeof(int) * (size_t)newcap);
+            if (ng) odef_name[bx] = ng;
+            if (nd) odef_def[bx] = nd;
+            if (ng && nd) odef_cap[bx] = newcap;
+          }
+          if (odef_n[bx] < odef_cap[bx]) {
+            odef_name[bx][odef_n[bx]] = strdup(name);
+            odef_def[bx][odef_n[bx]] = clone;
+            odef_n[bx]++;
+          }
+        }
+      }
+      changed = 1;
     }
-    bi_subtree_blank(nt, cp);
-    nt_node_set_type(nt, st, "NilNode");
-    changed = 1;
   }
   if (!changed) {
-    for (int bx = 0; bx < SP_BX_N; bx++) free(gdef[bx]);
+    for (int bx = 0; bx < SP_BX_N; bx++) {
+      free(gdef[bx]);
+      for (int i = 0; i < odef_n[bx]; i++) free(odef_name[bx][i]);
+      free(odef_name[bx]); free(odef_def[bx]);
+    }
     free(nb); return 0;
   }
   /* one copy per call site, exactly as desugar_builtins does for
@@ -3394,13 +3494,16 @@ int desugar_builtin_scalar_defs(Compiler *c) {
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *cn0 = nt_str(nt, id, "name");
-    int bx = -1, bi = -1;
-    for (int k = 0; k < SP_BX_N; k++) {
+    int bx = -1, gd = -1;
+    for (int k = 0; k < SP_BX_N && gd < 0; k++) {
       int idx = sp_builtin_extra_name_index(k, cn0);
-      if (idx >= 0 && gdef[k] && gdef[k][idx] >= 0) { bx = k; bi = idx; break; }
+      if (idx >= 0 && gdef[k] && gdef[k][idx] >= 0) { bx = k; gd = gdef[k][idx]; break; }
+      if (!cn0) continue;
+      for (int m = 0; m < odef_n[k]; m++)
+        if (sp_streq(odef_name[k][m], cn0) && odef_def[k][m] >= 0) { bx = k; gd = odef_def[k][m]; break; }
     }
-    if (bi < 0) continue;
-    int copy = nt_clone_subtree(nt, gdef[bx][bi]);
+    if (gd < 0) continue;
+    int copy = nt_clone_subtree(nt, gd);
     if (copy < 0) break;
     char cn[256]; snprintf(cn, sizeof cn, "%s%s__%d", sp_bx_prefix[bx], cn0, id);
     nt_node_set_str(nt, copy, "name", cn);
@@ -3414,6 +3517,11 @@ int desugar_builtin_scalar_defs(Compiler *c) {
     int n = sp_builtin_extra_names_n(bx);
     for (int i = 0; i < n; i++) if (gdef[bx] && gdef[bx][i] >= 0) bi_subtree_blank(nt, gdef[bx][i]);
     free(gdef[bx]);
+    for (int i = 0; i < odef_n[bx]; i++) {
+      if (odef_def[bx][i] >= 0) bi_subtree_blank(nt, odef_def[bx][i]);
+      free(odef_name[bx][i]);
+    }
+    free(odef_name[bx]); free(odef_def[bx]);
   }
   comp_grow_node_arrays(c);
   free(nb);
@@ -3465,9 +3573,12 @@ int desugar_builtin_scalar_calls(Compiler *c) {
       }
     }
     if (!ok) continue;
-    /* a program's own reopen of the concrete class wins */
-    int ci = comp_class_index(c, sp_bx_class_name[bx]);
-    if (ci >= 0 && comp_method_in_chain(c, ci, name, NULL) >= 0) continue;
+    /* Which def `copy` clones -- the spliced generic, or a program's own
+       reopen -- was already decided in desugar_builtin_scalar_defs' name
+       table (the program's own reopen overwrites the spliced generic's
+       entry there), so bx_copy alone says which one this call rewrites
+       onto; no separate "does the program's own class chain define this
+       name" check is needed here. */
     const char *gn = nt_str(nt, copy, "name");
     if (!gn || comp_method_index(c, gn) < 0) continue;
     int args = nt_ref(nt, id, "arguments");
