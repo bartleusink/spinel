@@ -3934,13 +3934,15 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
       }
       emit_indent(b, indent + 1);
       if (box_to_poly) {
-        if (et == TY_INT) buf_printf(b, "lv_%s = sp_box_int(sp_%sArray_get(", p0, k);
-        else if (et == TY_STRING) buf_printf(b, "lv_%s = sp_box_str(sp_%sArray_get(", p0, k);
-        else if (et == TY_FLOAT) buf_printf(b, "lv_%s = sp_box_float(sp_%sArray_get(", p0, k);
-        else if (et == TY_BOOL) buf_printf(b, "lv_%s = sp_box_bool(sp_%sArray_get(", p0, k);
-        else buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);
-        buf_puts(b, rb.p); buf_printf(b, ", _t%d)", t);
-        if (et == TY_INT || et == TY_STRING || et == TY_FLOAT || et == TY_BOOL) buf_puts(b, ")");
+        /* A nested row is a pointer, not one of the scalar boxes. The same
+           helper each_with_index uses covers that and the scalars. */
+        Buf src; memset(&src, 0, sizeof src);
+        buf_printf(&src, "sp_%sArray_get(", k);
+        buf_puts(&src, rb.p ? rb.p : "NULL");
+        buf_printf(&src, ", _t%d)", t);
+        buf_printf(b, "lv_%s = ", p0);
+        emit_boxed_text(c, et, src.p ? src.p : "", b);
+        free(src.p);
         buf_puts(b, ";\n");
       }
       else {

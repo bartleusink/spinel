@@ -2887,16 +2887,6 @@ int desugar_builtin_enum_calls(Compiler *c) {
     if (recv < 0) continue;
     if (chained && chained[id]) continue;
     TyKind rt = infer_type(c, recv);
-    /* each_with_index / reduce on an array stay on the typed emitter when
-       the block receives the row. A parameter is still a poly array on the
-       round it is first bound, which is after this round's narrow pass, so
-       rewriting it here would replace the iterator with a method argument
-       and the next narrow would give the pin back. A nested table then
-       walks sp_PtrArray and yields the row pointer. each / map / zip are
-       not in enumerable.rb, so they already stay. */
-    if (nested_row_iter_call(c, id) &&
-        (rt == TY_POLY_ARRAY || rt == TY_FLOAT_ARRAY_ARRAY || rt == TY_INT_ARRAY_ARRAY))
-      continue;
     int ok = 0;
     /* an Enumerator over a generator is driven lazily through #next by the
        typed emitter of these names, which is what lets a prefix be taken

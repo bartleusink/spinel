@@ -7484,6 +7484,27 @@ static int oa_want_dropped(Compiler *c, const int *cleared, int n_cleared) {
   return 0;
 }
 
+/* `__enum_<name>__<callId>`: the per-site copy desugar_builtins made for one
+   call. The id is the call this body was specialized for. */
+static int enum_copy_site(const char *name) {
+  if (!name || strncmp(name, "__enum_", 7) != 0) return -1;
+  const char *p = strrchr(name, '_');
+  if (!p || p == name || p[-1] != '_') return -1;
+  char *end = NULL;
+  long v = strtol(p + 1, &end, 10);
+  if (!end || *end || v < 0 || v > 2000000000L) return -1;
+  return (int)v;
+}
+
+static void oa_mark_subtree(const NodeTable *nt, int id, unsigned char *dead) {
+  if (id < 0 || id >= nt->count || dead[id]) return;
+  dead[id] = 1;
+  const SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++) oa_mark_subtree(nt, nd->r[j].ref, dead);
+  for (int j = 0; j < nd->na; j++)
+    for (int k = 0; k < nd->a[j].n; k++) oa_mark_subtree(nt, nd->a[j].ids[k], dead);
+}
+
 static int narrow_object_arrays(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -7504,6 +7525,17 @@ static int narrow_object_arrays(Compiler *c) {
          made the two passes trade the slot every round (#3781) */
       if (pn == TY_INT_ARRAY_ARRAY || pn == TY_FLOAT_ARRAY_ARRAY ||
           ty_is_obj_array(pn)) sc->locals[li].type = TY_POLY_ARRAY;
+      /* Enumerable's per-site copy types `__self` from its argument, so a
+         nested table arrives here already narrowed and would miss the
+         candidate list. The argument loop then reads "param not a candidate"
+         as a kill and the caller's table oscillates with the pin reassert.
+         Put the copy's receiver back on the poly array and let this round's
+         evidence decide it again, the same as a pin this pass wrote itself. */
+      if (sc->name && strncmp(sc->name, "__enum_", 7) == 0 &&
+          sc->locals[li].name && sp_streq(sc->locals[li].name, "__self") &&
+          (sc->locals[li].type == TY_INT_ARRAY_ARRAY ||
+           sc->locals[li].type == TY_FLOAT_ARRAY_ARRAY))
+        sc->locals[li].type = TY_POLY_ARRAY;
     }
   }
   /* 1. candidate slots: POLY_ARRAY locals/params (skip block params + rbs). */
@@ -7639,6 +7671,34 @@ static int narrow_object_arrays(Compiler *c) {
   }
   #define OA_IVSLOT(ci, ivn) ({ int _r = -1; if ((ci) >= 0 && (ci) < c->nclasses && ivslot[ci]) { int _iv = comp_ivar_index(&c->classes[ci], (ivn)); if (_iv >= 0) _r = ivslot[ci][_iv] - 1; } _r; })
   int nc = nt->count ? nt->count : 1;
+  /* The copy of Enumerable#each_with_index (and the other yielding builtins)
+     keeps both arms of `if block_given?` in the AST. Codegen folds the test,
+     so exactly one arm runs for this site. The other still reads the table
+     (`recv = self` in the Enumerator arm) and, unclaimed, killed the pin.
+     Mark that arm dead for the rest of this pass. The cell the else arm
+     allocates stays in the AST; this only stops it counting as a use. */
+  unsigned char *dead = (unsigned char *)calloc((size_t)nc, 1);
+  if (dead) {
+    for (int id = 0; id < nt->count; id++) {
+      if (nt_kind(nt, id) != NK_IfNode) continue;
+      int pred = nt_ref(nt, id, "predicate");
+      if (pred < 0 || nt_kind(nt, pred) != NK_CallNode || nt_ref(nt, pred, "receiver") >= 0) continue;
+      const char *pn = nt_str(nt, pred, "name");
+      if (!pn || !sp_streq(pn, "block_given?")) continue;
+      Scope *sc = comp_scope_of(c, id);
+      int site = sc && sc->name ? enum_copy_site(sc->name) : -1;
+      if (site < 0 || site >= nt->count || nt_kind(nt, site) != NK_CallNode) continue;
+      int has_block = nt_ref(nt, site, "block") >= 0;
+      int arm = -1;
+      if (has_block) {
+        int sub = nt_ref(nt, id, "subsequent");
+        if (sub >= 0 && nt_kind(nt, sub) == NK_ElseNode) arm = sub;
+      } else {
+        arm = nt_ref(nt, id, "statements");
+      }
+      if (arm >= 0) oa_mark_subtree(nt, arm, dead);
+    }
+  }
   int *read_slot = (int *)malloc(sizeof(int) * nc);
   /* call_ret[id]: the return slot this CallNode's value comes from, or -1. */
   int *call_ret = (int *)malloc(sizeof(int) * nc);
@@ -7690,6 +7750,7 @@ static int narrow_object_arrays(Compiler *c) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
     if (sp_streq(ty, "LocalVariableReadNode")) {
+      if (dead && dead[id]) continue;
       int sidx = c->nscope[id];
       const char *nm = nt_str(nt, id, "name");
       LocalVar *lv = nm ? scope_local(&c->scopes[sidx], nm) : NULL;
@@ -7811,6 +7872,7 @@ static int narrow_object_arrays(Compiler *c) {
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "CallNode")) continue;
+    if (dead && dead[id]) continue;
     const char *name = nt_str(nt, id, "name");
     int recv = nt_ref(nt, id, "receiver");
     int has_block = nt_ref(nt, id, "block") >= 0;
@@ -7979,6 +8041,7 @@ static int narrow_object_arrays(Compiler *c) {
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "LocalVariableWriteNode")) continue;
+    if (dead && dead[id]) continue;
     int sidx = c->nscope[id];
     const char *nm = nt_str(nt, id, "name");
     LocalVar *lv = nm ? scope_local(&c->scopes[sidx], nm) : NULL;
@@ -8013,6 +8076,7 @@ static int narrow_object_arrays(Compiler *c) {
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "ReturnNode")) continue;
+    if (dead && dead[id]) continue;
     int R = oa_find(sl, n, c->nscope[id], NULL);
     if (R < 0) continue;
     int ra = nt_ref(nt, id, "arguments");
@@ -8063,6 +8127,28 @@ static int narrow_object_arrays(Compiler *c) {
       }
       if (!sl[i].lv && c->scopes[sl[i].sidx].name &&
           sp_streq(c->scopes[sl[i].sidx].name, mn)) sl[i].alive = 0;
+    }
+  }
+
+  /* Enumerable#each_with_index answers `self` from the block arm of
+     `if block_given?`. That read is the method's value, the same table,
+     not an escape. Unclaimed, it killed the table the arm walks, so a
+     nested table rewritten onto the Ruby definition went back to a poly
+     array. The dead arm is the same shape. */
+  for (int id = 0; id < nt->count; id++) {
+    if (nt_kind(nt, id) != NK_IfNode) continue;
+    int pred = nt_ref(nt, id, "predicate");
+    if (pred < 0 || nt_kind(nt, pred) != NK_CallNode || nt_ref(nt, pred, "receiver") >= 0) continue;
+    const char *pn = nt_str(nt, pred, "name");
+    if (!pn || !sp_streq(pn, "block_given?")) continue;
+    int arms[2];
+    arms[0] = nt_ref(nt, id, "statements");
+    int sub = nt_ref(nt, id, "subsequent");
+    arms[1] = (sub >= 0 && nt_kind(nt, sub) == NK_ElseNode) ? nt_ref(nt, sub, "statements") : -1;
+    for (int a = 0; a < 2; a++) {
+      int bn = 0; const int *bb = arms[a] >= 0 ? nt_arr(nt, arms[a], "body", &bn) : NULL;
+      if (!bb || bn == 0 || bb[bn - 1] < 0 || bb[bn - 1] >= nc) continue;
+      if (read_slot[bb[bn - 1]] >= 0) claimed[bb[bn - 1]] = 1;
     }
   }
 
@@ -8215,7 +8301,7 @@ static int narrow_object_arrays(Compiler *c) {
   for (int k = 0; k < c->nclasses; k++) free(ivslot[k]);
   free(ivslot);
   #undef OA_IVSLOT
-  free(sl); free(read_slot); free(call_ret); free(claimed); free(value_ok); free(attr_sym);
+  free(sl); free(read_slot); free(call_ret); free(claimed); free(value_ok); free(attr_sym); free(dead);
   return changed;
 }
 
@@ -11518,6 +11604,12 @@ static int promote_shared_stored_strings(Compiler *c) {
        never promotes its param */
     if (contv4->type != TY_STR_ARRAY && contv4->type != TY_POLY_ARRAY) continue;
     if (contv4->type == TY_POLY_ARRAY) {
+      /* A poly array may still narrow to a nested numeric table. Binding the
+         element param poly here is permanent -- a block parameter only widens
+         -- so a row that each_with_index then yields arrives boxed. Wait for
+         the pessimistic stage: a container that is still a poly array there
+         really is one, and the demand below still runs. */
+      if (g_infer_optimistic) continue;
       /* mixed / not-provably-string elements: demand the string stores into
          handles and bind the param POLY -- the runtime mutator arms resolve
          `<<` per element kind (string append vs array push) (#3227) */
