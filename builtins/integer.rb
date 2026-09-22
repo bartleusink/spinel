@@ -51,21 +51,24 @@ class Integer
     # Bignum-sized literal anywhere in this body widened every use of
     # that local for the whole function, including the receiver's own
     # fast path, onto boxed/Bignum arithmetic. Every literal below fits
-    # int64, so an Integer receiver never takes the `while` loop at all
-    # and falls straight through the five fixed halvings and the shifts
-    # stay native; a Bignum receiver's `while` reduces 32 bits per pass
-    # (fewer, larger steps read worse for a rare case that is not benched
-    # here). Measured faster than the old emitter once compiled into the
-    # same translation unit (0.21s vs 0.31s, 200,000,000 calls) -- the
-    # library call it replaces could never be inlined across the .a
-    # boundary the way this generated copy is.
+    # the target's Integer, so an Integer receiver's shifts stay native.
+    # Measured faster than the old emitter once compiled into the same
+    # translation unit (0.21s vs 0.31s, 200,000,000 calls) -- the library
+    # call it replaces could never be inlined across the .a boundary the
+    # way this generated copy is.
+    #
+    # The loop reduces SIXTEEN bits per pass, not thirty-two: sp_int is
+    # the pointer width, so on a 32-bit target `n >> 32` is a shift past
+    # the width of the type, which the C compiler refuses under -Werror
+    # (`right shift count >= width of type`) and which no Integer
+    # receiver there could need anyway. Three passes cover an int64's
+    # magnitude, and a small receiver takes none.
     n = self < 0 ? ~self : self
     b = 0
-    while n >= 4294967296
-      b += 32
-      n = n >> 32
+    while n >= 65536
+      b += 16
+      n = n >> 16
     end
-    if n >= 65536 then b += 16; n = n >> 16 end
     if n >= 256 then b += 8; n = n >> 8 end
     if n >= 16 then b += 4; n = n >> 4 end
     if n >= 4 then b += 2; n = n >> 2 end
