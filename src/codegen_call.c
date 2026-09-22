@@ -1644,17 +1644,25 @@ int lazy_endpoint_is_infinite(Compiler *c, int right) {
    through a fusion-capable terminal (`first(n)` / `to_a` / `force`), so the
    broken assignment can be suppressed and each force site fuses the chain
    directly. (#2932) */
-/* True if the node subtree contains a call -- a conservative "may have a side
-   effect" test for operand-ordering decisions. */
-static int node_has_call(const NodeTable *nt, int node) {
+/* True if the node subtree can run Ruby code -- a conservative "may have a
+   side effect" test for operand-ordering decisions. A CallNode is the common
+   one, but `yield` and `super` run a body just as a call does, and a block or
+   an ancestor method can write the very slot the other operand was read from,
+   which is what this test is asked about. Recognising only CallNode left
+   `@a == yield` unsequenced, and a block assigning `@a` won the comparison. */
+static int node_may_run_ruby(const NodeTable *nt, int node) {
   if (node < 0) return 0;
-  if (nt_kind(nt, node) == NK_CallNode) return 1;
+  switch (nt_kind(nt, node)) {
+    case NK_CallNode: case NK_YieldNode:
+    case NK_SuperNode: case NK_ForwardingSuperNode: return 1;
+    default: break;
+  }
   int nr = nt_num_refs(nt, node);
-  for (int i = 0; i < nr; i++) if (node_has_call(nt, nt_ref_at(nt, node, i))) return 1;
+  for (int i = 0; i < nr; i++) if (node_may_run_ruby(nt, nt_ref_at(nt, node, i))) return 1;
   int na = nt_num_arrs(nt, node);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *a = nt_arr_at(nt, node, i, &n);
-    for (int j = 0; j < n; j++) if (node_has_call(nt, a[j])) return 1;
+    for (int j = 0; j < n; j++) if (node_may_run_ruby(nt, a[j])) return 1;
   }
   return 0;
 }
@@ -1701,7 +1709,7 @@ static int poly_binop_recv_temp(Compiler *c, int recv, int arg, Buf *b, int *stm
    expression: under promote, boxing an argument spills its writes into the
    pre-statement buffer, which lands in front of the whole expression. */
 static void emit_poly_cmp_ordered(Compiler *c, const char *fn, int recv, int arg, Buf *b) {
-  if (node_has_call(c->nt, arg)) {
+  if (node_may_run_ruby(c->nt, arg)) {
     int se = 0;
     int t = poly_binop_recv_temp(c, recv, arg, b, &se);
     buf_printf(b, "%s(_t%d, ", fn, t);
