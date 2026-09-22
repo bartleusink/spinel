@@ -23263,8 +23263,16 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         return;
       }
       /* rand(int): 0 behaves like rand() (a Float in [0,1)); a nonzero magnitude
-         gives an Integer in [0, |n|) (#2518). A literal folds to the exact form. */
-      if (nt_type(nt, av[0]) && sp_streq(nt_type(nt, av[0]), "IntegerNode")) {
+         gives an Integer in [0, |n|) (#2518). A literal folds to the exact form.
+         Not a literal past the TARGET's Integer, though: on a 32-bit build
+         `rand(0x100000000)` is a Bignum bound, which the analyzer types
+         TY_BIGINT, and folding it here emitted sp_krand_below of the saturated
+         sp_int -- so `rand(0x100000000).to_s(36)` (CRuby's own Dir::Tmpname
+         shape) fed an sp_int to sp_bigint_to_s_base and the C build stopped.
+         Fall through to the Bignum arm below, which the 64-bit build already
+         takes for a literal past int64. */
+      if (nt_type(nt, av[0]) && sp_streq(nt_type(nt, av[0]), "IntegerNode") &&
+          comp_ntype(c, av[0]) != TY_BIGINT) {
         long long v = nt_int(nt, av[0], "value", 0);
         if (v == 0) { buf_puts(b, "sp_krand_float()"); return; }
         long long m = v < 0 ? -v : v;
