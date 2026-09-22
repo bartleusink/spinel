@@ -2579,18 +2579,27 @@ void emit_node_or_tmp(Compiler *c, int node, int tmp, Buf *b) {
   if (tmp >= 0) buf_printf(b, "_t%d", tmp);
   else emit_expr(c, node, b);
 }
-/* Root a temp whose C type came from a TyKind. A boxed-poly temp is an
-   sp_RbVal, whose first word is a tag rather than a pointer, so it has to be
-   rooted through the rbval macro -- rooting it as a raw pointer hands the mark
-   walker a small integer and segfaults under GC pressure. Sites that emit a
-   temp from a type the inference chose keep getting this wrong one at a time,
-   so they go through here. */
+/* Root a variable whose C type came from a TyKind. A boxed-poly variable is
+   an sp_RbVal, whose first word is a tag rather than a pointer, so it has to
+   be rooted through the rbval macro -- rooting it as a raw pointer hands the
+   mark walker a small integer and segfaults under GC pressure. Sites that
+   emit a temp from a type the inference chose keep getting this wrong one at
+   a time, so they go through here; a site that names its variable takes the
+   `_var` form, and one that emits around the root asks `ty_gc_rootable`
+   first. */
+void emit_gc_root_var(Compiler *c, TyKind t, const char *name, Buf *b) {
+  if (!ty_gc_rootable(c, t)) return;
+  buf_printf(b, t == TY_POLY ? "SP_GC_ROOT_RBVAL(%s);" : "SP_GC_ROOT(%s);", name);
+}
 void emit_gc_root_tmp(Compiler *c, TyKind t, int tmp, Buf *b) {
-  if (!needs_root(t)) return;
-  /* A value-type object lives in the temp itself, not behind it: rooting one
-     hands the mark walker the struct's first field. */
-  if (comp_ty_value_obj(c, t)) return;
-  buf_printf(b, t == TY_POLY ? "SP_GC_ROOT_RBVAL(_t%d);" : "SP_GC_ROOT(_t%d);", tmp);
+  char name[24]; snprintf(name, sizeof name, "_t%d", tmp);
+  emit_gc_root_var(c, t, name, b);
+}
+/* Whether a variable of this kind takes a root at all. A value-type object
+   lives in the variable itself, not behind it: rooting one hands the mark
+   walker the struct's first field. */
+int ty_gc_rootable(Compiler *c, TyKind t) {
+  return needs_root(t) && !comp_ty_value_obj(c, t);
 }
 
 /* An arm that hoists its receiver into `_tN` and then evaluates arguments
