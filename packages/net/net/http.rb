@@ -246,6 +246,14 @@ module Net
     attr_reader :address, :port
     attr_accessor :use_ssl, :open_timeout, :read_timeout
 
+    # CRuby's `ssl_timeout` is the TLS SESSION timeout (it becomes
+    # `SSLContext#timeout`), how long a cached session may be resumed -- not
+    # a deadline on the handshake. This client caches no sessions, so there
+    # is nothing for it to govern; it is held so a program that sets it
+    # compiles and reads back what it wrote. The handshake is bounded by the
+    # connect path's own timeouts, as before.
+    attr_accessor :ssl_timeout
+
     # The address to CONNECT to, when it differs from the address the request
     # is addressed to. An application that resolves a hostname itself and then
     # pins the result -- which is how a Rails app defends against DNS
@@ -255,13 +263,26 @@ module Net
     # unset. CRuby's reader answers nil there, and this one answers "".
     attr_accessor :ipaddr
 
-    def initialize(address, port = 80)
+    # CRuby's positional proxy arguments, `Net::HTTP.new(host, port, p_addr,
+    # p_port, p_user, p_pass)`. This client has no proxy support, so the
+    # one value it can honour is the one that asks for none: `nil`, which a
+    # program passes to make a connection direct -- the spelling a Rails app
+    # uses to keep an egress proxy from re-resolving an address it pinned
+    # (see `ipaddr` above). A named proxy raises rather than connecting
+    # straight past it. CRuby's default, `:ENV`, reads the proxy from the
+    # environment; the default here is nil, which is what this client has
+    # always done with the environment.
+    def initialize(address, port = 80, p_addr = nil, p_port = nil, p_user = nil, p_pass = nil)
+      unless p_addr.nil?
+        raise NotImplementedError, "net/http: proxies are not supported (Net::HTTP.new given proxy #{p_addr})"
+      end
       @address = address
       @port = port
       @ipaddr = ""
       @use_ssl = false
       @open_timeout = 60
       @read_timeout = 60
+      @ssl_timeout = nil
       @socket = nil
       @tls = nil
       @fresh = false
