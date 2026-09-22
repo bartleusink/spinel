@@ -6813,7 +6813,7 @@ static int desugar_to_enum(Compiler *c) {
    ONCE, after the fixpoint, so the new type never feeds forward inference. */
 /* A slot is a local (lv), a method's value (lv NULL, sidx the method), or an
    @ivar of one class (ici/iiv, sidx -1; #4444). */
-typedef struct { int sidx; LocalVar *lv; int cls; int alive; int uf; int needs_cmp; int saw_call; TyKind old_pin; int ici, iiv; } OAS;
+typedef struct { int sidx; LocalVar *lv; int cls; int alive; int uf; int needs_cmp; int row_iter; int saw_call; TyKind old_pin; int ici, iiv; } OAS;
 
 static int oa_find(OAS *sl, int n, int sidx, LocalVar *lv) {
   for (int i = 0; i < n; i++) if (sl[i].sidx == sidx && sl[i].lv == lv && sl[i].ici < 0) return i;
@@ -7546,7 +7546,7 @@ static int narrow_object_arrays(Compiler *c) {
       LocalVar *lv = &sc->locals[li];
       if (lv->type != TY_POLY_ARRAY || lv->is_block_param || lv->rbs_seeded) continue;
       if (n >= cap) { cap *= 2; sl = (OAS *)realloc(sl, sizeof(OAS) * cap); if (!sl) { fprintf(stderr, "oom\n"); exit(1); } }
-      sl[n].sidx = s; sl[n].lv = lv; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0; sl[n].ici = -1; sl[n].iiv = -1;
+      sl[n].sidx = s; sl[n].lv = lv; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].row_iter = 0; sl[n].saw_call = 0; sl[n].ici = -1; sl[n].iiv = -1;
       sl[n].old_pin = lv->oa_pin; lv->oa_pin = TY_UNKNOWN; n++;
     }
   }
@@ -7576,7 +7576,7 @@ static int narrow_object_arrays(Compiler *c) {
        Money#coerce for a pair) */
     if (method_name_implicitly_invoked(sc->name)) continue;
     if (n >= cap) { cap *= 2; sl = (OAS *)realloc(sl, sizeof(OAS) * cap); if (!sl) { fprintf(stderr, "oom\n"); exit(1); } }
-    sl[n].sidx = s; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0; sl[n].ici = -1; sl[n].iiv = -1;
+    sl[n].sidx = s; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].row_iter = 0; sl[n].saw_call = 0; sl[n].ici = -1; sl[n].iiv = -1;
     sl[n].old_pin = sc->ret_oa_pin; sc->ret_oa_pin = TY_UNKNOWN; n++;
   }
   /* 1c. one slot per @ivar holding a poly array (#4444). An ivar's references
@@ -7613,7 +7613,7 @@ static int narrow_object_arrays(Compiler *c) {
         if (comp_ivar_index(&c->classes[k], ivn) >= 0) { inherited = 1; break; }
       if (inherited) continue;
       if (n >= cap) { cap *= 2; sl = (OAS *)realloc(sl, sizeof(OAS) * cap); if (!sl) { fprintf(stderr, "oom\n"); exit(1); } }
-      sl[n].sidx = -1; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0; sl[n].ici = ci; sl[n].iiv = iv;
+      sl[n].sidx = -1; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].row_iter = 0; sl[n].saw_call = 0; sl[n].ici = ci; sl[n].iiv = iv;
       /* An `Array[Array[Integer]]` / `Array[Array[Float]]` seed is element
          evidence, the same evidence a pushed row gives: it decides the kind
          when the program's own rows are silent (`Array.new(n) { [] }`), and
@@ -7839,6 +7839,14 @@ static int narrow_object_arrays(Compiler *c) {
             sl[S].alive = 0;
         }
       }
+      /* each / each_with_index / zip / map / reduce yield the row. Admitted
+         here so the slot can still narrow; resolution keeps that narrow only
+         for a nested numeric table, where the emitter walks sp_PtrArray.
+         An object array with the same call stays boxed. */
+      else if (nested_row_iter_call(c, id)) {
+        claimed[recv] = 1;
+        sl[S].row_iter = 1;
+      }
       else sl[S].alive = 0;
     }
     /* Resolve the call target the way emission will: the enclosing self's
@@ -7945,7 +7953,17 @@ static int narrow_object_arrays(Compiler *c) {
       int a = argv[k];
       if (read_slot[a] < 0) continue;
       int S = read_slot[a];
-      if (oa_tmi < 0) { sl[S].alive = 0; continue; }
+      /* zip's other operand is a peer array. A nested table passed there is
+         still the table: claiming it lets the literal `[[10],[20]]` narrow
+         instead of dying as an unmodeled builtin argument. */
+      if (oa_tmi < 0) {
+        if (k == 0 && name && sp_streq(name, "zip") && nested_row_iter_call(c, id)) {
+          claimed[a] = 1;
+          continue;
+        }
+        sl[S].alive = 0;
+        continue;
+      }
       Scope *M = &c->scopes[oa_tmi];
       if (k >= M->nparams || (M->rest_idx >= 0 && k >= M->rest_idx)) { sl[S].alive = 0; continue; }
       LocalVar *plv = M->pnames[k] ? scope_local(M, M->pnames[k]) : NULL;
@@ -8066,6 +8084,7 @@ static int narrow_object_arrays(Compiler *c) {
     if (r == i) continue;
     sl[r].cls = oa_cls_join(sl[r].cls, sl[i].cls);
     if (sl[i].needs_cmp) sl[r].needs_cmp = 1;
+    if (sl[i].row_iter) sl[r].row_iter = 1;
     if (!sl[i].alive) sl[r].alive = 0;
   }
   for (int i = 0; i < n; i++) {
@@ -8102,6 +8121,16 @@ static int narrow_object_arrays(Compiler *c) {
     if (!sl[r].alive || sl[r].cls == -1 || sl[r].cls == -2) {
       OA_DROP_SRC_STAMP();
       if (sl[i].ici >= 0) continue;   /* an ivar with no decision stays the poly array it was reset to */
+      if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
+      else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
+      continue;
+    }
+    /* A block iterator is kept only when the element is a numeric row.
+       The same call on an object array would narrow a table the emitters
+       do not walk. */
+    if (sl[r].row_iter && !OA_CLS_IS_NESTED(sl[r].cls)) {
+      OA_DROP_SRC_STAMP();
+      if (sl[i].ici >= 0) continue;
       if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
       else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
       continue;

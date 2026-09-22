@@ -3352,7 +3352,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
 
   /* array.each_with_index { |x, i| ... } */
   if (sp_streq(name, "each_with_index") && ty_is_array(rt)) {
-    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    const char *k = array_iter_kind(rt);
     if (!k) return 0;
     const char *p1 = block_param_name(c, block, 1); if (p1) p1 = rename_local(p1);
     int t = ++g_tmp;
@@ -3432,10 +3432,10 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
        poly table): walk it through the boxed accessors. Without this the call
        fell to the runtime dispatch, which has no zip arm at all. */
     int recv_poly = !ty_is_array(rt);
-    const char *k = recv_poly ? "Poly" : ((rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt));
+    const char *k = recv_poly ? "Poly" : array_iter_kind(rt);
     if (k && zargc == 1 && zargv) {
       TyKind a0t = comp_ntype(c, zargv[0]);
-      const char *k2 = ty_is_array(a0t) ? ((a0t == TY_POLY_ARRAY) ? "Poly" : array_kind(a0t)) : NULL;
+      const char *k2 = ty_is_array(a0t) ? array_iter_kind(a0t) : NULL;
       /* The other operand may be an array only at run time (a poly element of
          a table of rows). Read it through the boxed accessor rather than
          handing an sp_RbVal to the typed one. */
@@ -3855,7 +3855,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   }
   if ((sp_streq(name, "each") || sp_streq(name, "each_entry") || sp_streq(name, "reverse_each")) &&
       ty_is_array(rt)) {
-    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    const char *k = array_iter_kind(rt);
     if (!k) return 0;
     int rev = sp_streq(name, "reverse_each");
     int t = ++g_tmp, tn = ++g_tmp;

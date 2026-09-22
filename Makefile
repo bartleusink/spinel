@@ -2092,6 +2092,15 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -Eq 'sp_IntArray \* *lv_row ' "$$tmp/mtr.c" || { echo "infer-test: FAIL (a row read out of a mapped table stayed boxed)"; ok=0; }; \
 	grep -Eq 'sp_PolyArray \* *lv_rows' "$$tmp/mtr.c" || { echo "infer-test: FAIL (a table mapped from a HASH must stay boxed -- its emitter cannot build a pointer array, and narrowing it stops the program running)"; grep -oE 'sp_[A-Za-z]+Array \* *lv_rows' "$$tmp/mtr.c" | head -1; ok=0; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_F_s_mul\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/mtr.c" || { echo "infer-test: FAIL (a helper reading an element of a mapped table bound a boxed parameter)"; grep -E 'sp_F_s_mul\(' "$$tmp/mtr.c" | head -1; ok=0; }; \
+	$(SPINEL) test/nested_table_iter.rb -c --no-line-map -o "$$tmp/nti.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile nested_table_iter)"; exit 1; }; \
+	grep -Eq 'sp_mul\(sp_PtrArray \* *lv_a, sp_PtrArray \* *lv_b\)' "$$tmp/nti.c" || { echo "infer-test: FAIL (a nested table passed as a method argument stayed boxed)"; grep -E 'sp_mul\(' "$$tmp/nti.c" | head -1; ok=0; }; \
+	grep -Eq 'sp_FloatArray \* *lv_bj' "$$tmp/nti.c" || { echo "infer-test: FAIL (each_with_index on that argument did not yield a float row)"; ok=0; }; \
+	grep -Eq 'sp_FloatArray_get\(lv_bj,' "$$tmp/nti.c" || { echo "infer-test: FAIL (the zip read the yielded row through the poly accessor)"; ok=0; }; \
+	grep -Eq 'sp_PtrArray \* *lv_c' "$$tmp/nti.c" || { echo "infer-test: FAIL (each_with_index on the result table left it boxed)"; ok=0; }; \
+	grep -Eq 'sp_FloatArray \* *lv_ci' "$$tmp/nti.c" || { echo "infer-test: FAIL (each_with_index on the result table did not yield a float row)"; ok=0; }; \
+	grep -Eq 'sp_PtrArray \* *lv_other' "$$tmp/nti.c" || { echo "infer-test: FAIL (a nested table passed as zip'\''s other operand stayed boxed)"; ok=0; }; \
+	grep -Eq 'sp_IntArray \* *lv_o' "$$tmp/nti.c" || { echo "infer-test: FAIL (zip did not yield an int row from that operand)"; ok=0; }; \
+	grep -q 'sp_poly_arr_get' "$$tmp/nti.c" && { echo "infer-test: FAIL (a nested-table iterator still read through sp_poly_arr_get)"; ok=0; }; \
 	$(SPINEL) test/infer/generator_element_cycle.rb -c --no-line-map -o "$$tmp/g.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile generator_element_cycle)"; exit 1; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_int sp_F_s_add\(sp_int [A-Za-z_]+, sp_int [A-Za-z_]+\)' "$$tmp/g.c" || { echo "infer-test: FAIL (a generator whose element feeds back into its own operands latched a poly array)"; grep -E 'sp_F_s_add\(' "$$tmp/g.c" | head -1; ok=0; }; \
 	grep -Eq 'static (inline )?(__attribute__\(\(always_inline\)\) )?sp_IntArray \* *sp_E_s_add\(sp_IntArray \*' "$$tmp/g.c" || { echo "infer-test: FAIL (the extension-field add did not settle on the Integer array)"; grep -E 'sp_E_s_add\(' "$$tmp/g.c" | head -1; ok=0; }; \

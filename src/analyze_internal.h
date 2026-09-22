@@ -270,6 +270,10 @@ int desugar_lazy_method_call(Compiler *c);
 int desugar_value_callable_forwards(Compiler *c);
 int desugar_builtins(Compiler *c);
 int desugar_builtin_enum_calls(Compiler *c);
+/* Block iterator the nested-table narrow pass keeps, and that the typed
+   emitters walk as an sp_PtrArray of row pointers. Desugar leaves these
+   calls on that emitter once the receiver has narrowed. */
+int nested_row_iter_call(Compiler *c, int id);
 int fold_static_is_a(Compiler *c);
 int narrow_empty_array_args_by_yield(Compiler *c);
 int builtin_enum_name_index(const char *name);

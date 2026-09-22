@@ -1765,6 +1765,15 @@ const char *array_kind(TyKind t) {
     default:             return NULL;
   }
 }
+/* Storage prefix for a loop over the array itself. A nested numeric table is
+   an sp_PtrArray of row pointers, so the walk is sp_PtrArray_length / _get
+   (void* converts to the row pointer). Object arrays share that storage but
+   are not walked here. */
+const char *array_iter_kind(TyKind t) {
+  if (t == TY_POLY_ARRAY) return "Poly";
+  if (t == TY_INT_ARRAY_ARRAY || t == TY_FLOAT_ARRAY_ARRAY) return "Ptr";
+  return array_kind(t);
+}
 void emit_c_escaped_n(Buf *b, const char *s, size_t len) {
   for (size_t i = 0; i < len; i++) {
     unsigned char ch = (unsigned char)s[i];
