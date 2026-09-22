@@ -7,7 +7,7 @@
 -5
 ZeroDivisionError: divided by 0
 modulo    1   (CRuby 2.0)
-remainder 1   (CRuby 2.0)
+remainder 2.0   (CRuby 2.0, and right)
 div       8   (CRuby 6)
 pct       2.0   (CRuby 2.0, and right)
 /         6.8   (CRuby 6.8, and right)

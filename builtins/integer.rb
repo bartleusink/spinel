@@ -152,4 +152,62 @@ class Integer
       raise TypeError, "not an integer"
     end
   end
+
+  def remainder(other)
+    # The sign follows the RECEIVER, not the divisor (`%`/modulo's own
+    # rule) -- (-7).remainder(3) is -1, (-7) % 3 is 2. `%` already floors
+    # correctly for Integer/Float/Bignum/Rational, and correctly runs the
+    # #coerce protocol for a user object that defines it (its own
+    # migration is not this pass's job), so remainder is `%`'s answer
+    # corrected back to a truncated sign convention: when the floored
+    # remainder is non-zero and its sign disagrees with the receiver's,
+    # subtracting the divisor once gives the truncated-division remainder
+    # CRuby answers, without a second division or a float round-trip that
+    # would lose precision on a Bignum receiver.
+    #
+    # NOT the is_a?(Integer)/is_a?(Float) shape ceildiv/gcd use: `%` (the
+    # raw operator, unlike `.div`/`-@` as plain method calls) does not
+    # fail to COMPILE for a REQUIRED parameter whose concrete type has no
+    # numeric meaning at all -- it silently miscompiles instead (`f(x, y)
+    # = x % y` called with a String/Array/Hash/nil/true/false-typed `y`
+    # answers a wrong number or a bogus ZeroDivisionError, never a
+    # TypeError, confirmed identical and pre-existing on the unmigrated
+    # compiler). A first draft gated this the ceildiv way (is_a?(Integer)
+    # / is_a?(Float) / else raise) and it silently broke the numeric
+    # coerce protocol instead: `5.modulo(Num.new)` (Num#coerce defined)
+    # is neither Integer nor Float, so a same-shaped `modulo` fell into
+    # the "else" and raised, where CRuby (and `%` itself, called
+    # directly) coerces and answers 2.0 (test/numeric_coerce_protocol.rb,
+    # caught before landing). Excluding exactly the closed set of types
+    # `%` cannot handle -- nil/true/false/Symbol/String/Array/Hash -- and
+    # letting everything else (Integer, Float, Bignum, Rational, a
+    # coercible or plain user object) reach `%` directly keeps both
+    # correct: `%`'s own dispatch already raises properly for a user
+    # object with no coerce.
+    #
+    # Known pre-existing divergence, unchanged by this migration: CRuby's
+    # C implementation orders its OWN sign check before the modulo,
+    # comparing the raw uncoerced `other` against 0 -- so `Num` above
+    # (coerce only, no `<=>`) makes `5.remainder(Num.new)` raise
+    # ArgumentError ("comparison of Num with 0 failed") in real CRuby.
+    # Comparing `other` here instead of `%`'s already-coerced answer
+    # would match that, but `<` (a plain method call, unlike `%`) then
+    # fails to COMPILE for the same required-parameter reason `.div`/
+    # `-@` do in ceildiv/gcd, for a concrete Array/Hash-typed call site.
+    # Comparing the post-modulo VALUE (`r < 0`, a real number by
+    # construction) compiles for every type and answers 2.0 for this one
+    # exotic shape instead of raising -- identical to the unmigrated
+    # compiler's own answer here (confirmed on `Num`), so not a new gap.
+    if other.nil? || other == true || other == false || other.is_a?(Symbol) ||
+       other.is_a?(String) || other.is_a?(Array) || other.is_a?(Hash)
+      if other.nil? || other == true || other == false || other.is_a?(Symbol)
+        raise TypeError, "#{other.inspect} can't be coerced into Integer"
+      else
+        raise TypeError, "#{other.class} can't be coerced into Integer"
+      end
+    else
+      r = self % other
+      (r != 0 && (r < 0) != (self < 0)) ? r - other : r
+    end
+  end
 end
