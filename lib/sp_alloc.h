@@ -945,6 +945,9 @@ static inline sp_RbVal sp_box_int_or_nil(sp_int v) { return v == SP_INT_NIL ? sp
 static inline sp_RbVal sp_box_float_or_nil(sp_float v) { return sp_float_is_nil(v) ? sp_box_nil() : sp_box_float(v); }
 sp_RbVal sp_unsentinel(sp_RbVal v);
 sp_RbVal sp_box_bigint(sp_Bigint *b);
+/* A bigint slot's nil is NULL (the compiler's nil_value for TY_BIGINT), so a
+   nilable bigint boxes as nil rather than as a truthy Integer printing 0. */
+static inline sp_RbVal sp_box_bigint_or_nil(sp_Bigint *b) { return b ? sp_box_bigint(b) : sp_box_nil(); }
 /* A 64-bit value as a Ruby Integer: the sp_int when it fits, a Bignum when
    it does not (a checksum, an unpacked quad, a parsed literal on a 32-bit
    sp_int). What a package answers as :any for a value that may be wide. */

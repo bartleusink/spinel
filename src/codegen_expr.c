@@ -269,8 +269,12 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (t == TY_BIGINT) {
-        buf_puts(&conv, "sp_bigint_to_s(");
-        EMIT_IV(); buf_puts(&conv, ")");
+        /* NULL is this slot's nil, which interpolates as the empty string
+           the way a nullable String's does (#4800). */
+        int bgv = ++g_tmp;
+        buf_printf(&conv, "({ sp_Bigint *_t%d = ", bgv);
+        EMIT_IV();
+        buf_printf(&conv, "; _t%d ? sp_bigint_to_s(_t%d) : sp_str_empty; })", bgv, bgv);
       }
       else if (t == TY_IO || t == TY_DIR) {
         /* the IO family has Object's to_s (the protocol arm's render) */
@@ -3412,7 +3416,7 @@ else {
     else if (lt == TY_FLOAT) buf_printf(&tcond, "(!sp_float_is_nil(_t%d))", t);
     else if (lt == TY_STRING || ty_is_array(lt) || ty_is_hash(lt) || ty_is_object(lt) ||
              lt == TY_PROC || lt == TY_MATCHDATA || lt == TY_EXCEPTION ||
-             ty_nullable_builtin_id(lt))
+             lt == TY_BIGINT || ty_nullable_builtin_id(lt))
       buf_printf(&tcond, "(_t%d != 0)", t);  /* nullable pointer: NULL reads falsy */
     else if (lt == TY_SYMBOL) buf_printf(&tcond, "(_t%d != (sp_sym)-1)", t);  /* nilable symbol sentinel */
     else if (lt == TY_UNKNOWN && res == TY_BOOL) buf_printf(&tcond, "_t%d", t);  /* temp holds sp_poly_truthy(left) (#3276) */

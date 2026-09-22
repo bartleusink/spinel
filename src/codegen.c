@@ -107,6 +107,10 @@ void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
                tb, expr, tb, tb);
     return;
   }
+  /* A bigint slot's nil is NULL (nil_value), and sp_box_bigint would wrap it
+     as a truthy Integer that prints 0: box it as nil, the way the nullable
+     pointer types above do (#4800). */
+  if (t == TY_BIGINT) { buf_printf(b, "sp_box_bigint_or_nil(%s)", expr); return; }
   const char *fn = NULL;
   switch (t) {
     case TY_FLOAT: fn = "sp_box_float"; break;
@@ -1315,7 +1319,11 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
        ordinary Float and no literal nil matches it (#3493). */
     case TY_FLOAT:  fn = call_returns_nullable_int(c, node) ? "sp_box_float_or_nil"
                                                             : "sp_box_float"; break;
-    case TY_BIGINT: fn = "sp_box_bigint"; break;
+    /* NULL is a bigint slot's nil (nil_value), and boxing it as a Bignum made
+       a truthy Integer that printed 0 (#4800). Unconditional: a live Bignum is
+       never the NULL pointer, so the test costs one compare on a path that
+       already allocates, and no analysis has to prove nilability. */
+    case TY_BIGINT: fn = "sp_box_bigint_or_nil"; break;
     case TY_STRING: fn = "sp_box_str";   break;
     case TY_BOOL:   fn = "sp_box_bool";  break;
     case TY_SYMBOL: fn = "sp_box_sym";   break;
