@@ -5061,6 +5061,14 @@ static sp_RbVal sp_poly_splice_range(sp_RbVal recv, sp_Range r, sp_RbVal src) {
    through the poly `[]` as index 0, so every range answered the first element
    -- the array read out of a nested Array or Hash is exactly the shape that
    lands here (#3464). The string receiver was already handled (#3175). */
+/* A beginless Range carries INTPTR_MIN as its first, which is the sentinel
+   and not an index: the string helpers read it as an ordinary negative and
+   count back from the end, landing far out of range. sp_poly_arr_range
+   open-codes this translation for the array kinds; the string and symbol
+   arms take it from here. */
+static sp_int sp_range_first_from(sp_Range r) {
+  return r.first == INTPTR_MIN ? 0 : r.first;
+}
 static sp_RbVal sp_poly_arr_range(sp_RbVal recv, sp_Range r) {
   sp_int alen = sp_poly_arr_len(recv);
   sp_int first = r.first;
@@ -7927,7 +7935,18 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && recv.tag == SP_TAG_STR) {
     sp_Range *rg = (sp_Range *)idx.v.p;
     return sp_box_str(sp_str_sub_range_r(recv.v.s ? recv.v.s : sp_str_empty,
-                                         rg->first, rg->last, (int)rg->excl));
+                                         sp_range_first_from(*rg), rg->last, (int)rg->excl));
+  }
+  /* A Symbol answers a Range the way its NAME does, because Symbol#[] is
+     String#[] on #to_s: `:symbol[0..2]` is "sym". Only the String and the
+     array kinds took a Range here, so a symbol receiver fell past every arm
+     to the trailing nil -- the same lost value #4769 fixed for the
+     two-argument `:symbol[0, 3]`. Out of range is nil, exactly as it is for
+     the String the symbol names, which is what sp_box_str answers. */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && recv.tag == SP_TAG_SYM) {
+    sp_Range *rg = (sp_Range *)idx.v.p;
+    return sp_box_str(sp_str_sub_range_r(sp_sym_to_s((sp_sym)recv.v.i),
+                                         sp_range_first_from(*rg), rg->last, (int)rg->excl));
   }
   /* the same for a poly ARRAY: a sub-array, not element 0 (#3464) */
   if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE &&
