@@ -12023,6 +12023,15 @@ static TyKind emit_face_arm(Compiler *c, int id, unsigned kind, unsigned flags, 
   int sv_face = an_face_node(); TyKind sv_fk = an_face_kind();
   an_set_face_node(recv, as);
   TyKind nat = infer_uncached(c, id);
+  /* A numeric iterator with a block answers its receiver, and the arm's
+     expression bridge renders exactly that, in the owner's own kind -- but
+     a `break v` in the block makes the pinned inference say poly for the
+     union, which emit_face_value reads as "already boxed" and hands the raw
+     sp_int / sp_float to the poly slot (#4774). The value is the receiver. */
+  if (nat == TY_POLY && has_blk && (kind == PF_INT || kind == PF_FLOAT) &&
+      (sp_streq(name, "times") || sp_streq(name, "upto") || sp_streq(name, "downto") ||
+       sp_streq(name, "step")))
+    nat = as;
   Buf cb; memset(&cb, 0, sizeof cb);
   emit_call(c, id, &cb);
   an_set_face_node(sv_face, sv_fk);

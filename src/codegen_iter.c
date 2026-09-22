@@ -3080,10 +3080,14 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
       return 1;
     }
     int tb = ++g_tmp, tl = ++g_tmp, ts = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp;
-    emit_indent(b, indent); buf_printf(b, "sp_float _t%d = ", tb); emit_expr(c, recv, b); buf_puts(b, ";\n");
-    emit_indent(b, indent); buf_printf(b, "sp_float _t%d = ", tl); emit_expr(c, sargv[0], b); buf_puts(b, ";\n");
+    /* the limit and the step through the Float slot's conversion: a BOXED
+       one (an Integer local under --int-overflow=promote, the argument of a
+       boxed receiver's Float arm) unboxes, a typed Integer widens, and a
+       non-Numeric is CRuby's TypeError rather than a C build error (#4774) */
+    emit_indent(b, indent); buf_printf(b, "sp_float _t%d = ", tb); emit_float_expr(c, recv, b); buf_puts(b, ";\n");
+    emit_indent(b, indent); buf_printf(b, "sp_float _t%d = ", tl); emit_float_expr(c, sargv[0], b); buf_puts(b, ";\n");
     emit_indent(b, indent); buf_printf(b, "sp_float _t%d = ", ts);
-    if (sargc >= 2) emit_expr(c, sargv[1], b); else buf_puts(b, "1.0");
+    if (sargc >= 2) emit_float_expr(c, sargv[1], b); else buf_puts(b, "1.0");
     buf_puts(b, ";\n");
     /* a zero step never advances, so CRuby rejects it outright (#3648) */
     emit_indent(b, indent);
