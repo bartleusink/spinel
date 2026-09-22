@@ -7542,8 +7542,8 @@ int infer_block_params(Compiler *c) {
       }
       pt = isf ? TY_FLOAT : TY_INT;
     }
-    else if (sp_streq(name, "step") && rt == TY_RATIONAL)
-      pt = TY_POLY;  /* yields boxed Rational/Integer values (#2566) */
+    else if (sp_streq(name, "step") && (rt == TY_RATIONAL || rt == TY_BIGINT))
+      pt = TY_POLY;  /* yields boxed Rational/Integer values (#2566); a Bignum receiver walks boxed too (#4779) */
     else if ((sp_streq(name, "times") || sp_streq(name, "upto") ||
          sp_streq(name, "downto")) && rt == TY_INT)
       pt = TY_INT;

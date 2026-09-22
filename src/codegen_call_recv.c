@@ -12041,7 +12041,14 @@ static TyKind emit_face_arm(Compiler *c, int id, unsigned kind, unsigned flags, 
   /* A typed emitter that declines the call's argument shape answers the
      unresolved gate's raise token, a poly value that never returns: hand it
      on as poly, untouched, rather than bind it into a typed temp. */
-  if (strncmp(call, "sp_raise_nomethod(", 18) == 0) {
+  /* ...and the argument-validation token the numeric arms lower an
+     operand of the wrong class to (`({ (void)(recv); sp_raise_cls(...);
+     sp_box_nil(); })`): its value is the node's own default, boxed here since
+     the node is poly, whatever kind the arm was pinned to (#4779) */
+  size_t cl = strlen(call);
+  int val_tok = strncmp(call, "({ (void)(", 10) == 0 && strstr(call, "sp_raise_cls(") != NULL &&
+                cl > 18 && strcmp(call + cl - 18, "; sp_box_nil(); })") == 0;
+  if (strncmp(call, "sp_raise_nomethod(", 18) == 0 || val_tok) {
     TyKind slot = comp_ntype(c, id);
     if (slot == TY_POLY || slot == TY_UNKNOWN || slot == TY_VOID) { buf_puts(val, call); slot = TY_POLY; }
     else emit_unbox_text(c, slot, call, val);   /* the token is an sp_RbVal; the slot is not */

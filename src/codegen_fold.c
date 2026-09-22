@@ -2354,8 +2354,8 @@ int emit_step_array_expr(Compiler *c, int id, Buf *b) {
   int tr = ++g_tmp, tl = ++g_tmp, ts = ++g_tmp, ti = ++g_tmp;
   if (!is_float) {
     buf_printf(b, "({ sp_IntArray *_t%d = sp_IntArray_new(); SP_GC_ROOT(_t%d); sp_int _t%d = ", tr, tr, tl);
-    emit_expr(c, sv[0], b); buf_printf(b, "; sp_int _t%d = ", ts);
-    if (sc >= 2) emit_expr(c, sv[1], b); else buf_puts(b, "1");
+    emit_int_expr(c, sv[0], b); buf_printf(b, "; sp_int _t%d = ", ts);
+    if (sc >= 2) emit_int_expr(c, sv[1], b); else buf_puts(b, "1");
     /* a zero step never advances, so CRuby rejects it outright (#3648) */
     buf_printf(b, "; if (_t%d == 0) sp_raise_cls(\"ArgumentError\", \"step can't be 0\");", ts);
     buf_printf(b, " for (sp_int _t%d = ", ti); emit_expr(c, recv, b);
@@ -2365,9 +2365,13 @@ int emit_step_array_expr(Compiler *c, int id, Buf *b) {
   }
   int tb = ++g_tmp, tn = ++g_tmp;
   buf_printf(b, "({ sp_FloatArray *_t%d = sp_FloatArray_new(); SP_GC_ROOT(_t%d); sp_float _t%d = ", tr, tr, tb);
-  emit_expr(c, recv, b); buf_printf(b, "; sp_float _t%d = ", tl); emit_expr(c, sv[0], b);
+  /* the operands through the Float slot's conversion, as the block form
+     takes them: a boxed limit or step (an Integer local under
+     --int-overflow=promote) unboxes rather than landing in the slot as a
+     box (#4779) */
+  emit_float_expr(c, recv, b); buf_printf(b, "; sp_float _t%d = ", tl); emit_float_expr(c, sv[0], b);
   buf_printf(b, "; sp_float _t%d = ", ts);
-  if (sc >= 2) emit_expr(c, sv[1], b); else buf_puts(b, "1.0");
+  if (sc >= 2) emit_float_expr(c, sv[1], b); else buf_puts(b, "1.0");
   buf_printf(b, "; if (_t%d == 0) sp_raise_cls(\"ArgumentError\", \"step can't be 0\");", ts);
   buf_printf(b, " sp_float _t%d_e = (fabs(_t%d)+fabs(_t%d)+fabs(_t%d-_t%d))/fabs(_t%d)*DBL_EPSILON;"
                 " if (_t%d_e > 0.5) _t%d_e = 0.5;"

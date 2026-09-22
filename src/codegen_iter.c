@@ -3051,14 +3051,18 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
      sequence, yielding boxed Rational/Integer values. The bounds compare and
      the accumulator advances through the poly numeric tower (sp_poly_add keeps
      a Rational operand rational), so the values stay exact (#2566). */
-  if (sp_streq(name, "step") && rt == TY_RATIONAL) {
+  /* a Bignum receiver walks the same boxed sequence: it does not fit the
+     sp_int loop below, and it had no arm at all (#4779) */
+  if (sp_streq(name, "step") && (rt == TY_RATIONAL || rt == TY_BIGINT)) {
     int args = nt_ref(nt, id, "arguments");
     int sargc = 0;
     const int *sargv = args >= 0 ? nt_arr(nt, args, "arguments", &sargc) : NULL;
     if (sargc < 1) return 0;
     int tc = ++g_tmp, tl = ++g_tmp, ts = ++g_tmp, td = ++g_tmp;
-    emit_indent(b, indent); buf_printf(b, "sp_RbVal _t%d = sp_box_rational(", tc); emit_expr(c, recv, b);
-    buf_printf(b, "); SP_GC_ROOT_RBVAL(_t%d);\n", tc);
+    emit_indent(b, indent); buf_printf(b, "sp_RbVal _t%d = ", tc);
+    if (rt == TY_RATIONAL) { buf_puts(b, "sp_box_rational("); emit_expr(c, recv, b); buf_puts(b, ")"); }
+    else emit_boxed(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);\n", tc);
     emit_indent(b, indent); buf_printf(b, "sp_RbVal _t%d = ", tl); emit_boxed(c, sargv[0], b);
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);\n", tl);
     emit_indent(b, indent); buf_printf(b, "sp_RbVal _t%d = ", ts);
