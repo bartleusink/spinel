@@ -163,9 +163,10 @@ static int tmpdir_usable(const char *p) {
 
    The resolution is LEXICAL, which is what expand_path does: "a/../b" is
    "b" without asking the filesystem whether "a" was a symlink pointing
-   somewhere else. `~` is the one form not expanded, and it cannot be
-   reached -- tmpdir_usable has already stat'ed the path as the shell
-   left it, and a literal "~/tmp" is not a directory that exists. */
+   somewhere else. `~` is the one form not expanded: a literal "~/tmp"
+   becomes "<cwd>/~/tmp", which is not a directory that exists, so the
+   usability check on the expanded path rejects it and the answer is the
+   /tmp fallback. */
 static const char *tmpdir_expand(const char *p) {
   char raw[PATH_MAX];
   size_t n = 0;
@@ -214,7 +215,18 @@ static const char *tmpdir_expand(const char *p) {
 
 const char *sp_Dir_tmpdir(void) {
   const char *env = getenv("TMPDIR");
-  if (env && *env && tmpdir_usable(env)) return tmpdir_expand(env);
+  /* Expand BEFORE the usability check, on the path that is actually handed
+     back. The expansion is lexical, so a `..` after a symlink names a
+     different directory than the string the shell left: with $TMPDIR set to
+     "<dir>/ro/ln/.." where ln points out of ro, the raw path is writable (it
+     resolves through the link) while the expanded "<dir>/ro" is not, and
+     checking the raw one answered a directory nothing can be created in --
+     Dir.mktmpdir then raised where CRuby falls back to /tmp. CRuby runs
+     File.expand_path on each candidate and stats THAT. */
+  if (env && *env) {
+    const char *ex = tmpdir_expand(env);
+    if (tmpdir_usable(ex)) return ex;
+  }
   char *r = sp_str_alloc_raw(5);
   memcpy(r, "/tmp", 4);
   r[4] = '\0';
