@@ -6383,10 +6383,25 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
         buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
                    eid, outer->lid, outer->lid);
       }
-      /* Unhandled exception: propagate info to outer ensure context. */
+      /* Unhandled exception. It belongs to the nearest enclosing HANDLER,
+         which is not always the enclosing ensure: a `begin ... rescue`
+         between the two catches it in Ruby. Handing it straight to the outer
+         ensure walked past that rescue, ran the outer ensure (twice, once
+         here and once on the way out) and killed the program -- what
+         `Dir.chdir(a) { begin; Dir.chdir(b) { raise }; rescue; end }` does,
+         and any value-position begin/ensure nested the same way. An
+         intervening rescue shows up as an exception frame between this level
+         and the outer ensure's own, so re-raise there and let that handler
+         match; with no such frame, propagate to the outer ensure as before. */
       emit_indent(b, indent);
-      buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
-                 eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
+      if (g_exc_frame_depth > outer->exc_base + 1) {
+        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
+                   eid, eid, eid, eid);
+      }
+      else {
+        buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
+                   eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
+      }
     }
     else {
       /* the deferred return leaves through every enclosing live begin frame:

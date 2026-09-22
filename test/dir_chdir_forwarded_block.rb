@@ -26,10 +26,14 @@ begin
     p cd("inner") { |d| File.basename(d) }
     p cd_arg("inner") { |d| File.basename(d) }
 
-    # A raising body is NOT exercised here: a rescue sitting between two
-    # ensure levels does not catch it, a separate pre-existing defect of
-    # the value-position begin/ensure that reproduces with no chdir at
-    # all, and every shape of this file has an outer ensure for cleanup.
+    # a raising body still restores, and the rescue between the two chdir
+    # splices catches it (test/ensure_reraises_into_enclosing_rescue.rb)
+    begin
+      cd("inner") { raise "boom" }
+    rescue RuntimeError => e
+      p e.message
+    end
+    p File.basename(Dir.pwd) == File.basename(root)
 
     # the blockless form still switches for good
     pr = proc { File.basename(Dir.pwd) }
