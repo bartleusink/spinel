@@ -2100,7 +2100,17 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -Eq 'sp_FloatArray \* *lv_ci' "$$tmp/nti.c" || { echo "infer-test: FAIL (each_with_index on the result table did not yield a float row)"; ok=0; }; \
 	grep -Eq 'sp_PtrArray \* *lv_other' "$$tmp/nti.c" || { echo "infer-test: FAIL (a nested table passed as zip'\''s other operand stayed boxed)"; ok=0; }; \
 	grep -Eq 'sp_IntArray \* *lv_o' "$$tmp/nti.c" || { echo "infer-test: FAIL (zip did not yield an int row from that operand)"; ok=0; }; \
-	grep -q 'sp_poly_arr_get' "$$tmp/nti.c" && { echo "infer-test: FAIL (a nested-table iterator still read through sp_poly_arr_get)"; ok=0; }; \
+	grep -q 'sp_poly_arr_get' "$$tmp/nti.c" && grep -v -E 'lv_[abc]__bp[0-9]+ = sp_poly_arr_get\(' "$$tmp/nti.c" | grep -q 'sp_poly_arr_get' && { echo "infer-test: FAIL (a nested-table iterator still read through sp_poly_arr_get)"; ok=0; }; \
+	grep -Eq 'sp_PtrArray \* *lv_rows' "$$tmp/nti.c" || { echo "infer-test: FAIL (the int table walked by each lost its typed representation)"; ok=0; }; \
+	grep -Eq 'sp_PtrArray \* *lv_frows' "$$tmp/nti.c" || { echo "infer-test: FAIL (the float table walked by each lost its typed representation)"; ok=0; }; \
+	grep -Eq 'sp_PolyArray \* *lv_split_rows' "$$tmp/nti.c" || { echo "infer-test: FAIL (a nested table whose block splits the row narrowed to a pointer array)"; grep -oE 'sp_[A-Za-z]+Array \* *lv_split_rows' "$$tmp/nti.c" | head -1; ok=0; }; \
+	grep -Eq 'sp_PtrArray \* *lv_split_rows' "$$tmp/nti.c" && { echo "infer-test: FAIL (a split row was walked as a pointer array, which binds only the first parameter)"; ok=0; }; \
+	grep -Eq 'lv_a__bp[0-9]+ = sp_poly_arr_get\([^,]+, 0\)' "$$tmp/nti.c" || { echo "infer-test: FAIL (splitting a row did not bind the first element)"; ok=0; }; \
+	grep -Eq 'lv_b__bp[0-9]+ = sp_poly_arr_get\([^,]+, 1\)' "$$tmp/nti.c" || { echo "infer-test: FAIL (splitting a row did not bind the second element)"; ok=0; }; \
+	grep -Eq 'lv_c__bp[0-9]+ = sp_poly_arr_get\([^,]+, 2\)' "$$tmp/nti.c" || { echo "infer-test: FAIL (splitting a short row did not bind the missing element)"; ok=0; }; \
+	grep -Eq 'lv_a__bp[0-9]+ = sp_poly_index_poly\(' "$$tmp/nti.c" || { echo "infer-test: FAIL (reverse_each did not bind the first element of a split row)"; ok=0; }; \
+	grep -Eq 'lv_b__bp[0-9]+ = sp_poly_index_poly\(' "$$tmp/nti.c" || { echo "infer-test: FAIL (reverse_each did not bind the second element of a split row)"; ok=0; }; \
+	grep -Eq 'lv_[abc]__bp[0-9]+ = sp_PtrArray_get' "$$tmp/nti.c" && { echo "infer-test: FAIL (a row pointer was assigned to a parameter of a split block)"; ok=0; }; \
 	$(SPINEL) test/infer/nested_row_poly_param.rb -c --no-line-map -o "$$tmp/nrp.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile nested_row_poly_param)"; exit 1; }; \
 	grep -Eq 'lv_r = sp_box_nullable_obj\(\(void \*\)\(sp_PtrArray_get\(lv_rows,' "$$tmp/nrp.c" || { echo "infer-test: FAIL (a boxed block parameter over a nested table was not given the row pointer)"; ok=0; }; \
 	grep -q 'lv_r = sp_PtrArray_get' "$$tmp/nrp.c" && { echo "infer-test: FAIL (a void * row was assigned straight into the boxed parameter)"; ok=0; }; \

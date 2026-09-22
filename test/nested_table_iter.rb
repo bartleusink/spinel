@@ -41,3 +41,18 @@ frows.each { |r| fs += r[0] }
 p fs
 frows.reverse_each { |r| fs += r[1] }
 p fs
+
+# Splitting the row (`|a, b|`, or `|a, b, c|` when the row is short) is not a
+# row iterator. The table stays boxed and each element is bound on its own,
+# including a missing one. Narrowing it to a pointer array would store the
+# row pointer in the first parameter and leave the others unset.
+split_rows = [[1, 2], [3, 4]]
+split_s = 0
+split_rows.each { |a, b| split_s += a + b }
+p split_s
+split_rows.each { |a, b, c| split_s += a }
+p split_s
+split_frows = [[1.5, 2.5], [3.5, 4.5]]
+split_fs = 0.0
+split_frows.reverse_each { |a, b| split_fs += a + b }
+p split_fs
