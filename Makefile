@@ -672,6 +672,17 @@ endif
 ifeq ($(SPINEL_INT_BITS),32)
 TESTS := $(filter-out $(shell grep -l '^\# spinel: int64' test/*.rb),$(TESTS))
 endif
+# TEST_SHARD=k/n runs the k-th of n slices of the corpus (1-based), the
+# slice taken by position in the sorted list so every test lands in exactly
+# one: CI runs the slices as parallel jobs, since the corpus is what the
+# jobs' wall time is made of. The bundled packages' tests are sliced the
+# same way below. Unset, the whole corpus runs.
+ifneq ($(TEST_SHARD),)
+SHARD_K := $(word 1,$(subst /, ,$(TEST_SHARD)))
+SHARD_N := $(word 2,$(subst /, ,$(TEST_SHARD)))
+shard_pick = $(shell printf '%s\n' $(1) | awk -v k=$(SHARD_K) -v n=$(SHARD_N) 'NR % n == k % n')
+TESTS := $(call shard_pick,$(TESTS))
+endif
 TEST_TARGETS := $(patsubst test/%.rb,build/test-results/%.ok,$(TESTS))
 
 # Bundled spin packages carry their own test/*.rb (the same snapshot contract,
@@ -688,6 +699,9 @@ PKG_TESTS := $(filter-out packages/openssl/test/%.rb,$(PKG_TESTS))
 endif
 ifeq ($(SPINEL_INT_BITS),32)   # the same first-line marker as test/*.rb
 PKG_TESTS := $(filter-out $(shell grep -l '^\# spinel: int64' packages/*/test/*.rb),$(PKG_TESTS))
+endif
+ifneq ($(TEST_SHARD),)
+PKG_TESTS := $(call shard_pick,$(PKG_TESTS))
 endif
 pkg_of = $(word 2,$(subst /, ,$(1)))
 PKG_TEST_TARGETS := $(foreach t,$(PKG_TESTS),build/test-results/pkg.$(call pkg_of,$(t)).$(notdir $(t:.rb=)).ok)
