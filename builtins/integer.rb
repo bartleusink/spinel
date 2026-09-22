@@ -210,4 +210,51 @@ class Integer
       (r != 0 && (r < 0) != (self < 0)) ? r - other : r
     end
   end
+
+  def fdiv(other)
+    # Always a Float, never raising (7.fdiv(0) is Infinity, matching
+    # IEEE754 float division, not ZeroDivisionError): `to_f / other`
+    # converts the receiver once (a Bignum receiver loses precision the
+    # same way CRuby's own conversion does) and leaves the division to
+    # `/`, which already runs the numeric #coerce protocol for a user
+    # object and handles Rational/Float/Integer/Bignum arguments
+    # correctly. Same exclusion-list shape as remainder, not
+    # is_a?(Integer)/is_a?(Float): `/` (the raw operator) silently
+    # miscompiles rather than failing to compile for a REQUIRED
+    # parameter of a String/Array/Hash/nil/true/false concrete type
+    # (confirmed via `def f(x, y) = x.to_f / y`, identical and
+    # pre-existing on the unmigrated compiler), so those seven types are
+    # excluded by name and everything else reaches `/` directly. The
+    # message says "into Integer", not "into Float" as `x.to_f / y`
+    # alone would answer: CRuby's own Integer#fdiv coerces the argument
+    # by that name before ever converting to a Float, verified against
+    # a literal `7.fdiv(nil)` etc on real CRuby.
+    #
+    # A genuine engine gap surfaced writing this, fixed in
+    # analyze_infer.c: an Integer/Bignum arith op with a non-coercible
+    # argument (String/Symbol/nil/bool/Array/Hash/Range) was already
+    # typed as the raising expression's own kind so it could sit in a
+    # value position (#2471) -- but only for an Integer/Bignum RECEIVER,
+    # not a Float one, even though codegen_call.c's own matching arm
+    # (#3645) already emits the Float-side raise correctly. Every method
+    # here that raises inside an is_a? branch (gcd, ceildiv, remainder)
+    # happened to keep a scalar return type across every clone anyway,
+    # so this never mattered until fdiv's `self.to_f / other`: for a
+    # call site whose argument is one of those excluded types, this
+    # exact expression is unreachable but still has to type as SOMETHING
+    # other than UNKNOWN -- UNKNOWN poisoned the whole clone's return
+    # type to void, and every caller of `7.fdiv([1, 2])`-shaped code
+    # failed to compile ("void value not ignored"). Added the missing
+    # TY_FLOAT arm right next to the existing TY_INT/TY_BIGINT one.
+    if other.nil? || other == true || other == false || other.is_a?(Symbol) ||
+       other.is_a?(String) || other.is_a?(Array) || other.is_a?(Hash)
+      if other.nil? || other == true || other == false || other.is_a?(Symbol)
+        raise TypeError, "#{other.inspect} can't be coerced into Integer"
+      else
+        raise TypeError, "#{other.class} can't be coerced into Integer"
+      end
+    else
+      self.to_f / other
+    end
+  end
 end
