@@ -30437,8 +30437,11 @@ else {
       comp_ntype(c, argv[0]) == TY_STRING) {
     const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
     if (!k) k = "Str";
-    buf_printf(b, "sp_%sArray_join(", k); emit_expr(c, recv, b);
-    buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    Buf rb; char tyj[32]; snprintf(tyj, sizeof tyj, "sp_%sArray *", k);
+    int ch = hold_recv_open(c, recv, 0, tyj, "SP_GC_ROOT", b, &rb);
+    buf_printf(b, "sp_%sArray_join(%s, ", k, rb.p); free(rb.p);
+    emit_expr(c, argv[0], b); buf_puts(b, ")");
+    if (ch) buf_puts(b, "; })");
     return;
   }
 
