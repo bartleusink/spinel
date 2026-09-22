@@ -15427,7 +15427,17 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
    not a class at all. */
 static int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Buf *b) {
   if (!cn) return 0;
-  if (sp_streq(cn, "Integer") || sp_streq(cn, "Fixnum")) buf_printf(b, "%s.tag == SP_TAG_INT", v);
+  /* CRuby has unified Fixnum into Integer since 2.4, and spinel's own
+     Bignum tag is that same visible class (SP_TAG_BIGINT's class name is
+     "Integer": lib/spinel_rt.h's poly to_s/class-name switches), so a
+     poly value that is actually a Bignum at run time answers `is_a?`,
+     `instance_of?` and `Integer === v` alike -- this arm answered only
+     the small-int tag, missing the Bignum one, for both forms (#4665's
+     boxed-Integer family covered the named methods, not this generic
+     is_a? test; found via a poly Integer/Bignum split in a builtins/
+     migration, reproduces with zero migration mechanism involved:
+     `def wrap(v)=v; wrap(2**80).is_a?(Integer)` answered false). */
+  if (sp_streq(cn, "Integer") || sp_streq(cn, "Fixnum")) buf_printf(b, "(%s.tag == SP_TAG_INT || %s.tag == SP_TAG_BIGINT)", v, v);
   else if (sp_streq(cn, "String"))
     buf_printf(b, "(%s.tag == SP_TAG_STR || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_STRBUF))", v, v, v);
   else if (sp_streq(cn, "Float"))    buf_printf(b, "%s.tag == SP_TAG_FLT", v);
@@ -32438,6 +32448,9 @@ else {
       buf_printf(b, "sp_str_dup_external(sp_bigint_to_s_base(%s, ", r);
       emit_int_expr(c, argv[0], b); buf_puts(b, "))"); free(rs.p); return;
     }
+    /* digits: kept only for the poly "face table" re-entry, not reached by
+       any static concrete call site any more -- see the matching comment
+       in codegen_call_recv.c and desugar_builtin_scalar_calls. */
     if (sp_streq(name, "digits") && argc <= 1) {
       /* least-significant first via repeated divmod -- any radix >= 2
          (the to_s(base) text path stops at 36) */
