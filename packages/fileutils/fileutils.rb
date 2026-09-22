@@ -7,13 +7,12 @@
 #
 # What is absent is absent the way a subset is:
 #
-# * no `verbose:` reporting and no `noop:`. Both are accepted and ignored, so
-#   a caller that passes them keeps working; what they ask for is a running
-#   commentary and a dry run, and a compiler that inlines these has neither a
-#   $stderr convention nor a reason to build the plan without executing it.
+# * `verbose:` prints the equivalent shell command to $stdout before the
+#   operation, spelled as CRuby spells it, and `noop:` prints (when verbose)
+#   and does nothing else. Both are per call; there is no FileUtils::Verbose
+#   / ::NoWrite / ::DryRun module to include.
 # * no `preserve:` on cp/mv, no `dereference_root:`, no `secure:` on rm_r
 # * no ln_sf, no install, no chown, no cp_lr
-# * no FileUtils::Verbose / ::NoWrite / ::DryRun modules
 #
 # Every method takes a single path or a list of them, as CRuby's do, and
 # returns what CRuby's return (mkdir_p and friends answer the list they were
@@ -28,10 +27,25 @@ module FileUtils
     arg.is_a?(Array) ? arg.map { |x| x.to_s } : [arg.to_s]
   end
 
+  # `verbose: true` reports the shell command CRuby's FileUtils reports,
+  # before the operation runs (and instead of it under `noop:`). CRuby sends
+  # it to $stdout (fileutils.rb's own fu_output_message defaults there), not
+  # to $stderr, so a program that pipes its output sees these lines in it.
+  def fu_output_message(msg)
+    puts msg
+    nil
+  end
+
+  def fu_mode_to_s(mode)
+    mode.is_a?(Integer) ? sprintf("%o", mode) : mode.to_s
+  end
+
   # mkdir_p makes every missing component, and is NOT an error when the
   # directory is already there -- that is the whole difference from Dir.mkdir
   # and the reason nearly every caller wants this one.
   def mkdir_p(list, mode: nil, verbose: nil, noop: nil)
+    fu_output_message("mkdir -p #{mode ? sprintf('-m %03o ', mode) : ''}#{fu_list(list).join(' ')}") if verbose
+    return fu_list(list) if noop
     fu_list(list).each do |path|
       next if path.empty?
       # Walk down from the root building each missing component. Splitting on
@@ -57,14 +71,16 @@ module FileUtils
   end
 
   def makedirs(list, mode: nil, verbose: nil, noop: nil)
-    mkdir_p(list, mode: mode)
+    mkdir_p(list, mode: mode, verbose: verbose, noop: noop)
   end
 
   def mkpath(list, mode: nil, verbose: nil, noop: nil)
-    mkdir_p(list, mode: mode)
+    mkdir_p(list, mode: mode, verbose: verbose, noop: noop)
   end
 
   def mkdir(list, mode: nil, verbose: nil, noop: nil)
+    fu_output_message("mkdir #{mode ? sprintf('-m %03o ', mode) : ''}#{fu_list(list).join(' ')}") if verbose
+    return fu_list(list) if noop
     fu_list(list).each do |path|
       Dir.mkdir(path)
       File.chmod(mode, path) if mode
@@ -73,6 +89,8 @@ module FileUtils
   end
 
   def rmdir(list, parents: nil, verbose: nil, noop: nil)
+    fu_output_message("rmdir #{parents ? '-p ' : ''}#{fu_list(list).join(' ')}") if verbose
+    return fu_list(list) if noop
     fu_list(list).each { |path| Dir.rmdir(path) }
     fu_list(list)
   end
@@ -80,6 +98,8 @@ module FileUtils
   # rm removes files, never directories: a directory here is an error, as it
   # is in CRuby. rm_f swallows every error, which is what `force: true` means.
   def rm(list, force: nil, verbose: nil, noop: nil)
+    fu_output_message("rm#{force ? ' -f' : ''} #{fu_list(list).join(' ')}") if verbose
+    return fu_list(list) if noop
     fu_list(list).each do |path|
       begin
         File.delete(path)
@@ -91,11 +111,11 @@ module FileUtils
   end
 
   def rm_f(list, verbose: nil, noop: nil)
-    rm(list, force: true)
+    rm(list, force: true, verbose: verbose, noop: noop)
   end
 
   def remove(list, force: nil, verbose: nil, noop: nil)
-    rm(list, force: force)
+    rm(list, force: force, verbose: verbose, noop: noop)
   end
 
   def remove_file(path, force = false)
@@ -107,16 +127,18 @@ module FileUtils
   # link, not followed -- following it would delete a tree outside the one
   # named, which is the accident this check exists to prevent.
   def rm_r(list, force: nil, verbose: nil, noop: nil, secure: nil)
+    fu_output_message("rm -r#{force ? 'f' : ''} #{fu_list(list).join(' ')}") if verbose
+    return fu_list(list) if noop
     fu_list(list).each { |path| fu_rm_tree(path, force ? true : false) }
     fu_list(list)
   end
 
   def rm_rf(list, verbose: nil, noop: nil, secure: nil)
-    rm_r(list, force: true)
+    rm_r(list, force: true, verbose: verbose, noop: noop)
   end
 
   def rmtree(list, verbose: nil, noop: nil, secure: nil)
-    rm_r(list, force: true)
+    rm_r(list, force: true, verbose: verbose, noop: noop)
   end
 
   def remove_entry(path, force = false)
@@ -160,15 +182,19 @@ module FileUtils
   # cp copies file contents. A destination that is an existing DIRECTORY takes
   # the source's basename inside it, which is what makes `cp(files, dir)` work.
   def cp(src, dest, preserve: nil, verbose: nil, noop: nil)
+    fu_output_message("cp#{preserve ? ' -p' : ''} #{(fu_list(src) + [dest.to_s]).join(' ')}") if verbose
+    return nil if noop
     fu_list(src).each { |s| fu_copy_file(s, fu_dest_path(s, dest.to_s)) }
     nil
   end
 
   def copy(src, dest, preserve: nil, verbose: nil, noop: nil)
-    cp(src, dest)
+    cp(src, dest, preserve: preserve, verbose: verbose, noop: noop)
   end
 
   def cp_r(src, dest, preserve: nil, verbose: nil, noop: nil, dereference_root: nil, remove_destination: nil)
+    fu_output_message("cp -r#{preserve ? 'p' : ''} #{(fu_list(src) + [dest.to_s]).join(' ')}") if verbose
+    return nil if noop
     fu_list(src).each { |s| fu_copy_tree(s, fu_dest_path(s, dest.to_s)) }
     nil
   end
@@ -199,6 +225,8 @@ module FileUtils
   # there the move is a copy followed by a delete -- without the fallback,
   # moving out of /tmp onto another mount raised where CRuby succeeds.
   def mv(src, dest, force: nil, verbose: nil, noop: nil, secure: nil)
+    fu_output_message("mv#{force ? ' -f' : ''} #{(fu_list(src) + [dest.to_s]).join(' ')}") if verbose
+    return nil if noop
     fu_list(src).each do |s|
       d = fu_dest_path(s, dest.to_s)
       begin
@@ -212,12 +240,16 @@ module FileUtils
   end
 
   def move(src, dest, force: nil, verbose: nil, noop: nil, secure: nil)
-    mv(src, dest, force: force)
+    mv(src, dest, force: force, verbose: verbose, noop: noop)
   end
 
   # touch creates what is missing and updates the times of what is not.
   def touch(list, mtime: nil, nocreate: nil, verbose: nil, noop: nil)
     t = mtime || Time.now
+    if verbose
+      fu_output_message("touch #{nocreate ? '-c ' : ''}#{mtime ? mtime.strftime('-t %Y%m%d%H%M.%S ') : ''}#{fu_list(list).join(' ')}")
+    end
+    return fu_list(list) if noop
     fu_list(list).each do |path|
       if File.exist?(path)
         File.utime(t, t, path)
@@ -230,6 +262,8 @@ module FileUtils
   end
 
   def ln_s(src, dest, force: nil, verbose: nil, noop: nil)
+    fu_output_message("ln -s#{force ? 'f' : ''} #{(fu_list(src) + [dest.to_s]).join(' ')}") if verbose
+    return nil if noop
     fu_list(src).each do |s|
       d = fu_dest_path(s, dest.to_s)
       begin
@@ -243,24 +277,30 @@ module FileUtils
   end
 
   def symlink(src, dest, force: nil, verbose: nil, noop: nil)
-    ln_s(src, dest, force: force)
+    ln_s(src, dest, force: force, verbose: verbose, noop: noop)
   end
 
   def ln(src, dest, force: nil, verbose: nil, noop: nil)
+    fu_output_message("ln#{force ? ' -f' : ''} #{(fu_list(src) + [dest.to_s]).join(' ')}") if verbose
+    return nil if noop
     fu_list(src).each { |s| File.link(s, fu_dest_path(s, dest.to_s)) }
     nil
   end
 
   def link(src, dest, force: nil, verbose: nil, noop: nil)
-    ln(src, dest, force: force)
+    ln(src, dest, force: force, verbose: verbose, noop: noop)
   end
 
   def chmod(mode, list, verbose: nil, noop: nil)
+    fu_output_message("chmod #{fu_mode_to_s(mode)} #{fu_list(list).join(' ')}") if verbose
+    return fu_list(list) if noop
     fu_list(list).each { |path| File.chmod(mode, path) }
     fu_list(list)
   end
 
   def chmod_R(mode, list, verbose: nil, noop: nil, force: nil)
+    fu_output_message("chmod -R#{force ? 'f' : ''} #{fu_mode_to_s(mode)} #{fu_list(list).join(' ')}") if verbose
+    return fu_list(list) if noop
     fu_list(list).each { |path| fu_chmod_tree(mode, path) }
     fu_list(list)
   end
@@ -276,11 +316,14 @@ module FileUtils
   end
 
   def cd(dir, verbose: nil, &block)
-    Dir.chdir(dir.to_s, &block)
+    fu_output_message("cd #{dir}") if verbose
+    result = Dir.chdir(dir.to_s, &block)
+    fu_output_message("cd -") if verbose && block
+    result
   end
 
   def chdir(dir, verbose: nil, &block)
-    Dir.chdir(dir.to_s, &block)
+    cd(dir, verbose: verbose, &block)
   end
 
   def pwd
