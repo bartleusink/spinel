@@ -14,4 +14,7 @@ p(rand(2**70) < 2**70)
 p rand(10).class
 p rand(0).class
 p rand(1..3).between?(1, 3)
-p(-rand(2**40) <= 0)
+# a negative bound: the magnitude is what the draw uses. Written with a
+# literal past every target's Integer rather than `2**40`, which is a
+# RangeError on a 32-bit target under the default overflow mode.
+p(-rand(0x100000000) <= 0)
