@@ -88,6 +88,39 @@ begin
   p (File.stat(cf).mode & 0o777).to_s(8)
 
   p FileUtils.uptodate?(cf, [f])
+
+  # verbose: prints the equivalent shell command (to stdout, as CRuby's own
+  # fu_output_message does), noop: prints it and does nothing else. The paths
+  # here are relative so the printed lines carry no pid.
+  Dir.chdir(root) do
+    FileUtils.mkdir_p("v/one", verbose: true)
+    FileUtils.mkdir("v/two", verbose: true)
+    FileUtils.rmdir("v/two", verbose: true)
+    File.write("v/src.txt", "s")
+    FileUtils.cp("v/src.txt", "v/copy.txt", verbose: true)
+    FileUtils.cp_r("v/one", "v/one_copy", verbose: true)
+    FileUtils.mv("v/copy.txt", "v/moved.txt", verbose: true)
+    FileUtils.rm("v/moved.txt", verbose: true)
+    FileUtils.rm_f("v/gone.txt", verbose: true)
+    FileUtils.touch("v/t.txt", verbose: true)
+    FileUtils.chmod(0o644, "v/t.txt", verbose: true)
+    FileUtils.chmod_R(0o644, "v/one", verbose: true)
+    FileUtils.ln_s("t.txt", "v/link", verbose: true)
+    FileUtils.ln("v/t.txt", "v/hard", verbose: true)
+    FileUtils.rm_r("v/one_copy", verbose: true)
+    FileUtils.rm_rf(["v/one", "v/nope"], verbose: true)
+    p Dir.exist?("v/one")
+
+    # noop does not touch the filesystem, and still reports under verbose
+    p FileUtils.mkdir_p("v/dry", verbose: true, noop: true)
+    p Dir.exist?("v/dry")
+    FileUtils.rm_rf("v", noop: true)
+    p Dir.exist?("v")
+
+    # cd reports the directory it enters, and the return under a block
+    FileUtils.cd("v", verbose: true) { p File.basename(Dir.pwd) }
+    p File.basename(Dir.pwd) == File.basename(root)
+  end
 ensure
   FileUtils.rm_rf(root) if defined?(FileUtils)
 end

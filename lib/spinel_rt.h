@@ -9375,6 +9375,11 @@ static sp_RbVal sp_poly_first(sp_RbVal v) {
      Before the user_elems read, which materializes a Range and would answer
      nil for an empty one. */
   if (v.cls_id == SP_BUILTIN_RANGE) return sp_box_int(((sp_Range *)v.v.p)->first);
+  /* a Float range answers its begin the same way, and has no elements to
+     materialize: without this it fell through to the array read and answered
+     nil (a boxed 1.5..2.5 reaching a run-time-typed callable, #4804) */
+  if (v.cls_id == SP_BUILTIN_FLOAT_RANGE) return sp_box_float(((sp_FloatRange *)v.v.p)->first);
+  if (v.cls_id == SP_BUILTIN_STR_RANGE) return sp_box_str(((sp_StrRange *)v.v.p)->first);
   { sp_PolyArray *ue = sp_poly_user_elems(v);
     if (ue) return ue->len > 0 ? ue->data[0] : sp_box_nil(); }
   return sp_poly_arr_get(v, 0);
@@ -9392,6 +9397,12 @@ static sp_RbVal sp_poly_last(sp_RbVal v) {
     SP_GC_ROOT(ia);
     return ia->len ? sp_box_int(ia->data[ia->start + ia->len - 1]) : sp_box_nil();
   }
+  /* a Float / String range answers its end, exclusivity untouched, like the
+     Integer range above (#4804) */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE)
+    return sp_box_float(((sp_FloatRange *)v.v.p)->last);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE)
+    return sp_box_str(((sp_StrRange *)v.v.p)->last);
   { sp_PolyArray *ue = v.tag == SP_TAG_OBJ ? sp_poly_user_elems(v) : NULL;
     if (ue) return ue->len > 0 ? ue->data[ue->len - 1] : sp_box_nil(); }
   sp_int n = sp_poly_length(v);

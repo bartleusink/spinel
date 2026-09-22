@@ -12976,20 +12976,24 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     for (int kk = 0; kk < c->nclasses && !has_user_dig; kk++)
       if (comp_poly_arm_defines_n(c, kk, name, argc) ||
           (!c->classes[kk].is_native_class && comp_reader_in_chain(c, kk, name, NULL))) has_user_dig = 1;
+    /* the receiver is held across the arguments, which may allocate */
     if (!has_user_dig) {
       if (argc == 1 && nt_kind(nt, argv[0]) == NK_SplatNode) {
-        buf_puts(b, "sp_poly_dig_list("); emit_boxed(c, recv, b);
-        buf_puts(b, ", sp_poly_to_poly_array("); emit_boxed(c, argv[0], b); buf_puts(b, "))");
+        Buf rb; int ch = hold_recv_open(c, recv, 1, "sp_RbVal", "SP_GC_ROOT_RBVAL", b, &rb);
+        buf_printf(b, "sp_poly_dig_list(%s, sp_poly_to_poly_array(", rb.p); free(rb.p);
+        emit_boxed(c, argv[0], b); buf_puts(b, "))");
+        if (ch) buf_puts(b, "; })");
         return 1;
       }
       int any_splat = 0;
       for (int a = 0; a < argc; a++)
         if (nt_kind(nt, argv[a]) == NK_SplatNode) any_splat = 1;
       if (!any_splat) {
-        buf_printf(b, "sp_poly_dig_n("); emit_boxed(c, recv, b);
-        buf_printf(b, ", %d, (sp_RbVal[]){", argc);
+        Buf rb; int ch = hold_recv_open(c, recv, 1, "sp_RbVal", "SP_GC_ROOT_RBVAL", b, &rb);
+        buf_printf(b, "sp_poly_dig_n(%s, %d, (sp_RbVal[]){", rb.p, argc); free(rb.p);
         for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_boxed(c, argv[a], b); }
         buf_puts(b, "})");
+        if (ch) buf_puts(b, "; })");
         return 1;
       }
     }

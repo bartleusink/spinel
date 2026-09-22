@@ -13732,6 +13732,7 @@ void analyze_program(Compiler *c) {
       comp_grow_node_arrays(c);
     }
   }
+  desugar_root_scoped_constants(c);      /* ::Name -> Name (#4801) */
   /* builtins/enumerable.rb, spliced by the parser: its definitions become
      the receiver-taking top-level functions before any scope is built */
   desugar_builtins(c);

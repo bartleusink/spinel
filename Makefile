@@ -573,8 +573,13 @@ WASMTIME ?= wasmtime
 WASM_TESTS = test/string_gsub_block.rb test/rescue_roots_under_collection.rb test/float_round_half.rb \
              test/bignum_modulo_bit_pow.rb test/json_user_to_json_bytes.rb test/array_flatten_typed_elements.rb \
              test/string_to_i_overflow_raises.rb
+# WASM_ENGINE_REQUIRED=1 makes a missing engine a failure rather than a skip:
+# the one job whose whole purpose is to prove these programs still link and run
+# cannot report that by exiting 0 with "skipped" (#4807). CI sets it.
 wasm-test: $(SPINEL) wasm-rt
-	@if ! command -v $(WASMTIME) >/dev/null 2>&1; then echo "wasm-test: skipped (no $(WASMTIME))"; exit 0; fi; \
+	@if ! command -v $(WASMTIME) >/dev/null 2>&1; then \
+	  if [ -n "$(WASM_ENGINE_REQUIRED)" ]; then echo "wasm-test: FAIL (no $(WASMTIME), and WASM_ENGINE_REQUIRED is set)"; exit 1; fi; \
+	  echo "wasm-test: skipped (no $(WASMTIME))"; exit 0; fi; \
 	tmp=$$(mktemp -d /tmp/spinel-wasm.XXXXXX); ok=1; \
 	for t in $(WASM_TESTS); do \
 	  bn=$$(basename $$t .rb); \

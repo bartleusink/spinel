@@ -370,6 +370,18 @@ static void emit_bigint_operand(Compiler *c, int node, Buf *b) {
   TyKind t = comp_ntype(c, node);
   if (t == TY_BIGINT) { emit_expr(c, node, b); return; }
   if (t == TY_POLY) { buf_puts(b, "sp_poly_as_bigint("); emit_expr(c, node, b); buf_puts(b, ")"); return; }
+  /* A nilable int carries nil as SP_INT_NIL, and sp_bigint_new_int made a
+     Bignum of INT64_MIN out of it: `return (if false then 1 end)` from a
+     method whose value is a Bignum answered -9223372036854775808 rather
+     than nil, silently (#4800). The guard is only for a value that CAN be
+     nil -- a plain Integer of INT64_MIN is a real value and must convert. */
+  if (t == TY_INT && call_returns_nullable_int(c, node)) {
+    int tv = ++g_tmp;
+    buf_printf(b, "({ sp_int _t%d = ", tv);
+    emit_expr(c, node, b);
+    buf_printf(b, "; _t%d == SP_INT_NIL ? NULL : sp_bigint_new_int(_t%d); })", tv, tv);
+    return;
+  }
   buf_puts(b, "sp_bigint_new_int("); emit_expr(c, node, b); buf_puts(b, ")");
 }
 /* Same, reachable from the other emitters (the ivar op-assign). */
@@ -18919,7 +18931,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         if (aptmp) { \
           if (_at == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", aptmp[k]); \
           else if (proc_slot_is_ptr(_at) || _at == TY_PROC) buf_printf(b, "(sp_int)(uintptr_t)_t%d", aptmp[k]); \
-          else if (_at == TY_FLOAT) buf_puts(b, "0"); \
+          /* A value carried by the boxed side channel takes a placeholder in \
+             the legacy sp_int slot: a Float does not fit the integer \
+             register, and a struct-valued kind (Time, a Range, a Complex, a \
+             Rational, a Class) does not convert to sp_int at all -- it \
+             reached the slot verbatim and the C compiler refused the whole \
+             program (#4804). The real value is published beside it. */ \
+          else if (_at == TY_FLOAT || proc_slot_via_poly(c, _at)) buf_puts(b, "0"); \
           else buf_printf(b, "_t%d", aptmp[k]); \
         } \
         else emit_expr(c, argv[k], b); \
@@ -32332,7 +32350,13 @@ else {
     Buf rs = expr_buf(c, recv);
     const char *r = rs.p ? rs.p : "";
     if ((sp_streq(name, "to_s") || sp_streq(name, "inspect")) && argc == 0) {
-      buf_printf(b, "sp_bigint_to_s(%s)", r); free(rs.p); return;
+      /* NULL is this slot's nil: #to_s answers "" and #inspect "nil", the
+         way they do for every other nullable pointer type (#4800). */
+      int tsv = ++g_tmp;
+      buf_printf(b, "({ sp_Bigint *_t%d = %s; _t%d ? sp_bigint_to_s(_t%d) : %s; })",
+                 tsv, r, tsv, tsv,
+                 sp_streq(name, "inspect") ? "(&(\"\\xff\" \"nil\")[1])" : "sp_str_empty");
+      free(rs.p); return;
     }
     /* to_i / to_int on a Bignum is self -- returning the full value, not the
        64-bit-truncated sp_bigint_to_int (#2319) */

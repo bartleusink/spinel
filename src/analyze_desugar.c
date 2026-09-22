@@ -2113,15 +2113,92 @@ int desugar_block_implicit_rest(Compiler *c) {
   return changed;
 }
 
-/* `xs.sort_by.with_index { |v, i| key }`: a blockless sort_by answers an
-   Enumerator whose with_index feeds the index to the key block. There is no
-   Enumerator arm for the *_by family, so rewrite the chain into the equivalent
-   spelling over pairs and take the values back out:
+/* `::Name` (a ConstantPathNode with no parent) is the top-level constant
+   `Name`. The analyzer resolves a bare ConstantReadNode everywhere -- the
+   class census, the builtin receivers (ENV, File, Math), the exception
+   names -- while the rooted spelling was recognised only at the handful of
+   sites that looked for it, so `::ENV.fetch(k)` inside a method typed the
+   receiver unknown and raised NoMethodError at run time, and `::File.x` /
+   `::Math.sqrt` were refused outright (#4801).
 
-     xs.each_with_index.sort_by { |v, i| key }.map { |p| p[0] }
+   Retype the node in place, which makes every one of those sites answer;
+   the id stays, so the parent's ref still names it. Only for a name NOTHING
+   defines inside a class or module body: where a nested definition of the
+   same name exists, the two spellings mean different things and the rooted
+   one is the only way to say "the top-level one" (`::RootNS::Mid::LEAF`
+   beside a `Lex::RootNS`, `include ::Helper` inside an `Outer::Helper`,
+   `defined?(::Rails)` inside a `Underscore::Rails`). A write target
+   (`::X = 1`, `::X ||= v`) keeps its own node type: the writers read the
+   path. */
+static void rsc_mark_nested_defs(const NodeTable *nt, int id, unsigned char *seen,
+                                 char **names, int *nn, int depth) {
+  if (id < 0 || id >= nt->count || seen[id] || depth > 64) return;
+  seen[id] = 1;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_ClassNode || k == NK_ModuleNode || k == NK_ConstantWriteNode) {
+    const char *nm = NULL;
+    if (k == NK_ConstantWriteNode) nm = nt_str(nt, id, "name");
+    else {
+      int cp = nt_ref(nt, id, "constant_path");
+      if (cp >= 0) nm = nt_str(nt, cp, "name");
+    }
+    if (nm && *nn < 4096) names[(*nn)++] = (char *)nm;
+  }
+  const SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++)
+    rsc_mark_nested_defs(nt, nd->r[j].ref, seen, names, nn, depth + 1);
+  for (int j = 0; j < nd->na; j++)
+    for (int k2 = 0; k2 < nd->a[j].n; k2++)
+      rsc_mark_nested_defs(nt, nd->a[j].ids[k2], seen, names, nn, depth + 1);
+}
 
-   Only the no-offset form: `with_index(1)` would need the index to start
-   somewhere each_with_index cannot. */
+int desugar_root_scoped_constants(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  if (n0 <= 0) return 0;
+  unsigned char *skip = (unsigned char *)calloc((size_t)n0, 1);
+  if (!skip) return 0;
+  /* a write target keeps its node type */
+  for (int id = 0; id < n0; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strncmp(ty, "ConstantPath", 12) != 0) continue;
+    if (sp_streq(ty, "ConstantPathNode") || sp_streq(ty, "ConstantPathTargetNode")) continue;
+    int t = nt_ref(nt, id, "target");
+    if (t >= 0 && t < n0) skip[t] = 1;
+  }
+  /* the names some class or module body defines: there the bare spelling
+     resolves lexically and the two spellings differ */
+  char **names = (char **)malloc(sizeof(char *) * 4096);
+  int nn = 0;
+  if (names) {
+    unsigned char *seen = (unsigned char *)calloc((size_t)n0, 1);
+    if (seen) {
+      for (int id = 0; id < n0; id++) {
+        NodeKind k = nt_kind(nt, id);
+        if (k != NK_ClassNode && k != NK_ModuleNode) continue;
+        int body = nt_ref(nt, id, "body");
+        if (body >= 0) rsc_mark_nested_defs(nt, body, seen, names, &nn, 0);
+      }
+      free(seen);
+    }
+  }
+  int changed = 0;
+  for (int id = 0; id < n0; id++) {
+    if (skip[id] || nt_kind(nt, id) != NK_ConstantPathNode) continue;
+    if (nt_ref(nt, id, "parent") >= 0) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    int shadowed = 0;
+    for (int k = 0; k < nn; k++) if (sp_streq(nm, names[k])) { shadowed = 1; break; }
+    if (shadowed) continue;
+    nt_node_set_type(nt, id, "ConstantReadNode");
+    changed = 1;
+  }
+  free(names);
+  free(skip);
+  return changed;
+}
+
 int desugar_sort_by_with_index(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;

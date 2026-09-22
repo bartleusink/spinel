@@ -32,8 +32,11 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "; if (_t%d == SP_INT_NIL) putchar('\\n'); else printf(\"%%lld\\n\", (long long)_t%d); }\n", tv, tv);
   }
   else if (t == TY_BIGINT) {
-    buf_puts(b, "{ const char *_bs = sp_bigint_to_s("); emit_expr(c, arg, b);
-    buf_puts(b, "); if (_bs) sp_puts_line(_bs); }\n");
+    /* NULL is this slot's nil (nil_value), so it prints the empty line
+       `puts nil` prints rather than sp_bigint_to_s's defensive "0" (#4800). */
+    int bv = ++g_tmp;
+    buf_printf(b, "{ sp_Bigint *_t%d = ", bv); emit_expr(c, arg, b);
+    buf_printf(b, "; if (!_t%d) putchar('\\n'); else { const char *_bs = sp_bigint_to_s(_t%d); if (_bs) sp_puts_line(_bs); } }\n", bv, bv);
   }
   else if (t == TY_MATCHDATA) {
     /* puts uses to_s: the full matched substring; nil (NULL) prints blank */
@@ -244,8 +247,10 @@ void emit_print_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_puts(b, "); if (_s) fputs(_s, stdout); }\n");
   }
   else if (t == TY_BIGINT) {
-    buf_puts(b, "{ const char *_bs = sp_bigint_to_s((sp_Bigint *)("); emit_expr(c, arg, b);
-    buf_puts(b, ")); if (_bs) fputs(_bs, stdout); }\n");
+    /* a nil (NULL) prints as nothing, the way `print nil` does */
+    int bv2 = ++g_tmp;
+    buf_printf(b, "{ sp_Bigint *_t%d = (sp_Bigint *)(", bv2); emit_expr(c, arg, b);
+    buf_printf(b, "); if (_t%d) { const char *_bs = sp_bigint_to_s(_t%d); if (_bs) fputs(_bs, stdout); } }\n", bv2, bv2);
   }
   else if (t == TY_BOOL) {
     buf_puts(b, "fputs(("); emit_expr(c, arg, b); buf_puts(b, ") ? \"true\" : \"false\", stdout);\n");
@@ -507,9 +512,11 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "; sp_puts_line(sp_class_inspect_name(_t%d)); }\n", cv);
   }
   else if (t == TY_BIGINT) {
-    /* Integer#inspect == #to_s, so a bignum prints the same as puts/print. */
-    buf_puts(b, "{ const char *_bs = sp_bigint_to_s("); emit_expr(c, arg, b);
-    buf_puts(b, "); if (_bs) sp_puts_line(_bs); }\n");
+    /* Integer#inspect == #to_s, so a bignum prints the same as puts/print;
+       a nil (NULL, this slot's nil_value) inspects as "nil" (#4800). */
+    int bv3 = ++g_tmp;
+    buf_printf(b, "{ sp_Bigint *_t%d = ", bv3); emit_expr(c, arg, b);
+    buf_printf(b, "; if (!_t%d) sp_puts_line(\"nil\"); else { const char *_bs = sp_bigint_to_s(_t%d); if (_bs) sp_puts_line(_bs); } }\n", bv3, bv3);
   }
   else if (t == TY_NIL || t == TY_VOID) {
     buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, "); fputs(\"nil\\n\", stdout);\n");
@@ -1268,8 +1275,7 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   else if (lv && lv->type == TY_BIGINT) {
     TyKind vt = comp_ntype(c, v);
     if (vt == TY_BIGINT) emit_expr(c, v, b);
-    else if (vt == TY_POLY) { buf_puts(b, "sp_poly_as_bigint("); emit_expr(c, v, b); buf_puts(b, ")"); }
-    else { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else emit_bigint_operand_ext(c, v, b);
   }
   else if (lv && lv->type == TY_PROCESS_STATUS) {
     /* The slot is sp_ProcessStatus *. The RHS is sp_RbVal (a boxed
@@ -5374,9 +5380,7 @@ static void emit_tail_value(Compiler *c, int node, Buf *b) {
   if (g_ret_type == TY_BIGINT) {
     TyKind bvt = comp_ntype(c, node);
     if (bvt == TY_INT || bvt == TY_BOOL) {
-      buf_puts(b, "sp_bigint_new_int(");
-      emit_expr(c, node, b);
-      buf_puts(b, ")");
+      emit_bigint_operand_ext(c, node, b);
       return;
     }
     if (bvt == TY_POLY) {
@@ -6379,10 +6383,25 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
         buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
                    eid, outer->lid, outer->lid);
       }
-      /* Unhandled exception: propagate info to outer ensure context. */
+      /* Unhandled exception. It belongs to the nearest enclosing HANDLER,
+         which is not always the enclosing ensure: a `begin ... rescue`
+         between the two catches it in Ruby. Handing it straight to the outer
+         ensure walked past that rescue, ran the outer ensure (twice, once
+         here and once on the way out) and killed the program -- what
+         `Dir.chdir(a) { begin; Dir.chdir(b) { raise }; rescue; end }` does,
+         and any value-position begin/ensure nested the same way. An
+         intervening rescue shows up as an exception frame between this level
+         and the outer ensure's own, so re-raise there and let that handler
+         match; with no such frame, propagate to the outer ensure as before. */
       emit_indent(b, indent);
-      buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
-                 eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
+      if (g_exc_frame_depth > outer->exc_base + 1) {
+        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
+                   eid, eid, eid, eid);
+      }
+      else {
+        buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
+                   eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
+      }
     }
     else {
       /* the deferred return leaves through every enclosing live begin frame:

@@ -117,7 +117,8 @@ A few `require`s name a capability Spinel already provides as core, and are
 ### Pre-installed packages (the carved-out stdlib)
 
 Some stdlib ships with Spinel as Ruby source and is spliced when required --
-`set`, `forwardable`, `optparse`, `erb`, `csv`, `pathname`, `digest`, `base64`
+`set`, `forwardable`, `optparse`, `erb`, `csv`, `pathname`, `digest`, `base64`,
+`fileutils`, `tmpdir`, `zlib`
 (plus the `stringio`/`strscan`/`json` marker shims for their C-backed
 features). `net/http` and `uri` are there, and so
 is `openssl` -- the one that is conditional: it is glue over the system libssl, so it exists only where those

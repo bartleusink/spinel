@@ -135,8 +135,89 @@ module URI
     parts.join("&")
   end
 
+  # The characters RFC 3986 excludes from a URI: the space and the
+  # control range, plus the "unwise" set a generic URI may not carry
+  # unescaped, and the brackets an authority reserves for an IPv6
+  # literal. CRuby's parser rejects a string containing any of them
+  # with `InvalidURIError`, and an app can be RELYING on that rescue
+  # rather than on its own validation -- a Rails message body decides
+  # whether to keep a link by asking whether `URI.parse` accepted it,
+  # so a parser that accepts everything turns that check into a no-op.
+  # `"http://exa mple.com/ "` is the shape that surfaced it: with a
+  # space admitted, the host reads as an ordinary off-site domain.
+  INVALID_URI_CHARS = " <>\"{}|\\^`[]"
+
+  # Where each of them is excluded is not uniform, and CRuby's own parser is
+  # what this follows: the QUERY (between the first `?` and the first `#`)
+  # takes any ASCII character, including a space and the unwise set, so
+  # `?filter=a|b` parses; everywhere else -- the scheme, the authority, the
+  # path and the fragment -- the set above is rejected. A bracket is the
+  # exception inside an authority, where `http://[::1]/x` is an IPv6 host.
+  # A byte outside ASCII is rejected everywhere, query included.
+  def self.invalid_char?(s)
+    qi = s.index("?")
+    fi = s.index("#")
+    qi = nil if qi && fi && fi < qi          # `#a?b` is all fragment
+    auth_end = -1
+    ai = s.index("://")
+    if ai
+      auth_end = s.length
+      i = ai + 3
+      while i < s.length
+        c = s[i]
+        if c == "/" || c == "?" || c == "#"
+          auth_end = i
+          break
+        end
+        i += 1
+      end
+    end
+    # the host inside the authority, after any `user:pw@`
+    host_start = -1
+    host_end = -1
+    if ai
+      host_start = ai + 3
+      j = host_start
+      while j < auth_end
+        host_start = j + 1 if s[j] == "@"
+        j += 1
+      end
+      host_end = auth_end
+      j = host_start
+      while j < auth_end
+        if s[j] == "]"
+          host_end = j + 1
+          break
+        end
+        j += 1
+      end
+    end
+    i = 0
+    while i < s.length
+      c = s[i]
+      o = c.ord
+      return true if o > 0x7f
+      in_query = qi && i > qi && (fi.nil? || i < fi)
+      unless in_query
+        return true if o < 0x20 || o == 0x7f
+        if INVALID_URI_CHARS.include?(c)
+          # a bracketed IPv6 host: `[` opens the host and `]` closes it, with
+          # only a `:port` allowed after. Anything else bracketed is rejected
+          # the way CRuby rejects `http://exa[mple.com/`.
+          bracket_host = (c == "[" && i == host_start) ||
+                         (c == "]" && i == host_end - 1 && host_end > host_start + 1 &&
+                          s[host_start] == "[")
+          return true unless bracket_host
+        end
+      end
+      i += 1
+    end
+    false
+  end
+
   def self.parse(str)
     s = str.to_s
+    raise InvalidURIError, "bad URI (is not URI?): #{s.inspect}" if invalid_char?(s)
     scheme = ""
     rest = s
     idx = s.index("://")

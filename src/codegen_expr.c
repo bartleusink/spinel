@@ -269,8 +269,12 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (t == TY_BIGINT) {
-        buf_puts(&conv, "sp_bigint_to_s(");
-        EMIT_IV(); buf_puts(&conv, ")");
+        /* NULL is this slot's nil, which interpolates as the empty string
+           the way a nullable String's does (#4800). */
+        int bgv = ++g_tmp;
+        buf_printf(&conv, "({ sp_Bigint *_t%d = ", bgv);
+        EMIT_IV();
+        buf_printf(&conv, "; _t%d ? sp_bigint_to_s(_t%d) : sp_str_empty; })", bgv, bgv);
       }
       else if (t == TY_IO || t == TY_DIR) {
         /* the IO family has Object's to_s (the protocol arm's render) */
@@ -2753,6 +2757,28 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     int n = 0;
     const int *bd = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
     if (n == 0) { buf_puts(b, "sp_box_nil()"); return; }
+    /* The paren's value is its tail's, and a consumer that sees this node
+       typed POLY (the union of what several inline copies of the same
+       parenthesized body answer) is handed the tail's own C value: a
+       `const char *` went into an sp_RbVal slot unboxed and the C build
+       stopped (Dir.chdir's block splice, one copy per call site). Box the
+       tail where the node's own type says the consumer expects a box. */
+    if (comp_ntype(c, id) == TY_POLY) {
+      TyKind ptt = comp_ntype(c, bd[n - 1]);
+      if (ptt != TY_POLY && ptt != TY_UNKNOWN && ptt != TY_VOID && ptt != TY_NIL) {
+        Buf inner; memset(&inner, 0, sizeof inner);
+        if (n == 1) { buf_puts(&inner, "("); emit_expr(c, bd[0], &inner); buf_puts(&inner, ")"); }
+        else {
+          buf_puts(&inner, "({ ");
+          for (int j = 0; j < n - 1; j++) emit_stmt(c, bd[j], &inner, 0);
+          emit_expr(c, bd[n - 1], &inner);
+          buf_puts(&inner, "; })");
+        }
+        emit_boxed_text(c, ptt, inner.p ? inner.p : "0", b);
+        free(inner.p);
+        return;
+      }
+    }
     if (n == 1) {
       buf_puts(b, "("); emit_expr(c, bd[0], b); buf_puts(b, ")");
       return;
@@ -3390,7 +3416,7 @@ else {
     else if (lt == TY_FLOAT) buf_printf(&tcond, "(!sp_float_is_nil(_t%d))", t);
     else if (lt == TY_STRING || ty_is_array(lt) || ty_is_hash(lt) || ty_is_object(lt) ||
              lt == TY_PROC || lt == TY_MATCHDATA || lt == TY_EXCEPTION ||
-             ty_nullable_builtin_id(lt))
+             lt == TY_BIGINT || ty_nullable_builtin_id(lt))
       buf_printf(&tcond, "(_t%d != 0)", t);  /* nullable pointer: NULL reads falsy */
     else if (lt == TY_SYMBOL) buf_printf(&tcond, "(_t%d != (sp_sym)-1)", t);  /* nilable symbol sentinel */
     else if (lt == TY_UNKNOWN && res == TY_BOOL) buf_printf(&tcond, "_t%d", t);  /* temp holds sp_poly_truthy(left) (#3276) */

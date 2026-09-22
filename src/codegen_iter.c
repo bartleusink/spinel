@@ -927,9 +927,16 @@ static int block_tail_needs_value_form(Compiler *c, int id) {
      if-modifier) left the outer splice void (`{ |__fwd| yield __fwd }`, the
      forward of a named &block, handed on to a builtin). */
   if (nt_kind(nt, id) == NK_YieldNode) return 1;
-  if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) return 0;
+  if (nt_kind(nt, id) != NK_CallNode) return 0;
   const char *nm = nt_str(nt, id, "name");
   if (!nm) return 0;
+  /* `system(cmd)` as the tail: its statement form is a compound (the argv
+     array is built inside braces), whose value is void, while the call has
+     a value (the exit status as a boolean) that the block answers with.
+     `with_retries { system(cmd) }` did not build (#4802). The expression
+     form is the same compound as a statement expression. */
+  if (nt_ref(nt, id, "receiver") < 0 && sp_streq(nm, "system")) return 1;
+  if (nt_ref(nt, id, "block") < 0) return 0;
   if (sp_streq(nm, "tap") || sp_streq(nm, "then") || sp_streq(nm, "yield_self"))
     return nt_ref(nt, id, "receiver") >= 0;
   /* a block-driving call to a user method that yields is spliced inline;

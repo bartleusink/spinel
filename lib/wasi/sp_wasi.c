@@ -38,6 +38,7 @@ int kill(pid_t p, int s) SP_WASI_NOSYS(p, s)
 int setpgid(pid_t p, pid_t g) SP_WASI_NOSYS(p, g)
 int getpriority(int w, id_t who) { (void)w; (void)who; return 0; }
 int setpriority(int w, id_t who, int p) { (void)w; (void)who; (void)p; return 0; }
+int getrlimit(int r, struct rlimit *l) SP_WASI_NOSYS(r, l)
 int setrlimit(int r, const struct rlimit *l) SP_WASI_NOSYS(r, l)
 
 /* signals: sigaction fails, so a handler is never installed and the
@@ -69,6 +70,7 @@ ssize_t sendto(int fd, const void *b, size_t n, int fl, const struct sockaddr *a
 ssize_t recvfrom(int fd, void *b, size_t n, int fl, struct sockaddr *a, socklen_t *l) { (void)fd; (void)b; (void)n; (void)fl; (void)a; (void)l; errno = ENOTSUP; return -1; }
 int getaddrinfo(const char *n, const char *s, const struct addrinfo *h, struct addrinfo **r) { (void)n; (void)s; (void)h; (void)r; return EAI_FAIL; }
 void freeaddrinfo(struct addrinfo *a) { (void)a; }
+int getnameinfo(const struct sockaddr *a, socklen_t al, char *h, socklen_t hl, char *s, socklen_t sl, int f) { (void)a; (void)al; (void)h; (void)hl; (void)s; (void)sl; (void)f; return EAI_FAIL; }
 const char *gai_strerror(int e) { (void)e; return "name resolution is not available on wasm32-wasi"; }
 
 /* users, files, terminals */

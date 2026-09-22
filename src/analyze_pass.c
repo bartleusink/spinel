@@ -5613,6 +5613,47 @@ int desugar_dir_surface(Compiler *c) {
     if (sp_streq(nm, "foreach")) { nt_node_set_str(nt, id, "name", "entries"); changed = 1; continue; }
     if (sp_streq(nm, "each_child")) { nt_node_set_str(nt, id, "name", "children"); changed = 1; continue; }
 
+    /* chdir(d, &b): the block a method forwards by name. Only a literal
+       block reached the save/restore splice below, so a forwarded one was
+       dropped -- the chdir became permanent and the block never ran, with
+       nothing said (FileUtils.cd's own block form, #4803). Rewrite it into
+       the literal form `chdir(d) { |__cd_p| b.call(__cd_p) }` and let the
+       splice below do the rest. The parameter carries what Dir.chdir
+       yields, the new directory, so a proc that takes it still gets it. */
+    if (sp_streq(nm, "chdir") && blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode && an >= 1) {
+      int bx = nt_ref(nt, blk, "expression");
+      if (bx < 0 || nt_kind(nt, bx) == NK_SymbolNode) continue;
+      char pnm[48]; snprintf(pnm, sizeof pnm, "__cd_p_%d", id);
+      int base2 = nt->count;
+      int req = nt_new_node(nt, "RequiredParameterNode");
+      int params2 = nt_new_node(nt, "ParametersNode");
+      int bparams2 = nt_new_node(nt, "BlockParametersNode");
+      int pread = nt_new_node(nt, "LocalVariableReadNode");
+      int cargs = nt_new_node(nt, "ArgumentsNode");
+      int ccall = nt_new_node(nt, "CallNode");
+      int cbody = nt_new_node(nt, "StatementsNode");
+      int nblk = nt_new_node(nt, "BlockNode");
+      if (req < 0 || params2 < 0 || bparams2 < 0 || pread < 0 || cargs < 0 ||
+          ccall < 0 || cbody < 0 || nblk < 0) continue;
+      nt_node_set_str(nt, req, "name", pnm);
+      nt_node_set_arr(nt, params2, "requireds", &req, 1);
+      nt_node_set_ref(nt, bparams2, "parameters", params2);
+      nt_node_set_str(nt, pread, "name", pnm);
+      { int pa = pread; nt_node_set_arr(nt, cargs, "arguments", &pa, 1); }
+      nt_node_set_ref(nt, ccall, "receiver", bx);
+      nt_node_set_str(nt, ccall, "name", "call");
+      nt_node_set_ref(nt, ccall, "arguments", cargs);
+      nt_node_set_ref(nt, ccall, "block", -1);
+      { int cc = ccall; nt_node_set_arr(nt, cbody, "body", &cc, 1); }
+      nt_node_set_ref(nt, nblk, "parameters", bparams2);
+      nt_node_set_ref(nt, nblk, "body", cbody);
+      nt_node_set_ref(nt, id, "block", nblk);
+      comp_grow_node_arrays(c);
+      { int encl2 = c->nscope[id];
+        for (int j = base2; j < nt->count; j++) c->nscope[j] = encl2; }
+      changed = 1; continue;
+    }
+
     /* chdir(d) { body }: save, switch, run, restore -- the paren splice; the
        restore sits in an ensure so a body that raises (a failing filesystem
        call is enough now that those raise) does not leave the process in d */
@@ -5621,18 +5662,32 @@ int desugar_dir_surface(Compiler *c) {
       if (body < 0) continue;
       if (subtree_has_kind(nt, body, NK_DefNode, 0)) continue;
       int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
-      if (bn > 60) continue;
-      char sav[32], valn[32];
+      if (bn > 58) continue;
+      char sav[32], valn[32], dirn[32];
       snprintf(sav, sizeof sav, "__cd_sav_%d", id);
       snprintf(valn, sizeof valn, "__cd_val_%d", id);
+      snprintf(dirn, sizeof dirn, "__cd_dir_%d", id);
       Scope *es = comp_scope_of(c, id);
       LocalVar *slv = es ? scope_local_intern(es, sav) : NULL;
       LocalVar *vlv = es ? scope_local_intern(es, valn) : NULL;
-      if (!slv || !vlv) continue;
+      LocalVar *dlv = es ? scope_local_intern(es, dirn) : NULL;
+      if (!slv || !vlv || !dlv) continue;
       slv->type = TY_STRING; slv->rbs_seeded = 1;
+      /* Dir.chdir yields the directory it switched to. The splice dropped
+         the block's parameters, so `chdir(d) { |p| ... }` read p as nil.
+         The argument goes into a temp, which the switch and the parameter
+         both read (evaluating the argument expression twice would run its
+         side effects twice). */
+      const char *cdp0 = block_param_name(c, blk, 0);
+      LocalVar *plv = (cdp0 && es) ? scope_local_intern(es, cdp0) : NULL;
       int aan = 0; const int *aav = nt_arr(nt, args, "arguments", &aan);
       if (aan < 1) continue;
       int base = nt->count;
+      /* __dir = <arg> */
+      int wdir = nt_new_node(nt, "LocalVariableWriteNode");
+      int rdir = nt_new_node(nt, "LocalVariableReadNode");
+      int rdir2 = plv ? nt_new_node(nt, "LocalVariableReadNode") : -1;
+      int wparam = plv ? nt_new_node(nt, "LocalVariableWriteNode") : -1;
       /* __sav = Dir.pwd */
       int pwdc = nt_new_node(nt, "CallNode");
       int pwdr = nt_new_node(nt, "ConstantReadNode");
@@ -5660,7 +5715,15 @@ int desugar_dir_surface(Compiler *c) {
       int oparen = nt_new_node(nt, "ParenthesesNode");
       if (pwdc<0||pwdr<0||wsav<0||cd1<0||cd1r<0||cd1a<0||pstmts<0||paren<0||wval<0||
           cd2<0||cd2r<0||cd2a<0||rsav<0||rval<0||beg<0||bstmts<0||ens<0||estmts<0||
-          ostmts<0||oparen<0) continue;
+          ostmts<0||oparen<0||wdir<0||rdir<0||(plv && (rdir2<0||wparam<0))) continue;
+      nt_node_set_str(nt, wdir, "name", dirn);
+      nt_node_set_ref(nt, wdir, "value", aav[0]);
+      nt_node_set_str(nt, rdir, "name", dirn);
+      if (plv) {
+        nt_node_set_str(nt, rdir2, "name", dirn);
+        nt_node_set_str(nt, wparam, "name", cdp0);
+        nt_node_set_ref(nt, wparam, "value", rdir2);
+      }
       nt_node_set_str(nt, pwdr, "name", "Dir");
       nt_node_set_str(nt, pwdc, "name", "pwd");
       nt_node_set_ref(nt, pwdc, "receiver", pwdr);
@@ -5672,11 +5735,13 @@ int desugar_dir_surface(Compiler *c) {
       nt_node_set_str(nt, cd1, "name", "chdir");
       nt_node_set_str(nt, cd1, "chdir_label", "dir_chdir0");  /* CRuby's block-form label */
       nt_node_set_ref(nt, cd1, "receiver", cd1r);
-      { int a0 = aav[0]; nt_node_set_arr(nt, cd1a, "arguments", &a0, 1); }
+      { int a0 = rdir; nt_node_set_arr(nt, cd1a, "arguments", &a0, 1); }
       nt_node_set_ref(nt, cd1, "arguments", cd1a);
       nt_node_set_ref(nt, cd1, "block", -1);
-      { int items[60]; for (int k = 0; k < bn; k++) items[k] = bb[k];
-        nt_node_set_arr(nt, pstmts, "body", items, bn); }
+      { int items[64]; int ni = 0;
+        if (plv) items[ni++] = wparam;
+        for (int k = 0; k < bn; k++) items[ni++] = bb[k];
+        nt_node_set_arr(nt, pstmts, "body", items, ni); }
       nt_node_set_ref(nt, paren, "body", pstmts);
       nt_node_set_str(nt, wval, "name", valn);
       nt_node_set_ref(nt, wval, "value", paren);
@@ -5696,8 +5761,8 @@ int desugar_dir_surface(Compiler *c) {
       nt_node_set_ref(nt, beg, "rescue_clause", -1);
       nt_node_set_ref(nt, beg, "else_clause", -1);
       nt_node_set_ref(nt, beg, "ensure_clause", ens);
-      { int all[4] = { wsav, cd1, beg, rval };
-        nt_node_set_arr(nt, ostmts, "body", all, 4); }
+      { int all[5] = { wdir, wsav, cd1, beg, rval };
+        nt_node_set_arr(nt, ostmts, "body", all, 5); }
       nt_node_set_ref(nt, oparen, "body", ostmts);
       nt_node_set_str(nt, id, "name", "itself");
       nt_node_set_ref(nt, id, "receiver", oparen);
