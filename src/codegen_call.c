@@ -17089,6 +17089,40 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     return;
   }
 
+  /* A program's own reopen of a builtin primitive owns the name, as it does
+     in CRuby: `class Integer; def abs; 999; end; end` makes `(-5).abs` answer
+     999, not the builtin 5. The reopened method is emitted (sp_Integer_abs),
+     and the dispatch that calls it sits at the END of this function, after
+     every builtin arm -- so it only ever ran for a name the compiler has no
+     arm of its own for (`5.shout`), and an OVERRIDE of a real builtin method
+     was silently ignored for a concrete receiver. Only the poly path honoured
+     a reopen. Ask first, for the four primitives whose reopen this file
+     dispatches, and let the builtin arms have the name when no reopen claims
+     it. */
+  {
+    const NodeTable *ntR = c->nt;
+    int recvR = nt_ref(ntR, id, "receiver");
+    const char *nmR = nt_str(ntR, id, "name");
+    if (recvR >= 0 && nmR && nt_ref(ntR, id, "block") < 0) {
+      TyKind rtR = comp_ntype(c, recvR);
+      const char *ocR = rtR == TY_STRING ? "String"
+                      : rtR == TY_INT ? "Integer"
+                      : rtR == TY_FLOAT ? "Float"
+                      : rtR == TY_SYMBOL ? "Symbol" : NULL;
+      if (ocR) {
+        int ciR = comp_class_index(c, ocR);
+        int miR = ciR >= 0 ? comp_method_in_chain(c, ciR, nmR, NULL) : -1;
+        if (miR >= 0) {
+          buf_printf(b, "sp_%s_%s(", ocR, mc(nmR));
+          emit_expr(c, recvR, b);
+          emit_args_filled(c, miR, nt_ref(ntR, id, "arguments"), ", ", b);
+          buf_puts(b, ")");
+          return;
+        }
+      }
+    }
+  }
+
   /* A generated READER named after an Object builtin owns the name, as any
      reader does in CRuby: Data.define(:freeze) answers the member. The
      builtin arms below would claim these first, so hand the call to the
