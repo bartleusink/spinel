@@ -364,7 +364,12 @@ static int sp_poly_match_pair(sp_RbVal a, sp_RbVal b,
                               mrb_regexp_pattern **pat_out, const char **str_out) {
   sp_RbVal pv, sv;
   if (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_REGEX) { pv = b; sv = a; }
-  else { pv = a; sv = b; }
+  else if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_REGEX) { pv = a; sv = b; }
+  /* Neither side is a Regexp, which is `str.match("x")`: CRuby builds the
+     pattern from the ARGUMENT and matches the receiver against it. Taking the
+     receiver as the pattern matched "x" against /xyz/ and answered no match
+     for every such call. */
+  else { pv = b; sv = a; }
   const char *s = sp_poly_subject(sv);
   if (!s) return 0;
   mrb_regexp_pattern *p = sp_poly_as_pattern(pv);

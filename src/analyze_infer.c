@@ -4518,7 +4518,13 @@ else {
          Array or Hash: record what the builtin surface alone would answer, so
          codegen can shape that arm (its emitters read the node's own type, and
          the node here holds the union). Computed once per node. */
-      if (recv >= 0 && !an_builtin_only && poly_container_read_p(name) &&
+      /* The String surface needs the same record, for the same reason: a
+         String reaching the dispatch because a user class owns the name is
+         served by re-entering the emission, whose answer is a raw `const
+         char *` for half these names and a boxed value for the other half
+         (#4816). */
+      if (recv >= 0 && !an_builtin_only &&
+          (poly_container_read_p(name) || poly_string_read_p(name)) &&
           nt_ref(nt, id, "block") < 0 && c->poly_builtin_ty &&
           id < c->node_cap && c->poly_builtin_ty[id] == TY_UNKNOWN &&
           an_user_defines_or_reads(c, name)) {

@@ -1735,6 +1735,39 @@ int poly_container_read_p(const char *name) {
   return 0;
 }
 
+/* The read-only String surface a poly receiver can be served from. Same idea
+   as poly_container_read_p, for the other builtin a boxed value can be: when a
+   user class happens to own one of these names, the dispatch's switch has arms
+   for the user classes and none for a String, so a genuine String reaching it
+   answered NoMethodError for a method String has (#4816 arrived with `getbyte`
+   and `bytesize`, which openssl's buffering.rb defines, and the same shape
+   breaks three dozen more).
+
+   Reads only. The poly arm hands the value over as a `const char *`, so a
+   method that MUTATES its receiver would write through a copy and the
+   assignment would be lost -- `prepend`, `concat`, `insert`, `replace` and
+   `setbyte` are left to the switch, where they still raise.
+
+   Names the Array / Hash / Integer surface also owns are left out (`index`,
+   `count`, `sum`, `first`, `length`, ...): the re-entered emission picks its
+   arm by NAME, so for those it would emit the container's helper inside a
+   String-tagged arm. They keep whatever the container arms already give them. */
+int poly_string_read_p(const char *name) {
+  static const char *const N[] = {
+    "ascii_only?", "b", "byteindex", "byterindex", "byteslice", "bytesize",
+    "casecmp", "casecmp?", "center", "codepoints", "crypt",
+    "delete_prefix", "delete_suffix", "dump", "encode", "encoding",
+    "end_with?", "getbyte", "gsub", "hex", "intern",
+    "lines", "ljust", "lstrip", "match", "match?", "oct",
+    "partition", "rjust", "rpartition", "rstrip", "scan", "scrub",
+    "squeeze", "start_with?", "sub", "to_str", "to_sym",
+    "tr", "tr_s", "undump", "unicode_normalize", "unpack", "unpack1",
+    "valid_encoding?", NULL };
+  if (!name) return 0;
+  for (int i = 0; N[i]; i++) if (sp_streq(name, N[i])) return 1;
+  return 0;
+}
+
 /* A Class-valued receiver that carries its class only at run time: a variable,
    or a call whose result is a class (`Job.set(1).run(2)` -- ActiveJob's chained
    `set`). Excludes a constant receiver and an accessor call, which resolve
