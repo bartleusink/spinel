@@ -2102,7 +2102,10 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         return 1;
       }
       if (argc == 1) {
-        buf_puts(b, "sp_PolyArray_get("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
+        buf_printf(b, "sp_PolyArray_get(%s, ", rb.p); free(rb.p);
+        emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        if (ch) buf_puts(b, "; })");
       }
       else {
         /* each later step goes through the dig-specific helper so a scalar
@@ -2170,10 +2173,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     /* rindex(obj): last matching index, or nil (SP_INT_NIL sentinel, matching
        the index/find_index int-or-nil convention). */
     if (rt == TY_POLY_ARRAY && sp_streq(name, "rindex") && argc == 1 && nt_ref(nt, id, "block") < 0) {
+      Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
       int t = ++g_tmp;
-      buf_printf(b, "({ sp_int _t%d = sp_PolyArray_rindex(", t); emit_expr(c, recv, b);
-      buf_puts(b, ", "); emit_boxed(c, argv[0], b);
+      buf_printf(b, "({ sp_int _t%d = sp_PolyArray_rindex(%s, ", t, rb.p); free(rb.p);
+      emit_boxed(c, argv[0], b);
       buf_printf(b, "); _t%d < 0 ? SP_INT_NIL : _t%d; })", t, t);
+      if (ch) buf_puts(b, "; })");
       return 1;
     }
     /* each_index { |i| ... } - iterate with index (works for all array kinds) */
@@ -2241,16 +2246,21 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         int dbody = nt_ref(nt, dblk, "body");
         int dbn = 0; const int *dbb = dbody >= 0 ? nt_arr(nt, dbody, "body", &dbn) : NULL;
         if (dbn >= 1) {
+          Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
           int tdr = ++g_tmp;
-          buf_printf(b, "({ sp_RbVal _t%d = sp_PolyArray_delete(", tdr);
-          emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b);
+          buf_printf(b, "({ sp_RbVal _t%d = sp_PolyArray_delete(%s, ", tdr, rb.p); free(rb.p);
+          emit_boxed(c, argv[0], b);
           buf_printf(b, "); _t%d.tag != SP_TAG_NIL ? _t%d : ", tdr, tdr);
           emit_boxed(c, dbb[dbn - 1], b);
           buf_puts(b, "; })");
+          if (ch) buf_puts(b, "; })");
           return 1;
         }
       }
-      buf_puts(b, "sp_PolyArray_delete("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
+      buf_printf(b, "sp_PolyArray_delete(%s, ", rb.p); free(rb.p);
+      emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      if (ch) buf_puts(b, "; })");
       return 1;
     }
     /* find / detect { |x| cond } on a poly array -> the element or nil. The
@@ -2566,12 +2576,15 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         int rn = argv[0];
         int excl = (int)(nt_int(nt, rn, "flags", 0) & 4) ? 1 : 0;
         int lo = nt_ref(nt, rn, "left"), hi = nt_ref(nt, rn, "right");
-        buf_printf(b, "sp_%sArray_slice_range(", k); emit_expr(c, recv, b); buf_puts(b, ", ");
+        Buf rb; char tys[32]; snprintf(tys, sizeof tys, "sp_%sArray *", k);
+        int ch = hold_recv_open(c, recv, 0, tys, "SP_GC_ROOT", b, &rb);
+        buf_printf(b, "sp_%sArray_slice_range(%s, ", k, rb.p); free(rb.p);
         /* a poly bound (a destructured tuple element, #2923) unboxes here */
         if (lo >= 0) emit_int_expr(c, lo, b); else buf_puts(b, "0");
         buf_puts(b, ", ");
         if (hi >= 0) emit_int_expr(c, hi, b); else buf_puts(b, "-1");
         buf_printf(b, ", %d)", hi >= 0 ? excl : 0);
+        if (ch) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "[]") && argc == 2) {
@@ -2756,7 +2769,11 @@ else {
       if (sp_streq(name, "dig") && argc >= 1) {
         if (argc == 1) {
           /* single-step: same as arr[i] */
-          buf_printf(b, "sp_%sArray_get(", k); emit_expr(c, recv, b); buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+          Buf rb; char tyd[32]; snprintf(tyd, sizeof tyd, "sp_%sArray *", k);
+          int ch = hold_recv_open(c, recv, 0, tyd, "SP_GC_ROOT", b, &rb);
+          buf_printf(b, "sp_%sArray_get(%s, ", k, rb.p); free(rb.p);
+          emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+          if (ch) buf_puts(b, "; })");
         }
         else {
           /* multi-step: hand the whole key list to the runtime walk, which
@@ -3196,9 +3213,8 @@ else {
                            : sp_streq(name, "repeated_permutation") ? "sp_IntArray_repeated_permutation"
                            : "sp_IntArray_repeated_combination";
         int ta = ++g_tmp, tc = ++g_tmp, tout = ++g_tmp, ti = ++g_tmp;
-        Buf ra = expr_buf(c, recv);
-        buf_printf(b, "({ sp_IntArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
-        buf_printf(b, " sp_PtrArray *_t%d = %s(_t%d, ", tc, combfn, ta);
+        buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+        buf_printf(b, "sp_PtrArray *_t%d = %s(_t%d, ", tc, combfn, ta);
         if (argc == 1) emit_int_expr(c, argv[0], b);
         else buf_printf(b, "_t%d ? _t%d->len : 0", ta, ta);   /* argless permutation: full length */
         /* the combinations are only in this temp until the loop below boxes
@@ -3826,8 +3842,10 @@ else {
            `.sum(0.0)` is 0.6000000000000001. The boxed fold draws the same
            line; the two paths must not disagree. */
         if (rt == TY_FLOAT_ARRAY && init_t == TY_FLOAT) {
-          buf_puts(b, "sp_FloatArray_sum_plain("); emit_expr(c, recv, b); buf_puts(b, ", ");
+          Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_FloatArray *", "SP_GC_ROOT", b, &rb);
+          buf_printf(b, "sp_FloatArray_sum_plain(%s, ", rb.p); free(rb.p);
           emit_expr(c, argv[0], b); buf_puts(b, ")");
+          if (ch) buf_puts(b, "; })");
           return 1;
         }
         buf_printf(b, "sp_%sArray_sum(", k); emit_expr(c, recv, b); buf_puts(b, ", ");
@@ -3942,8 +3960,8 @@ else {
              used to be passed as the const char* itself, which did not
              compile (#4458). */
           int ta = ++g_tmp, tv = ++g_tmp;
-          buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_expr(c, recv, b);
-          buf_printf(b, "; sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+          buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+          buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
           buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : sp_box_nil(); })", tv, fn, ta, tv);
           return 1;
         }
@@ -3976,8 +3994,8 @@ else {
         TyKind sat = comp_ntype(c, argv[0]);
         if (rt == TY_STR_ARRAY && (sat == TY_POLY || sat == TY_NIL)) {
           int ta = ++g_tmp, tv = ++g_tmp;
-          buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_expr(c, recv, b);
-          buf_printf(b, "; sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+          buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+          buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
           buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : FALSE; })",
                      tv, fn, ta, tv);
           return 1;
@@ -4183,11 +4201,13 @@ else {
         int rn = argv[0];
         int excl = (int)(nt_int(nt, rn, "flags", 0) & 4) ? 1 : 0;
         int lo = nt_ref(nt, rn, "left"), hi = nt_ref(nt, rn, "right");
-        buf_puts(b, "sp_PolyArray_slice_range("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
+        buf_printf(b, "sp_PolyArray_slice_range(%s, ", rb.p); free(rb.p);
         if (lo >= 0) emit_int_expr(c, lo, b); else buf_puts(b, "0");
         buf_puts(b, ", ");
         if (hi >= 0) emit_int_expr(c, hi, b); else buf_puts(b, "-1");
         buf_printf(b, ", %d)", hi >= 0 ? excl : 0);
+        if (ch) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "[]") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
@@ -4671,7 +4691,10 @@ else {
           buf_puts(b, "((void)("); emit_boxed(c, argv[0], b); buf_puts(b, "), 0)");
           return 1;
         }
-        buf_puts(b, "sp_PolyArray_include("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
+        buf_printf(b, "sp_PolyArray_include(%s, ", rb.p); free(rb.p);
+        emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        if (ch) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "clone") && argc == 0) {
