@@ -6096,11 +6096,15 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            sp_streq(name, "floor") || sp_streq(name, "truncate") ||
            /* the value-answering numeric queries a user class can shadow the
               same way: abs2 and infinite? answer boxed, numerator and
-              denominator a machine int (#4651) */
+              denominator a machine int (#4651). bit_length is the same
+              shape: a machine int, and the runtime helper is
+              already named to match `sp_poly_%s` below. */
            sp_streq(name, "abs2") || sp_streq(name, "infinite?") ||
-           sp_streq(name, "numerator") || sp_streq(name, "denominator"))) {
+           sp_streq(name, "numerator") || sp_streq(name, "denominator") ||
+           sp_streq(name, "bit_length"))) {
         char nv[96];
-        int int_valued = sp_streq(name, "numerator") || sp_streq(name, "denominator");
+        int int_valued = sp_streq(name, "numerator") || sp_streq(name, "denominator") ||
+                         sp_streq(name, "bit_length");
         if (sp_streq(name, "succ") || sp_streq(name, "next"))
           snprintf(nv, sizeof nv, "sp_poly_succ_m(_t%d, %d)", tv, sp_streq(name, "next") ? 1 : 0);
         else if (sp_streq(name, "pred"))
@@ -6116,6 +6120,19 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         }
         else if (ret == TY_POLY) buf_puts(b, nv);
         else emit_unbox_text(c, ret, nv, b);
+        buf_puts(b, "; break;");
+        obj_default_done = 1;
+      }
+      /* Blockless `digits` (base 10 implicit), the same shape as the block
+         above but for a receiver answering an array rather than a scalar:
+         `sp_poly_int_digits` is the runtime helper the no-user-class path
+         already calls (codegen_call_recv.c), and it raises for a
+         non-Integer receiver, as CRuby does. */
+      if (!obj_default_done && argc == 0 && sp_streq(name, "digits")) {
+        char nv[64]; snprintf(nv, sizeof nv, "sp_poly_int_digits(_t%d, 10)", tv);
+        buf_printf(b, " default: _t%d = ", tr);
+        if (ret == TY_POLY) emit_boxed_text(c, TY_INT_ARRAY, nv, b);
+        else buf_puts(b, nv);
         buf_puts(b, "; break;");
         obj_default_done = 1;
       }
@@ -6499,7 +6516,21 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
     }
     int is_cover = sp_streq(name, "cover?") && argc == 1 && !diag_user_defines(c, name);
     int is_gcdlcm = sp_streq(name, "gcdlcm") && argc == 1 && !diag_user_defines(c, name);
-    if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge) {
+    /* An Integer-only arithmetic name: force the switch open even when
+       no user class is a CANDIDATE AT THIS CALL SITE'S ARITY -- a colliding
+       class may define the name with a different arity than this call site
+       uses (`def gcd(x, y)` against a `.gcd(4)` call site, still a distinct
+       collision because both names are `gcd`), which leaves `ncand` 0 and
+       every is_* flag above false. Without this the whole dispatch declined
+       here, and the call fell through to the "no candidates" NoMethodError
+       two frames up rather than reaching the numeric default arm below. */
+    int is_numeric_poly_arm =
+      ((sp_streq(name, "gcd") || sp_streq(name, "lcm") || sp_streq(name, "ceildiv")) && argc == 1) ||
+      (sp_streq(name, "gcdlcm") && argc == 1) ||
+      (sp_streq(name, "pow") && (argc == 1 || argc == 2)) ||
+      (sp_streq(name, "digits") && argc == 1) ||
+      ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1);
+    if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_numeric_poly_arm) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
       /* `x = v` through a writer: the value is v as written, so the arms call
@@ -7766,6 +7797,89 @@ else {
           else emit_unbox_text(c, ret, nv9.p ? nv9.p : "", b);
           buf_puts(b, "; break;");
           free(nv9.p);
+        }
+        /* Integer-only arithmetic a user class can shadow the same way
+           : a class defining `gcd`/`lcm`/`ceildiv`/`pow`/`digits`/
+           `allbits?` etc. took over the name, and the Integer or Bignum in
+           the same slot fell to the raise below with no arm of its own --
+           the same gap `bit_length`, `round(n)` and friends had. The
+           runtime helpers are the ones the no-user-class path already calls
+           (codegen_call_recv.c's `sp_poly_int_*` table), and they raise for
+           a receiver that is not a number, as CRuby does. */
+        else if ((sp_streq(name, "gcd") || sp_streq(name, "lcm") ||
+                  sp_streq(name, "gcdlcm") || sp_streq(name, "ceildiv")) && argc == 1) {
+          Buf ob9; memset(&ob9, 0, sizeof ob9);
+          { char on9[32]; snprintf(on9, sizeof on9, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&ob9, on9);
+            else emit_boxed_text(c, atmp_ty[0], on9, &ob9); }
+          const char *arg9 = ob9.p ? ob9.p : "sp_box_nil()";
+          if (sp_streq(name, "gcdlcm")) {
+            /* the only one of the four that answers an array, not a number */
+            if (ret == TY_POLY) {
+              char gv9[128]; snprintf(gv9, sizeof gv9, "sp_poly_int_gcdlcm(_t%d, %s)", tv, arg9);
+              buf_printf(b, " _t%d = ", tr); emit_boxed_text(c, TY_POLY_ARRAY, gv9, b); buf_puts(b, "; break;");
+            }
+            else buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
+          }
+          else {
+            const char *fn9 = sp_streq(name, "gcd") ? "sp_poly_int_gcd" :
+                              sp_streq(name, "lcm") ? "sp_poly_int_lcm" : "sp_poly_int_ceildiv";
+            char gv9[160]; snprintf(gv9, sizeof gv9, "%s(_t%d, %s)", fn9, tv, arg9);
+            buf_printf(b, " _t%d = ", tr);
+            if (ret == TY_POLY) buf_puts(b, gv9);
+            else emit_unbox_text(c, ret, gv9, b);
+            buf_puts(b, "; break;");
+          }
+          free(ob9.p);
+        }
+        else if (sp_streq(name, "pow") && (argc == 1 || argc == 2)) {
+          Buf eb9; memset(&eb9, 0, sizeof eb9);
+          { char en9[32]; snprintf(en9, sizeof en9, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&eb9, en9);
+            else emit_boxed_text(c, atmp_ty[0], en9, &eb9); }
+          char gv9[256];
+          if (argc == 1)
+            snprintf(gv9, sizeof gv9, "sp_poly_pow(_t%d, %s)", tv, eb9.p ? eb9.p : "sp_box_nil()");
+          else {
+            Buf mb9; memset(&mb9, 0, sizeof mb9);
+            { char mn9[32]; snprintf(mn9, sizeof mn9, "_t%d", atmp[1]);
+              if (atmp_ty[1] == TY_POLY) buf_puts(&mb9, mn9);
+              else emit_boxed_text(c, atmp_ty[1], mn9, &mb9); }
+            snprintf(gv9, sizeof gv9, "sp_poly_int_powmod(_t%d, %s, %s)", tv,
+                     eb9.p ? eb9.p : "sp_box_nil()", mb9.p ? mb9.p : "sp_box_nil()");
+            free(mb9.p);
+          }
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) buf_puts(b, gv9);
+          else emit_unbox_text(c, ret, gv9, b);
+          buf_puts(b, "; break;");
+          free(eb9.p);
+        }
+        else if (sp_streq(name, "digits") && argc == 1) {
+          char bs9[64];
+          if (atmp_ty[0] == TY_POLY) snprintf(bs9, sizeof bs9, "sp_poly_to_i(_t%d)", atmp[0]);
+          else snprintf(bs9, sizeof bs9, "(sp_int)_t%d", atmp[0]);
+          char gv9[128]; snprintf(gv9, sizeof gv9, "sp_poly_int_digits(_t%d, %s)", tv, bs9);
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) emit_boxed_text(c, TY_INT_ARRAY, gv9, b);
+          else buf_puts(b, gv9);
+          buf_puts(b, "; break;");
+        }
+        else if ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") ||
+                  sp_streq(name, "nobits?")) && argc == 1) {
+          Buf mb9; memset(&mb9, 0, sizeof mb9);
+          { char mn9[32]; snprintf(mn9, sizeof mn9, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&mb9, mn9);
+            else emit_boxed_text(c, atmp_ty[0], mn9, &mb9); }
+          int which9 = sp_streq(name, "allbits?") ? 0 : sp_streq(name, "anybits?") ? 1 : 2;
+          char gv9[160];
+          snprintf(gv9, sizeof gv9, "sp_poly_int_bits_test(_t%d, %s, %d)", tv,
+                   mb9.p ? mb9.p : "sp_box_nil()", which9);
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) buf_printf(b, "sp_box_bool(%s)", gv9);
+          else buf_puts(b, gv9);
+          buf_puts(b, "; break;");
+          free(mb9.p);
         }
         /* index/rindex also belong to String, whose box carries no cls_id, so
            no case above can claim it. Answer it here, ahead of the raise, or a
