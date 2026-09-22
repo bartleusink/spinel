@@ -6546,7 +6546,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       (sp_streq(name, "pow") && (argc == 1 || argc == 2)) ||
       (sp_streq(name, "digits") && argc == 1) ||
       ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1) ||
-      ((sp_streq(name, "divmod") || sp_streq(name, "remainder") || sp_streq(name, "fdiv")) && argc == 1);
+      ((sp_streq(name, "divmod") || sp_streq(name, "remainder") || sp_streq(name, "fdiv")) && argc == 1) ||
+      ((sp_streq(name, "quo") || sp_streq(name, "modulo") || sp_streq(name, "div")) && argc == 1);
     if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_numeric_poly_arm) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
@@ -7937,6 +7938,52 @@ else {
           else buf_puts(b, gv12);
           buf_puts(b, "; break;");
           free(ob12.p);
+        }
+        /* Numeric#quo/#modulo/#div reaching this dispatch only because a
+           user class owns the name: the same shape as divmod/remainder/fdiv
+           just above -- the runtime helpers are the ones the no-user-class
+           path uses (the "poly arithmetic" arm's own `!user_defines_or_reads`
+           guard, above in emit_call), which decline this dispatch outright
+           when the name is contested and fall through to here instead. */
+        else if (sp_streq(name, "quo") && argc == 1) {
+          Buf ob13; memset(&ob13, 0, sizeof ob13);
+          { char on13[32]; snprintf(on13, sizeof on13, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&ob13, on13);
+            else emit_boxed_text(c, atmp_ty[0], on13, &ob13); }
+          char gv13[160]; snprintf(gv13, sizeof gv13, "sp_poly_quo(_t%d, %s)", tv, ob13.p ? ob13.p : "sp_box_nil()");
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) buf_puts(b, gv13);
+          else emit_unbox_text(c, ret, gv13, b);
+          buf_puts(b, "; break;");
+          free(ob13.p);
+        }
+        else if (sp_streq(name, "modulo") && argc == 1) {
+          Buf ob14; memset(&ob14, 0, sizeof ob14);
+          { char on14[32]; snprintf(on14, sizeof on14, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&ob14, on14);
+            else emit_boxed_text(c, atmp_ty[0], on14, &ob14); }
+          /* the collision-dispatch default uses the stricter "modulo" guard
+             (sp_poly_modulo), not sp_poly_mod itself: `%` accepts a String
+             receiver, but Numeric#modulo does not (CRuby has no
+             String#modulo), and the raised message must name "modulo". */
+          char gv14[160]; snprintf(gv14, sizeof gv14, "sp_poly_modulo(_t%d, %s)", tv, ob14.p ? ob14.p : "sp_box_nil()");
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) buf_puts(b, gv14);
+          else emit_unbox_text(c, ret, gv14, b);
+          buf_puts(b, "; break;");
+          free(ob14.p);
+        }
+        else if (sp_streq(name, "div") && argc == 1) {
+          Buf ob15; memset(&ob15, 0, sizeof ob15);
+          { char on15[32]; snprintf(on15, sizeof on15, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&ob15, on15);
+            else emit_boxed_text(c, atmp_ty[0], on15, &ob15); }
+          char gv15[160]; snprintf(gv15, sizeof gv15, "sp_poly_div_m(_t%d, %s)", tv, ob15.p ? ob15.p : "sp_box_nil()");
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) buf_puts(b, gv15);
+          else emit_unbox_text(c, ret, gv15, b);
+          buf_puts(b, "; break;");
+          free(ob15.p);
         }
         /* index/rindex also belong to String, whose box carries no cls_id, so
            no case above can claim it. Answer it here, ahead of the raise, or a
@@ -30606,7 +30653,7 @@ else {
       else if (sp_streq(name, "fdiv")) pfn = "sp_poly_fdiv";
       else if (sp_streq(name, "div")) pfn = "sp_poly_div_m";
       else if (sp_streq(name, "divmod")) pfn = "sp_poly_divmod";
-      else if (sp_streq(name, "modulo")) pfn = "sp_poly_mod";
+      else if (sp_streq(name, "modulo")) pfn = "sp_poly_modulo";
       else if (sp_streq(name, "remainder")) pfn = "sp_poly_remainder";
     }
 
