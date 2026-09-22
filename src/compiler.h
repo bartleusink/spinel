@@ -995,6 +995,7 @@ const char *poly_enum_op_for(const char *name);
 int poly_container_read_p(const char *name);
 /* 1 for a numeric read a builtin receiver answers differently (see compiler.c). */
 int poly_numeric_read_p(const char *name);
+int poly_string_read_p(const char *name);
 
 /* 1 for a Class-valued receiver whose class is only known at run time (a
    variable, or a call returning a class); 0 for a constant or accessor
