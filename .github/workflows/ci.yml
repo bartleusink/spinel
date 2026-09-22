@@ -228,3 +228,88 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats
+
+  # wasm32-wasi. Two commits in eight days left `--target=wasm32-wasi` unable
+  # to link any program (64cd200e's execv, 9d8f098f's getrlimit), and both
+  # were reported from outside the repo a day after the merge, because no lane
+  # builds for this target: linux32 is the word-size rehearsal, not the wasm
+  # one, and a wasm-only link error passes straight through it. The shape is
+  # always the same -- lib/wasi/*.h declares a POSIX function, sp_wasi.c never
+  # defines it, and nothing notices until something first calls it, which
+  # docs/wasm.md's own invariant forbids ("never as a link error"). The
+  # existing `make wasm-test` builds seven corpus programs for the target and
+  # diffs them against their expected output, which catches the whole class
+  # (#4807).
+  #
+  # The sdk is a 183 MB download, so it is cached by version; the engine is
+  # wasmtime, installed from its release tarball. WASM_ENGINE_REQUIRED makes a
+  # missing engine fail rather than skip, so this job cannot report success by
+  # doing nothing.
+  wasm:
+    name: wasm32-wasi
+    runs-on: ubuntu-latest
+    env:
+      # docs/wasm.md asks for 34 or later (the exnref lowering)
+      WASI_SDK_VERSION: "34"
+      # docs/wasm.md: wasmtime 48 runs the modules as they are emitted
+      WASMTIME_VERSION: "49.0.0"
+      WASI_SDK_PATH: ${{ github.workspace }}/.wasi-sdk
+      CC: sccache cc
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_STARTUP_TIMEOUT: "30"
+      SCCACHE_IDLE_TIMEOUT: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Restore the sccache store
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: sccache-wasm-${{ github.run_id }}
+          restore-keys: sccache-wasm-
+
+      - name: Pre-start sccache server
+        run: sccache --start-server
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Restore the wasi-sdk
+        id: wasi-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: .wasi-sdk
+          key: wasi-sdk-${{ env.WASI_SDK_VERSION }}-x86_64-linux
+
+      - name: Install the wasi-sdk
+        if: steps.wasi-sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          v=${WASI_SDK_VERSION}
+          url="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${v}/wasi-sdk-${v}.0-x86_64-linux.tar.gz"
+          curl -fsSL "$url" -o /tmp/wasi-sdk.tar.gz
+          mkdir -p .wasi-sdk
+          tar -xzf /tmp/wasi-sdk.tar.gz -C .wasi-sdk --strip-components=1
+
+      - name: Install wasmtime
+        run: |
+          curl -fsSL https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
+          mkdir -p /tmp/wasmtime && tar -xJf /tmp/wasmtime.tar.xz -C /tmp/wasmtime --strip-components=1
+          echo "/tmp/wasmtime" >> "$GITHUB_PATH"
+
+      - name: Fetch libprism sources
+        run: make deps
+
+      - name: Build (parse + regexp + spinelc)
+        run: make -j$(getconf _NPROCESSORS_ONLN) all
+
+      - name: Build the wasm32-wasi runtime and run the wasm programs
+        run: make -j$(getconf _NPROCESSORS_ONLN) wasm-test WASM_ENGINE_REQUIRED=1
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
