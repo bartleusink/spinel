@@ -2101,9 +2101,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     }
     if (rt == TY_POLY_ARRAY && sp_streq(name, "dig") && argc >= 1) {
       /* dig(*keys): walk the runtime key list (see the hash arm) */
+      /* the receiver is held across the keys, which may allocate */
       if (nt_kind(nt, argv[0]) == NK_SplatNode) {
-        buf_puts(b, "sp_poly_dig_list("); emit_boxed(c, recv, b);
-        buf_puts(b, ", sp_poly_to_poly_array("); emit_boxed(c, argv[0], b); buf_puts(b, "))");
+        Buf rb; int ch = hold_recv_open(c, recv, 1, "sp_RbVal", "SP_GC_ROOT_RBVAL", b, &rb);
+        buf_printf(b, "sp_poly_dig_list(%s, sp_poly_to_poly_array(", rb.p); free(rb.p);
+        emit_boxed(c, argv[0], b); buf_puts(b, "))");
+        if (ch) buf_puts(b, "; })");
         return 1;
       }
       if (argc == 1) {
@@ -2117,9 +2120,11 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
            intermediate raises TypeError instead of bit/char-indexing (#2983) */
         /* the key goes boxed: a Struct member can be named, and a String or
            Symbol reached the integer offset slot as a pointer (#3575) */
+        Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
         for (int di = argc - 1; di >= 1; di--) buf_printf(b, "sp_poly_dig_step_key(");
-        buf_puts(b, "sp_PolyArray_get("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_PolyArray_get(%s, ", rb.p); free(rb.p); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
         for (int di = 1; di < argc; di++) { buf_puts(b, ", "); emit_boxed(c, argv[di], b); buf_puts(b, ")"); }
+        if (ch) buf_puts(b, "; })");
       }
       return 1;
     }
@@ -5435,11 +5440,13 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
         /* dig(*keys): the key list only exists at run time, so walk it there.
            Emitting the splat as a single key read the key array through the
            key's own type and the C did not compile. */
+        /* the receiver is held across the keys, which may allocate */
         if (nt_kind(nt, argv[0]) == NK_SplatNode) {
-          buf_puts(b, "sp_poly_dig_list("); emit_boxed(c, recv, b);
-          buf_puts(b, ", sp_poly_to_poly_array(");
+          Buf rb; int ch = hold_recv_open(c, recv, 1, "sp_RbVal", "SP_GC_ROOT_RBVAL", b, &rb);
+          buf_printf(b, "sp_poly_dig_list(%s, sp_poly_to_poly_array(", rb.p); free(rb.p);
           emit_boxed(c, argv[0], b);
           buf_puts(b, "))");
+          if (ch) buf_puts(b, "; })");
           return 1;
         }
         TyKind vt = ty_hash_val(rt);
@@ -5456,17 +5463,19 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
         }
         const char *getter = vt == TY_INT ? "get_opt" : "get";
         if (argc == 1) {
-          buf_printf(b, "sp_%sHash_%s(", hn, getter);
-          emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], kt, b); buf_puts(b, ")");
+          Buf rb; int ch = hold_recv_open(c, recv, 0, c_type_name(rt), "SP_GC_ROOT", b, &rb);
+          buf_printf(b, "sp_%sHash_%s(%s, ", hn, getter, rb.p); free(rb.p);
+          emit_hash_key(c, argv[0], kt, b); buf_puts(b, ")");
+          if (ch) buf_puts(b, "; })");
         }
         else {
           /* multi-step dig: use a compound statement to guarantee
              left-to-right key-expression evaluation order. */
           int tr = ++g_tmp, th = ++g_tmp;
           buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th);
-          emit_expr(c, recv, b); buf_puts(b, ";");
+          emit_recv_rooted(c, recv, th, "SP_GC_ROOT", b);
           /* first key -> box to sp_RbVal so remaining steps are uniform */
-          buf_printf(b, " sp_RbVal _t%d = ", tr);
+          buf_printf(b, "sp_RbVal _t%d = ", tr);
           if (vt == TY_INT) {
             int tk0 = ++g_tmp;
             buf_printf(b, "({ sp_int _t%d = sp_%sHash_%s(_t%d, ", tk0, hn, getter, th);
@@ -9917,10 +9926,13 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
           }
         }
         int t = ++g_tmp;
-        Buf rb = expr_buf(c, recv);
         char fld[300]; snprintf(fld, sizeof fld, "_t%d->iv_%s", t, iv_c(sc->ivars[mi] + 1));
         TyKind mt = sc->ivar_types[mi];
-        buf_printf(b, "({ sp_%s *_t%d = %s; ", sc->c_name, t, rb.p ? rb.p : ""); free(rb.p);
+        /* the receiver is rooted across the later keys, which may allocate;
+           a single key reads the member with nothing emitted in between */
+        buf_printf(b, "({ sp_%s *_t%d = ", sc->c_name, t);
+        if (argc == 1) { emit_expr(c, recv, b); buf_puts(b, "; "); }
+        else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
         if (argc == 1) buf_puts(b, fld);
         else if (ty_is_hash(mt) && argc == 2) {
           const char *hn = ty_hash_cname(mt);
@@ -9958,10 +9970,10 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
          at run time; each further key then digs from that value (#3849) */
       if (sc->nivars > 0) {
         int td = ++g_tmp;
-        Buf rbd = expr_buf(c, recv);
         char rtxt[32]; snprintf(rtxt, sizeof rtxt, "_t%d", td);
-        buf_printf(b, "({ sp_%s *_t%d = %s; ", sc->c_name, td, rbd.p ? rbd.p : "");
-        free(rbd.p);
+        /* the receiver is rooted across the keys, which may allocate */
+        buf_printf(b, "({ sp_%s *_t%d = ", sc->c_name, td);
+        emit_recv_rooted(c, recv, td, "SP_GC_ROOT", b);
         if (argc == 1) emit_struct_member_by_key(c, sc, rtxt, argv[0], 0, 1, b);
         else {
           buf_puts(b, "sp_poly_dig_n(");
