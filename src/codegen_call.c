@@ -9942,6 +9942,12 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
 
   if (argc == 1 && (sp_streq(name, "==") || sp_streq(name, "!=") ||
                     (sp_streq(name, "===") && rt == TY_STRING) ||  /* String#=== is == (#2347) */
+                    /* Object#=== is ==, which an Array or a Hash inherits: a
+                       typed `[1,2] === [1,2]` raised NoMethodError, and a
+                       `case arr when [1,2]` fell through, while the same
+                       comparison through a poly value answered (#4805's class
+                       arm). Same rule as String's above. */
+                    (sp_streq(name, "===") && (ty_is_array(rt) || ty_is_hash(rt))) ||
                     (sp_streq(name, "eql?") &&
                      (ty_is_array(rt) || ty_is_hash(rt) ||
                       (ty_is_object(rt) && ty_object_class(rt) >= 0 &&

@@ -4411,6 +4411,28 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
               buf_puts(b, ")");
             }
           }
+          /* `case <array or hash> when <array or hash>`: Array#=== and
+             Hash#=== are Object#===, which is ==, so the arm compares by
+             value. Without this the subject and the arm went to the pointer
+             compare below and `case [1,2] when [1,2]` fell through. */
+          else if (ty_is_array(pt) || ty_is_hash(pt)) {
+            TyKind wat2 = comp_ntype(c, conds[j]);
+            char stmp[24]; snprintf(stmp, sizeof stmp, "_t%d", t);
+            if (ty_is_array(wat2) || ty_is_hash(wat2) || wat2 == TY_POLY || wat2 == TY_UNKNOWN) {
+              buf_puts(b, "sp_poly_eq(");
+              emit_boxed_text(c, pt, stmp, b);
+              buf_puts(b, ", ");
+              emit_boxed(c, conds[j], b);
+              buf_puts(b, ")");
+            }
+            else {
+              /* An arm of another kind can never be == an Array or a Hash;
+                 comparing the two pointers is not even well-typed C. Same
+                 shape as the String arm above: run it for its effects and
+                 answer false. */
+              buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, conds[j], b); buf_puts(b, "), 0)");
+            }
+          }
           else if (pt == TY_POLY) {
             buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")");
           }
