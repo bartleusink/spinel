@@ -10681,6 +10681,24 @@ static int strbuf_container_stores_nonstring(Compiler *c, const char *contn, Sco
   }
   return 0;
 }
+/* Is every write of local `rn` (read at `recv`) an array literal? Then the
+   local BUILT its array and a widened slot keeps naming it; bound from an
+   element or an ivar read it is another name for storage something else
+   holds, and the widening's converted copy would cut the alias (#4412). */
+static int pw_local_owns_array(Compiler *c, int recv, const char *rn) {
+  const NodeTable *nt = c->nt;
+  Scope *ls = comp_scope_of(c, recv);
+  int owns = 1, saw = 0;
+  for (int w = comp_kind_first(c, NK_LocalVariableWriteNode); w >= 0 && owns; w = comp_kind_next(c, w)) {
+    if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, rn) || comp_scope_of(c, w) != ls) continue;
+    saw = 1;
+    int wv = nt_ref(nt, w, "value");
+    if (wv < 0 || nt_kind(nt, wv) != NK_ArrayNode) owns = 0;
+  }
+  return saw && owns;
+}
 /* Does method scope `mi` mutate its parameter `name` in place (a push, a
    store, a bang), directly or by handing it to a receiverless user method
    that does? The promote reconciliation keeps such a parameter at its kind:
@@ -16161,17 +16179,7 @@ void analyze_program(Compiler *c) {
                ivar read it is another name for storage something else holds,
                and a widened slot would take a converted copy, so the pushes
                would no longer reach the container (#4412) */
-            Scope *ls = comp_scope_of(c, recv);
-            int owns = 1, saw = 0;
-            for (int w = comp_kind_first(c, NK_LocalVariableWriteNode); w >= 0 && owns; w = comp_kind_next(c, w)) {
-              if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
-              const char *wn = nt_str(nt, w, "name");
-              if (!wn || !sp_streq(wn, rn) || comp_scope_of(c, w) != ls) continue;
-              saw = 1;
-              int wv = nt_ref(nt, w, "value");
-              if (wv < 0 || nt_kind(nt, wv) != NK_ArrayNode) owns = 0;
-            }
-            if (!saw || !owns) continue;
+            if (!pw_local_owns_array(c, recv, rn)) continue;
             lv->type = TY_POLY_ARRAY; changed = 1;
           }
           else if (rk == NK_InstanceVariableReadNode) {
@@ -16184,6 +16192,36 @@ void analyze_program(Compiler *c) {
                 { c->classes[cid].ivar_types[iv] = TY_POLY_ARRAY; changed = 1; }
             }
           }
+        }
+        /* (13) a splice into a typed array from a source that is a poly array
+           now -- an object whose #to_ary builds its array out of widened
+           ivars (#4764), or a poly array outright: the fold of the splice
+           source into the receiver's element kind ran inside the fixpoint,
+           before the widening. The receiver, an array the local built, takes
+           the poly kind, whose splice arm reads any array source. */
+        for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
+          if (nt_kind(nt, u) != NK_CallNode) continue;
+          const char *pn = nt_str(nt, u, "name");
+          if (!pn || !sp_streq(pn, "[]=")) continue;
+          int a = nt_ref(nt, u, "arguments"); int an = 0;
+          const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+          if (an < 2) continue;
+          int recv = nt_ref(nt, u, "receiver");
+          if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) continue;
+          /* a splice: two index arguments, or a Range index */
+          if (an == 2 && infer_type(c, av[0]) != TY_RANGE) continue;
+          int val = av[an - 1];
+          TyKind vt = infer_type(c, val), src = vt;
+          if (ty_is_object(vt)) {
+            int tmi = comp_method_in_chain(c, ty_object_class(vt), "to_ary", NULL);
+            src = tmi >= 0 ? (TyKind)c->scopes[tmi].ret : TY_UNKNOWN;
+          }
+          if (src != TY_POLY_ARRAY) continue;
+          const char *rn = nt_str(nt, recv, "name");
+          LocalVar *lv = rn ? scope_local(comp_scope_of(c, recv), rn) : NULL;
+          if (!lv || lv->is_param || lv->is_block_param || !PW_TYPED_ARR(lv->type)) continue;
+          if (!pw_local_owns_array(c, recv, rn)) continue;
+          lv->type = TY_POLY_ARRAY; changed = 1;
         }
         #undef PW_JOIN
         #undef PW_TYPED_ARR
