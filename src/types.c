@@ -33,6 +33,10 @@ static const PolyFace ty_poly_face_tbl[] = {
      (sp_poly_int_*, #4665) */
   {"times", PF_INT, 0, 0, 1}, {"upto", PF_INT, 1, 1, 1}, {"downto", PF_INT, 1, 1, 1},
   {"step", PF_INT | PF_FLOAT, 0, 2, 1},   /* no limit: the endless Integer walk (the Float arm declines it) */
+  /* the blockless form materializes the sequence the way the typed
+     emitters do (an Integer or a Float array), boxed since the two arms
+     disagree, so `.to_a` / `.map` read it as the Enumerator's answer (#4779) */
+  {"step", PF_INT | PF_FLOAT, 1, 2, 0},
   /* The Enumerable names a boxed receiver shares with Array: its elements
      (a hash's [key, value] pairs) materialize into a poly array once. */
   {"minmax", PF_ENUM, 0, -1, -1}, {"tally", PF_ENUM, 0, -1, -1}, {"product", PF_ENUM, 0, -1, -1},
