@@ -72,4 +72,52 @@ class Integer
     if n >= 2 then b += 1; n = n >> 1 end
     b + n
   end
+
+  def gcd(other)
+    # CRuby rejects anything but an Integer here, Float included (even a
+    # whole one), with this exact message, no interpolated class name.
+    # The if/else form matters, not just style: a guard-clause shape
+    # (`raise X unless y.is_a?(Integer)` then using `y` normally after)
+    # does not stop a call site whose actual argument is e.g. an Array
+    # from specializing this clone with `other` typed concretely Array,
+    # and `other < 0` two lines down then fails to COMPILE
+    # (`undefined method '<' for an instance of Array`) even though it
+    # is unreachable at run time. Nesting the body inside the true arm
+    # of the is_a? check itself (this shape) does not have the problem
+    # -- caught by test/integer_gcd_arg_check.rb, which the guard-clause
+    # draft of this method failed outright.
+    if other.is_a?(Integer)
+      a = self < 0 ? -self : self
+      b = other < 0 ? -other : other
+      while b != 0
+        a, b = b, a % b
+      end
+      a
+    else
+      raise TypeError, "not an integer"
+    end
+  end
+
+  def lcm(other)
+    if other.is_a?(Integer)
+      if self == 0 || other == 0
+        0
+      else
+        g = gcd(other)
+        a = self < 0 ? -self : self
+        b = other < 0 ? -other : other
+        (a / g) * b
+      end
+    else
+      raise TypeError, "not an integer"
+    end
+  end
+
+  def gcdlcm(other)
+    if other.is_a?(Integer)
+      [gcd(other), lcm(other)]
+    else
+      raise TypeError, "not an integer"
+    end
+  end
 end
