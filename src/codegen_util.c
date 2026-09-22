@@ -398,6 +398,9 @@ int  g_yield_block_fallback = -1;
    locals (#3281). Paired with g_block_id / g_yield_block_fallback. */
 int  g_block_nren = 0;
 int  g_yield_block_fallback_nren = 0;
+/* see codegen_internal.h */
+const char *g_block_owner_param_name = NULL;
+const char *g_yield_block_fallback_param_name = NULL;
 /* The (g_self, g_self_deref) that were active when the current g_block_id
    was captured -- i.e. the caller context of the innermost yield-method
    inline. A block spliced at a `yield` is caller code: emit_block_invoke
@@ -575,6 +578,10 @@ const char *g_yield_proc_ref = NULL;
    yields poly, but the slot may be concrete (the analyzer typed this forwarding
    context), so a value-position yield unboxes its result to this. */
 TyKind g_yield_slot_ty = TY_UNKNOWN;
+/* One level further out still, paired with g_yield_self_fallback2: see
+   codegen_internal.h. */
+const char *g_yield_proc_ref_fallback2 = NULL;
+TyKind g_yield_slot_ty_fallback2 = TY_UNKNOWN;
 EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 int       g_ensure_depth = 0;
 RescueSave g_rescue_save_stack[MAX_ENSURE_DEPTH];

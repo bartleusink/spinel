@@ -123,6 +123,15 @@ int strbuf_boxed_elem_read(Compiler *c, int v);
 int emit_strbuf_read_ref(Compiler *c, int recv, Buf *b);
 extern int g_block_nren;
 extern int g_yield_block_fallback_nren;
+/* Paired 1:1 with g_block_nren / g_yield_block_fallback_nren: the &block
+   parameter name of the SCOPE THAT OWNS the block g_block_id (resp.
+   g_yield_block_fallback) currently names, so that when that block's body is
+   finally spliced (emit_block_invoke), `<that scope's own &block>.call(...)`
+   inside it still resolves -- g_block_param_name itself names the CURRENT
+   callee's own &block instead (see codegen_util.c), which is a different
+   scope once a block is spliced through more than one inlined callee. */
+extern const char *g_block_owner_param_name;
+extern const char *g_yield_block_fallback_param_name;
 extern int  g_nren;
 extern int  g_block_id;
 int builtin_method_known(const char *cls, const char *m);
@@ -274,6 +283,15 @@ extern TyKind g_yield_slot_ty_fallback;
 extern const char *g_yield_lowered_blk_fallback;
 extern const char *g_yield_proc_ref;
 extern TyKind g_yield_slot_ty;
+/* the forwarded proc one level further out still, the same pairing
+   g_yield_self_fallback2 keeps for self: a literal block (B) handed to an
+   inlined callee (M1) that itself hands B on into a second inlined callee
+   (M2, `{ |x| yield x }`) needs B's OWN g_yield_proc_ref (the proc M1 was
+   given, if M1 forwards ITS block by name via `.call`) to survive M2's own
+   entry, which otherwise overwrites g_yield_proc_ref_fallback with M1's
+   (irrelevant) value before B's body is ever spliced. */
+extern const char *g_yield_proc_ref_fallback2;
+extern TyKind g_yield_slot_ty_fallback2;
 
 /* When set (SPINEL_LINE_MAP / SPINEL_DEBUG), emit `#line N "file"` directives
    at statement boundaries so a C compile error is reported against the
@@ -826,9 +844,7 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b);
 int emit_find_index_poly_expr(Compiler *c, int id, Buf *b);
 void emit_autosplat_params(Compiler *c, int block, int np, int elem_temp, int indent);
 int poly_block_call_needs_dispatch(Compiler *c, int id);
-int emit_grep_pred(Compiler *c, int pat, const char *ev, TyKind et, Buf *b);
 void emit_obj_alloc_expr(Compiler *c, int cid, Buf *b);
-int emit_grep_expr(Compiler *c, int id, Buf *b);
 void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out);
 int arg_wants_root(Compiler *c, TyKind pt, int provided);
 void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr, Buf *out);

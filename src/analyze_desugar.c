@@ -2253,11 +2253,14 @@ int desugar_sort_by_with_index(Compiler *c) {
    blockless form answers an Enumerator that keeps its source (`(1..6)
    .each_slice(2)` inspects as `1..6:each_slice(2)`, not as its elements). */
 static int enum_via_to_a_name(const char *n) {
-  /* take_while, drop_while, flat_map, collect_concat and minmax_by were
-     here: they are Ruby definitions now (builtins/enumerable.rb) whose
-     `each` walks a Hash or a Range as it is, an endless Range included */
+  /* take_while, drop_while, flat_map, collect_concat, minmax_by, grep and
+     grep_v were here: they are Ruby definitions now (builtins/enumerable.rb)
+     whose `each` walks a Hash or a Range as it is, an endless Range
+     included, and neither arm of grep/grep_v is ever an Enumerator (both
+     compute immediately), so unlike find_index/minmax below they have no
+     remaining form that still wants this hop. */
   static const char *always[] = {
-    "grep", "grep_v", "chunk_while", "slice_when",
+    "chunk_while", "slice_when",
     "slice_before", "slice_after", "sort", "minmax", "zip",
     "find_index", "uniq", NULL
   };
@@ -2913,6 +2916,37 @@ int desugar_builtin_enum_calls(Compiler *c) {
        (undefined reference at link time). Only the block form is a
        rewrite target. */
     if (sp_streq(name, "find_index") && nt_ref(nt, id, "block") < 0) continue;
+    /* reduce/inject without a block is the symbol form (`reduce(:+)`), the
+       seeded form (`reduce(seed)`, `reduce(seed, :+)`), or the bare argless
+       call, which must raise CRuby's ArgumentError; the definition has no
+       parameter for any of the three, so all of them stay on the existing
+       arity-checked emitter, the way blockless count/find_index do. An
+       OPERATOR symbol spelled `&:+` reaches here as a raw BlockArgumentNode
+       wrapping a SymbolNode too, not a real block: spinel_parse.c's textual
+       `&:sym` -> block lowering deliberately leaves operator symbols (empty
+       name_len there) unconverted for "the arith reduce/inject lowering" --
+       the fold emitter's own symbol-operator path, which this definition's
+       plain `yield` cannot splice. Without this carve-out the call was
+       claimed anyway and block_given? read false at the specialized clone
+       (nothing there is an inlineable block), raising this definition's
+       own ArgumentError for a call that plainly passed one
+       (`[1, 2, 3].inject(&:+)`). */
+    if (sp_streq(name, "reduce") || sp_streq(name, "inject")) {
+      int blk9 = nt_ref(nt, id, "block");
+      if (blk9 < 0) continue;
+      if (nt_kind(nt, blk9) == NK_BlockArgumentNode) {
+        int ex9 = nt_ref(nt, blk9, "expression");
+        if (ex9 < 0 || nt_kind(nt, ex9) == NK_SymbolNode) continue;
+      }
+      /* `reduce(:sym)` / `inject(:sym)`: desugar_reduce_method_symbol already
+         turned this into a literal 0-arg block calling `.sym` on each
+         element, indistinguishable at this point from a program-written
+         block -- marked there for exactly this carve-out. Stays on the fold
+         emitter, which answers a symbol naming no real method with CRuby's
+         NoMethodError; this definition's plain `yield` has no such fallback
+         and failed the C build outright (found testing inject/reduce). */
+      if ((int)nt_int(nt, id, "sym_fold", 0)) continue;
+    }
     /* each_with_index without a block, on an Array/Hash/Range/Enumerator, is
        the existing typed emitter's Enumerator-of-pairs (a real receiver+size,
        #next-replayable, matches each_with_index_enumerator.rb and

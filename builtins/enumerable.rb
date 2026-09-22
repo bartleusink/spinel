@@ -458,4 +458,80 @@ module Enumerable
       each
     end
   end
+
+  # inject and reduce are the same method under two names in CRuby (an
+  # `alias`, not a delegation, so overriding one leaves the other alone) --
+  # written here as two independent definitions rather than one canonicalized
+  # to the other, the same way a user class's own override of just one name
+  # leaves the other on Enumerable. Only the arity-0 block form
+  # (`inject { |acc, x| ... }`) is a rewrite target: the seeded form
+  # (`inject(seed) { }`), the symbol forms (`inject(:+)`, `inject(seed, :+)`)
+  # and the bare argless call all have no parameter here, so they stay on the
+  # existing arity-checked C emitter (desugar_builtin_enum_calls), the same
+  # carve-out find_index/count have for the forms their definitions likewise
+  # do not cover.
+  def inject
+    if block_given?
+      acc = first
+      skip = true
+      each do |x|
+        if skip
+          skip = false
+        else
+          acc = yield(acc, x)
+        end
+      end
+      acc
+    else
+      # unreached by the rewrite (desugar_builtin_enum_calls keeps every
+      # blockless call -- the seeded/symbol forms and the bare argless call
+      # alike -- on the existing emitter, which already raises this);
+      # kept correct here for the same reason the other blockless arms are.
+      raise ArgumentError, "wrong number of arguments (given 0, expected 1..2)"
+    end
+  end
+
+  def reduce
+    if block_given?
+      acc = first
+      skip = true
+      each do |x|
+        if skip
+          skip = false
+        else
+          acc = yield(acc, x)
+        end
+      end
+      acc
+    else
+      raise ArgumentError, "wrong number of arguments (given 0, expected 1..2)"
+    end
+  end
+
+  # Unlike most Enumerable methods here, grep/grep_v are never an Enumerator
+  # blockless: both arms compute immediately, `pattern === x` deciding
+  # membership and the block (when given) transforming what's kept. Written
+  # against `each` and a plain `===`, so any pattern CRuby's `===` accepts
+  # (a class, a Range, a Regexp, a value compared by `==`, an object
+  # defining its own `===`) works the same way here, without a per-pattern
+  # C fold to keep in step.
+  def grep(pattern)
+    out = []
+    if block_given?
+      each { |x| out << yield(x) if pattern === x }
+    else
+      each { |x| out << x if pattern === x }
+    end
+    out
+  end
+
+  def grep_v(pattern)
+    out = []
+    if block_given?
+      each { |x| out << yield(x) unless pattern === x }
+    else
+      each { |x| out << x unless pattern === x }
+    end
+    out
+  end
 end

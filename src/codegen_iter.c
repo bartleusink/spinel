@@ -342,6 +342,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_inline_depth++;
   int saved_nren = g_nren, saved_block = g_block_id;
   int saved_bnren = g_block_nren, saved_yfbn = g_yield_block_fallback_nren;
+  const char *saved_bown = g_block_owner_param_name, *saved_yfbpn = g_yield_block_fallback_param_name;
   int saved_emcls = g_emitting_class_id;
   const char *saved_self = g_self;
   const char *saved_bpn = g_block_param_name;
@@ -361,6 +362,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      active before this inline, not to the inner block. */
   g_yield_block_fallback = saved_block;
   g_yield_block_fallback_nren = saved_bnren;
+  g_yield_block_fallback_param_name = saved_bown;
   g_yield_blk_brk_fallback = saved_bbv;
   g_yield_blk_brk_efallback = saved_bbe;
   /* the block being captured is caller code: record the caller's self so
@@ -390,6 +392,8 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      itself called with `&proc` found no block at all. */
   const char *saved_ypr_fb = g_yield_proc_ref_fallback;
   TyKind saved_yslot_fb = g_yield_slot_ty_fallback;
+  const char *saved_ypr_fb2 = g_yield_proc_ref_fallback2;
+  TyKind saved_yslot_fb2 = g_yield_slot_ty_fallback2;
   g_yield_proc_ref_fallback = g_yield_proc_ref;
   g_yield_slot_ty_fallback = g_yield_slot_ty;
   g_current_scope_is_lowered = 0;
@@ -405,11 +409,30 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     /* captured here, BEFORE the receiver-context switch below, so it holds the
        caller's class for the spliced (caller-code) block body */
     g_yield_emitting_class_fallback = g_emitting_class_id;
+    /* the forwarded proc one level out moves out with it, the same way: the
+       block now becoming g_yield_block_fallback (`block`, one level out from
+       the callee we are entering) keeps ITS OWN proc-ref (saved_ypr_fb, what
+       g_yield_proc_ref_fallback was BEFORE this call overwrote it above) so a
+       yield two splices deep still finds it once this block's own body is
+       finally spliced (emit_block_invoke's one-level-out step reads it back
+       out of the fallback2 pair). Without this, a literal block forwarding a
+       method's own `&block` by name (`b.call(x)`) through a second inlined
+       yielding callee lost the proc and emitted the caller's `b` unrenamed
+       (`'lv_b' undeclared`) -- found migrating Enumerable#inject to Ruby,
+       general and unrelated to the migration itself. */
+    g_yield_proc_ref_fallback2 = saved_ypr_fb;
+    g_yield_slot_ty_fallback2 = saved_yslot_fb;
   }
   g_block_id = block;
   /* a forwarded outer block keeps ITS definition depth; a literal block is
      call-site code at the depth BEFORE this inline's renames */
   g_block_nren = (block == saved_block) ? saved_bnren : saved_nren;
+  /* ... and, the same way, the &block name of the scope that owns it: a
+     forwarded outer block keeps the name ITS OWN definition scope answers
+     to (saved_yfbpn); a literal block is call-site code, so it answers to
+     THIS call site's own enclosing &block (saved_bpn, this frame's
+     g_block_param_name before line below overwrites it for the callee). */
+  g_block_owner_param_name = (block == saved_block) ? saved_yfbpn : saved_bpn;
   const char *saved_ypr = g_yield_proc_ref;
   TyKind saved_yslot = g_yield_slot_ty;
   g_yield_proc_ref = fwd_yield_proc;   /* NULL clears it for a normal inline */
@@ -773,8 +796,12 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_yield_block_fallback = saved_yfb;
   g_block_nren = saved_bnren;
   g_yield_block_fallback_nren = saved_yfbn;
+  g_block_owner_param_name = saved_bown;
+  g_yield_block_fallback_param_name = saved_yfbpn;
   g_yield_proc_ref_fallback = saved_ypr_fb;
   g_yield_slot_ty_fallback = saved_yslot_fb;
+  g_yield_proc_ref_fallback2 = saved_ypr_fb2;
+  g_yield_slot_ty_fallback2 = saved_yslot_fb2;
   g_yield_self_fallback = saved_self_fb;
   g_yield_self_fallback2 = saved_self_fb2; g_yield_self_deref_fallback2 = saved_deref_fb2;
   g_yield_emitting_class_fallback2 = saved_emcls_fb2;
@@ -1388,7 +1415,22 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
      yield inside the body splices at the right level */
   BI_BLOCK_SIDE();
   int sv_bnren = g_block_nren; g_block_nren = g_yield_block_fallback_nren;
-  const char *svbpn = g_block_param_name; g_block_param_name = NULL;
+  /* The block body about to be emitted is g_block_owner_param_name's own
+     code: a `<name>.call(...)` inside it, where <name> is THAT scope's own
+     &block parameter, must still expand as a yield there, so this splice
+     runs under that scope's own name -- not the current callee's
+     (g_block_param_name, which g_block_owner_param_name already holds the
+     right value FOR, having been tracked in lockstep with g_block_id/
+     g_block_nren the whole way down). Was unconditionally NULL, which read
+     as "no forwarded &block here" for a block that forwarded one two
+     splices out -- the caller's own name then had no rename entry either
+     (it is deliberately not a plain local, see codegen_util.c's
+     "virtual &block slot"), and the generated C read it unrenamed
+     (`'lv_b' undeclared`). General and pre-existing; found migrating
+     Enumerable#inject to Ruby (a literal block forwarding a method's own
+     `&block` by name through a second inlined yielding callee). */
+  const char *svbpn = g_block_param_name; g_block_param_name = g_block_owner_param_name;
+  const char *svbown = g_block_owner_param_name; g_block_owner_param_name = g_yield_block_fallback_param_name;
   /* the block body executes in its DEFINITION site's break scope: a
      top-level break targets the call that received the block, not whatever
      loop/iterator surrounds this yield inside the method body */
@@ -1431,8 +1473,18 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   g_current_scope_is_lowered = g_yield_lowered_fallback;
   g_lowered_blk_name = g_yield_lowered_blk_fallback;
   const char *sv_bypr = g_yield_proc_ref; TyKind sv_byslot = g_yield_slot_ty;
+  const char *sv_yprf = g_yield_proc_ref_fallback; TyKind sv_yslotf = g_yield_slot_ty_fallback;
   g_yield_proc_ref = g_yield_proc_ref_fallback;
   g_yield_slot_ty = g_yield_slot_ty_fallback;
+  /* the forwarded proc one level out moves out with it, the same way self's
+     fallback2 does just above: without this, a THIRD nested splice (a block
+     forwarding a method's own `&block` by name, itself handed through a
+     second inlined yielding callee) found this slot already overwritten by
+     the second callee's own (irrelevant) proc-ref and fell back to an
+     unrenamed caller local (`'lv_b' undeclared`) -- general and pre-existing,
+     found migrating Enumerable#inject to Ruby. */
+  g_yield_proc_ref_fallback = g_yield_proc_ref_fallback2;
+  g_yield_slot_ty_fallback = g_yield_slot_ty_fallback2;
   /* A `next` in a yielded block leaves the BLOCK with its value -- but this
      body is spliced inline (no _proc_ function, no loop), so a bare
      `continue` is invalid C. Only when the body owns a `next`, wrap the
@@ -1606,6 +1658,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   g_current_scope_is_lowered = sv_blow;
   g_lowered_blk_name = sv_blbn;
   g_yield_proc_ref = sv_bypr; g_yield_slot_ty = sv_byslot;
+  g_yield_proc_ref_fallback = sv_yprf; g_yield_slot_ty_fallback = sv_yslotf;
   g_method_pr_label = sv_bl; g_method_pr_var = sv_bv; g_ret_type = sv_bt;
   g_method_pr_exc_depth = sv_bexc;
   g_brk_ser_var = svser; g_brk_ensure_base = svebase; g_brk_exc_base = svbexc;
@@ -1613,6 +1666,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   g_block_nren = sv_bnren;
   BI_METHOD_SIDE();
   g_block_id = svb; g_yield_block_fallback = svfb; g_block_param_name = svbpn;
+  g_block_owner_param_name = svbown;
   if (as_expr) {
     /* `{ return e }`: the block exits the enclosing function, so the
        statement-expr's tail is unreachable -- but C still needs a value
