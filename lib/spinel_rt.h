@@ -3932,16 +3932,35 @@ static sp_RbVal sp_poly_quo(sp_RbVal a, sp_RbVal b) {
    (as the sort/min/max comparison errors already do), so a non-numeric poly
    bound names its real class and renders its value rather than reinterpreting
    the union as an integer. */
+/* The comparisons are sp_poly_cmp's, exact for a Bignum against an Integer:
+   through doubles, 2**63 and 2**63 - 1 are the same value, so a Bignum
+   receiver clamped to the Integer range came back unchanged (wasm's
+   trunc_sat, #4777). A NaN anywhere is an incomparable pair there,
+   which is CRuby's failed comparison. */
 static sp_RbVal sp_num_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
-  sp_float dv = sp_poly_to_f(v), dlo = sp_poly_to_f(lo), dhi = sp_poly_to_f(hi);
-  if (dlo != dlo || dhi != dhi)
-    sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(lo), sp_poly_to_s(hi)));
-  if (dlo > dhi)
-    sp_raise_cls("ArgumentError", "min argument must be less than or equal to max argument");
-  if (dv != dv)
-    sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_to_s(lo)));
-  if (dv < dlo) return lo;
-  if (dv > dhi) return hi;
+  /* a nil bound is an open side (CRuby): it took part in the double
+     comparison as 0.0, and was even handed back as the clamped value */
+  int has_lo = lo.tag != SP_TAG_NIL, has_hi = hi.tag != SP_TAG_NIL;
+  sp_bool ok;
+  if (has_lo && has_hi) {
+    sp_int lh = sp_poly_cmp(lo, hi, &ok);
+    if (!ok)
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(lo), sp_poly_to_s(hi)));
+    if (lh > 0)
+      sp_raise_cls("ArgumentError", "min argument must be less than or equal to max argument");
+  }
+  if (has_lo) {
+    sp_int vl = sp_poly_cmp(v, lo, &ok);
+    if (!ok)
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_to_s(lo)));
+    if (vl < 0) return lo;
+  }
+  if (has_hi) {
+    sp_int vh = sp_poly_cmp(v, hi, &ok);
+    if (!ok)
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_to_s(hi)));
+    if (vh > 0) return hi;
+  }
   return v;
 }
 /* clamp(lo, hi) where a nil bound is an open (unbounded) side: a nil lo skips
@@ -3949,12 +3968,7 @@ static sp_RbVal sp_num_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
    its Integer/Float class is preserved. Both bounds present falls back to the
    checked sp_num_clamp (which raises on lo > hi). */
 static sp_RbVal sp_num_clamp_open(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
-  int has_lo = lo.tag != SP_TAG_NIL, has_hi = hi.tag != SP_TAG_NIL;
-  if (has_lo && has_hi) return sp_num_clamp(v, lo, hi);
-  sp_float dv = sp_poly_to_f(v);
-  if (has_lo) return dv < sp_poly_to_f(lo) ? lo : v;
-  if (has_hi) return dv > sp_poly_to_f(hi) ? hi : v;
-  return v;
+  return sp_num_clamp(v, lo, hi);   /* the nil sides are open there now (#4777) */
 }
 /* clamp on a boxed value: numerics route through sp_num_clamp so the returned
    operand keeps its own Integer/Float class; a user object anywhere in the
@@ -3975,7 +3989,11 @@ static sp_RbVal sp_poly_clamp_range(sp_RbVal v, sp_Range r) {
   if (r.excl && r.last != INTPTR_MAX)
     sp_raise_cls("ArgumentError", "cannot clamp with an exclusive range");
   if (v.tag == SP_TAG_OBJ && !sp_poly_numeric_p(v)) return sp_obj_clamp_range(v, r);
-  return sp_num_clamp(v, sp_box_int(r.first), sp_box_int(r.last));
+  /* the sentinels are OPEN sides, not bounds: with the exact comparison a
+     Bignum receiver past the word (2**63 against `0..`) would otherwise be
+     clamped to the sentinel; the double comparison only hid that (#4777) */
+  return sp_num_clamp_open(v, r.first == INTPTR_MIN ? sp_box_nil() : sp_box_int(r.first),
+                              r.last == INTPTR_MAX ? sp_box_nil() : sp_box_int(r.last));
 }
 /* Integer #** : Spinel has no Rational, so a negative integer exponent --
    which CRuby evaluates to a Rational like (1/2) -- raises RangeError rather
