@@ -46,3 +46,30 @@ p $log
 $log = []
 p(false ? (side(3) == arg(3)) : :skipped)
 p $log
+
+# `yield` and `super` run Ruby just as a call does, and the block or the
+# ancestor method can write the slot the receiver was read from. The operand
+# test recognised only a CallNode, so these two stayed unsequenced.
+class Y
+  attr_accessor :a
+  def initialize(v); @a = v; end
+  def eq;  @a == yield; end
+  def cmp; @a <=> yield; end
+end
+y = Y.new(mka(1))
+p(y.eq { y.a = mka(5); mka(5) })
+z = Y.new(mka(1))
+p(z.cmp { z.a = mka(5); mka(5) })
+
+class Base
+  attr_accessor :a
+  def initialize(v); @a = v; end
+  def eq;  @a = mka(5); mka(5); end
+  def cmp; @a = mka(5); mka(5); end
+end
+class Kid < Base
+  def eq;  @a == super; end
+  def cmp; @a <=> super; end
+end
+p Kid.new(mka(1)).eq
+p Kid.new(mka(1)).cmp
