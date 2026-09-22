@@ -135,8 +135,30 @@ module URI
     parts.join("&")
   end
 
+  # The characters RFC 3986 excludes from a URI: the space and the
+  # control range, plus the "unwise" set a generic URI may not carry
+  # unescaped. CRuby's parser rejects a string containing any of them
+  # with `InvalidURIError`, and an app can be RELYING on that rescue
+  # rather than on its own validation — a Rails message body decides
+  # whether to keep a link by asking whether `URI.parse` accepted it,
+  # so a parser that accepts everything turns that check into a no-op.
+  # `"http://exa mple.com/ "` is the shape that surfaced it: with a
+  # space admitted, the host reads as an ordinary off-site domain.
+  INVALID_URI_CHARS = " <>\"{}|\\^`"
+
+  def self.invalid_char?(s)
+    i = 0
+    while i < s.length
+      c = s[i]
+      return true if INVALID_URI_CHARS.include?(c) || c.ord < 0x20 || c.ord == 0x7f
+      i += 1
+    end
+    false
+  end
+
   def self.parse(str)
     s = str.to_s
+    raise InvalidURIError, "bad URI (is not URI?): #{s.inspect}" if invalid_char?(s)
     scheme = ""
     rest = s
     idx = s.index("://")
