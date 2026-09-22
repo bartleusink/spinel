@@ -5259,6 +5259,13 @@ static void emit_unbox_node(Compiler *c, TyKind t, int node, Buf *b) {
   if (t == TY_INT)                 buf_printf(b, "sp_poly_to_i_or_nil(%s)", v);
   else if (t == TY_FLOAT)          buf_printf(b, "sp_poly_to_f_or_nil(%s)", v);
   else if (t == TY_BOOL)           buf_printf(b, "sp_poly_to_i(%s)", v);
+  /* A Rational slot is a by-value struct, so it matched neither the scalar
+     arms above nor the pointer test below and left with the box still on:
+     the generated C returned an sp_RbVal through an sp_Rational signature
+     and did not build. `Rational#quo` with an Integer operand is the way in
+     -- under promote the parameter widens to poly, the call answers boxed,
+     and the return slot stays Rational. */
+  else if (t == TY_RATIONAL)       buf_printf(b, "sp_poly_as_rational(%s)", v);
   else {
     const char *cn = c_type_name(t);
     if (t == TY_STRING || ty_is_object(t) || (cn && cn[0] && cn[strlen(cn) - 1] == '*'))
