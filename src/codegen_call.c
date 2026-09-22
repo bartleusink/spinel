@@ -18921,7 +18921,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         if (aptmp) { \
           if (_at == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", aptmp[k]); \
           else if (proc_slot_is_ptr(_at) || _at == TY_PROC) buf_printf(b, "(sp_int)(uintptr_t)_t%d", aptmp[k]); \
-          else if (_at == TY_FLOAT) buf_puts(b, "0"); \
+          /* A value carried by the boxed side channel takes a placeholder in \
+             the legacy sp_int slot: a Float does not fit the integer \
+             register, and a struct-valued kind (Time, a Range, a Complex, a \
+             Rational, a Class) does not convert to sp_int at all -- it \
+             reached the slot verbatim and the C compiler refused the whole \
+             program (#4804). The real value is published beside it. */ \
+          else if (_at == TY_FLOAT || proc_slot_via_poly(c, _at)) buf_puts(b, "0"); \
           else buf_printf(b, "_t%d", aptmp[k]); \
         } \
         else emit_expr(c, argv[k], b); \
