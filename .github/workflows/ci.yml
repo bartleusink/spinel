@@ -27,28 +27,47 @@ jobs:
     env:
       # `sccache <cc>` wrapper. sccache forwards through to the
       # underlying compiler when its cache misses, so this stays
-      # transparent. `SCCACHE_GHA_ENABLED=true` tells sccache to
-      # use the GitHub Actions cache as its storage backend (set
-      # up by the sccache-action step below). The test/bench rules
-      # use separate compile and link steps so the compile step is
-      # in sccache's cacheable pattern; the test compile also loads
-      # a precompiled spinel_rt.h (see PCH_ROOT in the Makefile),
-      # which cuts the compile even when sccache misses. sccache
-      # hashes the preprocessed source, so the gcc-implicit .gch
-      # never leaks into the cache key; for clang's -include-pch
-      # sccache declines to cache and forwards, which still gets
-      # the PCH speedup.
+      # transparent. The test/bench rules use separate compile and
+      # link steps so the compile step is in sccache's cacheable
+      # pattern; the test compile also loads a precompiled
+      # spinel_rt.h (see PCH_ROOT in the Makefile), which cuts the
+      # compile even when sccache misses. sccache hashes the
+      # preprocessed source, so the gcc-implicit .gch never leaks
+      # into the cache key; for clang's -include-pch sccache
+      # declines to cache and forwards, which still gets the PCH
+      # speedup.
+      #
+      # The store is sccache's own on-disk cache, carried between
+      # runs as ONE actions/cache entry per lane and slice (the
+      # steps below), not the GitHub cache service as sccache's
+      # backend (SCCACHE_GHA_ENABLED). That backend makes a service
+      # round trip per compile, and with twelve jobs each running
+      # four compiles a second the service answered "rate limit
+      # exceeded" to about half of them (run 35706592343): reads
+      # that fail are misses, writes that fail never land, and the
+      # corpus slices settled at a 35-75% hit rate. A restored disk
+      # cache answers every lookup locally.
       CC: sccache ${{ matrix.cc }}
-      SCCACHE_GHA_ENABLED: "true"
-      # Room for the slow GHA-backed server startup (default ~10s); keep it
-      # alive across steps. See the pre-start step below.
+      SCCACHE_DIR: ${{ runner.temp }}/sccache
       SCCACHE_STARTUP_TIMEOUT: "30"
+      # Keep the server alive across steps. See the pre-start step below.
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      # The key never matches (it carries the run id), so the post step
+      # always saves this run's cache; the restore key picks up the newest
+      # earlier one for the same lane and slice, from this branch or from
+      # master. Old entries fall to the repository's cache eviction.
+      - name: Restore the sccache store
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-${{ matrix.os }}-${{ matrix.cc }}-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: sccache-${{ matrix.os }}-${{ matrix.cc }}-${{ matrix.shard }}-
 
       # Start the server once here so `make -j` clients don't race to start it.
       - name: Pre-start sccache server
@@ -93,7 +112,7 @@ jobs:
         # re-wraps a command-line CC with `override CC := sccache $(CC)`
         # whenever sccache is on PATH, and the stats step below shows the
         # result (91% hits, 1479 of 1621 executed compiles, on run
-        # 35701579214's gcc slice 1). That is what makes these slices run in
+        # 35701579214's gcc slice 1). That is what makes a slice run in
         # ~120 s: the same slice compiled cold costs ~370 s, which is what
         # the -m32 lane paid until it got the same wrapper. The override
         # is kept as the spelling of the opt level per compiler; NO_CCACHE=1
@@ -167,18 +186,21 @@ jobs:
         shard: [1, 2, 3]
     env:
       CC: sccache gcc -m32
-      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_DIR: ${{ runner.temp }}/sccache
       SCCACHE_STARTUP_TIMEOUT: "30"
       SCCACHE_IDLE_TIMEOUT: "0"
-      # Diagnostic (temporary): the stats show ~500 cache write errors per
-      # slice; the server log says what the cache service answered.
-      SCCACHE_ERROR_LOG: /tmp/sccache_server.log
-      SCCACHE_LOG: info
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Restore the sccache store
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-ubuntu-latest-gcc-m32-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: sccache-ubuntu-latest-gcc-m32-${{ matrix.shard }}-
 
       - name: Pre-start sccache server
         run: sccache --start-server
@@ -205,6 +227,4 @@ jobs:
 
       - name: sccache stats
         if: always()
-        run: |
-          sccache --show-stats
-          grep -iE "error|warn|429|409|too many|rate" /tmp/sccache_server.log | sed 's/[0-9a-f]\{32,\}/<key>/g' | sort | uniq -c | sort -rn | head -40
+        run: sccache --show-stats
