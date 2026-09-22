@@ -123,4 +123,138 @@ class Integer
       raise TypeError, "not an integer"
     end
   end
+
+  def ceildiv(other)
+    # CRuby's own algorithm (found by black-box probing a coerce-tracing
+    # stub, since there is no source to read here): negate `other` FIRST
+    # (a real call to its own unary `-@`, which is why a receiver lacking
+    # one -- Array, Hash, Symbol, nil, true, false -- answers CRuby's
+    # "undefined method `-@'" rather than a coercion error), floor-divide,
+    # then negate the quotient. `elsif is_a?(Float)` (not a single
+    # `is_a?(Numeric)` arm) because the two need the SAME body but each
+    # needs its own is_a? to narrow `other` for codegen: a single shared
+    # arm left `other` at the call site's own concrete type in the arm
+    # CRuby ALSO takes, and a concrete Array/Hash/String argument (a call
+    # CRuby raises for at run time, not reject at compile time) has no
+    # `-@`/`div` to bind and failed to COMPILE outright -- the same
+    # REQUIRED-parameter pitfall gcd's own commit found, one narrowing
+    # arm per accepted type rather than gcd's single is_a? guard. The
+    # final `else` never touches `other` itself, so it compiles for any
+    # type; CRuby's own message there is class-specific (NoMethodError
+    # naming `-@`) but this is what the unmigrated compiler already
+    # answered for the same inputs (`5.gcd(other)`'s sibling arms took
+    # the same simplification), so this is not a new gap.
+    if other.is_a?(Integer)
+      -(self.div(-other))
+    elsif other.is_a?(Float)
+      -(self.div(-other))
+    else
+      raise TypeError, "not an integer"
+    end
+  end
+
+  def remainder(other)
+    # The sign follows the RECEIVER, not the divisor (`%`/modulo's own
+    # rule) -- (-7).remainder(3) is -1, (-7) % 3 is 2. `%` already floors
+    # correctly for Integer/Float/Bignum/Rational, and correctly runs the
+    # #coerce protocol for a user object that defines it (its own
+    # migration is not this pass's job), so remainder is `%`'s answer
+    # corrected back to a truncated sign convention: when the floored
+    # remainder is non-zero and its sign disagrees with the receiver's,
+    # subtracting the divisor once gives the truncated-division remainder
+    # CRuby answers, without a second division or a float round-trip that
+    # would lose precision on a Bignum receiver.
+    #
+    # NOT the is_a?(Integer)/is_a?(Float) shape ceildiv/gcd use: `%` (the
+    # raw operator, unlike `.div`/`-@` as plain method calls) does not
+    # fail to COMPILE for a REQUIRED parameter whose concrete type has no
+    # numeric meaning at all -- it silently miscompiles instead (`f(x, y)
+    # = x % y` called with a String/Array/Hash/nil/true/false-typed `y`
+    # answers a wrong number or a bogus ZeroDivisionError, never a
+    # TypeError, confirmed identical and pre-existing on the unmigrated
+    # compiler). A first draft gated this the ceildiv way (is_a?(Integer)
+    # / is_a?(Float) / else raise) and it silently broke the numeric
+    # coerce protocol instead: `5.modulo(Num.new)` (Num#coerce defined)
+    # is neither Integer nor Float, so a same-shaped `modulo` fell into
+    # the "else" and raised, where CRuby (and `%` itself, called
+    # directly) coerces and answers 2.0 (test/numeric_coerce_protocol.rb,
+    # caught before landing). Excluding exactly the closed set of types
+    # `%` cannot handle -- nil/true/false/Symbol/String/Array/Hash -- and
+    # letting everything else (Integer, Float, Bignum, Rational, a
+    # coercible or plain user object) reach `%` directly keeps both
+    # correct: `%`'s own dispatch already raises properly for a user
+    # object with no coerce.
+    #
+    # Known pre-existing divergence, unchanged by this migration: CRuby's
+    # C implementation orders its OWN sign check before the modulo,
+    # comparing the raw uncoerced `other` against 0 -- so `Num` above
+    # (coerce only, no `<=>`) makes `5.remainder(Num.new)` raise
+    # ArgumentError ("comparison of Num with 0 failed") in real CRuby.
+    # Comparing `other` here instead of `%`'s already-coerced answer
+    # would match that, but `<` (a plain method call, unlike `%`) then
+    # fails to COMPILE for the same required-parameter reason `.div`/
+    # `-@` do in ceildiv/gcd, for a concrete Array/Hash-typed call site.
+    # Comparing the post-modulo VALUE (`r < 0`, a real number by
+    # construction) compiles for every type and answers 2.0 for this one
+    # exotic shape instead of raising -- identical to the unmigrated
+    # compiler's own answer here (confirmed on `Num`), so not a new gap.
+    if other.nil? || other == true || other == false || other.is_a?(Symbol) ||
+       other.is_a?(String) || other.is_a?(Array) || other.is_a?(Hash)
+      if other.nil? || other == true || other == false || other.is_a?(Symbol)
+        raise TypeError, "#{other.inspect} can't be coerced into Integer"
+      else
+        raise TypeError, "#{other.class} can't be coerced into Integer"
+      end
+    else
+      r = self % other
+      (r != 0 && (r < 0) != (self < 0)) ? r - other : r
+    end
+  end
+
+  def fdiv(other)
+    # Always a Float, never raising (7.fdiv(0) is Infinity, matching
+    # IEEE754 float division, not ZeroDivisionError): `to_f / other`
+    # converts the receiver once (a Bignum receiver loses precision the
+    # same way CRuby's own conversion does) and leaves the division to
+    # `/`, which already runs the numeric #coerce protocol for a user
+    # object and handles Rational/Float/Integer/Bignum arguments
+    # correctly. Same exclusion-list shape as remainder, not
+    # is_a?(Integer)/is_a?(Float): `/` (the raw operator) silently
+    # miscompiles rather than failing to compile for a REQUIRED
+    # parameter of a String/Array/Hash/nil/true/false concrete type
+    # (confirmed via `def f(x, y) = x.to_f / y`, identical and
+    # pre-existing on the unmigrated compiler), so those seven types are
+    # excluded by name and everything else reaches `/` directly. The
+    # message says "into Integer", not "into Float" as `x.to_f / y`
+    # alone would answer: CRuby's own Integer#fdiv coerces the argument
+    # by that name before ever converting to a Float, verified against
+    # a literal `7.fdiv(nil)` etc on real CRuby.
+    #
+    # A genuine engine gap surfaced writing this, fixed in
+    # analyze_infer.c: an Integer/Bignum arith op with a non-coercible
+    # argument (String/Symbol/nil/bool/Array/Hash/Range) was already
+    # typed as the raising expression's own kind so it could sit in a
+    # value position (#2471) -- but only for an Integer/Bignum RECEIVER,
+    # not a Float one, even though codegen_call.c's own matching arm
+    # (#3645) already emits the Float-side raise correctly. Every method
+    # here that raises inside an is_a? branch (gcd, ceildiv, remainder)
+    # happened to keep a scalar return type across every clone anyway,
+    # so this never mattered until fdiv's `self.to_f / other`: for a
+    # call site whose argument is one of those excluded types, this
+    # exact expression is unreachable but still has to type as SOMETHING
+    # other than UNKNOWN -- UNKNOWN poisoned the whole clone's return
+    # type to void, and every caller of `7.fdiv([1, 2])`-shaped code
+    # failed to compile ("void value not ignored"). Added the missing
+    # TY_FLOAT arm right next to the existing TY_INT/TY_BIGINT one.
+    if other.nil? || other == true || other == false || other.is_a?(Symbol) ||
+       other.is_a?(String) || other.is_a?(Array) || other.is_a?(Hash)
+      if other.nil? || other == true || other == false || other.is_a?(Symbol)
+        raise TypeError, "#{other.inspect} can't be coerced into Integer"
+      else
+        raise TypeError, "#{other.class} can't be coerced into Integer"
+      end
+    else
+      self.to_f / other
+    end
+  end
 end

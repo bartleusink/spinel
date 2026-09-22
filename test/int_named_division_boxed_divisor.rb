@@ -18,20 +18,23 @@ rescue ZeroDivisionError => e
   puts "ZeroDivisionError: #{e.message}"
 end
 
-# KNOWN DIVERGENCE, pinned so it is not mistaken for correct. A boxed Float
-# divisor makes CRuby's answer a Float -- 17.remainder(2.5) is 2.0, 17.div(2.5)
+# KNOWN DIVERGENCE for modulo and div, pinned so it is not mistaken for
+# correct. A boxed Float divisor makes CRuby's answer a Float -- 17.div(2.5)
 # is 6 -- but these calls are typed Integer, so the divisor is forced to an
 # integer first and the answer is a different number. The operators `%` and
 # `/` get it right because they dispatch on the runtime kind instead.
 #
-# This predates the modulo fix above: `remainder` and `div` have always
-# answered this way, and `modulo` merely joins them rather than staying
-# unbuildable. Answering it properly means typing these calls poly, which the
-# return-type derivation will not widen to (g_ret_no_new_poly) -- the #2024
-# boundary. Until then the operators are the spelling that is right.
+# This predates the modulo fix above: `modulo` and `div` have always
+# answered this way (div still does; modulo merely joins it here rather than
+# staying unbuildable). Answering it properly means typing these calls poly,
+# which the return-type derivation will not widen to (g_ret_no_new_poly) --
+# the #2024 boundary. `remainder`, migrated to Ruby (builtins/integer.rb),
+# is no longer part of this divergence: its body is `self % other`, so it
+# dispatches on the runtime kind exactly as `%` itself does and answers the
+# same 2.0 CRuby does.
 f = [2.5, "x"].first
 puts "modulo    #{17.modulo(f)}   (CRuby 2.0)"
-puts "remainder #{17.remainder(f)}   (CRuby 2.0)"
+puts "remainder #{17.remainder(f)}   (CRuby 2.0, and right)"
 puts "div       #{17.div(f)}   (CRuby 6)"
 puts "pct       #{17 % f}   (CRuby 2.0, and right)"
 puts "/         #{17 / f}   (CRuby 6.8, and right)"

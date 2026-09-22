@@ -5996,6 +5996,20 @@ else {
         (a0 == TY_STRING || a0 == TY_SYMBOL || a0 == TY_NIL || a0 == TY_BOOL ||
          ty_is_array(a0) || ty_is_hash(a0) || a0 == TY_RANGE))
       return TY_INT;
+    /* The same rule on the Float side (codegen_call.c's own "coercion rule
+       on the Float side", #3645, already emits this raise as `(sp_float)0`)
+       -- missing here, this expression stayed TY_UNKNOWN, which poisoned the
+       return type of any GENERIC method whose only live branch for a given
+       call-site clone was this one (a Ruby-defined Integer#fdiv's `self.to_f
+       / other` in the branch that only Integer/Float ever actually reach:
+       the SAME expression, unreachable for an Array-typed `other` at THAT
+       clone, still has to type as something other than UNKNOWN or the whole
+       method compiled as void and every caller's `_t = fdiv(...)` failed to
+       compile with "void value not ignored", found migrating fdiv there). */
+    if (rt == TY_FLOAT &&
+        (a0 == TY_STRING || a0 == TY_SYMBOL || a0 == TY_NIL || a0 == TY_BOOL ||
+         ty_is_array(a0) || ty_is_hash(a0) || a0 == TY_RANGE))
+      return TY_FLOAT;
     return TY_UNKNOWN;
   }
   if (recv >= 0 && argc == 1 && sp_streq(name, "<=>")) return TY_INT;
