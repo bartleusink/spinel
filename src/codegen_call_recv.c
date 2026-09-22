@@ -1597,8 +1597,13 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       const char *kind = rt == TY_POLY_ARRAY ? "Poly"
                        : rt == TY_STR_ARRAY  ? "Str"
                        : rt == TY_FLOAT_ARRAY ? "Float" : "Int";
-      buf_printf(b, "sp_%sArray_pack(", kind);
-      emit_expr(c, recv, b); buf_puts(b, ", "); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
+      /* the format string may allocate; the receiver is held across it */
+      Buf rpk; char typk[32];
+      snprintf(typk, sizeof typk, "sp_%sArray *", kind);
+      int cpk = hold_recv_open(c, recv, 0, typk, "SP_GC_ROOT", b, &rpk);
+      buf_printf(b, "sp_%sArray_pack(%s, ", kind, rpk.p); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
+      free(rpk.p);
+      if (cpk) buf_puts(b, "; })");
       return 1;
     }
     /* product(b, c, ...) with two or more array arguments: the n-way Cartesian
@@ -3338,25 +3343,31 @@ else {
             return 1;
           }
           if (dbn >= 1) {
+            /* the block form holds the receiver across the value as the
+               plain form below does */
             int tdr = ++g_tmp;
+            Buf rdb; char tyb[32];
+            snprintf(tyb, sizeof tyb, "sp_%sArray *", k);
+            int cdb = hold_recv_open(c, recv, 0, tyb, "SP_GC_ROOT", b, &rdb);
             if (rt == TY_INT_ARRAY) {
-              buf_printf(b, "({ sp_int _t%d = sp_IntArray_delete(", tdr);
-              emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
+              buf_printf(b, "({ sp_int _t%d = sp_IntArray_delete(%s, ", tdr, rdb.p);
+              emit_expr(c, argv[0], b);
               buf_printf(b, "); _t%d != SP_INT_NIL ? sp_box_int(_t%d) : ", tdr, tdr);
             }
             else if (rt == TY_FLOAT_ARRAY) {
-              buf_printf(b, "({ sp_float _t%d = sp_FloatArray_delete%s(", tdr, df_boxed ? "_key" : "");
-              emit_expr(c, recv, b); buf_puts(b, ", ");
+              buf_printf(b, "({ sp_float _t%d = sp_FloatArray_delete%s(%s, ", tdr, df_boxed ? "_key" : "", rdb.p);
               if (df_boxed) emit_boxed(c, argv[0], b); else emit_float_expr(c, argv[0], b);
               buf_printf(b, "); !sp_float_is_nil(_t%d) ? sp_box_float(_t%d) : ", tdr, tdr);
             }
             else {
-              buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(", tdr);
-              emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
+              buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(%s, ", tdr, rdb.p);
+              emit_expr(c, argv[0], b);
               buf_printf(b, "); _t%d ? sp_box_str(_t%d) : ", tdr, tdr);
             }
             emit_boxed(c, dbb[dbn - 1], b);
             buf_puts(b, "; })");
+            free(rdb.p);
+            if (cdb) buf_puts(b, "; })");
             return 1;
           }
         }
@@ -3369,11 +3380,17 @@ else {
           buf_printf(b, "); %s; })", rt == TY_INT_ARRAY ? "SP_INT_NIL" : rt == TY_STR_ARRAY ? "(const char *)0" : "sp_float_nil()");
           return 1;
         }
-        buf_printf(b, "sp_%sArray_delete%s(", k, df_boxed ? "_key" : ""); emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* held across the value, as the poly arm holds it */
+        Buf rdl; char tyl[32];
+        snprintf(tyl, sizeof tyl, "sp_%sArray *", k);
+        int cdl = hold_recv_open(c, recv, 0, tyl, "SP_GC_ROOT", b, &rdl);
+        buf_printf(b, "sp_%sArray_delete%s(%s, ", k, df_boxed ? "_key" : "", rdl.p);
         if (df_boxed) emit_boxed(c, argv[0], b);
         else if (rt == TY_FLOAT_ARRAY) emit_float_expr(c, argv[0], b);
         else emit_expr(c, argv[0], b);
         buf_puts(b, ")");
+        free(rdl.p);
+        if (cdl) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "tally") && argc == 0) {
@@ -3694,8 +3711,9 @@ else {
           argc == 1 && nt_ref(nt, id, "block") < 0) {
         /* array.all?(v)/any?(v)/none?(v)/one?(v)/count(v) -- compare by == */
         int ta = ++g_tmp, tv = ++g_tmp, tc = ++g_tmp, ti = ++g_tmp;
-        Buf ra = expr_buf(c, recv);
-        buf_printf(b, "({ sp_%sArray *_t%d = %s;", k, ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        /* the hoisted receiver is rooted across the value, which may allocate */
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta);
+        emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
         emit_indent(g_pre, 0);
         if (value_obj_compares(c, argv[0])) {
           unsupported_feature(c, id, "a user object defining == compared against a typed Array's elements");
@@ -3709,7 +3727,7 @@ else {
           else                              buf_puts(b, " 0; })");
           return 1;
         }
-        buf_printf(b, " "); emit_ctype(c, ty_array_elem(rt), b);
+        emit_ctype(c, ty_array_elem(rt), b);
         buf_printf(b, " _t%d = ", tv); emit_expr(c, argv[0], b); buf_puts(b, ";");
         buf_printf(b, " sp_int _t%d = 0;", tc);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++)", ti, ti, k, ta, ti);
@@ -3796,8 +3814,12 @@ else {
         TyKind init_t = fold_seed_ntype(c, argv[0]);
         /* a String initial value concatenates (["a","b"].sum("") == "ab") */
         if (rt == TY_STR_ARRAY && init_t == TY_STRING) {
-          buf_puts(b, "sp_StrArray_sum_str("); emit_expr(c, recv, b); buf_puts(b, ", ");
+          Buf rss;
+          int css = hold_recv_open(c, recv, 0, "sp_StrArray *", "SP_GC_ROOT", b, &rss);
+          buf_printf(b, "sp_StrArray_sum_str(%s, ", rss.p);
           emit_expr(c, argv[0], b); buf_puts(b, ")");
+          free(rss.p);
+          if (css) buf_puts(b, "; })");
           return 1;
         }
         /* a float initial value promotes an integer-array sum to Float: add the
@@ -3830,7 +3852,11 @@ else {
           emit_expr(c, argv[0], b); buf_puts(b, ")");
           return 1;
         }
-        buf_printf(b, "sp_%sArray_sum(", k); emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* the seed may allocate (a method call); the receiver is held across it */
+        Buf rsm; char tym[32];
+        snprintf(tym, sizeof tym, "sp_%sArray *", k);
+        int csm = hold_recv_open(c, recv, 0, tym, "SP_GC_ROOT", b, &rsm);
+        buf_printf(b, "sp_%sArray_sum(%s, ", k, rsm.p);
         if (rt == TY_FLOAT_ARRAY && init_t == TY_INT) {
           buf_puts(b, "(sp_float)("); emit_expr(c, argv[0], b); buf_puts(b, ")");
         }
@@ -3838,6 +3864,8 @@ else {
           emit_expr(c, argv[0], b);
         }
         buf_puts(b, ")");
+        free(rsm.p);
+        if (csm) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "join") && argc <= 1) {
@@ -3947,12 +3975,17 @@ else {
           buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : sp_box_nil(); })", tv, fn, ta, tv);
           return 1;
         }
-        buf_printf(b, "sp_%sArray_%s(", k, fn);
-        emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* held across the needle, which may allocate */
+        Buf rix; char tyx[32];
+        snprintf(tyx, sizeof tyx, "sp_%sArray *", k);
+        int cix = hold_recv_open(c, recv, 0, tyx, "SP_GC_ROOT", b, &rix);
+        buf_printf(b, "sp_%sArray_%s(%s, ", k, fn, rix.p);
         if (rt == TY_INT_ARRAY) emit_int_expr(c, argv[0], b);
         else if (rt == TY_FLOAT_ARRAY) emit_float_expr(c, argv[0], b);
         else emit_expr(c, argv[0], b);
         buf_puts(b, ")");
+        free(rix.p);
+        if (cix) buf_puts(b, "; })");
         return 1;
       }
       if ((sp_streq(name, "include?") || sp_streq(name, "member?")) && argc == 1) {
@@ -3963,8 +3996,14 @@ else {
         }
       }
       if ((sp_streq(name, "include?") || sp_streq(name, "member?")) && argc == 1 && rt == TY_FLOAT_ARRAY) {
-        buf_puts(b, "sp_FloatArray_include("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* held across the needle: a freed receiver here read a reused slot
+           as a float array and crashed */
+        Buf rfi;
+        int cfi = hold_recv_open(c, recv, 0, "sp_FloatArray *", "SP_GC_ROOT", b, &rfi);
+        buf_printf(b, "sp_FloatArray_include(%s, ", rfi.p);
         emit_float_expr(c, argv[0], b); buf_puts(b, ")");
+        free(rfi.p);
+        if (cfi) buf_puts(b, "; })");
         return 1;
       }
       if ((sp_streq(name, "include?") || sp_streq(name, "member?") || sp_streq(name, "index") || sp_streq(name, "find_index")) && argc == 1 && rt != TY_FLOAT_ARRAY) {
@@ -3982,8 +4021,11 @@ else {
                      tv, fn, ta, tv);
           return 1;
         }
-        buf_printf(b, "sp_%sArray_%s(", k, fn);
-        emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* held across the needle, which may allocate */
+        Buf rin; char tyn[32];
+        snprintf(tyn, sizeof tyn, "sp_%sArray *", k);
+        int cin = hold_recv_open(c, recv, 0, tyn, "SP_GC_ROOT", b, &rin);
+        buf_printf(b, "sp_%sArray_%s(%s, ", k, fn, rin.p);
         /* a poly argument into a string array's const char* slot (`arr.include?(
            params[k])`) needs coercing; emit_str_expr passes a plain string
            through and sp_poly_to_s's a poly value. */
@@ -3991,6 +4033,8 @@ else {
         else if (rt == TY_STR_ARRAY) emit_str_expr(c, argv[0], b);
         else emit_expr(c, argv[0], b);
         buf_puts(b, ")");
+        free(rin.p);
+        if (cin) buf_puts(b, "; })");
         return 1;
       }
       if (sp_streq(name, "sort") && argc == 0 &&
@@ -4698,11 +4742,16 @@ else {
       }
       if (sp_streq(name, "flatten") && argc <= 1) {
         if (argc == 1) {
-          buf_puts(b, "sp_PolyArray_flatten_n("); emit_expr(c, recv, b); buf_puts(b, ", ");
+          /* held across the depth, which may allocate */
+          Buf rfl;
+          int cfl = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rfl);
+          buf_printf(b, "sp_PolyArray_flatten_n(%s, ", rfl.p);
           /* a nil depth is legal and means "no limit" (flatten_n: < 0) */
           if (comp_ntype(c, argv[0]) == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), (sp_int)-1)"); }
           else emit_int_expr(c, argv[0], b);
           buf_puts(b, ")");
+          free(rfl.p);
+          if (cfl) buf_puts(b, "; })");
         }
         else { buf_puts(b, "sp_PolyArray_flatten("); emit_expr(c, recv, b); buf_puts(b, ")"); }
         return 1;
