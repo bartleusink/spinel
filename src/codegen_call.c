@@ -16838,6 +16838,42 @@ int push_recv_in_slot(Compiler *c, int recv, int argc, const int *argv, TyKind a
   return 1;
 }
 
+/* The receiver of a poly `<<`, `&`, `|`, `^` or `>>`, hoisted into a rooted
+   temp emitted BEFORE the operand. #4740 hoisted it into a statement
+   expression wrapped around the call, which holds while the operand renders
+   as a C expression -- but an operand that hoists statements of its own puts
+   them in front of that whole expression, and the receiver is then read
+   after them. Under promote this is the ordinary case, because boxing an
+   argument spills `_gcf` writes into the pre-statement buffer: a receiver
+   its operand reassigns read the NEW value, which is the order #4740 set out
+   to fix. `x & (x = mka(5); mka(5))` answered the second array's `&`.
+
+   Rendering the receiver into its own buffer and writing that to g_pre first
+   -- the shape the poly arithmetic arm above already uses -- puts it ahead
+   of whatever the operand hoists. Only when the operand can allocate:
+   nothing hoists or collects in the window otherwise, and the
+   statement-expression form #4740 verified under GC stress is kept there.
+
+   Answers the temp to call with; *stmt_expr says whether an opening `({`
+   still needs closing. */
+static int poly_binop_recv_temp(Compiler *c, int recv, int arg, Buf *b, int *stmt_expr) {
+  int t = ++g_tmp;
+  if (subtree_may_allocate(c->nt, arg)) {
+    Buf rb; memset(&rb, 0, sizeof rb);
+    emit_boxed(c, recv, &rb);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n",
+               t, rb.p ? rb.p : "sp_box_nil()", t);
+    free(rb.p);
+    *stmt_expr = 0;
+    return t;
+  }
+  buf_printf(b, "({ sp_RbVal _t%d = ", t);
+  emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+  *stmt_expr = 1;
+  return t;
+}
+
 static void emit_call_body(Compiler *c, int id, Buf *b) {
   /* deep-return pickup (#3227 P6): a marked receiverless call to a method
      whose every return path yields a shared handle -- reset the side
@@ -22449,16 +22485,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
      shift (e.g. peek16's `hi << 8`). */
   if (recv >= 0 && sp_streq(name, "<<") && argc == 1 &&
       comp_ntype(c, recv) == TY_POLY) {
-    int t = ++g_tmp;
-    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
     /* the hoisted receiver is rooted across its argument and the dispatch:
        sp_poly_shl can reach a user-defined <<, which can reassign the slot
        the receiver was read from, so the slot-keeping rule of the array
        arms (push_recv_in_slot) does not hold here */
-    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+    int se = 0;
+    int t = poly_binop_recv_temp(c, recv, argv[0], b, &se);
     buf_printf(b, "sp_poly_shl(_t%d, ", t);
     emit_boxed(c, argv[0], b);
-    buf_puts(b, "); })");
+    buf_puts(b, se ? "); })" : ")");
     return;
   }
   /* poly_val >> int: unbox recv to int, apply op. & | ^ dispatch on the
@@ -22466,14 +22501,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && argc == 1 && comp_ntype(c, recv) == TY_POLY &&
       (sp_streq(name, "&") || sp_streq(name, "|") || sp_streq(name, "^"))) {
     int bop = sp_streq(name, "&") ? 0 : sp_streq(name, "|") ? 1 : 2;
-    int t = ++g_tmp;
-    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
     /* the hoisted receiver is rooted across its argument and the dispatch:
        a heap receiver (an array, a Bignum, a user object whose own operator
        sp_poly_bitop reaches) is held by nothing else while the argument runs */
-    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+    int se = 0;
+    int t = poly_binop_recv_temp(c, recv, argv[0], b, &se);
     buf_printf(b, "sp_poly_bitop(_t%d, ", t);
-    emit_boxed(c, argv[0], b); buf_printf(b, ", %d); })", bop);
+    emit_boxed(c, argv[0], b);
+    buf_printf(b, ", %d)%s", bop, se ? "; })" : "");
     return;
   }
   /* `poly >> n`: through sp_poly_shr, which keeps a bignum receiver in bignum
@@ -22481,14 +22516,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
      turning the shift arithmetic and diverging a masked xorshift from CRuby for
      good (#3371). sp_poly_shr also carries the Proc#>> composition arm. */
   if (recv >= 0 && argc == 1 && comp_ntype(c, recv) == TY_POLY && sp_streq(name, ">>")) {
-    int t = ++g_tmp;
-    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", t);
     /* as the bit-operator arm above: a Bignum, Proc or user-object receiver
        is held by nothing else while the argument runs */
-    emit_recv_rooted(c, recv, t, "SP_GC_ROOT_RBVAL", b);
+    int se = 0;
+    int t = poly_binop_recv_temp(c, recv, argv[0], b, &se);
     buf_printf(b, "sp_poly_shr(_t%d, ", t);
     emit_boxed(c, argv[0], b);
-    buf_puts(b, "); })");
+    buf_puts(b, se ? "); })" : ")");
     return;
   }
 
