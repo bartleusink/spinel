@@ -31448,8 +31448,13 @@ else {
     if (rt == TY_POLY) {
       int ts = hoist_boxed_rooted(c, recv);
       int tlo = hoist_boxed_rooted(c, argv[0]), thi = hoist_boxed_rooted(c, argv[1]);
-      buf_printf(b, "(sp_poly_cmp_ck(_t%d, _t%d) >= 0 && sp_poly_cmp_ck(_t%d, _t%d) <= 0)",
-                 ts, tlo, ts, thi);
+      /* nil has no #between?, and the checked comparison below would call it
+         an incomparable pair instead -- the Comparable ArgumentError, which
+         belongs to the BOUND being incomparable, not to a missing method.
+         Only this site knows the method's name. */
+      buf_printf(b, "(sp_poly_recv_ck(_t%d, \"%s\"), "
+                    "sp_poly_cmp_ck(_t%d, _t%d) >= 0 && sp_poly_cmp_ck(_t%d, _t%d) <= 0)",
+                 ts, name, ts, tlo, ts, thi);
       return;
     }
     /* Comparable: user type with <=> method */
