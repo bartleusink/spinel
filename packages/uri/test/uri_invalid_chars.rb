@@ -25,3 +25,24 @@ p parse("http://user:pw@example.com:8080/x")
 p parse("https://example.com/path%20with%20escape")
 p parse("/rooms/1")
 p parse("")
+
+# Where a character is excluded is not uniform, and this follows CRuby: the
+# QUERY takes any ASCII, the unwise set included, so a filter expression
+# parses; the fragment and everything before the query do not.
+p parse("http://example.com/?q=a|b")
+p parse("http://example.com/?q=a b")
+p parse("http://example.com/?q=<x>")
+p parse("http://example.com/?q=a[1]")
+p parse("http://example.com/#a[1]")
+p parse("http://example.com/a[1]")
+
+# a bracketed IPv6 host is the one place brackets belong
+p parse("http://[::1]/x")
+p parse("http://[::1]:8080/x")
+p parse("http://user:pw@[2001:db8::1]:443/x")
+p parse("http://exa[mple.com/")
+
+# a byte outside ASCII is rejected everywhere, the query included
+p parse("http://\u4f8b\u3048.jp/")
+p parse("http://example.com/?q=\u00e9")
+p parse("http://example.com/x\u00e9")
