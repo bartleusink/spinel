@@ -87,3 +87,9 @@ ensure
   f.close
   File.unlink(f.path)
 end
+
+# The file is owner-only, and `perm:` does not change that: CRuby's own
+# create sets opts[:perm] = 0600 after merging the caller's options, so a
+# caller asking for 0644 still gets a file nobody else can open.
+Tempfile.create("mode") { |f| p (File.stat(f.path).mode & 0o777).to_s(8) }
+Tempfile.create("mode", nil, perm: 0644) { |f| p (File.stat(f.path).mode & 0o777).to_s(8) }

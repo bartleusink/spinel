@@ -41,6 +41,12 @@ class Tempfile
   # uses for directories.
   MAX_TRY = 10000
 
+  # `perm:` is accepted and IGNORED, which is what CRuby does with it: its
+  # own create sets `opts[:perm] = 0600` after merging the caller's options,
+  # so the file is owner-only whatever the caller asked for. Honouring it
+  # here would hand a caller a group- or world-readable temp file out of a
+  # method whose whole contract is that nobody else can open it, and would
+  # answer differently from CRuby for the same program.
   def self.create(basename = "", tmpdir = nil, max_try: nil, binmode: false, perm: 0600, &block)
     prefix, suffix = split_basename(basename)
     parent = tmpdir ? File.path(tmpdir) : Dir.tmpdir
@@ -65,7 +71,7 @@ class Tempfile
       path = "#{parent}/#{prefix}#{date}-#{Process.pid}-" \
              "#{rand(0x100000000).to_s(36)}#{counter}#{suffix}"
       begin
-        file = File.open(path, mode, perm)
+        file = File.open(path, mode, 0600)
         break
       rescue Errno::EEXIST
         i += 1
