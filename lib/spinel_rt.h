@@ -827,12 +827,12 @@ static inline sp_int sp_int_bit(sp_int n, sp_int i) {
    each bound (so a NaN receiver names min); a non-NaN min>max is the
    ordinary ArgumentError. */
 static inline sp_int sp_int_clamp_ck(sp_int v,sp_int lo,sp_int hi){
-  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be less than or equal to max argument");
+  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be smaller than max argument");
   return sp_int_clamp(v,lo,hi);
 }
 static inline sp_float sp_float_clamp_ck(sp_float v,sp_float lo,sp_float hi){
   if(lo!=lo||hi!=hi)sp_raise_cls("ArgumentError",sp_sprintf("comparison of Float with %s failed",sp_float_to_s(hi)));
-  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be less than or equal to max argument");
+  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be smaller than max argument");
   if(v!=v)sp_raise_cls("ArgumentError",sp_sprintf("comparison of Float with %s failed",sp_float_to_s(lo)));
   return sp_float_clamp(v,lo,hi);
 }
@@ -3748,7 +3748,7 @@ static sp_RbVal sp_obj_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
      the first lo<=>hi comparison, lo/hi across the later ones. */
   SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(lo); SP_GC_ROOT_RBVAL(hi);
   if (lo.tag != SP_TAG_NIL && hi.tag != SP_TAG_NIL && sp_poly_cmp_ck(lo, hi) > 0)
-    sp_raise_cls("ArgumentError", "min argument must be less than or equal to max argument");
+    sp_raise_cls("ArgumentError", "min argument must be smaller than max argument");
   if (lo.tag != SP_TAG_NIL) {
     sp_int c1 = sp_poly_cmp_ck(v, lo);
     if (c1 == 0) return v;
@@ -3809,7 +3809,17 @@ static sp_Complex sp_complex_div_poly(sp_Complex a, sp_RbVal b) {
 }
 static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984): none of the checks below can match either tag, and this is what a boxed arithmetic loop actually holds. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_idiv(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f / b.v.f); /* before the tower branches, which match on the receiver kind and would convert a user object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("/", a, b); if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_div(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("/", a, b); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); /* A Complex divided by a REAL divides each component, and the typed arms have done that since #3616: boxing the real into c+0i and running the conjugate formula answers NaN where MRI answers Infinity for a Float divisor, and swallows the ZeroDivisionError an Integer 0 owes (integer division rules). The boxed path still boxed, so `Complex(20, 40) / z` with a zero z out of a container answered (NaN+NaN*i) in both modes instead of raising. Complex / Complex keeps the full formula. */ if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) return sp_box_complex(sp_complex_div_poly(sp_poly_as_complex(a), b)); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
 static sp_RbVal sp_poly_str_mod(sp_RbVal a, sp_RbVal b);  /* fwd: defined beside the format helper */
-static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984). */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_imod(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(a.v.f, b.v.f)); if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); /* the user-object arm has to come before the float one: a Float on either side otherwise converted the object to a number (0.0) and answered a division by zero where CRuby coerces. */ if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); /* a strbuf RECEIVER already returned through sp_poly_str_mod above */ if (SP_UNLIKELY(sp_poly_is_strbuf(b))) return sp_poly_mod(a, sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("%", a, b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
+static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984). */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_imod(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(a.v.f, b.v.f)); if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); /* the user-object arm has to come before the float one: a Float on either side otherwise converted the object to a number (0.0) and answered a division by zero where CRuby coerces. */ if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); /* a strbuf RECEIVER already returned through sp_poly_str_mod above */ if (SP_UNLIKELY(sp_poly_is_strbuf(b))) return sp_poly_mod(a, sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("%", a, b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); /* the sibling helpers (div_m, remainder, fdiv, divmod) all refuse a non-numeric RECEIVER; `%` did not, so nil/Array/Hash/Symbol/true/false reaching here (a poly-dispatch collision default, or plain `nil % 1`) fell through to sp_poly_to_i below and answered 0 instead of raising the method they lack (#4816). */ if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a)) sp_raise_poly_nomethod("%", a); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
+/* Numeric#modulo: same computation as `%`, but a receiver with no such
+   method spells the message with "modulo" (CRuby distinguishes the two
+   call syntaxes) and, unlike `%`, a String has no modulo method at all
+   (only the operator does) -- so the guard here is stricter than sp_poly_mod's
+   own, not merely a renamed copy of it. */
+static sp_RbVal sp_poly_modulo(sp_RbVal a, sp_RbVal b) {
+  if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
+    sp_raise_poly_nomethod("modulo", a);
+  return sp_poly_mod(a, b);
+}
 /* divmod / quo on a boxed receiver. The typed paths build these inline per
    receiver kind; the poly path had neither, so an exact Rational reaching them
    through a block parameter raised NoMethodError on a method it answers (#3512).
@@ -3948,6 +3958,14 @@ static sp_RbVal sp_poly_coerce(sp_RbVal a, sp_RbVal b) {
 }
 static sp_RbVal sp_poly_quo(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("quo");
+  /* the sibling helpers (div_m, remainder, fdiv, divmod) all refuse a
+     non-numeric RECEIVER this way; quo did not, so a nil/String/Symbol/
+     Array/Hash value that reaches here (a poly-dispatch collision default,
+     or a receiver the coerce hook above declined) fell through to
+     sp_poly_as_rational below, which reads a non-number as 0, instead of
+     raising the method it lacks (the same gap divmod had, #4816). */
+  if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
+    sp_raise_poly_nomethod("quo", a);
   if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)
     return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b));
   return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b)));
@@ -3966,6 +3984,23 @@ static sp_RbVal sp_poly_quo(sp_RbVal a, sp_RbVal b) {
    receiver clamped to the Integer range came back unchanged (wasm's
    trunc_sat, #4777). A NaN anywhere is an incomparable pair there,
    which is CRuby's failed comparison. */
+/* CRuby's rb_cmperr names the SECOND (failing) operand by its VALUE only
+   for an immediate-ish type (an Integer that fits a machine word, a Float,
+   a Symbol, nil, true, false) and by its CLASS NAME for everything else,
+   Bignum included (`5.clamp(1, "z")` says "...with String failed", not
+   "...with z failed"; `"a".clamp("b", 2**70)` says "...with Integer
+   failed", not the Bignum's digits). sp_poly_to_s named the VALUE
+   unconditionally, so a String/Array/Hash/Symbol/Bignum bound produced a
+   message CRuby never gives (found probing this same helper for
+   Comparable#clamp/#between?'s Ruby migration). The FIRST operand is
+   always the class name (sp_poly_class_name), never inspected. */
+static sp_bool sp_poly_cmp_err_immediate_p(sp_RbVal v) {
+  return v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT || v.tag == SP_TAG_SYM ||
+         v.tag == SP_TAG_NIL || v.tag == SP_TAG_BOOL;
+}
+static const char *sp_poly_cmp_err_repr(sp_RbVal v) {
+  return sp_poly_cmp_err_immediate_p(v) ? sp_poly_inspect(v) : sp_poly_class_name(v);
+}
 static sp_RbVal sp_num_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
   /* a nil bound is an open side (CRuby): it took part in the double
      comparison as 0.0, and was even handed back as the clamped value */
@@ -3974,20 +4009,25 @@ static sp_RbVal sp_num_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
   if (has_lo && has_hi) {
     sp_int lh = sp_poly_cmp(lo, hi, &ok);
     if (!ok)
-      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(lo), sp_poly_to_s(hi)));
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(lo), sp_poly_cmp_err_repr(hi)));
+    /* CRuby raises only for a STRICT ordering violation: `5.clamp(5, 5)`
+       answers 5, not an ArgumentError (equal bounds are a valid, empty
+       range). The old wording ("less than or equal to") implied the
+       opposite; corrected here to match CRuby's own exact message,
+       though the `> 0` check below was already the correct boundary. */
     if (lh > 0)
-      sp_raise_cls("ArgumentError", "min argument must be less than or equal to max argument");
+      sp_raise_cls("ArgumentError", "min argument must be smaller than max argument");
   }
   if (has_lo) {
     sp_int vl = sp_poly_cmp(v, lo, &ok);
     if (!ok)
-      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_to_s(lo)));
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_cmp_err_repr(lo)));
     if (vl < 0) return lo;
   }
   if (has_hi) {
     sp_int vh = sp_poly_cmp(v, hi, &ok);
     if (!ok)
-      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_to_s(hi)));
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_cmp_err_repr(hi)));
     if (vh > 0) return hi;
   }
   return v;

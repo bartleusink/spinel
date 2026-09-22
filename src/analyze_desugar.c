@@ -3417,9 +3417,29 @@ int desugar_builtin_scalar_defs(Compiler *c) {
       const char *name = nt_str(nt, def, "name");
       if (!name) continue;
       int pn0 = nt_ref(nt, def, "parameters");
+      int shape_ok = 1;
       if (pn0 >= 0 && (nt_ref(nt, pn0, "block") >= 0 || nt_ref(nt, pn0, "rest") >= 0 ||
-                       nt_ref(nt, pn0, "keyword_rest") >= 0)) continue;
-      if (pn0 >= 0) { int kwn = 0; nt_arr(nt, pn0, "keywords", &kwn); if (kwn > 0) continue; }
+                       nt_ref(nt, pn0, "keyword_rest") >= 0)) shape_ok = 0;
+      if (shape_ok && pn0 >= 0) { int kwn = 0; nt_arr(nt, pn0, "keywords", &kwn); if (kwn > 0) shape_ok = 0; }
+      if (!shape_ok) {
+        /* A reopen this registration cannot clone (a splat, a block or
+           keyword parameters) still REPLACES the name for the program.
+           Skipping it silently was only safe while the name was the
+           program's alone; when it is also one a builtins/ file defines,
+           the spliced generic stays in the table and every concrete call
+           site rewrites onto THAT, so the reopen was ignored outright:
+           `class Integer; def gcd(*a) = "mine"; end; 12.gcd(8)` answered
+           4. Stand the generic down instead -- with no table entry no
+           call site rewrites, and the calls take the ordinary
+           open-class path, which answers the reopen correctly (the same
+           answer SPINEL_NO_BUILTINS=1 gives). */
+        int bi0 = sp_builtin_extra_name_index(bx, name);
+        if (bi0 >= 0 && gdef[bx] && gdef[bx][bi0] >= 0) {
+          bi_subtree_blank(nt, gdef[bx][bi0]);
+          gdef[bx][bi0] = -1;
+        }
+        continue;
+      }
       int clone = nt_clone_subtree(nt, def);
       if (clone < 0) continue;
       int hi = bi_subtree_max(nt, clone);
@@ -3566,13 +3586,59 @@ int desugar_builtin_scalar_calls(Compiler *c) {
     if (bx == SP_BX_INTEGER) ok = (rt == TY_INT || rt == TY_BIGINT);
     else if (bx == SP_BX_FLOAT) ok = (rt == TY_FLOAT);
     else if (bx == SP_BX_COMPARABLE) {
-      ok = (rt == TY_INT || rt == TY_BIGINT || rt == TY_FLOAT || rt == TY_STRING);
-      if (!ok && ty_is_object(rt)) {
-        int oci = ty_object_class(rt);
-        ok = comp_method_in_chain(c, oci, "<=>", NULL) >= 0 && comp_method_in_chain(c, oci, name, NULL) < 0;
-      }
+      /* Integer/Bignum/Float only, narrower than builtins/comparable.rb's
+         own surface suggests. Two SEPARATE pre-existing gaps rule the
+         other two receiver shapes out, both found writing that file and
+         both reproducing with no Comparable migration involved at all:
+
+         A String receiver: `self <=> min` inside the generic method,
+         with `min` some other concrete non-String type at a given call
+         site's clone (an object with no `<=>`, say), reaches the
+         compiler's generic "no dispatch arm for this receiver/argument
+         pair" fallback and hard-compiles an unconditional NoMethodError
+         -- where the same `"str" <=> obj` written directly, outside any
+         generic/cloned method body, correctly compiles a run-time nil
+         check (test/numeric_coerce_protocol.rb's `"abc".between?(money,
+         "b")`, for a `money` with no `<=>`, answered "undefined method
+         '<=>' for an instance of String" instead of CRuby's "comparison
+         of String with Money failed").
+
+         A user class with its own `<=>`: writing `lo <=> hi` with the
+         operands concretely that class is a genuinely NEW kind of call
+         site for the class's own `<=>` -- every existing route to it
+         (the `<`/`>`/`between?` operators, `sort`/`min`/`max`, the
+         object-clamp emitter) calls it through the boxed runtime hook
+         (sp_obj_cmp_hook), never as a plain statically typed Ruby
+         expression. That one concretely-typed call site settles the
+         method's OWN parameter type to the class, and a program that
+         also uses the same `<=>` with a different argument type
+         elsewhere (any `x.clamp(range)`, whose emitter calls `<=>` with
+         an Integer endpoint through that hook) then miscompiles: the
+         parameter stays typed as the class while a real Integer flows
+         into it, read back through a pointer that was never one. A bare
+         `a <=> b` beside an unrelated `x.clamp(1..5)` already breaks the
+         same way on a compiler with no builtins/comparable.rb at all.
+
+         Both are general method-typing gaps (a parameter's type has to
+         account for every REACHABLE caller, hook-based ones included),
+         not something one migration should paper over. */
+      ok = (rt == TY_INT || rt == TY_BIGINT || rt == TY_FLOAT);
     }
     if (!ok) continue;
+    /* Comparable's names are the one CROSS-container case: they are
+       reopened on Integer/Float (`class Integer; def clamp`), never on
+       `module Comparable`, so the registration below -- which keys a
+       reopen to the container whose CLASS NAME the reopen spells -- files
+       such a def under Integer, where the name is not a builtins name at
+       all, and the Comparable generic stays live for every call site.
+       The reopen was then ignored outright. Ask the receiver's own
+       concrete class instead, and leave the call on the ordinary
+       open-class path when it answers. */
+    if (bx == SP_BX_COMPARABLE) {
+      const char *concrete = rt == TY_FLOAT ? "Float" : "Integer";
+      int cci = comp_class_index(c, concrete);
+      if (cci >= 0 && comp_method_in_chain(c, cci, name, NULL) >= 0) continue;
+    }
     /* Which def `copy` clones -- the spliced generic, or a program's own
        reopen -- was already decided in desugar_builtin_scalar_defs' name
        table (the program's own reopen overwrites the spliced generic's
