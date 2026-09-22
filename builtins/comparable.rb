@@ -28,7 +28,7 @@
 # endpoint through the very same hook) miscompiled: the parameter stayed
 # typed as the user's class while a real Integer argument flowed into it
 # at runtime, reading a bogus field through a pointer that was never one
-# (#4816; test/comparable_clamp_parity.rb, a pre-existing test, reproduces
+# (test/comparable_clamp_parity.rb, a pre-existing test, reproduces
 # the underlying gap with ZERO Comparable/clamp Ruby migration involved --
 # a bare `a <=> b` beside an unrelated `x.clamp(1..5)` already miscompiles
 # on the unmigrated compiler; this migration would merely have given the
@@ -78,7 +78,7 @@ module Comparable
     # STATIC type is a plain Integer/Float here: `self <=> min` would
     # compile the sentinel as an ordinary number and answer a wrong
     # comparison or exception, where nil itself simply has no such method
-    # (test/nil_recv_compare_nomethod.rb, #4816). `.nil?` on a concrete
+    # (test/nil_recv_compare_nomethod.rb). `.nil?` on a concrete
     # Integer/Float already compiles to exactly this sentinel check.
     if self.nil?
       raise NoMethodError, "undefined method 'between?' for nil"
