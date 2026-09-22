@@ -268,6 +268,7 @@ int desugar_proc_expr_block_arg(Compiler *c);
 int desugar_to_hash_splat(Compiler *c);
 int desugar_lazy_method_call(Compiler *c);
 int desugar_value_callable_forwards(Compiler *c);
+int desugar_root_scoped_constants(Compiler *c);
 int desugar_builtins(Compiler *c);
 int desugar_builtin_enum_calls(Compiler *c);
 /* Block iterator the nested-table narrow pass keeps. each / map / zip stay
