@@ -6529,7 +6529,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       (sp_streq(name, "gcdlcm") && argc == 1) ||
       (sp_streq(name, "pow") && (argc == 1 || argc == 2)) ||
       (sp_streq(name, "digits") && argc == 1) ||
-      ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1);
+      ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1) ||
+      ((sp_streq(name, "divmod") || sp_streq(name, "remainder") || sp_streq(name, "fdiv")) && argc == 1);
     if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_numeric_poly_arm) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
@@ -7880,6 +7881,46 @@ else {
           else buf_puts(b, gv9);
           buf_puts(b, "; break;");
           free(mb9.p);
+        }
+        /* Numeric#divmod/#remainder/#fdiv reaching this dispatch only
+           because a user class owns the name: the runtime helpers are the
+           ones the no-user-class path uses (the "poly arithmetic" arm
+           above, codegen_call.c's own emit_call), which decline this
+           dispatch outright when the name is contested and fall through
+           to here instead. */
+        else if (sp_streq(name, "divmod") && argc == 1) {
+          Buf ob10; memset(&ob10, 0, sizeof ob10);
+          { char on10[32]; snprintf(on10, sizeof on10, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&ob10, on10);
+            else emit_boxed_text(c, atmp_ty[0], on10, &ob10); }
+          char gv10[160]; snprintf(gv10, sizeof gv10, "sp_poly_divmod(_t%d, %s)", tv, ob10.p ? ob10.p : "sp_box_nil()");
+          if (ret == TY_POLY) buf_printf(b, " _t%d = %s; break;", tr, gv10);
+          else buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
+          free(ob10.p);
+        }
+        else if (sp_streq(name, "remainder") && argc == 1) {
+          Buf ob11; memset(&ob11, 0, sizeof ob11);
+          { char on11[32]; snprintf(on11, sizeof on11, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&ob11, on11);
+            else emit_boxed_text(c, atmp_ty[0], on11, &ob11); }
+          char gv11[160]; snprintf(gv11, sizeof gv11, "sp_poly_remainder(_t%d, %s)", tv, ob11.p ? ob11.p : "sp_box_nil()");
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) buf_puts(b, gv11);
+          else emit_unbox_text(c, ret, gv11, b);
+          buf_puts(b, "; break;");
+          free(ob11.p);
+        }
+        else if (sp_streq(name, "fdiv") && argc == 1) {
+          Buf ob12; memset(&ob12, 0, sizeof ob12);
+          { char on12[32]; snprintf(on12, sizeof on12, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&ob12, on12);
+            else emit_boxed_text(c, atmp_ty[0], on12, &ob12); }
+          char gv12[160]; snprintf(gv12, sizeof gv12, "sp_poly_fdiv(_t%d, %s)", tv, ob12.p ? ob12.p : "sp_box_nil()");
+          buf_printf(b, " _t%d = ", tr);
+          if (ret == TY_POLY) emit_boxed_text(c, TY_FLOAT, gv12, b);
+          else buf_puts(b, gv12);
+          buf_puts(b, "; break;");
+          free(ob12.p);
         }
         /* index/rindex also belong to String, whose box carries no cls_id, so
            no case above can claim it. Answer it here, ahead of the raise, or a
@@ -30510,7 +30551,7 @@ else {
        unboxed argument), and routing it through the boxed dispatch instead
        would box the receiver, call the generic helper and unbox the result
        -- correct, and three operations worse, on a path that was fine. */
-    else if (rt != TY_INT && rt != TY_FLOAT && rt != TY_BIGINT) {
+    else if (rt != TY_INT && rt != TY_FLOAT && rt != TY_BIGINT && !user_defines_or_reads(c, name)) {
       if (sp_streq(name, "quo")) pfn = "sp_poly_quo";
       else if (sp_streq(name, "fdiv")) pfn = "sp_poly_fdiv";
       else if (sp_streq(name, "div")) pfn = "sp_poly_div_m";

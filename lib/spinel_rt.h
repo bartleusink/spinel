@@ -3828,6 +3828,13 @@ static sp_float sp_poly_fdiv(sp_RbVal a, sp_RbVal b) {
 }
 static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("divmod");
+  /* the sibling helpers (div_m, remainder, fdiv) all refuse a non-numeric
+     RECEIVER this way; divmod did not, so a String/Symbol/nil/Array/Hash
+     value that reaches here (a poly-dispatch collision default, or a
+     receiver the coerce hook above declined) fell through to sp_poly_to_i
+     below instead of raising the method it lacks. */
+  if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
+    sp_raise_poly_nomethod("divmod", a);
   sp_PolyArray *out = sp_PolyArray_new();
   SP_GC_ROOT(out);
   /* A Float operand is answered by the Float arm below, not read as a
