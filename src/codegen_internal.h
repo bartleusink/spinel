@@ -765,6 +765,10 @@ const char *bigint_arith_fn(const char *op);
    `=`->_set, anything else non-identifier -> `_`. Returns a static buffer
    (one live result at a time -- fine since each use is consumed inline). */
 const char *mc(const char *name);
+/* The class stem to compose a REOPENED builtin's method name with: the
+   plain c_name, or one with an `_oc` suffix where the runtime already has a
+   function of that exact spelling (sp_String_length). */
+const char *mc_reopen_cls(Compiler *c, int class_id, const char *mname);
 const char *mc_top(Compiler *c, const char *name);
 const char *iv_c(const char *name);  /* ivar/member name -> valid C field id (#3110) */
 /* A class method scope is shadowed (and must not be emitted) when a later

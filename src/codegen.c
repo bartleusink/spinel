@@ -1908,7 +1908,7 @@ void emit_method_cname(Compiler *c, Scope *s, Buf *b) {
   if (s->class_id >= 0 && s->is_cmethod)
     buf_printf(b, "sp_%s_s_%s", c->classes[s->class_id].c_name, mc(s->name));
   else if (s->class_id >= 0)
-    buf_printf(b, "sp_%s_%s", c->classes[s->class_id].c_name, mc(s->name));
+    buf_printf(b, "sp_%s_%s", mc_reopen_cls(c, s->class_id, s->name), mc(s->name));
   else
     buf_printf(b, "sp_%s", mc_top(c, s->name));
 }

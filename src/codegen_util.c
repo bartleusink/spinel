@@ -2217,6 +2217,31 @@ const char *array_index_bad_class(Compiler *c, int id) {
     return "Range";
   return NULL;
 }
+/* A method on a REOPENED builtin whose composed C name would be a runtime
+   function of the same spelling: sp_String is the shared-mutable String's own
+   type, so `class String; def length` emitted an sp_String_length(const char *)
+   beside the runtime's sp_String_length(sp_String *) and the program did not
+   compile at all. The same holds for dup, freeze, insert, prepend, replace and
+   the rest of that family. A reopened method of one of those names takes an
+   `_oc` suffix on the class stem instead; every site that composes the name
+   goes through here or through mc_reopen_cls below. */
+static const char *const sp_rt_string_fns[] = {
+  "append", "append_bin", "append_n", "cstr", "dup", "fin", "freeze",
+  "insert", "is_frozen", "length", "new", "new_len", "new_shared",
+  "prepend", "replace", "set_bin", NULL };
+const char *mc_reopen_cls(Compiler *c, int class_id, const char *mname) {
+  static char buf[128];
+  const char *stem = c->classes[class_id].c_name;
+  if (mname && sp_streq(c->classes[class_id].name, "String")) {
+    for (int i = 0; sp_rt_string_fns[i]; i++)
+      if (sp_streq(mname, sp_rt_string_fns[i])) {
+        snprintf(buf, sizeof buf, "%s_oc", stem);
+        return buf;
+      }
+  }
+  return stem;
+}
+
 const char *mc(const char *name) {
   static char buf[256];
   int j = 0;

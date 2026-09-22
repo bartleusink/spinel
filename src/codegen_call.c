@@ -17113,7 +17113,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         int ciR = comp_class_index(c, ocR);
         int miR = ciR >= 0 ? comp_method_in_chain(c, ciR, nmR, NULL) : -1;
         if (miR >= 0) {
-          buf_printf(b, "sp_%s_%s(", ocR, mc(nmR));
+          buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, ciR, nmR), mc(nmR));
           emit_expr(c, recvR, b);
           emit_args_filled(c, miR, nt_ref(ntR, id, "arguments"), ", ", b);
           buf_puts(b, ")");
@@ -33074,7 +33074,7 @@ else {
       if (oc_ci >= 0) {
         int oc_mi = comp_method_in_chain(c, oc_ci, name, NULL);
         if (oc_mi >= 0) {
-          buf_printf(b, "sp_%s_%s(", oc_cn, mc(name));
+          buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, oc_ci, name), mc(name));
           emit_expr(c, recv, b);
           emit_args_filled(c, oc_mi, nt_ref(nt, id, "arguments"), ", ", b);
           buf_puts(b, ")");
