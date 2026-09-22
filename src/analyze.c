@@ -14331,11 +14331,21 @@ void analyze_program(Compiler *c) {
       if (v) comp_sym_intern_n(c, v, nt_str_len(c->nt, id, "value"));
     }
     /* a def in value position evaluates to :name. A builtin's definition
-       (`__enum_<m>`, and its per-site copies) is never in value position:
-       its name would only add a string per call site to the symbol table */
+       (`__enum_<m>`, `__int_<m>`, `__flt_<m>`, `__cmp_<m>`, and each of
+       their per-call-site copies) is never in value position: its name
+       would only add a string per call site to the symbol table. The
+       Integer/Float/Comparable containers (analyze_desugar.c's sp_bx_*
+       tables) share this same "generic def cloned per call site" shape
+       enumerable.rb pioneered, but this exclusion was never extended to
+       them -- invisible for Integer/Float's narrower methods, but a
+       Comparable#clamp/#between? and its own private helper, reached from
+       nearly everywhere, added one string per call site of any of them
+       (found in this migration's own corpus sweep). */
     else if (ty && sp_streq(ty, "DefNode")) {
       const char *dn = nt_str(c->nt, id, "name");
-      if (dn && strncmp(dn, "__enum_", 7) != 0) comp_sym_intern(c, dn);
+      if (dn && strncmp(dn, "__enum_", 7) != 0 && strncmp(dn, "__int_", 6) != 0 &&
+          strncmp(dn, "__flt_", 6) != 0 && strncmp(dn, "__cmp_", 6) != 0)
+        comp_sym_intern(c, dn);
     }
     /* __method__ / __callee__ yield the enclosing method's name as a symbol;
        intern it now so the id table is sized before the codegen prologue */

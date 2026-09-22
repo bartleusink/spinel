@@ -827,12 +827,12 @@ static inline sp_int sp_int_bit(sp_int n, sp_int i) {
    each bound (so a NaN receiver names min); a non-NaN min>max is the
    ordinary ArgumentError. */
 static inline sp_int sp_int_clamp_ck(sp_int v,sp_int lo,sp_int hi){
-  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be less than or equal to max argument");
+  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be smaller than max argument");
   return sp_int_clamp(v,lo,hi);
 }
 static inline sp_float sp_float_clamp_ck(sp_float v,sp_float lo,sp_float hi){
   if(lo!=lo||hi!=hi)sp_raise_cls("ArgumentError",sp_sprintf("comparison of Float with %s failed",sp_float_to_s(hi)));
-  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be less than or equal to max argument");
+  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be smaller than max argument");
   if(v!=v)sp_raise_cls("ArgumentError",sp_sprintf("comparison of Float with %s failed",sp_float_to_s(lo)));
   return sp_float_clamp(v,lo,hi);
 }
@@ -3748,7 +3748,7 @@ static sp_RbVal sp_obj_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
      the first lo<=>hi comparison, lo/hi across the later ones. */
   SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(lo); SP_GC_ROOT_RBVAL(hi);
   if (lo.tag != SP_TAG_NIL && hi.tag != SP_TAG_NIL && sp_poly_cmp_ck(lo, hi) > 0)
-    sp_raise_cls("ArgumentError", "min argument must be less than or equal to max argument");
+    sp_raise_cls("ArgumentError", "min argument must be smaller than max argument");
   if (lo.tag != SP_TAG_NIL) {
     sp_int c1 = sp_poly_cmp_ck(v, lo);
     if (c1 == 0) return v;
@@ -3984,6 +3984,23 @@ static sp_RbVal sp_poly_quo(sp_RbVal a, sp_RbVal b) {
    receiver clamped to the Integer range came back unchanged (wasm's
    trunc_sat, #4777). A NaN anywhere is an incomparable pair there,
    which is CRuby's failed comparison. */
+/* CRuby's rb_cmperr names the SECOND (failing) operand by its VALUE only
+   for an immediate-ish type (an Integer that fits a machine word, a Float,
+   a Symbol, nil, true, false) and by its CLASS NAME for everything else,
+   Bignum included (`5.clamp(1, "z")` says "...with String failed", not
+   "...with z failed"; `"a".clamp("b", 2**70)` says "...with Integer
+   failed", not the Bignum's digits). sp_poly_to_s named the VALUE
+   unconditionally, so a String/Array/Hash/Symbol/Bignum bound produced a
+   message CRuby never gives (found probing this same helper for
+   Comparable#clamp/#between?'s Ruby migration). The FIRST operand is
+   always the class name (sp_poly_class_name), never inspected. */
+static sp_bool sp_poly_cmp_err_immediate_p(sp_RbVal v) {
+  return v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT || v.tag == SP_TAG_SYM ||
+         v.tag == SP_TAG_NIL || v.tag == SP_TAG_BOOL;
+}
+static const char *sp_poly_cmp_err_repr(sp_RbVal v) {
+  return sp_poly_cmp_err_immediate_p(v) ? sp_poly_inspect(v) : sp_poly_class_name(v);
+}
 static sp_RbVal sp_num_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
   /* a nil bound is an open side (CRuby): it took part in the double
      comparison as 0.0, and was even handed back as the clamped value */
@@ -3992,20 +4009,25 @@ static sp_RbVal sp_num_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
   if (has_lo && has_hi) {
     sp_int lh = sp_poly_cmp(lo, hi, &ok);
     if (!ok)
-      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(lo), sp_poly_to_s(hi)));
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(lo), sp_poly_cmp_err_repr(hi)));
+    /* CRuby raises only for a STRICT ordering violation: `5.clamp(5, 5)`
+       answers 5, not an ArgumentError (equal bounds are a valid, empty
+       range). The old wording ("less than or equal to") implied the
+       opposite; corrected here to match CRuby's own exact message,
+       though the `> 0` check below was already the correct boundary. */
     if (lh > 0)
-      sp_raise_cls("ArgumentError", "min argument must be less than or equal to max argument");
+      sp_raise_cls("ArgumentError", "min argument must be smaller than max argument");
   }
   if (has_lo) {
     sp_int vl = sp_poly_cmp(v, lo, &ok);
     if (!ok)
-      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_to_s(lo)));
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_cmp_err_repr(lo)));
     if (vl < 0) return lo;
   }
   if (has_hi) {
     sp_int vh = sp_poly_cmp(v, hi, &ok);
     if (!ok)
-      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_to_s(hi)));
+      sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(v), sp_poly_cmp_err_repr(hi)));
     if (vh > 0) return hi;
   }
   return v;

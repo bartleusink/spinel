@@ -1028,7 +1028,17 @@ int call_returns_nullable_int(Compiler *c, int node) {
       sp_streq(nm, "pop") || sp_streq(nm, "shift") || sp_streq(nm, "delete")) return 1;
   if (sp_streq(nm, "begin") || sp_streq(nm, "end")) {
     int r = nt_ref(nt, node, "receiver");
-    if (r >= 0 && comp_ntype(c, r) == TY_MATCHDATA) return 1;
+    TyKind rrt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+    /* MatchData#begin/end (an unmatched optional group -> nil) and,
+       missed until a generic Comparable#clamp (builtins/comparable.rb)
+       stored a beginless/endless Range's own #begin/#end into a plain
+       local -- boxing the raw SP_INT_NIL sentinel as sp_box_int gave a
+       value that answered `.nil?` false and `<=>` a huge fake number
+       instead of the open bound CRuby's clamp/between? treat it as. A
+       Float-bounded Range's #end/#begin instead reads back HUGE_VAL, a
+       genuine Float value that already boxes correctly, so
+       TY_FLOAT_RANGE is not part of this. */
+    if (rrt == TY_MATCHDATA || rrt == TY_RANGE) return 1;
   }
   /* an attr-reader over an int ivar: int ivars are SP_INT_NIL-defaulted
      (ivar_scalar_nil_init), so the read can carry the sentinel -- boxing it
