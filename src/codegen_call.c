@@ -1253,6 +1253,14 @@ int exc_subclass_defines(Compiler *c, const char *name) {
 static int uk_class_can_be_reached(Compiler *c, int ci) {
   if (ci < 0 || ci >= c->nclasses) return 1;
   if (c->classes[ci].instantiated) return 1;
+  /* A reopened builtin primitive has instances without any user constructor,
+     so the `.new` census never marks it -- the same reason the dispatch below
+     carries class_is_prim_reopen. Without it here, `user_defines_or_reads`
+     answered false for a name a reopen defines, and every poly arm that asks
+     it (succ, upcase, downcase, ... ) kept the name and answered the builtin
+     for a receiver typed at run time, while the concrete receiver took the
+     reopen. */
+  if (class_is_prim_reopen(c, ci)) return 1;
   for (int j = 0; j < c->nclasses; j++) {
     if (!c->classes[j].instantiated) continue;
     for (int k = j; k >= 0; k = c->classes[k].parent)
@@ -5589,7 +5597,15 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
          fell through to the seed (nil, or 0 for #bytes). Same tag pre-arm the
          `[]` and #include? cases above use: String at run time takes the
          String method, an object takes its member. */
-      if (argc == 0) {
+      /* ... unless the program REOPENED String with that very name, in which
+         case the String arm below (case 0 / the reopen's own method) is the
+         answer and this shortcut would take it away: `class String; def
+         upcase; "nope"; end` has to reach "nope" for a run-time-typed
+         receiver too, the way it now does for a concrete one. */
+      int str_reopen_owns = 0;
+      { int sci = comp_class_index(c, "String");
+        if (sci >= 0 && comp_method_in_chain(c, sci, name, NULL) >= 0) str_reopen_owns = 1; }
+      if (argc == 0 && !str_reopen_owns) {
         static const struct { const char *nm, *fn; int arr; } STRT[] = {
           {"upcase","sp_str_upcase",0}, {"downcase","sp_str_downcase",0},
           {"capitalize","sp_str_capitalize",0}, {"swapcase","sp_str_swapcase",0},

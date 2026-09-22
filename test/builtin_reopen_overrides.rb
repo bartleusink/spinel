@@ -35,13 +35,21 @@ p "ab".to_s
 p "ab".shout
 p 1.234.round(1)
 
-# A receiver typed only at run time honours a reopen where the poly dispatch
-# has an arm for the name (abs, round). It does not yet for every name -- a
-# poly `succ` still answers the builtin -- which is the other half of this
-# gap and is not fixed here.
+# A receiver typed only at run time takes the same answer. The poly arms
+# that answer a name themselves (succ on an Integer tag, upcase on a String
+# tag) stand down where a reopen owns it, and the dispatch's own arm runs.
 def pick(v) = v
 p pick(-5).abs
+p pick(5).succ
 p pick(1.234).round(1)
+p pick("ab").upcase
+p pick("ab").to_s
+p pick(5).to_s
+
+# and a name no reopen defines still answers the builtin at run time
+p pick("ab").downcase
+p pick(5).zero?
+p pick("ab").reverse
 
 # the builtin still answers a name the reopen does not define
 p((-5).magnitude)
