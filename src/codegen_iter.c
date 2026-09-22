@@ -2814,6 +2814,21 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
   return 1;
 }
 
+/* Bind one zip block param. A poly slot takes a boxed source; a concrete
+   slot takes a typed array read as-is. The remaining case is a concrete
+   slot fed by a poly operand (`ai.zip(tj)` where `ai` is Array[Float] and
+   `tj` is only an array at run time): the read is an sp_RbVal, and the
+   param was still inferred as the receiver's element type. Assigning the
+   box into that slot does not compile. Narrow it, keeping nil as the
+   slot's own nil so a shorter operand still yields nil. */
+static void emit_zip_block_param(Compiler *c, TyKind slot, TyKind src_ty,
+                                 const char *src, Buf *b) {
+  if (slot == TY_POLY && src_ty != TY_POLY) emit_boxed_text(c, src_ty, src, b);
+  else if (src_ty == TY_POLY && slot != TY_POLY && slot != TY_UNKNOWN)
+    emit_unbox_nilable_text(c, slot, src, b);
+  else buf_puts(b, src);
+}
+
 int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int block = nt_ref(nt, id, "block");
@@ -3352,7 +3367,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
 
   /* array.each_with_index { |x, i| ... } */
   if (sp_streq(name, "each_with_index") && ty_is_array(rt)) {
-    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    const char *k = array_iter_kind(rt);
     if (!k) return 0;
     const char *p1 = block_param_name(c, block, 1); if (p1) p1 = rename_local(p1);
     int t = ++g_tmp;
@@ -3432,10 +3447,10 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
        poly table): walk it through the boxed accessors. Without this the call
        fell to the runtime dispatch, which has no zip arm at all. */
     int recv_poly = !ty_is_array(rt);
-    const char *k = recv_poly ? "Poly" : ((rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt));
+    const char *k = recv_poly ? "Poly" : array_iter_kind(rt);
     if (k && zargc == 1 && zargv) {
       TyKind a0t = comp_ntype(c, zargv[0]);
-      const char *k2 = ty_is_array(a0t) ? ((a0t == TY_POLY_ARRAY) ? "Poly" : array_kind(a0t)) : NULL;
+      const char *k2 = ty_is_array(a0t) ? array_iter_kind(a0t) : NULL;
       /* The other operand may be an array only at run time (a poly element of
          a table of rows). Read it through the boxed accessor rather than
          handing an sp_RbVal to the typed one. */
@@ -3499,20 +3514,16 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
         char src[512];
         if (recv_poly) snprintf(src, sizeof src, "sp_poly_arr_get(%s, _t%d)", rb.p ? rb.p : "sp_box_nil()", t);
         else snprintf(src, sizeof src, "sp_%sArray_get(%s, _t%d)", k, rb.p ? rb.p : "NULL", t);
-        int box0 = zlv0->type == TY_POLY && et != TY_POLY;
         emit_indent(b, indent + 1); buf_printf(b, "lv_%s = ", p0);
-        if (box0) emit_boxed_text(c, et, src, b);
-        else buf_puts(b, src);
+        emit_zip_block_param(c, zlv0->type, et, src, b);
         buf_puts(b, ";\n");
       }
       if (p1n && zlv1 && ob.p) {
         char src2[512];
         if (arg_poly) snprintf(src2, sizeof src2, "sp_poly_arr_get(%s, _t%d)", ob.p, t);
         else snprintf(src2, sizeof src2, "sp_%sArray_get(%s, _t%d)", k2, ob.p, t);
-        int box1 = zlv1->type == TY_POLY && et2 != TY_POLY;
         emit_indent(b, indent + 1); buf_printf(b, "lv_%s = ", p1n);
-        if (box1) emit_boxed_text(c, et2, src2, b);
-        else buf_puts(b, src2);
+        emit_zip_block_param(c, zlv1->type, et2, src2, b);
         buf_puts(b, ";\n");
       }
       emit_loop_body(c, body, b, indent + 1);
@@ -3855,7 +3866,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   }
   if ((sp_streq(name, "each") || sp_streq(name, "each_entry") || sp_streq(name, "reverse_each")) &&
       ty_is_array(rt)) {
-    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    const char *k = array_iter_kind(rt);
     if (!k) return 0;
     int rev = sp_streq(name, "reverse_each");
     int t = ++g_tmp, tn = ++g_tmp;
@@ -3934,13 +3945,15 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
       }
       emit_indent(b, indent + 1);
       if (box_to_poly) {
-        if (et == TY_INT) buf_printf(b, "lv_%s = sp_box_int(sp_%sArray_get(", p0, k);
-        else if (et == TY_STRING) buf_printf(b, "lv_%s = sp_box_str(sp_%sArray_get(", p0, k);
-        else if (et == TY_FLOAT) buf_printf(b, "lv_%s = sp_box_float(sp_%sArray_get(", p0, k);
-        else if (et == TY_BOOL) buf_printf(b, "lv_%s = sp_box_bool(sp_%sArray_get(", p0, k);
-        else buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);
-        buf_puts(b, rb.p); buf_printf(b, ", _t%d)", t);
-        if (et == TY_INT || et == TY_STRING || et == TY_FLOAT || et == TY_BOOL) buf_puts(b, ")");
+        /* A nested row is a pointer, not one of the scalar boxes. The same
+           helper each_with_index uses covers that and the scalars. */
+        Buf src; memset(&src, 0, sizeof src);
+        buf_printf(&src, "sp_%sArray_get(", k);
+        buf_puts(&src, rb.p ? rb.p : "NULL");
+        buf_printf(&src, ", _t%d)", t);
+        buf_printf(b, "lv_%s = ", p0);
+        emit_boxed_text(c, et, src.p ? src.p : "", b);
+        free(src.p);
         buf_puts(b, ";\n");
       }
       else {

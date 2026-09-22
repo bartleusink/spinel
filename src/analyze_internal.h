@@ -272,6 +272,10 @@ int desugar_builtins(Compiler *c);
 int desugar_builtin_enum_calls(Compiler *c);
 int desugar_builtin_scalar_defs(Compiler *c);
 int desugar_builtin_scalar_calls(Compiler *c);
+/* Block iterator the nested-table narrow pass keeps. each / map / zip stay
+   on the typed emitter. each_with_index / reduce / inject are rewritten
+   onto builtins/enumerable.rb; the copy's own each is what walks the table. */
+int nested_row_iter_call(Compiler *c, int id);
 int fold_static_is_a(Compiler *c);
 int narrow_empty_array_args_by_yield(Compiler *c);
 int builtin_enum_name_index(const char *name);

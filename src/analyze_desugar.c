@@ -2831,6 +2831,32 @@ static unsigned char *find_calls_in_param_defaults(const NodeTable *nt, int n0) 
   return mark;
 }
 
+/* each / each_with_index / zip / map / reduce whose block receives the row
+   (and, for each_with_index, the index). A destructure of the row, a splat,
+   or a block argument stays on the poly path: the pointer-array emitters
+   bind one row pointer, not the row's elements. */
+int nested_row_iter_call(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, id) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  if (!nm) return 0;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0 || nt_kind(nt, block) != NK_BlockNode) return 0;
+  if (block_rest_name(c, block) || block_param_is_multi(c, block, 0)) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0;
+  if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+  int np = 0;
+  while (block_param_name(c, block, np)) np++;
+  if ((sp_streq(nm, "each") || sp_streq(nm, "reverse_each") || sp_streq(nm, "each_entry")) &&
+      argc == 0 && np <= 1) return 1;
+  if (sp_streq(nm, "each_with_index") && argc == 0 && np <= 2) return 1;
+  if ((sp_streq(nm, "map") || sp_streq(nm, "collect")) && argc == 0 && np <= 1) return 1;
+  if ((sp_streq(nm, "reduce") || sp_streq(nm, "inject")) && argc <= 1 && np == 2) return 1;
+  if (sp_streq(nm, "zip") && argc == 1 && (np == 1 || np == 2)) return 1;
+  return 0;
+}
+
 int desugar_builtin_enum_calls(Compiler *c) {
   if (sp_builtin_enum_names_n == 0) return 0;
   NodeTable *nt = (NodeTable *)c->nt;

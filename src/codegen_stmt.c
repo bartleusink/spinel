@@ -4589,7 +4589,12 @@ void emit_case_branch_value(Compiler *c, int stmts, TyKind rt, int cr, Buf *b) {
   Buf val; memset(&val, 0, sizeof val);
   Buf *sv_pre = g_pre;
   g_pre = &pre;
-  if (n > 0) { if (rt == TY_POLY) emit_boxed(c, bb[n - 1], &val); else emit_expr(c, bb[n - 1], &val); }
+  /* a bigint result takes the same int->bigint wrap the ternary arms take:
+     the arm's value is otherwise assigned raw into the sp_Bigint * result
+     temp, which is an integer reinterpreted as a pointer */
+  if (n > 0 && rt == TY_BIGINT && comp_ntype(c, bb[n - 1]) != TY_BIGINT)
+    emit_bigint_operand_ext(c, bb[n - 1], &val);
+  else if (n > 0) { if (rt == TY_POLY) emit_boxed(c, bb[n - 1], &val); else emit_expr(c, bb[n - 1], &val); }
   else buf_puts(&val, rt == TY_POLY ? "sp_box_nil()" : default_value(rt));
   g_pre = sv_pre;
   if (pre.p) buf_puts(b, pre.p);

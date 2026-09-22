@@ -2667,7 +2667,7 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
      poly array; fold them as int arrays (unboxing each element). The poly array
      itself has no array_kind, so detect this before the typed-array bail. */
   int nested = (rt == TY_POLY_ARRAY && comp_is_nested_int_array_literal(c, recv));
-  const char *k = (rt == TY_POLY_ARRAY && !nested) ? "Poly" : array_kind(rt);
+  const char *k = (rt == TY_POLY_ARRAY && !nested) ? "Poly" : array_iter_kind(rt);
   if (!k && !nested) return 0;
   if (nested) k = "Poly";  /* length via sp_PolyArray_length; elements unboxed below */
   TyKind et = nested ? TY_INT_ARRAY : ty_array_elem(rt);
@@ -2854,7 +2854,8 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   else { buf_printf(b, "sp_%sArray_length(_t%d) > 0 ? sp_%sArray_get(_t%d, 0) : %s; ", k, ta, k, ta,
                     acc_ty == TY_INT ? "SP_INT_NIL" : acc_ty == TY_FLOAT ? "sp_float_nil()"
                     : acc_ty == TY_STRING ? "NULL"
-                    : acc_ty == TY_POLY ? "sp_box_nil()" : "0"); start = 1; }
+                    : acc_ty == TY_POLY ? "sp_box_nil()"
+                    : (ty_is_array(acc_ty) || ty_is_object(acc_ty)) ? "NULL" : "0"); start = 1; }
   /* The loop reassigns this slot from a freshly allocated value on every turn,
      and the next turn's block reads it back, so it is a root for the whole
      walk -- as the empty-[] and empty-{} seeds above already were. The root
@@ -4363,7 +4364,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     return 1;
   }
   if (!ty_is_array(rt) && !range_recv) return 0;
-  const char *k = range_recv ? "Int" : (rt == TY_POLY_ARRAY ? "Poly" : array_kind(rt));
+  const char *k = range_recv ? "Int" : array_iter_kind(rt);
   if (!k) return 0;
 
   TyIterShape shp = ty_iter_shape(name);
