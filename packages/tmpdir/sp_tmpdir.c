@@ -151,16 +151,70 @@ static int tmpdir_usable(const char *p) {
   return access(p, W_OK | X_OK) == 0;
 }
 
+/* CRuby runs each candidate through File.expand_path before handing it
+   back, so what the caller gets is absolute and lexically clean. macOS
+   sets $TMPDIR in exactly the form that shows the difference --
+   "/var/folders/.../T/" -- and returning it raw put that trailing
+   separator into every path built on it. "/T//foo" opens the same file,
+   but File.dirname of it is "/T/", which is not the string Dir.tmpdir
+   answered, and that comparison is the one Dir.mktmpdir's own parent
+   check makes. A relative $TMPDIR is worse than cosmetic: the answer
+   stops naming the same directory the moment the process chdirs.
+
+   The resolution is LEXICAL, which is what expand_path does: "a/../b" is
+   "b" without asking the filesystem whether "a" was a symlink pointing
+   somewhere else. `~` is the one form not expanded, and it cannot be
+   reached -- tmpdir_usable has already stat'ed the path as the shell
+   left it, and a literal "~/tmp" is not a directory that exists. */
+static const char *tmpdir_expand(const char *p) {
+  char raw[PATH_MAX];
+  size_t n = 0;
+  if (p[0] != '/') {
+    if (!getcwd(raw, sizeof(raw)))
+      sp_raise_cls("ArgumentError", "cannot expand a relative TMPDIR: getcwd failed");
+    n = strlen(raw);
+    if (n + 1 >= sizeof(raw)) sp_raise_cls("ArgumentError", "tmpdir path too long");
+    raw[n++] = '/';
+  }
+  size_t pn = strlen(p);
+  if (n + pn >= sizeof(raw)) sp_raise_cls("ArgumentError", "tmpdir path too long");
+  memcpy(raw + n, p, pn);
+  n += pn;
+  raw[n] = '\0';
+
+  /* Walk the components, dropping "" and "." and popping on "..". The
+     output always starts at the root, so a ".." there is dropped rather
+     than climbing above it -- "/.." is "/", as it is on the filesystem. */
+  char out[PATH_MAX];
+  size_t len = 0;
+  for (size_t i = 0; i < n; ) {
+    while (i < n && raw[i] == '/') i++;
+    size_t b = i;
+    while (i < n && raw[i] != '/') i++;
+    size_t clen = i - b;
+    if (clen == 0) continue;
+    if (clen == 1 && raw[b] == '.') continue;
+    if (clen == 2 && raw[b] == '.' && raw[b + 1] == '.') {
+      while (len > 0 && out[len - 1] != '/') len--;
+      if (len > 0) len--;   /* drop the separator too */
+      continue;
+    }
+    out[len++] = '/';
+    memcpy(out + len, raw + b, clen);
+    len += clen;
+  }
+  if (len == 0) out[len++] = '/';   /* every component cancelled: the root */
+
+  char *r = sp_str_alloc_raw(len + 1);
+  memcpy(r, out, len);
+  r[len] = '\0';
+  sp_str_set_len(r, len);
+  return r;
+}
+
 const char *sp_Dir_tmpdir(void) {
   const char *env = getenv("TMPDIR");
-  if (env && *env && tmpdir_usable(env)) {
-    size_t n = strlen(env);
-    char *r = sp_str_alloc_raw(n + 1);
-    memcpy(r, env, n);
-    r[n] = '\0';
-    sp_str_set_len(r, n);
-    return r;
-  }
+  if (env && *env && tmpdir_usable(env)) return tmpdir_expand(env);
   char *r = sp_str_alloc_raw(5);
   memcpy(r, "/tmp", 4);
   r[4] = '\0';
