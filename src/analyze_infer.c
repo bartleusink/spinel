@@ -5595,6 +5595,10 @@ else {
   }
 
   /* numeric.step(...) without a block materializes the sequence as an array */
+  /* a Float's step with a block answers the receiver, as an Integer's does
+     (the rule below is inside the Integer arm); it read as nothing, and the
+     value printed nil (#4763) */
+  if (recv >= 0 && rt == TY_FLOAT && sp_streq(name, "step") && nt_ref(nt, id, "block") >= 0) return TY_FLOAT;
   if (recv >= 0 && ty_is_numeric(rt) && sp_streq(name, "step") && nt_ref(nt, id, "block") < 0) {
     int args = nt_ref(nt, id, "arguments");
     int sc = 0; const int *sv = args >= 0 ? nt_arr(nt, args, "arguments", &sc) : NULL;

@@ -23,12 +23,16 @@ static const PolyFace ty_poly_face_tbl[] = {
   {"partition", PF_STRING, 1, 1, 0}, {"rpartition", PF_STRING, 1, 1, 0},
   {"hex", PF_STRING, 0, 0, 0}, {"oct", PF_STRING, 0, 0, 0}, {"tr_s", PF_STRING, 2, 2, 0},
   {"crypt", PF_STRING, 1, 1, 0}, {"casecmp", PF_STRING, 1, 1, 0}, {"casecmp?", PF_STRING, 1, 1, 0},
-  /* The names Integer alone owns. step is left out: a Float receiver owns it
-     too, so unboxing to an sp_int would truncate a legitimate `2.5.step(9, 3)`. */
+  /* The names Integer alone owns -- and step, which a Float receiver owns
+     too: two owners, dispatched on the box's tag at run time, so a boxed
+     `2.5.step(9, 3)` reaches the Float emitter rather than being truncated
+     to an sp_int (#4763). The block form only: the blockless form answers an
+     Enumerator neither typed emitter builds from a box. */
   /* digits, pred, bit_length, ceildiv, pow and gcdlcm were rows here: the
      narrowing to sp_int truncated a Bignum; they answer by the box's tag now
      (sp_poly_int_*, #4665) */
   {"times", PF_INT, 0, 0, 1}, {"upto", PF_INT, 1, 1, 1}, {"downto", PF_INT, 1, 1, 1},
+  {"step", PF_INT | PF_FLOAT, 1, 2, 1},
   /* The Enumerable names a boxed receiver shares with Array: its elements
      (a hash's [key, value] pairs) materialize into a poly array once. */
   {"minmax", PF_ENUM, 0, -1, -1}, {"tally", PF_ENUM, 0, -1, -1}, {"product", PF_ENUM, 0, -1, -1},

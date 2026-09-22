@@ -4530,6 +4530,14 @@ static sp_PolyArray *sp_poly_set_operand(sp_RbVal v) {
    a boxed value. The sibling of sp_poly_arr_recv above: a value that is not an
    Integer answers NoMethodError naming the method, rather than being coerced
    to some number and running the loop anyway. */
+/* The Float owner's coercion for a name it shares with Integer (step): a
+   Float box unboxes, anything else raises the NoMethodError the call would
+   have raised (the Integer arm has already taken an Integer box). */
+static sp_float sp_poly_float_recv(sp_RbVal v, const char *m) {
+  if (v.tag == SP_TAG_FLT) return v.v.f;
+  sp_raise_nomethod(sp_nomethod_msg(m, v));
+  return 0.0;
+}
 static sp_int sp_poly_int_recv(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_INT) return v.v.i;
   /* a Bignum has the method, but this loop counts in an sp_int: say what

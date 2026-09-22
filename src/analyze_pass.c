@@ -7511,7 +7511,11 @@ int infer_block_params(Compiler *c) {
     }
 
     TyKind pt = TY_UNKNOWN;
-    if (sp_streq(name, "step") && (rt == TY_INT || rt == TY_FLOAT)) {
+    /* a BOXED receiver's step is an Integer's or a Float's only at run time
+       (the two-owner face row, #4763): the param takes the box, so the body
+       is typed once and both arms bind it boxed */
+    if (sp_streq(name, "step") && rt == TY_POLY && p0) pt = TY_POLY;
+    else if (sp_streq(name, "step") && (rt == TY_INT || rt == TY_FLOAT)) {
       /* a float receiver or float limit/step yields floats */
       int args = nt_ref(nt, id, "arguments");
       int sc = 0; const int *sv = args >= 0 ? nt_arr(nt, args, "arguments", &sc) : NULL;

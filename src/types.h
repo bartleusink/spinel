@@ -52,7 +52,8 @@ enum {
   PF_ENUM   = 1 << 2,  /* TY_POLY_ARRAY over any collection's elements (a hash's pairs) */
   PF_HASH   = 1 << 3,  /* TY_POLY_POLY_HASH */
   PF_INT    = 1 << 4,  /* TY_INT */
-  PF_OWNERS = 0x1f,
+  PF_FLOAT  = 1 << 5,  /* TY_FLOAT: an owner beside Integer for the names both have (step) */
+  PF_OWNERS = 0x3f,
   PF_MUT      = 1 << 8,  /* mutates the receiver: the result is written back through the box */
   PF_STR_BANG = 1 << 9,  /* String value-form bang: re-enter the plain name, nil when unchanged */
   PF_STR_SELF = 1 << 10, /* ... but a bang that answers self (succ!/next!): never nil */
@@ -161,6 +162,7 @@ static inline TyKind ty_poly_face_kind(unsigned owner) {
     case PF_ENUM:   return TY_POLY_ARRAY;
     case PF_HASH:   return TY_POLY_POLY_HASH;
     case PF_INT:    return TY_INT;
+    case PF_FLOAT:  return TY_FLOAT;
   }
   return TY_UNKNOWN;
 }

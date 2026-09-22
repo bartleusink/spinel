@@ -18607,7 +18607,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       ((comp_ntype(c, recv) == TY_INT &&
         (sp_streq(name, "times") || sp_streq(name, "upto") ||
          sp_streq(name, "downto") || sp_streq(name, "step"))) ||
-       (comp_ntype(c, recv) == TY_RATIONAL && sp_streq(name, "step")))) {
+       /* a Float steps too, and a boxed receiver's Float arm re-enters here
+          in expression position (#4763) */
+       ((comp_ntype(c, recv) == TY_RATIONAL || comp_ntype(c, recv) == TY_FLOAT) &&
+        sp_streq(name, "step")))) {
     buf_puts(b, "({ ");
     emit_iteration_stmt(c, id, b, 0);
     emit_expr(c, recv, b); buf_puts(b, "; })");
