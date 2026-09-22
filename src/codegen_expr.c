@@ -637,6 +637,21 @@ static void emit_ternary_arm(Compiler *c, int nd, TyKind res, Buf *b) {
       return;
     }
   }
+  /* A BIGINT result with an arm that is not one. The arm is a value, not a
+     pointer, and C put it straight into the sp_Bigint * slot the sibling arm
+     types: `return c ? 9223372036854775808 : 9223372036854775807` returned
+     the second literal AS a pointer, and the first read of it segfaulted.
+     The C compiler does say so -- `pointer/integer type mismatch in
+     conditional expression` -- but the generated TU is built with -Wall off,
+     so it is a warning and the build completes.
+
+     The implicit-tail form never showed it: there each branch returns on its
+     own and takes the return path's int->bigint wrap. Only an arm sitting in
+     a C conditional beside a bigint sibling reaches here. */
+  if (res == TY_BIGINT && comp_ntype(c, nd) != TY_BIGINT) {
+    emit_bigint_operand_ext(c, nd, b);
+    return;
+  }
   if (ty_is_array(res) && bty && sp_streq(bty, "ArrayNode")) {
     int bn = 0; nt_arr(nt, nd, "elements", &bn);
     if (bn == 0) {
