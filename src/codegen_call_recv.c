@@ -8180,6 +8180,18 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
         /* Integer#div(Float) floors the real quotient (7.div(2.5) == 2) (#2425) */
         buf_printf(b, "((sp_int)floor((double)(%s) / (", r); emit_expr(c, argv[0], b); buf_puts(b, ")))");
       }
+      /* int receiver, Bignum divisor: the receiver always fits an sp_int, but
+         the quotient has to be computed in bigint since the divisor cannot
+         narrow to one -- emit_int_divisor's plain sp_int cast handed
+         sp_idiv a pointer where it wanted a machine int, and the call never
+         compiled (not merely truncated). Dividing something that fits int64
+         by something that does not always answers -1, 0, or a small
+         quotient bounded by the receiver, so narrow the ANSWER instead,
+         the same shape gcd/lcm's own TY_BIGINT arms below use. */
+      else if (sp_streq(name, "div") && argc == 1 && comp_ntype(c, argv[0]) == TY_BIGINT) {
+        buf_printf(b, "sp_bigint_to_int(sp_bigint_div(sp_bigint_new_int(%s), ", r);
+        emit_expr(c, argv[0], b); buf_puts(b, "))");
+      }
       else if (sp_streq(name, "div") && argc == 1) { buf_printf(b, "sp_idiv(%s, ", r); emit_int_divisor(c, argv[0], b); buf_puts(b, ")"); }
       else if ((sp_streq(name, "gcd") || sp_streq(name, "lcm")) && argc == 1 &&
                (comp_ntype(c, argv[0]) == TY_FLOAT ||

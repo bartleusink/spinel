@@ -120,4 +120,33 @@ class Integer
       raise TypeError, "not an integer"
     end
   end
+
+  def ceildiv(other)
+    # CRuby's own algorithm (found by black-box probing a coerce-tracing
+    # stub, since there is no source to read here): negate `other` FIRST
+    # (a real call to its own unary `-@`, which is why a receiver lacking
+    # one -- Array, Hash, Symbol, nil, true, false -- answers CRuby's
+    # "undefined method `-@'" rather than a coercion error), floor-divide,
+    # then negate the quotient. `elsif is_a?(Float)` (not a single
+    # `is_a?(Numeric)` arm) because the two need the SAME body but each
+    # needs its own is_a? to narrow `other` for codegen: a single shared
+    # arm left `other` at the call site's own concrete type in the arm
+    # CRuby ALSO takes, and a concrete Array/Hash/String argument (a call
+    # CRuby raises for at run time, not reject at compile time) has no
+    # `-@`/`div` to bind and failed to COMPILE outright -- the same
+    # REQUIRED-parameter pitfall gcd's own commit found, one narrowing
+    # arm per accepted type rather than gcd's single is_a? guard. The
+    # final `else` never touches `other` itself, so it compiles for any
+    # type; CRuby's own message there is class-specific (NoMethodError
+    # naming `-@`) but this is what the unmigrated compiler already
+    # answered for the same inputs (`5.gcd(other)`'s sibling arms took
+    # the same simplification), so this is not a new gap.
+    if other.is_a?(Integer)
+      -(self.div(-other))
+    elsif other.is_a?(Float)
+      -(self.div(-other))
+    else
+      raise TypeError, "not an integer"
+    end
+  end
 end
