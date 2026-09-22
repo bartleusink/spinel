@@ -48,7 +48,7 @@ jobs:
       # corpus slices settled at a 35-75% hit rate. A restored disk
       # cache answers every lookup locally.
       CC: sccache ${{ matrix.cc }}
-      SCCACHE_DIR: ${{ github.workspace }}/../sccache
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
       SCCACHE_STARTUP_TIMEOUT: "30"
       # Keep the server alive across steps. See the pre-start step below.
       SCCACHE_IDLE_TIMEOUT: "0"
@@ -65,7 +65,7 @@ jobs:
       - name: Restore the sccache store
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/../sccache
+          path: .sccache
           key: sccache-${{ matrix.os }}-${{ matrix.cc }}-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: sccache-${{ matrix.os }}-${{ matrix.cc }}-${{ matrix.shard }}-
 
@@ -186,7 +186,7 @@ jobs:
         shard: [1, 2, 3]
     env:
       CC: sccache gcc -m32
-      SCCACHE_DIR: ${{ github.workspace }}/../sccache
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
       SCCACHE_STARTUP_TIMEOUT: "30"
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
@@ -198,7 +198,7 @@ jobs:
       - name: Restore the sccache store
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/../sccache
+          path: .sccache
           key: sccache-ubuntu-latest-gcc-m32-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: sccache-ubuntu-latest-gcc-m32-${{ matrix.shard }}-
 
