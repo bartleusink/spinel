@@ -1,9 +1,9 @@
 # The value of a begin/ensure expression, and a return deferred past an
 # ensure body, are rooted while the ensure body runs. Each loop below
 # computes a value in a begin whose ensure body allocates, then reads the
-# value. On 6f3dadd0 this prints 8, 6, 8, 4, 4, 8, 6, 5, 3 and 0 in the plain
-# build and 1, 0, 72, 200, 200, 0, 1, 1, 200 and 200 under SPINEL_GC_STRESS=1
-# (three runs each); it should print ten zeros.
+# value. On 6c10c479 the first ten loops print zeros (#4814); the eleventh
+# prints 13 in the plain build and the run dies with a segmentation fault
+# under SPINEL_GC_STRESS=1 (three runs each). It should print eleven zeros.
 class Bits
   attr_reader :v
   def initialize(v) @v = v end
@@ -134,4 +134,15 @@ n.times do
   r = each_once { begin; "s#{12345}"; ensure; churn; end }
   w += 1 unless r == "s12345"
 end
+p w
+
+# a String whose bytes are a builder's buffer: the temp holds the buffer and
+# the handle that owns it sits only in a temporary array
+def acarrier(k)
+  s = +"h"
+  3.times { s << "p#{k}" }
+  [s, 7]
+end
+w = 0
+n.times { |k| v = begin; acarrier(k)[0].to_s; ensure; churn; end; w += 1 unless v == "hp#{k}p#{k}p#{k}" }
 p w

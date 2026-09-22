@@ -999,7 +999,7 @@ void emit_stmts(Compiler *c, int id, Buf *b, int indent);
 void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent);
 int needs_root(TyKind t);
 /* Whether a variable of an inferred type takes a root, and the root itself,
-   picking the rbval macro for boxed poly. */
+   picking the rbval macro for boxed poly and the string one for a String. */
 int ty_gc_rootable(Compiler *c, TyKind t);
 void emit_gc_root_var(Compiler *c, TyKind t, const char *name, Buf *b);
 void emit_gc_root_tmp(Compiler *c, TyKind t, int tmp, Buf *b);
