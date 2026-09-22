@@ -103,7 +103,13 @@ static inline void sp_gc_cleanup(int *p) { sp_gc_nroots = *p; }
 #define _SP_GC_CONCAT2(a,b) a##b
 #define _SP_GC_CONCAT(a,b) _SP_GC_CONCAT2(a,b)
 #define SP_GC_SAVE() int __attribute__((cleanup(sp_gc_cleanup))) _gc_saved = sp_gc_nroots
-#define SP_GC_ROOT(v) int __attribute__((cleanup(_sp_gc_root_pop))) _SP_GC_CONCAT(_sp_gcr_, __COUNTER__) = _sp_gc_root_push((void**)&(v))
+/* A `const char *` slot is a String, and takes the string tag (below) whichever
+   macro roots it: a mutable String's payload (marker 0xfd) is kept alive by
+   the handle in front of it, which only sp_mark_string reaches, and the
+   object walk skips the payload. The slot's C type is the one thing every
+   emitter agrees on, so the choice is made here rather than at each site. */
+#define _SP_GC_SLOT_TAG(v) _Generic(&(v), const char **: (uintptr_t)2, default: (uintptr_t)0)
+#define SP_GC_ROOT(v) int __attribute__((cleanup(_sp_gc_root_pop))) _SP_GC_CONCAT(_sp_gcr_, __COUNTER__) = _sp_gc_root_push((void**)((uintptr_t)&(v) | _SP_GC_SLOT_TAG(v)))
 /* Root a poly (sp_RbVal) local: tag the stored slot's low bit so the mark
    walker routes it through sp_mark_rbval (the object pointer sits in a union at
    a nonzero offset, only for STR/OBJ tags). */
@@ -138,7 +144,7 @@ static inline void sp_gc_cleanup(int *p) { sp_gc_nroots = *p; }
    omitted when its count is 0. */
 typedef struct { int nv; int np; } sp_gc_frame_hdr;
 #define SP_GC_ROOT_FRAME(f) ((void)_sp_gc_root_push((void**)((uintptr_t)&(f) | (uintptr_t)3)))
-#define SP_GC_ENTRY_PTR(v)   ((void**)&(v))
+#define SP_GC_ENTRY_PTR(v)   ((void**)((uintptr_t)&(v) | _SP_GC_SLOT_TAG(v)))
 #define SP_GC_ENTRY_RBVAL(v) ((void**)((uintptr_t)&(v) | (uintptr_t)1))
 #define SP_GC_ENTRY_STR(v)   ((void**)((uintptr_t)&(v) | (uintptr_t)2))
 
