@@ -1,11 +1,13 @@
-# Seven more dig arms hold their receiver across an allocating key; six of
-# them are the loops below (the seventh, a Struct member named at run time,
-# is measured in the PR). On 8d50f53e this prints 2, 0, 2, 6, 3 and 4 in
-# the plain build and, under SPINEL_GC_STRESS=1, 200, 112, 26, 200 and 199,
-# then segfaults in the last loop: the receiver (a fresh Hash, Array or
-# Struct a method answers, held by nothing else) was read by the runtime
-# call after a key, or the splat's array conversion, had allocated and
-# freed it. CRuby prints six zeros.
+# Seven more dig arms hold their receiver across an allocating key, one
+# loop each. On 8d50f53e the first six print 2, 0, 2, 6, 3 and 4 in the
+# plain build and, under SPINEL_GC_STRESS=1, 200, 112, 26, 200 and 199,
+# then segfault in the sixth: the receiver (a fresh Hash, Array or Struct
+# a method answers, held by nothing else) was read by the runtime call
+# after a key, or the splat's array conversion, had allocated and freed
+# it. The seventh loop is the Struct arm's other path, the one a member
+# named at run time takes, which the six above never reach -- a
+# regression there would pass all of them (it prints 200 under stress on
+# the same build). CRuby prints seven zeros.
 # Each loop prints how many of its 200 runs were wrong.
 
 def churn
@@ -27,5 +29,6 @@ w = 0; n.times { w += 1 unless hh.dig(*keys) == 5 }; p w
 w = 0; n.times { w += 1 unless pa.dig(*(churn; [5])) == "s6" }; p w
 w = 0; n.times { w += 1 unless pan.dig((churn; 5), 1) == "s6" }; p w
 w = 0; n.times { w += 1 unless mk.dig(:a, (churn; 5)) == "e6" }; p w
+w = 0; n.times { w += 1 unless mk.dig((churn; :a), (churn; 5)) == "e6" }; p w
 w = 0; n.times { w += 1 unless hh.dig((churn; "k5")) == 5 }; p w
 w = 0; n.times { w += 1 unless hn.dig((churn; "k5"), 1) == 10 }; p w
