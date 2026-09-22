@@ -7189,6 +7189,60 @@ int infer_block_params(Compiler *c) {
       }
     }
 
+    /* each_with_index / reduce / inject rewritten onto builtins/enumerable.rb.
+       The copy yields the row, but that yield is visited before the copy's
+       own each has typed it, and a block parameter only widens, so the
+       caller's parameter stuck at poly and the row was boxed on the way in.
+       The table is argument 0. A numeric row takes that element type here,
+       the same binding the call had before the rewrite. A flat array falls
+       through and is typed from the yield, which is that definition's job. */
+    if (recv < 0 && name && strncmp(name, "__enum_", 7) == 0) {
+      int ewi = strncmp(name, "__enum_each_with_index__", 24) == 0;
+      int red = strncmp(name, "__enum_reduce__", 15) == 0 || strncmp(name, "__enum_inject__", 15) == 0;
+      int eargs = nt_ref(nt, id, "arguments");
+      int ean = 0; const int *eav = eargs >= 0 ? nt_arr(nt, eargs, "arguments", &ean) : NULL;
+      TyKind ert = (ean >= 1 && eav) ? infer_type(c, eav[0]) : TY_UNKNOWN;
+      TyKind et = ty_is_array(ert) ? ty_array_elem(ert) : TY_UNKNOWN;
+      int enp = 0; while (block_param_name(c, block, enp)) enp++;
+      int row_shape = ewi ? enp > 0 && enp <= 2 : red && ean == 1 && enp == 2;
+      /* A poly array may still narrow to a table of rows. Typing the
+         parameter from the yield now would pin it at poly, and it only
+         widens. Wait while that is still possible. Once the fixpoint gives
+         up on a narrower type, fall through and let the yield type it. */
+      if (row_shape && g_infer_optimistic &&
+          (ert == TY_POLY_ARRAY || et == TY_UNKNOWN)) {
+        /* Mark the parameters now, before a type is known. The next round's
+           write pass resets every local that is not a block parameter and
+           re-derives it from `ci[j] = s`, which reads as a poly slot. A
+           block parameter only widens, so that guess would stick. */
+        Scope *ws = comp_scope_of(c, block);
+        for (int k = 0; k < enp; k++) {
+          const char *ep = block_param_name(c, block, k);
+          if (!ep) break;
+          LocalVar *lp = scope_local_intern(ws, ep);
+          lp->is_block_param = 1;
+        }
+        continue;
+      }
+      if (row_shape && (et == TY_FLOAT_ARRAY || et == TY_INT_ARRAY)) {
+        Scope *es = comp_scope_of(c, block);
+        const char *ep0 = block_param_name(c, block, 0);
+        if (ep0) {
+          LocalVar *lp = scope_local_intern(es, ep0); lp->is_block_param = 1;
+          TyKind m = ty_unify(lp->type, et);
+          if (m != lp->type) { lp->type = m; changed = 1; }
+        }
+        const char *ep1 = block_param_name(c, block, 1);
+        if (ep1) {
+          LocalVar *lp = scope_local_intern(es, ep1); lp->is_block_param = 1;
+          TyKind want = ewi ? TY_INT : et;
+          TyKind m = ty_unify(lp->type, want);
+          if (m != lp->type) { lp->type = m; changed = 1; }
+        }
+        continue;
+      }
+    }
+
     /* call to a user yielding method: block params take the yield arg types */
     {
       int mi = -1;

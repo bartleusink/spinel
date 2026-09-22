@@ -700,6 +700,9 @@ const char *ptr_array_stamp(Compiler *c, TyKind t);   /* "SP_PTR_ELEM_x, cls" fo
 void emit_box_close(Compiler *c, TyKind t, Buf *b);
 /* "Int" / "Str" / "Float" for the sp_<K>Array_* runtime family. */
 const char *array_kind(TyKind t);
+/* "Poly" / "Ptr" / array_kind, for a loop that walks the container. "Ptr" is
+   a nested numeric table (sp_PtrArray of row pointers). */
+const char *array_iter_kind(TyKind t);
 const char *array_to_poly_fn(TyKind t);
 /* comp_ntype for a fold seed, with an empty `[]` / `{}` literal resolved to
    its container kind rather than left TY_UNKNOWN (see types.c). */
