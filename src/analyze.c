@@ -15386,7 +15386,19 @@ void analyze_program(Compiler *c) {
              lane, anything else rides the boxed channel; a bam wrapper's
              signature is fixed by the adapter emission */
           TyKind ev = (i < 16 && dyn_seen[i]) ? dyn_arg[i] : TY_INT;
-          p->type = (is_bam_wrap || ev == TY_INT) ? TY_INT : TY_POLY;
+          /* A bam wrapper's parameter takes the one kind the sites pass when
+             the legacy signature carries it as itself (a String, a Symbol, a
+             bool, a typed array): `method(:Integer).call("42")` stamped an
+             Integer slot the String argument could never match, and with no
+             thunk on a builtin's wrapper the Method was uncallable in the
+             default mode (#4785). Mixed or boxed evidence keeps the int
+             default: poly is the one kind such a wrapper cannot take here.
+             Under --int-overflow=promote the int default is what widens to
+             the poly signature every call site there rides, so it stays. */
+          if (is_bam_wrap)
+            p->type = (!g_promote_mode && (ev == TY_STRING || ev == TY_SYMBOL || ev == TY_BOOL || ty_is_array(ev))) ? ev : TY_INT;
+          else
+            p->type = ev == TY_INT ? TY_INT : TY_POLY;
           msym_pinned = 1;
         }
       }
