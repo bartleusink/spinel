@@ -8339,9 +8339,19 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
         /* the helper raises on an exclusive range with a real end (CRuby) */
         buf_printf(b, "sp_int_clamp_range_ck(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
+      /* digits is migrated to builtins/integer.rb for every STATIC concrete
+         call site (desugar_builtin_scalar_calls rewrites it to
+         __int_digits__N before codegen ever sees a plain "digits" name
+         here) -- these arms are dead for that case by construction, kept
+         only as the poly "face table"'s own re-entry target (below,
+         "unbox to the kind that owns the name, retype, re-enter"): a
+         run-time-typed value whose actual class turns out to be Integer,
+         reached only when some OTHER class in the program also defines a
+         method literally named digits (the migration's own poly receiver
+         deliberately stays on sp_poly_int_digits / this face table rather
+         than an is_a? split, measured too costly; see
+         desugar_builtin_scalar_calls's own comment). */
       else if (sp_streq(name, "digits") && argc == 0) buf_printf(b, "sp_int_digits(%s, 10)", r);
-      /* digits(base) with a Bignum base: every digit of an sp_int receiver is
-         below such a base, so the answer is the receiver itself (#3006) */
       else if (sp_streq(name, "digits") && argc == 1 && comp_ntype(c, argv[0]) == TY_BIGINT) {
         int tdb = ++g_tmp;
         buf_printf(b, "({ (void)("); emit_expr(c, argv[0], b);

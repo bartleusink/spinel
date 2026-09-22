@@ -13614,6 +13614,9 @@ void analyze_program(Compiler *c) {
   /* builtins/enumerable.rb, spliced by the parser: its definitions become
      the receiver-taking top-level functions before any scope is built */
   desugar_builtins(c);
+  /* builtins/integer.rb, float.rb, comparable.rb: the same idea, one more
+     container per file (analyze_desugar.c's sp_bx_* table) */
+  desugar_builtin_scalar_defs(c);
   scope_numbered_block_params(c);
   rename_shadowing_block_params(c);
   /* `:m.to_proc.call(r, a)` -> `r.m(a)`, before the to_proc rewrite below
@@ -14409,6 +14412,7 @@ void analyze_program(Compiler *c) {
          widest hash the way any yielding method's does */
       mark_empty_literal_args(c);
     }
+    ch |= desugar_builtin_scalar_calls(c);     /* recv.m(a) -> __int_m(recv, a) etc */
     ch |= narrow_empty_array_args_by_yield(c); /* f([]) { |m| m << 1 }: the [] is an int array */
     ch |= fold_static_is_a(c);                 /* if v.is_a?(Array) on a typed local: one arm */
     ch |= infer_block_params(c);

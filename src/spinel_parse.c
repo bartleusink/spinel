@@ -2547,7 +2547,11 @@ static void sp_lib_dir(const char *exe_path, char *lib_dir, size_t lib_dir_n);
 char **sp_builtin_enum_names = NULL;
 int sp_builtin_enum_names_n = 0;
 
-static void sp_builtin_names_from(const char *content) {
+/* Read the `def name` (2-space indent, one container body deep) spellings
+   out of a builtins/*.rb file into *names_out/*names_n_out. Shared by
+   enumerable.rb's own global table and the other containers' per-file ones
+   below (sp_builtin_extras). */
+static void sp_builtin_names_from_into(const char *content, char ***names_out, int *names_n_out) {
   const char *p = content;
   while ((p = strstr(p, "\n  def ")) != NULL) {
     p += 7;
@@ -2558,10 +2562,14 @@ static void sp_builtin_names_from(const char *content) {
     char *nm = (char *)malloc((size_t)(q - p) + 1);
     if (!nm) return;
     memcpy(nm, p, (size_t)(q - p)); nm[q - p] = 0;
-    sp_builtin_enum_names = (char **)realloc(sp_builtin_enum_names, sizeof(char *) * (size_t)(sp_builtin_enum_names_n + 1));
-    sp_builtin_enum_names[sp_builtin_enum_names_n++] = nm;
+    *names_out = (char **)realloc(*names_out, sizeof(char *) * (size_t)(*names_n_out + 1));
+    (*names_out)[(*names_n_out)++] = nm;
     p = q;
   }
+}
+
+static void sp_builtin_names_from(const char *content) {
+  sp_builtin_names_from_into(content, &sp_builtin_enum_names, &sp_builtin_enum_names_n);
 }
 
 /* Does the source mention `name` as a method: `.name` or a bare `name`
@@ -2638,6 +2646,91 @@ static char *sp_splice_builtins(char *source, const char *exe_path,
   memcpy(ns, head, hl); memcpy(ns + hl, source, sl + 1);
   free(source);
   return resolve_plain_requires(ns, exe_path, fsl, fsl_n);
+}
+
+/* ---- builtins/: the other containers (Integer, Float, Comparable) ----
+   Same splice-if-mentioned idea as enumerable.rb above, generalized to a
+   small table so a new container is one more row here plus its own file
+   under builtins/ and its own desugar container/prefix in
+   analyze_desugar.c (desugar_builtin_scalar_defs / _calls). Two
+   differences from enumerable.rb, both because these are optional and
+   younger: (1) a missing file is not an error -- a container with no
+   builtins/<name>.rb yet (Float, Comparable, until their own methods
+   land) simply never splices, where enumerable.rb's absence is a broken
+   toolchain; (2) each file gets its own `require` line, spliced
+   independently, so a program using only Integer names never parses
+   float.rb or comparable.rb at all. SPINEL_NO_BUILTINS (checked at the
+   top of sp_splice_builtins above) already gates the call site below, so
+   both mechanisms share the one A/B switch. */
+typedef struct {
+  const char *file;   /* "builtins/integer.rb" */
+  const char *req;    /* the require name: "builtins/integer" */
+  char **names;
+  int names_n;
+  int scanned;         /* the file load was attempted (found or not) */
+} SpBuiltinExtra;
+
+static SpBuiltinExtra sp_builtin_extras[] = {
+  { "builtins/integer.rb", "builtins/integer", NULL, 0, 0 },
+  { "builtins/float.rb", "builtins/float", NULL, 0, 0 },
+  { "builtins/comparable.rb", "builtins/comparable", NULL, 0, 0 },
+};
+#define SP_BUILTIN_EXTRA_N ((int)(sizeof(sp_builtin_extras) / sizeof(sp_builtin_extras[0])))
+
+static char *sp_splice_builtin_extra(char *source, const char *exe_path, SpBuiltinExtra *bf,
+                                      unsigned char **fsl, size_t *fsl_n) {
+  if (!bf->scanned) {
+    bf->scanned = 1;
+    char lib_dir[1024], gp[1200];
+    sp_lib_dir(exe_path, lib_dir, sizeof lib_dir);
+    int base_len = (int)strlen(lib_dir);
+    if (base_len >= 4 && strcmp(lib_dir + base_len - 4, "/lib") == 0) base_len -= 4;
+    snprintf(gp, sizeof gp, "%.*s/%s", base_len, lib_dir, bf->file);
+    char *content = read_file(gp);
+    if (!content) { snprintf(gp, sizeof gp, "%.*s/../%s", base_len, lib_dir, bf->file); content = read_file(gp); }
+    if (content) { sp_builtin_names_from_into(content, &bf->names, &bf->names_n); free(content); }
+  }
+  if (bf->names_n == 0) return source;
+  int any = 0;
+  for (int i = 0; i < bf->names_n && !any; i++)
+    if (sp_source_mentions_method(source, bf->names[i])) any = 1;
+  if (!any) return source;
+  char head[160]; snprintf(head, sizeof head, "require \"%s\"\n", bf->req);
+  size_t sl = strlen(source), hl = strlen(head);
+  char *ns = (char *)malloc(sl + hl + 1);
+  if (!ns) return source;
+  memcpy(ns, head, hl); memcpy(ns + hl, source, sl + 1);
+  free(source);
+  return resolve_plain_requires(ns, exe_path, fsl, fsl_n);
+}
+
+static char *sp_splice_builtin_extras(char *source, const char *exe_path,
+                                       unsigned char **fsl, size_t *fsl_n) {
+  if (getenv("SPINEL_NO_BUILTINS")) return source;
+  for (int i = 0; i < SP_BUILTIN_EXTRA_N; i++)
+    source = sp_splice_builtin_extra(source, exe_path, &sp_builtin_extras[i], fsl, fsl_n);
+  return source;
+}
+
+/* Accessors for analyze_desugar.c (desugar_builtin_scalar_defs/_calls):
+   sp_builtin_extras is static to this file, and its `names` arrays are
+   only populated lazily (the file is read on first use, from
+   sp_splice_builtin_extra above), which by the time analysis runs has
+   already happened for every extra a program's source could have
+   mentioned. Container indices match SP_BUILTIN_EXTRA_N's table order:
+   0 = Integer, 1 = Float, 2 = Comparable. */
+int sp_builtin_extra_names_n(int idx) {
+  return (idx >= 0 && idx < SP_BUILTIN_EXTRA_N) ? sp_builtin_extras[idx].names_n : 0;
+}
+const char *sp_builtin_extra_name(int idx, int i) {
+  if (idx < 0 || idx >= SP_BUILTIN_EXTRA_N || i < 0 || i >= sp_builtin_extras[idx].names_n) return NULL;
+  return sp_builtin_extras[idx].names[i];
+}
+int sp_builtin_extra_name_index(int idx, const char *name) {
+  if (!name || idx < 0 || idx >= SP_BUILTIN_EXTRA_N) return -1;
+  for (int i = 0; i < sp_builtin_extras[idx].names_n; i++)
+    if (strcmp(sp_builtin_extras[idx].names[i], name) == 0) return i;
+  return -1;
 }
 
 /* lib/ relative to this executable, resolving symlinks the same way the
@@ -3544,6 +3637,7 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
   free(source);
   source = resolve_plain_requires(resolved, argv0, &fsl, &fsl_n);
   source = sp_splice_builtins(source, argv0, &fsl, &fsl_n);
+  source = sp_splice_builtin_extras(source, argv0, &fsl, &fsl_n);
 
   /* Debug: build the buffer-line -> (file, original line) map from the
      marker-annotated buffer *before* syntax-sugar rewriting (which could

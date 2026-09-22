@@ -5675,7 +5675,7 @@ else {
     if (sp_streq(name, "magnitude") && argc == 0) return TY_INT;  /* alias for abs */
     if ((sp_streq(name, "modulo") || sp_streq(name, "remainder")) && argc == 1) return TY_INT;
     if (sp_streq(name, "gcdlcm") && argc == 1) return TY_INT_ARRAY;  /* [gcd, lcm] */
-    if (sp_streq(name, "digits")) return TY_INT_ARRAY;
+    if (sp_streq(name, "digits")) return TY_INT_ARRAY;   /* face-table fallback only, see codegen_call_recv.c */
     if (sp_streq(name, "to_s") && argc == 1) return TY_STRING;
     if (sp_streq(name, "coerce") && argc == 1) {
       TyKind a0 = infer_type(c, argv[0]);
@@ -6041,7 +6041,7 @@ else {
     if ((sp_streq(name, "downto") || sp_streq(name, "upto")) && argc == 1 &&
         nt_ref(nt, id, "block") < 0) return TY_POLY_ARRAY;
     if (sp_streq(name, "to_s") && argc == 1) return TY_STRING;
-    if (sp_streq(name, "digits") && argc <= 1) return TY_INT_ARRAY;
+    if (sp_streq(name, "digits") && argc <= 1) return TY_INT_ARRAY;   /* face-table fallback only, see codegen_call.c */
     /* #2318 / #2319: query + reflection on a Bignum */
     if ((sp_streq(name, "zero?") || sp_streq(name, "positive?") ||
          sp_streq(name, "negative?") || sp_streq(name, "integer?")) && argc == 0) return TY_BOOL;

@@ -3157,3 +3157,237 @@ int desugar_builtin_enum_calls(Compiler *c) {
   free(chained); free(in_default);
   return changed;
 }
+
+/* ---- builtins/: Integer, Float, Comparable (builtins/integer.rb etc,
+   spliced by sp_splice_builtin_extras, spinel_parse.c). Unlike
+   Enumerable, these methods take no block and never answer an
+   Enumerator, so the generic def is a plain method: no block_given?
+   split, no lazy-Enumerator carve-outs, no `each`-chain rule. The
+   receiver rule is correspondingly simpler than desugar_builtin_enum_calls
+   above: a call is rewritten only for a CONCRETE Integer/Bignum (the
+   Integer container), a concrete Float (the Float container), or a
+   receiver Comparable's methods can already answer without going through
+   an open-ended is_a? split (the Comparable container, added with its
+   own methods). A run-time-typed (poly) receiver is deliberately left on
+   the existing runtime dispatch (sp_poly_int_*, sp_poly_float_* and
+   friends in lib/spinel_rt.h): those already switch on the boxed tag
+   correctly for every name this mechanism's first callers migrate
+   (verified against CRuby per method, in each method's own probe and
+   commit), so reproducing Enumerable's is_a? split here -- built for an
+   open-ended set of user classes, which Integer/Float/Comparable are not
+   -- would only add AST-rewrite surface for a receiver shape whose
+   answer does not change. A program's own reopen (`class Integer; def
+   digits`) wins the same way an Enumerable includer's own method does:
+   checked per call site against the container's real class index
+   (comp_class_index), not by skipping the splice outright the way
+   enumerable.rb's `module Enumerable` guard does. */
+enum { SP_BX_INTEGER = 0, SP_BX_FLOAT = 1, SP_BX_COMPARABLE = 2, SP_BX_N = 3 };
+static const char *const sp_bx_class_name[SP_BX_N] = { "Integer", "Float", "Comparable" };
+static const char *const sp_bx_prefix[SP_BX_N]     = { "__int_", "__flt_", "__cmp_" };
+
+extern int sp_builtin_extra_names_n(int idx);
+extern const char *sp_builtin_extra_name(int idx, int i);
+extern int sp_builtin_extra_name_index(int idx, const char *name);
+
+int desugar_builtin_scalar_defs(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int root = nt->root_id;
+  int top = root >= 0 ? nt_ref(nt, root, "statements") : -1;
+  if (top < 0) return 0;
+  int any_names = 0;
+  for (int bx = 0; bx < SP_BX_N; bx++) if (sp_builtin_extra_names_n(bx) > 0) any_names = 1;
+  if (!any_names) return 0;
+  int tn = 0; const int *tb = nt_arr(nt, top, "body", &tn);
+  if (!tb || tn == 0) return 0;
+  int *nb = (int *)malloc(sizeof(int) * (size_t)(tn + 64));
+  if (!nb) return 0;
+  int nbn = 0, cap = tn + 64;
+  int *gdef[SP_BX_N];
+  for (int bx = 0; bx < SP_BX_N; bx++) {
+    int n = sp_builtin_extra_names_n(bx);
+    gdef[bx] = n > 0 ? (int *)malloc(sizeof(int) * (size_t)n) : NULL;
+    for (int i = 0; i < n; i++) gdef[bx][i] = -1;
+  }
+  int n0 = nt->count;
+  int changed = 0;
+  /* Splicing prepends the required file's content ahead of the program's
+     own source (resolve_plain_requires), so the FIRST top-level
+     ClassNode/ModuleNode for a given container is always the spliced
+     generic one, if there is one at all. A program that reopens the same
+     container itself (`class Integer; def digits; ...different...; end;
+     end`, likely to override just that one name) is textually
+     indistinguishable from "all-builtin-named defs" by shape alone --
+     digits.rb probing found this the hard way, an own reopen consisting
+     of exactly one builtin-named method converted along with the real
+     one and shadowed EVERY call in the file, not just those after it.
+     Consuming only the first occurrence per container and passing every
+     later one through untouched sends a genuine reopen through the
+     ordinary open-class/poly path instead, where comp_method_in_chain
+     (desugar_builtin_scalar_calls) already defers to it. */
+  int bx_done[SP_BX_N] = { 0, 0, 0 };
+  for (int i = 0; i < tn; i++) {
+    int st = tb[i];
+    NodeKind sk = nt_kind(nt, st);
+    if (sk != NK_ClassNode && sk != NK_ModuleNode) { nb[nbn++] = st; continue; }
+    int cp = nt_ref(nt, st, "constant_path");
+    const char *mn = cp >= 0 ? nt_str(nt, cp, "name") : nt_str(nt, st, "name");
+    int bx = -1;
+    for (int k = 0; k < SP_BX_N; k++) if (mn && sp_streq(mn, sp_bx_class_name[k])) { bx = k; break; }
+    if (bx < 0 || sp_builtin_extra_names_n(bx) == 0) { nb[nbn++] = st; continue; }
+    if (bx_done[bx]) { nb[nbn++] = st; continue; }   /* a later reopen of the same container: a program's own, left as it was */
+    int body = nt_ref(nt, st, "body");
+    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+    int all_builtin = bn > 0;
+    for (int k = 0; k < bn; k++)
+      if (nt_kind(nt, bb[k]) != NK_DefNode || sp_builtin_extra_name_index(bx, nt_str(nt, bb[k], "name")) < 0) all_builtin = 0;
+    if (!all_builtin) { nb[nbn++] = st; continue; }   /* a program's own reopen: left as it was */
+    bx_done[bx] = 1;
+    for (int k = 0; k < bn; k++) {
+      int def = bb[k];
+      const char *name = nt_str(nt, def, "name");
+      int bi = sp_builtin_extra_name_index(bx, name);
+      int hi = bi_subtree_max(nt, def);
+      int pn = nt_ref(nt, def, "parameters");
+      if (pn < 0) { pn = nt_new_node(nt, "ParametersNode"); if (pn < 0) break; nt_node_set_ref(nt, def, "parameters", pn); }
+      int spself = nt_new_node(nt, "RequiredParameterNode"); if (spself < 0) break;
+      nt_node_set_str(nt, spself, "name", "__self");
+      { int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
+        int *nr = (int *)malloc(sizeof(int) * (size_t)(rn + 1));
+        if (!nr) break;
+        nr[0] = spself; for (int j = 0; j < rn; j++) nr[j + 1] = reqs[j];
+        nt_node_set_arr(nt, pn, "requireds", nr, rn + 1); free(nr); }
+      int dbody = nt_ref(nt, def, "body");
+      int lo = dbody >= 0 ? dbody : def;
+      for (int id = lo; id <= hi; id++) {
+        NodeKind kind = nt_kind(nt, id);
+        if (kind == NK_SelfNode) {
+          nt_node_set_type(nt, id, "LocalVariableReadNode");
+          nt_node_set_str(nt, id, "name", "__self");
+          nt_node_set_int(nt, id, "depth", 0);
+        }
+        else if (kind == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
+          const char *nm = nt_str(nt, id, "name");
+          if (!nm || bi_kernel_call_name(nm)) continue;
+          int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) break;
+          nt_node_set_str(nt, rd, "name", "__self");
+          nt_node_set_int(nt, rd, "depth", 0);
+          nt_node_set_ref(nt, id, "receiver", rd);
+        }
+      }
+      { char gn[256]; snprintf(gn, sizeof gn, "%s%s", sp_bx_prefix[bx], name); nt_node_set_str(nt, def, "name", gn); }
+      if (bi >= 0) gdef[bx][bi] = def;
+    }
+    bi_subtree_blank(nt, cp);
+    nt_node_set_type(nt, st, "NilNode");
+    changed = 1;
+  }
+  if (!changed) {
+    for (int bx = 0; bx < SP_BX_N; bx++) free(gdef[bx]);
+    free(nb); return 0;
+  }
+  /* one copy per call site, exactly as desugar_builtins does for
+     enumerable.rb (a shared definition would carry the union of every
+     call site's argument types onto every site) */
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *cn0 = nt_str(nt, id, "name");
+    int bx = -1, bi = -1;
+    for (int k = 0; k < SP_BX_N; k++) {
+      int idx = sp_builtin_extra_name_index(k, cn0);
+      if (idx >= 0 && gdef[k] && gdef[k][idx] >= 0) { bx = k; bi = idx; break; }
+    }
+    if (bi < 0) continue;
+    int copy = nt_clone_subtree(nt, gdef[bx][bi]);
+    if (copy < 0) break;
+    char cn[256]; snprintf(cn, sizeof cn, "%s%s__%d", sp_bx_prefix[bx], cn0, id);
+    nt_node_set_str(nt, copy, "name", cn);
+    nt_node_set_int(nt, id, "bx_copy", copy);
+    nt_node_set_int(nt, id, "bx_container", bx);
+    if (nbn >= cap) { cap *= 2; int *g = (int *)realloc(nb, sizeof(int) * (size_t)cap); if (!g) break; nb = g; }
+    nb[nbn++] = copy;
+  }
+  nt_node_set_arr(nt, top, "body", nb, nbn);
+  for (int bx = 0; bx < SP_BX_N; bx++) {
+    int n = sp_builtin_extra_names_n(bx);
+    for (int i = 0; i < n; i++) if (gdef[bx] && gdef[bx][i] >= 0) bi_subtree_blank(nt, gdef[bx][i]);
+    free(gdef[bx]);
+  }
+  comp_grow_node_arrays(c);
+  free(nb);
+  return 1;
+}
+
+/* `recv.m(args)` (no block, ever, for these three containers) on a receiver
+   the container's method serves: rewritten into the per-call-site copy,
+   `<prefix>m__N(recv, args)`, once the receiver's type has settled. Runs
+   in the fixpoint alongside desugar_builtin_enum_calls. */
+int desugar_builtin_scalar_calls(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  int changed = 0;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    int copy = (int)nt_int(nt, id, "bx_copy", -1);
+    if (copy < 0 || copy >= nt->count) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;   /* already rewritten in an earlier round */
+    int bx = (int)nt_int(nt, id, "bx_container", -1);
+    const char *name = nt_str(nt, id, "name");
+    TyKind rt = infer_type(c, recv);
+    /* Only a CONCRETE receiver is rewritten (Integer: TY_INT/TY_BIGINT,
+       Float: TY_FLOAT, Comparable: as below). A run-time-typed (poly)
+       receiver is deliberately left on the existing dispatch (the
+       sp_poly_int_ and sp_poly_float_ runtime helpers in lib/spinel_rt.h,
+       or the face table fallback in codegen_call_recv.c/codegen_call.c
+       that a program-wide name collision with an unrelated class routes
+       a poly value through): an is_a?-split rewrite for a poly receiver
+       was tried and measured (a 1,000,000-call loop) at 1.7 to 3.5 times
+       the cost of that existing dispatch, past the ~10% bound this
+       migration is held to -- the split's own overhead (a write, a
+       runtime is_a? check, and a box/unbox round trip for the argument)
+       is comparable to or larger than a method like digits' own O(digit
+       count) work, unlike Enumerable's poly split where that overhead is
+       negligible next to a whole iteration. The concrete-type C emitter
+       arms this migration removes for the COMMON case stay present in a
+       narrower form specifically for that face-table fallback to call:
+       see the comment where they are re-added. */
+    int ok = 0;
+    if (bx == SP_BX_INTEGER) ok = (rt == TY_INT || rt == TY_BIGINT);
+    else if (bx == SP_BX_FLOAT) ok = (rt == TY_FLOAT);
+    else if (bx == SP_BX_COMPARABLE) {
+      ok = (rt == TY_INT || rt == TY_BIGINT || rt == TY_FLOAT || rt == TY_STRING);
+      if (!ok && ty_is_object(rt)) {
+        int oci = ty_object_class(rt);
+        ok = comp_method_in_chain(c, oci, "<=>", NULL) >= 0 && comp_method_in_chain(c, oci, name, NULL) < 0;
+      }
+    }
+    if (!ok) continue;
+    /* a program's own reopen of the concrete class wins */
+    int ci = comp_class_index(c, sp_bx_class_name[bx]);
+    if (ci >= 0 && comp_method_in_chain(c, ci, name, NULL) >= 0) continue;
+    const char *gn = nt_str(nt, copy, "name");
+    if (!gn || comp_method_index(c, gn) < 0) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    { int cpn = nt_ref(nt, copy, "parameters");
+      int crn = 0; if (cpn >= 0) nt_arr(nt, cpn, "requireds", &crn);
+      int con = 0; if (cpn >= 0) nt_arr(nt, cpn, "optionals", &con);
+      if (an + 1 < crn || an + 1 > crn + con) continue; }
+    int encl = c->nscope[id];
+    int base = nt->count;
+    int *na = (int *)malloc(sizeof(int) * (size_t)(an + 1));
+    if (!na) continue;
+    na[0] = recv; for (int j = 0; j < an; j++) na[j + 1] = av[j];
+    int nargs = nt_new_node(nt, "ArgumentsNode");
+    if (nargs < 0) { free(na); continue; }
+    nt_node_set_arr(nt, nargs, "arguments", na, an + 1);
+    free(na);
+    nt_node_set_ref(nt, id, "arguments", nargs);
+    nt_node_set_ref(nt, id, "receiver", -1);
+    nt_node_set_str(nt, id, "name", gn);
+    comp_grow_node_arrays(c);
+    for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  return changed;
+}
