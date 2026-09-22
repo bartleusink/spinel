@@ -1688,19 +1688,33 @@ static void emit_str_eq_ordered(Compiler *c, int recv, int arg, int eq, Buf *b) 
   emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, arg, b);
   buf_puts(b, eq ? ")" : "))");
 }
+static int poly_binop_recv_temp(Compiler *c, int recv, int arg, Buf *b, int *stmt_expr);
+/* One poly comparison called with its receiver evaluated strictly before its
+   argument, through the same hoist the bit-operator and arithmetic arms use.
+
+   Two things were wrong with doing it only when BOTH operands contain a
+   call. Whether the RECEIVER has a call of its own says nothing about
+   whether the argument can overwrite it -- a bare local read is precisely
+   the receiver an argument writes, and `b == (b = mka(5); mka(5))` compared
+   against the value the argument had just stored. And the statement
+   expression the hoist used holds only while the argument renders as a C
+   expression: under promote, boxing an argument spills its writes into the
+   pre-statement buffer, which lands in front of the whole expression. */
+static void emit_poly_cmp_ordered(Compiler *c, const char *fn, int recv, int arg, Buf *b) {
+  if (node_has_call(c->nt, arg)) {
+    int se = 0;
+    int t = poly_binop_recv_temp(c, recv, arg, b, &se);
+    buf_printf(b, "%s(_t%d, ", fn, t);
+    emit_boxed(c, arg, b);
+    buf_puts(b, se ? "); })" : ")");
+    return;
+  }
+  buf_printf(b, "%s(", fn); emit_boxed(c, recv, b); buf_puts(b, ", ");
+  emit_boxed(c, arg, b); buf_puts(b, ")");
+}
 static void emit_poly_eq_ordered(Compiler *c, int recv, int arg, int eq, Buf *b) {
-  int order = node_has_call(c->nt, recv) && node_has_call(c->nt, arg);
   buf_puts(b, eq ? "" : "(!");
-  if (order) {
-    int t = ++g_tmp;
-    buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_boxed(c, recv, b);
-    /* the arg below can allocate, and the hoisted receiver is held by nothing else */
-    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_eq(_t%d, ", t, t); emit_boxed(c, arg, b); buf_puts(b, "); })");
-  }
-  else {
-    buf_puts(b, "sp_poly_eq("); emit_boxed(c, recv, b); buf_puts(b, ", ");
-    emit_boxed(c, arg, b); buf_puts(b, ")");
-  }
+  emit_poly_cmp_ordered(c, "sp_poly_eq", recv, arg, b);
   buf_puts(b, eq ? "" : ")");
 }
 /* The lazy stages emit_lazy_pipeline_expr fuses, as tables. lazy_stage_name
@@ -9748,9 +9762,7 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
     int eq = !sp_streq(name, "!=");
     if (sp_streq(name, "eql?") && (ty_is_array(rt) || ty_is_array(a0) ||
                                    ty_is_hash(rt) || ty_is_hash(a0))) {
-      buf_puts(b, "sp_poly_eql(");
-      emit_boxed(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b);
-      buf_puts(b, ")");
+      emit_poly_cmp_ordered(c, "sp_poly_eql", recv, argv[0], b);
       return 1;
     }
     /* `x == nil` / `x != nil` for any receiver */
@@ -30819,8 +30831,7 @@ else {
          out through an sp_RbVal signature and the build fails (#3498). */
       int cmp_poly = comp_ntype(c, id) == TY_POLY;
       if (cmp_poly) buf_puts(b, "sp_box_int_or_nil(");
-      buf_puts(b, "sp_poly_spaceship("); emit_boxed(c, recv, b);
-      buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      emit_poly_cmp_ordered(c, "sp_poly_spaceship", recv, argv[0], b);
       if (cmp_poly) buf_puts(b, ")");
       return;
     }
