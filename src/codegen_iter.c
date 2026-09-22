@@ -2814,6 +2814,21 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
   return 1;
 }
 
+/* Bind one zip block param. A poly slot takes a boxed source; a concrete
+   slot takes a typed array read as-is. The remaining case is a concrete
+   slot fed by a poly operand (`ai.zip(tj)` where `ai` is Array[Float] and
+   `tj` is only an array at run time): the read is an sp_RbVal, and the
+   param was still inferred as the receiver's element type. Assigning the
+   box into that slot does not compile. Narrow it, keeping nil as the
+   slot's own nil so a shorter operand still yields nil. */
+static void emit_zip_block_param(Compiler *c, TyKind slot, TyKind src_ty,
+                                 const char *src, Buf *b) {
+  if (slot == TY_POLY && src_ty != TY_POLY) emit_boxed_text(c, src_ty, src, b);
+  else if (src_ty == TY_POLY && slot != TY_POLY && slot != TY_UNKNOWN)
+    emit_unbox_nilable_text(c, slot, src, b);
+  else buf_puts(b, src);
+}
+
 int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int block = nt_ref(nt, id, "block");
@@ -3499,20 +3514,16 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
         char src[512];
         if (recv_poly) snprintf(src, sizeof src, "sp_poly_arr_get(%s, _t%d)", rb.p ? rb.p : "sp_box_nil()", t);
         else snprintf(src, sizeof src, "sp_%sArray_get(%s, _t%d)", k, rb.p ? rb.p : "NULL", t);
-        int box0 = zlv0->type == TY_POLY && et != TY_POLY;
         emit_indent(b, indent + 1); buf_printf(b, "lv_%s = ", p0);
-        if (box0) emit_boxed_text(c, et, src, b);
-        else buf_puts(b, src);
+        emit_zip_block_param(c, zlv0->type, et, src, b);
         buf_puts(b, ";\n");
       }
       if (p1n && zlv1 && ob.p) {
         char src2[512];
         if (arg_poly) snprintf(src2, sizeof src2, "sp_poly_arr_get(%s, _t%d)", ob.p, t);
         else snprintf(src2, sizeof src2, "sp_%sArray_get(%s, _t%d)", k2, ob.p, t);
-        int box1 = zlv1->type == TY_POLY && et2 != TY_POLY;
         emit_indent(b, indent + 1); buf_printf(b, "lv_%s = ", p1n);
-        if (box1) emit_boxed_text(c, et2, src2, b);
-        else buf_puts(b, src2);
+        emit_zip_block_param(c, zlv1->type, et2, src2, b);
         buf_puts(b, ";\n");
       }
       emit_loop_body(c, body, b, indent + 1);
