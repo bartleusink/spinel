@@ -46,6 +46,14 @@ p pick("ab").upcase
 p pick("ab").to_s
 p pick(5).to_s
 
+# Interpolation is to_s, so a reopened to_s owns it -- except for a String
+# part, which CRuby uses as it stands (its objtostring never calls to_s on a
+# String) even when String#to_s is reopened.
+p "i=#{5}"
+p "f=#{1.5}"
+p "s=#{"ab"}"
+p "n=#{-5}"
+
 # and a name no reopen defines still answers the builtin at run time
 p pick("ab").downcase
 p pick(5).zero?
