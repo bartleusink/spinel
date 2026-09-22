@@ -6250,9 +6250,16 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       /* a by-value object class is a bare struct: default_value's NULL is
          ill-typed C there */
       if (ty_is_object(g_ret_type) && comp_ty_value_obj(c, g_ret_type))
-        buf_printf(b, " _retv%d = (sp_%s){0};\n", eid, c->classes[ty_object_class(g_ret_type)].c_name);
+        buf_printf(b, " _retv%d = (sp_%s){0};", eid, c->classes[ty_object_class(g_ret_type)].c_name);
       else
-        buf_printf(b, " _retv%d = %s;\n", eid, default_value(g_ret_type));
+        buf_printf(b, " _retv%d = %s;", eid, default_value(g_ret_type));
+      /* the deferred value waits in the slot while the ensure body runs,
+         which may allocate */
+      if (ty_gc_rootable(c, g_ret_type)) {
+        char rn[24]; snprintf(rn, sizeof rn, "_retv%d", eid);
+        buf_puts(b, " "); emit_gc_root_var(c, g_ret_type, rn, b);
+      }
+      buf_puts(b, "\n");
     }
     g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type };
 
@@ -10527,9 +10534,16 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
          build (#4270). The ensure's own deferred-return slot makes the same
          distinction (#4268); this is that question for the begin's result. */
       if (comp_ty_value_obj(c, rt))
-        buf_printf(b, " _t%d = (sp_%s){0};\n", t, c->classes[ty_object_class(rt)].c_name);
+        buf_printf(b, " _t%d = (sp_%s){0};", t, c->classes[ty_object_class(rt)].c_name);
       else
-        buf_printf(b, " _t%d = %s;\n", t, rt == TY_RANGE ? "(sp_Range){0}" : default_value(rt));
+        buf_printf(b, " _t%d = %s;", t, rt == TY_RANGE ? "(sp_Range){0}" : default_value(rt));
+      /* the value sits in the temp while the ensure body runs, which may
+         allocate; the root goes in front of the region so the landing's
+         watermark restore keeps it. An empty ensure clause runs nothing between
+         the write and the read, so it gets no root. */
+      int ec = nt_ref(nt, id, "ensure_clause");
+      if (ec >= 0 && nt_ref(nt, ec, "statements") >= 0 && ty_gc_rootable(c, rt)) { buf_puts(b, " "); emit_gc_root_tmp(c, rt, t, b); }
+      buf_puts(b, "\n");
       int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
       TyKind srt = g_result_ty; g_result_ty = rt;   /* the arms' nil is this slot's (a scalar's sentinel) */
       emit_begin(c, id, b, indent, rv);

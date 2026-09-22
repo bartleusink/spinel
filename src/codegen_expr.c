@@ -3590,16 +3590,26 @@ else {
     char rv[32]; snprintf(rv, sizeof rv, "_t%d", t);
     int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
     TyKind srt = g_result_ty; g_result_ty = rt;
+    /* the value sits in the temp while the ensure body runs, which may
+       allocate; the root goes in front of the region so the landing's
+       watermark restore keeps it. An empty ensure clause runs nothing between
+       the write and the read, so it gets no root. */
+    int ec = nt_ref(c->nt, id, "ensure_clause");
+    int hold = ec >= 0 && nt_ref(c->nt, ec, "statements") >= 0 && ty_gc_rootable(c, rt);
     if (g_pre) {
       emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
-      buf_printf(g_pre, " _t%d = %s;\n", t, slot_zero(c, rt));
+      buf_printf(g_pre, " _t%d = %s;", t, slot_zero(c, rt));
+      if (hold) { buf_puts(g_pre, " "); emit_gc_root_tmp(c, rt, t, g_pre); }
+      buf_puts(g_pre, "\n");
       emit_begin(c, id, g_pre, g_indent, rv);
     }
     else {
       /* No prelude available (e.g. inside another expression's prelude):
          fall back to a GCC statement expression. */
       buf_puts(b, "({ ");
-      emit_ctype(c, rt, b); buf_printf(b, " _t%d = %s;\n", t, slot_zero(c, rt));
+      emit_ctype(c, rt, b); buf_printf(b, " _t%d = %s;", t, slot_zero(c, rt));
+      if (hold) { buf_puts(b, " "); emit_gc_root_tmp(c, rt, t, b); }
+      buf_puts(b, "\n");
       emit_begin(c, id, b, 0, rv);
       buf_printf(b, "_t%d; })", t);
       g_result_poly = sp; g_result_ty = srt;
