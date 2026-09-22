@@ -42,10 +42,10 @@ p fs
 frows.reverse_each { |r| fs += r[1] }
 p fs
 
-# Splitting the row (`|a, b|`, or `|a, b, c|` when the row is short) is not a
-# row iterator. The table stays boxed and each element is bound on its own,
-# including a missing one. Narrowing it to a pointer array would store the
-# row pointer in the first parameter and leave the others unset.
+# Splitting the row (`|a, b|`, or `|a, b, c|` when the row is short) binds
+# each element, including a missing one. The pointer-array walk stores one
+# row pointer in the first parameter, so this shape is answered by the poly
+# each until that walk learns to split the row.
 split_rows = [[1, 2], [3, 4]]
 split_s = 0
 split_rows.each { |a, b| split_s += a + b }
