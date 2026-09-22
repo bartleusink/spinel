@@ -611,6 +611,17 @@ static int node_is_raise(Compiler *c, int nd) {
 
 /* One arm of a value-position if/unless: box a concrete arm into a poly
    result, and give empty []/{} literals the result's container type. */
+/* An arm already rendered as TEXT, carried into a BIGINT result temp. The
+   poly cases beside each call box; this one wraps, because the temp is an
+   sp_Bigint * and a plain Integer arm is otherwise assigned into it as a
+   pointer -- the same defect #4794 fixed for the arms that go through
+   emit_ternary_arm, in the paths that do not. Answers 1 when it emitted. */
+static int emit_arm_text_as_bigint(TyKind res, TyKind at, const char *txt, Buf *out) {
+  if (res != TY_BIGINT || at == TY_BIGINT) return 0;
+  buf_printf(out, "%s(%s)", at == TY_POLY ? "sp_poly_as_bigint" : "sp_bigint_new_int",
+             txt && txt[0] ? txt : "0");
+  return 1;
+}
 static void emit_ternary_arm(Compiler *c, int nd, TyKind res, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *bty = nt_type(nt, nd);
@@ -3190,6 +3201,7 @@ else {
             emit_boxed_text(c, lt, le.p ? le.p : default_value(lt), &bx);
             buf_puts(g_pre, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
           }
+          else if (emit_arm_text_as_bigint(res, lt, le.p ? le.p : default_value(lt), g_pre)) { }
           else buf_puts(g_pre, le.p ? le.p : default_value(res));
           buf_puts(g_pre, ";\n");
           free(le.p);
@@ -3222,6 +3234,7 @@ else {
                 emit_boxed_text(c, lt2, le2.p ? le2.p : default_value(lt2), &bx2);
                 buf_puts(g_pre, bx2.p ? bx2.p : "sp_box_nil()"); free(bx2.p);
               }
+              else if (emit_arm_text_as_bigint(res, lt2, le2.p ? le2.p : default_value(lt2), g_pre)) { }
               else buf_puts(g_pre, le2.p ? le2.p : default_value(res));
               buf_puts(g_pre, ";\n");
               free(le2.p);
@@ -3255,6 +3268,7 @@ else {
              its own (a nullable String, #4567) it is that nil, not the box */
           else if (subt == TY_NIL && res != TY_POLY && nil_value(res))
             buf_puts(g_pre, nil_value(res));
+          else if (emit_arm_text_as_bigint(res, subt, sub_e.p ? sub_e.p : default_value(subt), g_pre)) { }
           else buf_puts(g_pre, sub_e.p ? sub_e.p : default_value(res));
           buf_puts(g_pre, ";\n");
           free(sub_e.p);
