@@ -159,7 +159,8 @@ void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   switch (t) {
     case TY_INT:    buf_printf(b, "(%s).v.i", expr); return;
     case TY_FLOAT:  buf_printf(b, "(%s).v.f", expr); return;
-    case TY_STRING: buf_printf(b, "(%s).v.s", expr); return;
+    /* not a bare `.v.s`: a mutable String's box holds its handle there */
+    case TY_STRING: buf_printf(b, "sp_poly_unbox_s(%s)", expr); return;
     case TY_BOOL:   buf_printf(b, "(%s).v.b", expr); return;
     case TY_SYMBOL: buf_printf(b, "(sp_sym)(%s).v.i", expr); return;
     /* NOT the bare `.v.p` cast: a poly slot holds a small Integer inline

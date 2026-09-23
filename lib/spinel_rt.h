@@ -2381,6 +2381,15 @@ static inline sp_String *sp_poly_as_strbuf(sp_RbVal v) {
 static inline sp_bool sp_poly_is_strbuf(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STRBUF;
 }
+/* A boxed value unboxed into a String slot. A mutable String's box carries
+   its sp_String handle in the union, so reading `.v.s` there hands the slot
+   the handle, not the bytes; the bytes are the handle's data, the same live
+   buffer sp_poly_to_s answers. A box with no handle, and every other tag,
+   reads the union as the plain `.v.s` did (a nil box is NULL). */
+static inline const char *sp_poly_unbox_s(sp_RbVal v) {
+  if (sp_poly_is_strbuf(v) && v.v.p) return sp_String_cstr((sp_String *)v.v.p);
+  return v.v.s;
+}
 /* The object pointer a boxed value carries, for a slot that holds pointers
    rather than sp_RbVal (a PtrArray of one user class). nil is a NULL element,
    which is how that slot spells nil already. */
