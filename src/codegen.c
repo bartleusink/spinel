@@ -10190,6 +10190,24 @@ static int node_is_computed_name(const NodeTable *nt, int n) {
          sp_streq(ty, "InterpolatedSymbolNode");
 }
 
+/* An element read out of a named container (`PLAN[i]`, `PLAN.first`,
+   `TABLE.fetch(k)`, `@plan[i]`) is the same kind of name a block parameter
+   over that container is: one of the values the container was filled with,
+   which the arm set already covers when those are literals. It was refused
+   as computed, with the refusal misreading `send` itself as undefined
+   (#4850). */
+static int node_is_container_read(const NodeTable *nt, int n) {
+  if (n < 0 || nt_kind(nt, n) != NK_CallNode) return 0;
+  const char *en = nt_str(nt, n, "name");
+  int er = nt_ref(nt, n, "receiver");
+  NodeKind rk = er >= 0 ? nt_kind(nt, er) : NK_NONE;
+  return en && (sp_streq(en, "[]") || sp_streq(en, "first") || sp_streq(en, "last") ||
+                sp_streq(en, "fetch") || sp_streq(en, "at") || sp_streq(en, "dig") ||
+                sp_streq(en, "sample")) &&
+         (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ||
+          rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode);
+}
+
 /* A dynamic-send name is genuinely runtime-computed -- and so cannot be covered
    by desugar_dynamic_send's literal-derived arm set -- when it is a computed
    expression directly, or a local assigned such a computation. A bare variable
@@ -10200,23 +10218,7 @@ static int node_is_computed_name(const NodeTable *nt, int n) {
    silently raising the wrong NoMethodError for a method the arms never built. */
 static int send_name_is_computed(Compiler *c, int arg) {
   const NodeTable *nt = c->nt;
-  /* An element read out of a named container (`PLAN[i]`, `PLAN.first`,
-     `TABLE.fetch(k)`, `@plan[i]`) is the same kind of name a block parameter
-     over that container is: one of the values the container was filled with,
-     which the arm set already covers when those are literals. It was refused
-     as computed, with the refusal misreading `send` itself as undefined
-     (#4850). */
-  if (nt_kind(nt, arg) == NK_CallNode) {
-    const char *en = nt_str(nt, arg, "name");
-    int er = nt_ref(nt, arg, "receiver");
-    NodeKind rk = er >= 0 ? nt_kind(nt, er) : NK_NONE;
-    if (en && (sp_streq(en, "[]") || sp_streq(en, "first") || sp_streq(en, "last") ||
-               sp_streq(en, "fetch") || sp_streq(en, "at") || sp_streq(en, "dig") ||
-               sp_streq(en, "sample")) &&
-        (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ||
-         rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode))
-      return 0;
-  }
+  if (node_is_container_read(nt, arg)) return 0;
   if (node_is_computed_name(nt, arg)) return 1;
   const char *aty = arg >= 0 ? nt_type(nt, arg) : NULL;
   if (!aty || !sp_streq(aty, "LocalVariableReadNode")) return 0;
@@ -10227,7 +10229,10 @@ static int send_name_is_computed(Compiler *c, int arg) {
     if (c->nscope[id] != scope) continue;
     const char *wn = nt_str(nt, id, "name");
     if (!wn || !sp_streq(wn, vn)) continue;
-    if (node_is_computed_name(nt, nt_ref(nt, id, "value"))) return 1;
+    /* a local bound to such an element (`step = PLAN[i]; send(step)`) is
+       that element */
+    int wv = nt_ref(nt, id, "value");
+    if (node_is_computed_name(nt, wv) && !node_is_container_read(nt, wv)) return 1;
   }
   return 0;
 }
