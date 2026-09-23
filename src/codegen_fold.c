@@ -7177,6 +7177,126 @@ static void emit_arm_arg(Compiler *c, Scope *arm, int a, int atmp_id, TyKind fro
   else buf_puts(b, tn);
 }
 
+/* Does an arm of a dispatch switch need the call's block as an sp_Proc *? */
+static int arm_takes_blk(Scope *s) {
+  return s->blk_param && s->blk_param[0] && !s->yields;
+}
+
+/* Do the switch's arms bind the call's arguments differently? The shared path
+   evaluates the arguments once, laid out for the base method, and hands every
+   arm the same temps. That is only right when every arm takes the same plain
+   list: an override with another count, a rest, a keyword or a block slot got
+   a C call with the wrong number of arguments, and one with a default got the
+   base method's default instead of its own (#4866). */
+static int dispatch_arms_disagree(Compiler *c, int cid, const char *name) {
+  Scope *first = NULL;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    int kd = -1;
+    int kmi = comp_method_in_chain(c, k, name, &kd);
+    if (kmi < 0 || !scope_has_callable_symbol(c, kmi)) continue;
+    Scope *s = &c->scopes[kmi];
+    if (!first) { first = s; }
+    if (s == first) continue;
+    if (s->nparams != first->nparams || s->rest_idx != first->rest_idx ||
+        s->kwrest_idx != first->kwrest_idx || s->npost_rest != first->npost_rest ||
+        arm_takes_blk(s) != arm_takes_blk(first))
+      return 1;
+    for (int i = 0; i < s->nparams; i++) {
+      if ((s->pdefault && s->pdefault[i] >= 0) || (first->pdefault && first->pdefault[i] >= 0))
+        return 1;
+      if (!s->pnames[i] || !first->pnames[i]) return 1;
+      int kw_s = callee_has_kwarg(c, s, s->pnames[i]);
+      if (kw_s != callee_has_kwarg(c, first, first->pnames[i])) return 1;
+      if (kw_s && !sp_streq(s->pnames[i], first->pnames[i])) return 1;
+    }
+  }
+  return 0;
+}
+
+/* One arm of a per-arm dispatch: the call of `kmi` (defined in class `kd`) with
+   its own argument list, assigned to the result temp. */
+static void emit_dispatch_arm_call(Compiler *c, int kd, int kmi, const char *selfptr,
+                                   int argsNode, int blk_tmp, TyKind ret, TyKind disp_ret,
+                                   int rtmp, Buf *b) {
+  Scope *s = &c->scopes[kmi];
+  const char *cn = c->classes[kd].c_name;
+  Buf apre; memset(&apre, 0, sizeof apre);
+  Buf call; memset(&call, 0, sizeof call);
+  Buf *sv_pre = g_pre; int sv_ind = g_indent;
+  g_pre = &apre; g_indent = 0;
+  buf_printf(&call, "sp_%s_%s((sp_%s *)%s", cn, mc(s->name), cn, selfptr);
+  emit_args_filled(c, kmi, argsNode, ", ", &call);
+  g_pre = sv_pre; g_indent = sv_ind;
+  if (arm_takes_blk(s)) {
+    if (blk_tmp >= 0) buf_printf(&call, ", _t%d", blk_tmp);
+    else buf_puts(&call, ", NULL");
+  }
+  buf_puts(&call, ")");
+  buf_puts(b, "{ ");
+  if (apre.p) buf_puts(b, apre.p);
+  TyKind arm_ret = (TyKind)s->ret;
+  if (method_is_void(s))
+    buf_printf(b, "%s; _t%d = %s; ", call.p, rtmp, default_value(disp_ret));
+  else if (arm_ret != ret && ret == TY_POLY) {
+    buf_printf(b, "_t%d = ", rtmp);
+    emit_boxed_text(c, arm_ret, call.p, b);
+    buf_puts(b, "; ");
+  }
+  else buf_printf(b, "_t%d = %s; ", rtmp, call.p);
+  buf_puts(b, "break; }");
+  free(apre.p); free(call.p);
+}
+
+/* The dispatch switch for arms that disagree on their parameters: each arm
+   binds the call's arguments by its own method's list, the way a direct call
+   to that method would, defaults and arity check included. The argument
+   expressions sit inside the arms, so only the entered one evaluates them. */
+static void emit_dispatch_per_arm(Compiler *c, int cid, const char *name, const char *selfptr,
+                                  int argsNode, int blk_node, int mi, int defcls,
+                                  TyKind ret, TyKind disp_ret, Buf *b) {
+  int want_blk = 0;
+  for (int k = 0; k < c->nclasses && !want_blk; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    int kd = -1;
+    int kmi = comp_method_in_chain(c, k, name, &kd);
+    if (kmi >= 0 && arm_takes_blk(&c->scopes[kmi])) want_blk = 1;
+  }
+  int blk_tmp = -1;
+  if (want_blk) blk_node = resolve_forwarded_block(c, blk_node);
+  if (want_blk && blk_node >= 0) {
+    blk_tmp = ++g_tmp;
+    Buf pb; memset(&pb, 0, sizeof pb);
+    if (!emit_forwarded_proc_arg(c, blk_node, &pb))
+      emit_proc_literal(c, blk_node, &pb);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_Proc *_t%d = %s;\n", blk_tmp, pb.p ? pb.p : "NULL");
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", blk_tmp);
+    free(pb.p);
+  }
+  int rtmp = ++g_tmp;
+  buf_puts(b, "({ ");
+  emit_ctype(c, disp_ret, b);
+  buf_printf(b, " _t%d; switch ((%s)->cls_id) {", rtmp, selfptr);
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    int kd = -1;
+    int kmi = comp_method_in_chain(c, k, name, &kd);
+    if (kmi < 0 || !scope_has_callable_symbol(c, kmi)) continue;
+    nd_callee(c, g_nd_call_id, kmi, kd, 1);
+    buf_printf(b, " case %d: ", k);
+    emit_dispatch_arm_call(c, kd, kmi, selfptr, argsNode, blk_tmp, ret, disp_ret, rtmp, b);
+  }
+  buf_puts(b, " default: ");
+  if (mi >= 0)
+    emit_dispatch_arm_call(c, defcls, mi, selfptr, argsNode, blk_tmp, ret, disp_ret, rtmp, b);
+  else
+    buf_printf(b, "_t%d = %s; break;", rtmp,
+               ret == TY_POLY ? "sp_box_nil()" : default_value(disp_ret));
+  buf_printf(b, " } _t%d; })", rtmp);
+}
+
 /* Emit a (possibly virtual) method call. `selfptr` is a reusable C
    expression yielding sp_<static>* (e.g. "self", "&lv_x", "&_t3"). Args
    are pre-evaluated into temps so they're emitted once.
@@ -7224,6 +7344,10 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
   int virtual = (is_scalar_ret(ret) || ret_is_void) && (impl_n > 1 || (!m && impl_n >= 1));
   nd_stamp(g_nd_call_id, virtual ? ND_SWITCH : ND_DIRECT);
   if (!virtual && m) nd_callee(c, g_nd_call_id, mi, defcls, 0);
+  if (virtual && dispatch_arms_disagree(c, cid, name)) {
+    emit_dispatch_per_arm(c, cid, name, selfptr, argsNode, blk_node, mi, defcls, ret, disp_ret, b);
+    return;
+  }
 
   /* Arity check, the same one the free-function path already made: an over- or
      under-supplied instance call went through with the extra arguments simply
