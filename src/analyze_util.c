@@ -1018,6 +1018,7 @@ static int yvt_call_forwards_block(const NodeTable *nt, int cid) {
    the program, methods x calls per round (#4847). An aliased name, and a
    prepend shadow (named `__prep_N_m`), are left to the full resolution. */
 static unsigned char *yvt_alias_name = NULL;   /* per yvt_ids entry: its name is an alias somewhere */
+static unsigned char *yvt_fwd = NULL;          /* per yvt_ids entry: yvt_call_forwards_block */
 static int yvt_name_is_alias(Compiler *c, const char *cn) {
   for (int k = 0; k < c->nclasses; k++)
     for (int i = 0; i < c->classes[k].naliases; i++)
@@ -1036,8 +1037,8 @@ static int yvt_may_reach(Compiler *c, int ii, int mi) {
 static void yvt_build(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count;
-  free(yvt_ids); free(yvt_sup_ids); free(yvt_alias_name);
-  yvt_alias_name = NULL;
+  free(yvt_ids); free(yvt_sup_ids); free(yvt_alias_name); free(yvt_fwd);
+  yvt_alias_name = NULL; yvt_fwd = NULL;
   yvt_ids = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
   yvt_sup_ids = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
   yvt_n = 0; yvt_sup_n = 0;
@@ -1056,6 +1057,11 @@ static void yvt_build(Compiler *c) {
     if (nt_ref(nt, cid, "block") < 0 && !yvt_call_forwards_block(nt, cid)) continue;
     yvt_ids[yvt_n++] = cid;
   }
+  /* the forward test is structural, and was re-run for every entry of this
+     list once per yielding method: 7% of a 16K-line analysis (#4847) */
+  yvt_fwd = malloc((size_t)(yvt_n > 0 ? yvt_n : 1));
+  if (yvt_fwd)
+    for (int ii = 0; ii < yvt_n; ii++) yvt_fwd[ii] = (unsigned char)yvt_call_forwards_block(nt, yvt_ids[ii]);
   yvt_alias_name = malloc((size_t)(yvt_n > 0 ? yvt_n : 1));
   if (yvt_alias_name)
     for (int ii = 0; ii < yvt_n; ii++) {
@@ -1162,8 +1168,8 @@ TyKind yield_value_type(Compiler *c, int mi) {
     int blk = nt_ref(nt, cid, "block");
     /* A `callee(...)` forward carries its block implicitly inside the `...`
        (no explicit block node); treat it as a forwarded block too. */
-    int fwd_args = yvt_call_forwards_block(nt, cid);
     if (!yvt_may_reach(c, ii, mi)) continue;
+    int fwd_args = yvt_fwd ? yvt_fwd[ii] : yvt_call_forwards_block(nt, cid);
     /* skip calls that live inside method mi itself (recursive self-calls);
        only external call sites provide a concrete block value type */
     if ((int)(comp_scope_of(c, cid) - c->scopes) == mi) continue;
@@ -1271,8 +1277,8 @@ int yield_block_tails(Compiler *c, int mi, int *out, int max) {
   for (int ii = 0; ii < yvt_n && n < max; ii++) {
     int cid = yvt_ids[ii];
     int blk = nt_ref(nt, cid, "block");
-    int fwd_args = yvt_call_forwards_block(nt, cid);
     if (!yvt_may_reach(c, ii, mi)) continue;
+    int fwd_args = yvt_fwd ? yvt_fwd[ii] : yvt_call_forwards_block(nt, cid);
     if ((int)(comp_scope_of(c, cid) - c->scopes) == mi) continue;
     if (yvt_callee_index(c, cid) != mi) continue;
     const char *blkty = blk >= 0 ? nt_type(nt, blk) : NULL;
