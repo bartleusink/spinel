@@ -8025,10 +8025,16 @@ else {
             snprintf(gv9, sizeof gv9, "%s(_t%d, %s, %d)", fn9, tv, a9, SP_NUM_ARM[ai].extra);
           else
             snprintf(gv9, sizeof gv9, "%s(_t%d, %s)", fn9, tv, a9);
-          /* A pair has no scalar form at all: the slot the dispatch assigns
-             into cannot hold one, so the arm raises there rather than build a
-             value it would have to throw away. */
-          if (SP_NUM_ARM[ai].kind == NPA_PAIR && ret != TY_POLY)
+          /* A pair fits a poly slot and an array one, and nothing else: a
+             scalar slot cannot hold it, so the arm raises there rather than
+             build a value it would have to throw away. Asking the slot rather
+             than asking only whether it is poly is the fourth instance of
+             this family -- `n.gcdlcm(8)` raised "undefined method 'gcdlcm'"
+             whenever the dispatch had typed the call from the builtin answer
+             alone, which is every program where the colliding class's own
+             arity keeps it out of the candidate set. */
+          if (SP_NUM_ARM[ai].kind == NPA_PAIR &&
+              ret != TY_POLY && ret != TY_POLY_ARRAY && ret != TY_INT_ARRAY)
             buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
           else {
             buf_printf(b, " _t%d = ", tr);
@@ -8037,10 +8043,17 @@ else {
                 if (ret == TY_POLY) buf_puts(b, gv9);
                 else emit_unbox_text(c, ret, gv9, b);
                 break;
-              case NPA_PAIR:
-                if (SP_NUM_ARM[ai].box_as != TY_UNKNOWN) emit_boxed_text(c, SP_NUM_ARM[ai].box_as, gv9, b);
-                else buf_puts(b, gv9);
-                break;
+              case NPA_PAIR: {
+                /* box_as names the pointer kind the helper answers directly;
+                   without one it answers an sp_RbVal already. */
+                int raw9 = SP_NUM_ARM[ai].box_as != TY_UNKNOWN;
+                if (ret == TY_POLY) {
+                  if (raw9) emit_boxed_text(c, SP_NUM_ARM[ai].box_as, gv9, b);
+                  else buf_puts(b, gv9);
+                }
+                else if (raw9 && ret == SP_NUM_ARM[ai].box_as) buf_puts(b, gv9);
+                else emit_unbox_text(c, ret, gv9, b);
+                break; }
               case NPA_FLOAT:
                 if (ret == TY_POLY) emit_boxed_text(c, TY_FLOAT, gv9, b);
                 else buf_puts(b, gv9);
