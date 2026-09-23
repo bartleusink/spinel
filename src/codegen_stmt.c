@@ -1936,11 +1936,46 @@ int static_nil_reader_cond(Compiler *c, int pred) {
    0 = always false, -1 = decided at run time. */
 static int static_block_given_cond(Compiler *c, int pred) {
   const NodeTable *nt = c->nt;
-  if (pred < 0 || nt_kind(nt, pred) != NK_CallNode) return -1;
-  const char *nm = nt_str(nt, pred, "name");
-  if (!nm || !sp_streq(nm, "block_given?")) return -1;
-  int r = nt_ref(nt, pred, "receiver");
-  if (r >= 0 && !(nt_type(nt, r) && sp_streq(nt_type(nt, r), "SelfNode"))) return -1;
+  if (pred < 0) return -1;
+  /* `unless block` / `if block`, where `block` is the method's own `&block`
+     parameter, asks what `block_given?` asks -- packages/tempfile/tempfile.rb
+     writes it that way, and so did the program that reported this. Read only
+     as an ordinary local, the guard stayed in the C, and its dead branch
+     assigned the guarded `return`'s value into the result slot the LIVE
+     branch had typed: `return f unless block` beside a `yield f` tail met a
+     `const char *` with an `sp_F *` and the build stopped (#4819).
+
+     A body that ASSIGNS to the name is not asking this question any more, so
+     the answer is declined there rather than guessed. */
+  if (nt_kind(nt, pred) == NK_LocalVariableReadNode) {
+    const char *ln = nt_str(nt, pred, "name");
+    Scope *ls = comp_scope_of(c, pred);
+    if (!ln || !ls || !ls->blk_param || !ls->blk_param[0] || !sp_streq(ln, ls->blk_param))
+      return -1;
+    /* Only where a literal block is being spliced in. Everywhere else the
+       name is a REAL variable holding a proc -- a module method reached
+       through the proc form takes it as an argument and calls it -- and
+       answering "no block" for that emitted `puts 'no block'` for a call
+       that plainly passes one. The `block_given?` spelling above can answer
+       0 outside an inline because a plain emitted body never receives a
+       block; a `&block` parameter read cannot, because it does. */
+    if (g_block_id < 0) return -1;
+    /* A body that ASSIGNS to the name is not asking this question any more. */
+    for (int w = 0; w < nt->count; w++) {
+      NodeKind wk = nt_kind(nt, w);
+      if (wk != NK_LocalVariableWriteNode && wk != NK_LocalVariableOperatorWriteNode &&
+          wk != NK_LocalVariableOrWriteNode && wk != NK_LocalVariableAndWriteNode) continue;
+      const char *wn = nt_str(nt, w, "name");
+      if (wn && sp_streq(wn, ln) && comp_scope_of(c, w) == ls) return -1;
+    }
+  }
+  else {
+    if (nt_kind(nt, pred) != NK_CallNode) return -1;
+    const char *nm = nt_str(nt, pred, "name");
+    if (!nm || !sp_streq(nm, "block_given?")) return -1;
+    int r = nt_ref(nt, pred, "receiver");
+    if (r >= 0 && !(nt_type(nt, r) && sp_streq(nt_type(nt, r), "SelfNode"))) return -1;
+  }
   if (g_block_id >= 0) {
     /* the `{ |__fwd| yield __fwd }` a forwarded `&b` became stands for the
        ENCLOSING method's block: the answer is whether that one exists at
