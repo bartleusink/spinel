@@ -7846,6 +7846,11 @@ void emit_super(Compiler *c, int id, Buf *b) {
         }
         else buf_printf(b, "lv_%s", rename_local(s->pnames[i]));
       }
+      /* the parent's extra parameters take their defaults (#4852) */
+      for (int i = n; i < pm->nparams; i++) {
+        buf_puts(b, i == 0 ? "" : ", ");
+        emit_arg_or_default(c, pm, i, -1, b);
+      }
     }
     else emit_args_filled(c, cmi, nt_ref(c->nt, id, "arguments"), "", b);
     buf_puts(b, ")");
@@ -8024,6 +8029,14 @@ void emit_super(Compiler *c, int id, Buf *b) {
       else {
         buf_printf(b, ", lv_%s", rename_local(s->pnames[i]));
       }
+    }
+    /* The parent may declare more than this method does -- an optional,
+       `*rest`, a keyword, `**` -- which a bare super leaves to their defaults
+       and empties, as CRuby does. The call stopped at this method's own
+       count and the C had too few arguments (#4852). */
+    for (int i = n; i < pm->nparams; i++) {
+      buf_puts(b, ", ");
+      emit_arg_or_default(c, pm, i, -1, b);
     }
   }
   else {
