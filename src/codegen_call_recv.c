@@ -10218,7 +10218,24 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
         NativeMethod *m = &c->native_methods[nm];
         native_arg_check(c, id, "native method", m, argc, argv);
         int wrap = sp_streq(m->ret, "string?");
+        /* The two borrowed-buffer return modes, which the native_func arm
+           (codegen_call.c) has carried since they were introduced and this
+           one never did: a `cstring` is the callee's own storage, clobbered
+           by its next call, so it is duplicated onto the GC string heap
+           before it escapes into Ruby; a `cbinstr` is the same buffer
+           holding raw BYTES, so exactly the count the callee published in
+           sp_ffi_bin_len is copied -- strlen stops at the first NUL, and a
+           PNG came back as the 8 bytes of its signature (#4821). The result
+           is tagged binary for the reason the other arm states: declaring
+           this return mode is the callee saying its answer is bytes. */
+        int cstr_ret = sp_streq(m->ret, "cstring");
+        int bin_ret = sp_streq(m->ret, "cbinstr");
+        int bin_tmp = bin_ret ? ++g_tmp : 0;
         if (wrap) buf_puts(b, "sp_box_nullable_str(");
+        if (cstr_ret) buf_puts(b, "sp_str_dup_external(");
+        /* Sequence the call before the sp_ffi_bin_len read: C leaves
+           argument evaluation order unspecified. */
+        if (bin_ret) buf_printf(b, "({ const char *_t%d = ", bin_tmp);
         buf_puts(b, m->csym); buf_puts(b, "("); emit_expr(c, recv, b);
         for (int ai = 0; ai < m->nargs && ai < argc; ai++) {
           buf_puts(b, ", ");
@@ -10235,6 +10252,10 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
           else emit_expr(c, argv[ai], b);
         }
         buf_puts(b, ")");
+        if (cstr_ret) buf_puts(b, ")");
+        if (bin_ret)
+          buf_printf(b, "; sp_str_as_binary(sp_str_from_bytes(_t%d, (size_t)(sp_ffi_bin_len < 0 ? 0 : sp_ffi_bin_len))); })",
+                     bin_tmp);
         if (wrap) buf_puts(b, ")");
         return 1;
       }

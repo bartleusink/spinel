@@ -820,6 +820,41 @@ expect "symlinked install builds and runs" "6" \
   "$(PATH="$WORK/linked/bin:$PATH" spin run 2>&1 | tail -1)"
 cd "$WORK/app"
 
+# --- a native_method returning bytes copies the count, not up to a NUL --------
+# A `:cbinstr` return is a borrowed buffer holding raw BYTES, and the callee
+# publishes how many in sp_ffi_bin_len. The native_func arm copied that count;
+# the native_method arm copied the result as an ordinary C string, so the bytes
+# stopped at the first NUL and nothing was reported -- the method answered a
+# shorter, valid String. A PNG came back as the 8 bytes of its signature
+# (#4821). Both bindings of the same C function are checked here, because the
+# two paths answering differently is the whole bug.
+cd "$WORK"
+rm -rf spinel-binpkg binapp
+mkdir -p spinel-binpkg binapp/bin
+printf '[package]\nname = "binpkg"\nsources = ["bin.c"]\n' > spinel-binpkg/spin.toml
+cat > spinel-binpkg/binpkg.rb <<'EOF'
+module BinPackage
+  native_struct "Bin", "sp_Bin"
+  native_new [], "sp_Bin_new"
+  native_method :bytes, [], :cbinstr, "sp_Bin_bytes"
+  native_func :bytes, [], :cbinstr, "sp_bin_bytes"
+end
+EOF
+cat > spinel-binpkg/bin.c <<'EOF'
+#include "spinel/runtime.h"
+typedef struct sp_Bin_s { sp_int cls_id; } sp_Bin;
+sp_Bin *sp_Bin_new(sp_int cls_id) { sp_Bin *s = sp_gc_alloc(sizeof(sp_Bin), NULL, NULL); s->cls_id = cls_id; return s; }
+static const char bin_bytes[4] = { 'a', 0, 'b', 'c' };
+const char *sp_Bin_bytes(sp_Bin *self) { (void)self; sp_ffi_bin_len = 4; return bin_bytes; }
+const char *sp_bin_bytes(void) { sp_ffi_bin_len = 4; return bin_bytes; }
+EOF
+printf '[package]\nname = "binapp"\n\n[dependencies]\nbinpkg = { path = "../spinel-binpkg" }\n' > binapp/spin.toml
+printf 'require "binpkg"\nputs Bin.new.bytes.bytesize\nputs BinPackage.bytes.bytesize\n' > binapp/bin/binapp.rb
+cd "$WORK/binapp"
+expect "native_method :cbinstr keeps the bytes past a NUL" "4 4" \
+  "$("$SPIN" run 2>&1 | tail -2 | tr '\n' ' ' | sed 's/ $//')"
+cd "$WORK/app"
+
 # --- the native cache is relocatable and skippable (#4115) --------------------
 # A run behaves differently depending on whether an object is already cached,
 # which is what you least want while working out why a build differs.
