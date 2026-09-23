@@ -2895,7 +2895,7 @@ static void emit_pm_typed_assign(Scope *sc, const char *lnm,
   else if (ty == TY_STR_ARRAY)            buf_printf(b, "(sp_StrArray *)(%s).v.p", boxed);
   /* the slice keeps the scrutinee's kind, which may be a typed array */
   else if (ty == TY_POLY_ARRAY)           buf_printf(b, "sp_poly_to_a_arr(%s)", boxed);
-  else if (ty == TY_STRING)               buf_printf(b, "(%s).v.s", boxed);
+  else if (ty == TY_STRING)               buf_printf(b, "sp_poly_unbox_s(%s)", boxed);
   else                                    buf_puts(b, boxed);  /* poly: direct */
   buf_puts(b, ";\n");
 }
@@ -5268,12 +5268,12 @@ void emit_for(Compiler *c, int id, Buf *b, int indent) {
    int/bool/float go through the converting sp_poly_to_i/f (matching the legacy
    scalar-return coercion; sp_bool is int-backed). Strings, objects, and every
    other pointer-backed reference (arrays, hashes, procs, fibers, ...) unbox via
-   emit_unbox_text: a string reads `.v.s` (a nil box has a zeroed union, so this
-   is NULL and `String?` round-trips); a pointer reads `(T *)(...).v.p`. The few
-   by-value types (Range/Time/Complex/...) have no `.v.p` form, so they fall back
-   to a plain emit (no coercion was applied for them before either, and no such
-   poly-bodied return arises). Used where a method's RBS return type is narrower
-   than its poly body value (#1417). */
+   emit_unbox_text: a string goes through sp_poly_unbox_s (a nil box has a
+   zeroed union, so this is NULL and `String?` round-trips); a pointer reads
+   `(T *)(...).v.p`. The few by-value types (Range/Time/Complex/...) have no
+   `.v.p` form, so they fall back to a plain emit (no coercion was applied for
+   them before either, and no such poly-bodied return arises). Used where a
+   method's RBS return type is narrower than its poly body value (#1417). */
 static void emit_unbox_node(Compiler *c, TyKind t, int node, Buf *b) {
   /* When the slot being narrowed into is a SEEDED return, the narrowing is the
      moment the seed's truth becomes checkable, so it carries the assertion --
@@ -8873,7 +8873,7 @@ else {
           int htmp = ++g_tmp;
           buf_printf(b, "{ sp_RbVal _t%d = sp_%sHash_get(_t%d, ", htmp, hn, thash);
           emit_expr(c, pkey, b); buf_puts(b, "); ");
-          if (hpltype == TY_STRING) buf_printf(b, "lv_%s = _t%d.v.s; }\n", lnm, htmp);
+          if (hpltype == TY_STRING) buf_printf(b, "lv_%s = sp_poly_unbox_s(_t%d); }\n", lnm, htmp);
           else if (hpltype == TY_INT) buf_printf(b, "lv_%s = _t%d.v.i; }\n", lnm, htmp);
           else if (hpltype == TY_FLOAT) buf_printf(b, "lv_%s = _t%d.v.f; }\n", lnm, htmp);
           else if (hpltype == TY_BOOL) buf_printf(b, "lv_%s = _t%d.v.b; }\n", lnm, htmp);
