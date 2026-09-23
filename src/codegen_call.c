@@ -5568,7 +5568,30 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
          candidate, as the choice to emit a dispatch at all always has. */
       if (is_call && (c->classes[k].instantiated || class_is_prim_reopen(c, k))) ncall_arm++;
     }
-    if (ncand > 0 || is_lengthlike || is_pred || is_class_named || is_class_reflect || is_ostruct || is_io_rewind || is_poly_to_a || is_poly_to_h) {
+    /* The builtin emitters stand down for a name any reachable user class
+       owns, and they do it by NAME: user_defines_or_reads takes no arity.
+       This gate asked whether a user class is a candidate AT THIS CALL
+       SITE'S ARITY. The two disagree exactly when the colliding class
+       defines the name with a different signature -- `def scan(a, b)`
+       against a `str.scan("b")` call site -- and there the call had nowhere
+       left to go: the builtin emitter had already declined it, and the
+       dispatch declined it too, so it fell through to a NoMethodError for a
+       method the receiver has.
+
+       Three fixes patched this one name family at a time by naming the
+       numeric methods in the gate (is_numeric_poly_arm, whose table is
+       above). They were a piece of this: the same hole swallowed
+       `str.start_with?`, `arr.flatten`, `h.default`, `(1..5).size`,
+       `sym.to_sym` and a dozen more, none of them numeric, none of them
+       ever reported. Asking the same question the emitters asked closes it
+       for every name at once, and costs a call they already make.
+
+       Opening the switch with no user arm at this arity is safe: the arms
+       are per class and per arity as before, and a name with no builtin arm
+       either lands on the switch's own raising default, which is the answer
+       it had. */
+    int name_taken = user_defines_or_reads(c, name);
+    if (ncand > 0 || name_taken || is_lengthlike || is_pred || is_class_named || is_class_reflect || is_ostruct || is_io_rewind || is_poly_to_a || is_poly_to_h) {
       TyKind ret = comp_ntype(c, id);
       /* an OpenStruct member is a boxed value; but when analyze typed the
          call concretely (a user method OR reader/alias resolves the name --
@@ -6717,7 +6740,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        here, and the call fell through to the "no candidates" NoMethodError
        two frames up rather than reaching the numeric default arm below. */
     int is_numeric_poly_arm = poly_num_arm(name, argc) >= 0;
-    if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_numeric_poly_arm) {
+    /* see the zero-argument gate's own note: the emitters stand down by
+       name, so the dispatch has to open by name too */
+    int name_taken2 = user_defines_or_reads(c, name);
+    if (ncand > 0 || name_taken2 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_numeric_poly_arm) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
       /* `x = v` through a writer: the value is v as written, so the arms call
