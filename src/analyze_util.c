@@ -1300,7 +1300,30 @@ int yield_value_diverges(Compiler *c, int mi) {
   int sv = g_yvt_unify_all; g_yvt_unify_all = 1;
   TyKind t = yield_value_type(c, mi);
   g_yvt_unify_all = sv;
-  return t == TY_POLY;
+  if (t == TY_POLY) return 1;
+  /* Asking whether the UNION is poly misses the disagreements ty_unify can
+     absorb, and a nil one it always can: `nil` joined to a String is a
+     nullable String, to an Integer a nullable Integer. So a method yielded to
+     from two sites, one block answering a value and the other answering
+     nothing, read as agreeing -- and the per-site scan then handed the FIRST
+     site's type to every site, so the other's value was typed from it. With
+     the nil site first, `Tempfile.create { ... find(path) }` answered nil for
+     a block that plainly returns a String, and nothing was reported (#4819).
+     Compare the sites themselves instead: two that answer different types
+     diverge whether or not a union exists for them. */
+  {
+    int tails[32];
+    int nsite = yield_block_tails(c, mi, tails, 32);
+    TyKind seen = TY_UNKNOWN; int have = 0;
+    for (int i = 0; i < nsite; i++) {
+      TyKind bt = tails[i] >= 0 ? infer_type(c, tails[i]) : TY_NIL;
+      if (bt == TY_VOID) bt = TY_NIL;
+      if (bt == TY_UNKNOWN) continue;
+      if (!have) { seen = bt; have = 1; continue; }
+      if (bt != seen) return 1;
+    }
+  }
+  return 0;
 }
 /* The value type `node` contributes to an accumulator, widened to poly when it
    is a `yield` whose enclosing method's block value type diverges across call
