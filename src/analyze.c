@@ -13989,6 +13989,43 @@ void analyze_program(Compiler *c) {
         }
         if (!changed) break;
       }
+      /* The same for a parent that keeps a named `&blk`: a super that brings no
+         block of its own hands the parent the block this method was called
+         with, declared or not. Without a block parameter to hold it that block
+         was dropped, and the parent answered as if called without one (#4852).
+         The method takes a synthetic one, which its callers fill as they fill
+         any `&blk`. */
+      char *bare_super = (char *)calloc((size_t)ns, 1);
+      if (bare_super) {
+        for (int id = 0; id < c->nt->count; id++) {
+          const char *ty = nt_type(c->nt, id);
+          if (!ty || (!sp_streq(ty, "SuperNode") && !sp_streq(ty, "ForwardingSuperNode"))) continue;
+          if (nt_ref(c->nt, id, "block") >= 0) continue;
+          Scope *sc = comp_scope_of(c, id);
+          int idx = sc ? (int)(sc - c->scopes) : -1;
+          if (idx >= 0 && idx < ns) bare_super[idx] = 1;
+        }
+        for (int round = 0; round < 8; round++) {
+          int changed = 0;
+          for (int i = 0; i < ns; i++) {
+            Scope *s = &c->scopes[i];
+            if (s->yields || s->blk_param || !bare_super[i] || s->class_id < 0 || !s->name) continue;
+            int p = c->classes[s->class_id].parent;
+            if (p < 0) continue;
+            int mi = s->is_cmethod ? comp_cmethod_in_chain(c, p, s->name, NULL)
+                                   : comp_method_in_chain(c, p, s->name, NULL);
+            if (mi < 0 || mi >= ns) continue;
+            Scope *pm = &c->scopes[mi];
+            if (!pm->blk_param || !pm->blk_param[0] || pm->yields) continue;
+            s->blk_param = strdup("__sblk__");
+            LocalVar *sblk = scope_local_intern(s, s->blk_param);
+            if (sblk) { sblk->type = TY_PROC; sblk->is_param = 1; }
+            changed = 1;
+          }
+          if (!changed) break;
+        }
+        free(bare_super);
+      }
       free(has_super);
     }
   }

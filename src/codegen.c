@@ -7655,6 +7655,91 @@ static void emit_marshal_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "  *ok = 0; return sp_box_nil();\n}\n");
 }
 
+/* A parent parameter a bare `super` has no argument for: `*rest` takes an
+   empty Array and `**kw` an empty Hash, as CRuby binds them; any other slot
+   takes its default. emit_arg_or_default knows no rest kinds, so both came out
+   as a NULL the callee read back as nil (#4852). Each empty is rooted in the
+   prelude: the next one allocates before the callee roots its parameters. */
+static void emit_zsuper_param_fill(Compiler *c, Scope *pm, int i, Buf *b) {
+  int is_rest = i == pm->rest_idx, is_kwrest = i == pm->kwrest_idx;
+  if (!is_rest && !is_kwrest) { emit_arg_or_default(c, pm, i, -1, b); return; }
+  LocalVar *p = pm->pnames[i] ? scope_local(pm, pm->pnames[i]) : NULL;
+  int poly = !p || p->type == TY_POLY || p->type == TY_UNKNOWN;
+  const char *cty = is_rest ? "sp_PolyArray" : "sp_SymPolyHash";
+  int t = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "%s *_t%d = %s_new();\n", cty, t, cty);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+  char tn[24]; snprintf(tn, sizeof tn, "_t%d", t);
+  if (poly) emit_boxed_text(c, is_rest ? TY_POLY_ARRAY : TY_SYM_POLY_HASH, tn, b);
+  else buf_puts(b, tn);
+}
+
+/* How many leading positional parameters a bare `super`'s method forwards
+   into the parent's `*rest` when it has more of them than the parent takes
+   before it, or -1 when the plain slot-by-slot forward applies. CRuby hands
+   zsuper the method's positionals as an argument list, so `def m(x, y) =
+   super` into `def m(x, *rest)` binds rest to [y]; forwarding by slot passed
+   the bare y where the parent's C function takes an Array (#4852). A parent
+   with required parameters after its rest keeps the slot-by-slot forward. */
+static int zsuper_rest_surplus(Compiler *c, Scope *s, Scope *pm) {
+  if (pm->rest_idx < 0 || pm->npost_rest > 0) return -1;
+  int npos = 0;
+  while (npos < s->nparams && npos != s->rest_idx && npos != s->kwrest_idx &&
+         !callee_param_is_declared_kwarg(c, s, s->pnames[npos])) npos++;
+  return npos > pm->rest_idx ? npos : -1;
+}
+
+/* The parent's `*rest` for zsuper_rest_surplus: the method's positionals
+   from the rest's index on, boxed into one Array rooted in the prelude. */
+static void emit_zsuper_rest_pack(Compiler *c, Scope *s, Scope *pm, int npos, Buf *b) {
+  int t = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new();\n", t);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+  for (int i = pm->rest_idx; i < npos; i++) {
+    LocalVar *ep = scope_local(s, s->pnames[i]);
+    TyKind et = ep && ep->type != TY_UNKNOWN ? ep->type : TY_POLY;
+    char txt[128]; snprintf(txt, sizeof txt, "lv_%s", rename_local(s->pnames[i]));
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", t);
+    if (et == TY_POLY) buf_puts(g_pre, txt);
+    else emit_boxed_text(c, et, txt, g_pre);
+    buf_puts(g_pre, ");\n");
+  }
+  LocalVar *rp = scope_local(pm, pm->pnames[pm->rest_idx]);
+  char tn[24]; snprintf(tn, sizeof tn, "_t%d", t);
+  if (!rp || rp->type == TY_POLY || rp->type == TY_UNKNOWN) emit_boxed_text(c, TY_POLY_ARRAY, tn, b);
+  else buf_puts(b, tn);
+}
+
+/* The trailing `&blk` slot of a `super` call: the parent's C function takes
+   one whenever it keeps a named block parameter, and the call left it out
+   (#4852). The call's own block goes there -- a literal as a proc, a `&proc`
+   as itself -- and without one the caller's block is forwarded, as CRuby's
+   super does with or without arguments; a caller with no block passes NULL. */
+static void emit_super_block_arg(Compiler *c, int id, Scope *s, Scope *pm, int lead_comma, Buf *b) {
+  if (!pm->blk_param || !pm->blk_param[0] || pm->yields) return;
+  if (lead_comma) buf_puts(b, ", ");
+  int blk = nt_ref(c->nt, id, "block");
+  const char *bty = blk >= 0 ? nt_type(c->nt, blk) : NULL;
+  if (bty && sp_streq(bty, "BlockNode")) { emit_proc_literal(c, blk, b); return; }
+  if (bty && sp_streq(bty, "BlockArgumentNode")) {
+    int fe = nt_ref(c->nt, blk, "expression");
+    if (fe >= 0) {
+      if (comp_ntype(c, fe) == TY_PROC) emit_expr(c, fe, b);
+      else if (sp_streq(nt_type(c->nt, fe), "NilNode")) buf_puts(b, "NULL");
+      else unsupported(c, blk, "super with a block argument that is not a proc");
+      return;
+    }
+  }
+  if (s->blk_param && s->blk_param[0] && !s->yields)
+    buf_printf(b, "lv_%s", rename_local(s->blk_param));
+  else buf_puts(b, "NULL");
+}
+
 /* Inline super { block } when the parent method uses yield.
    Returns 1 if the expansion was emitted, 0 if it should fall through to a
    regular function call (parent doesn't yield, has early return, etc.). */
@@ -7675,7 +7760,18 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   /* A bare `super` forwards the caller's block, which is the one currently
      being spliced into this (inlined) method. */
   if (block < 0) block = g_block_id;
-  if (block < 0) return 0;
+  /* No block to splice: the parent is still only ever inlined (a yielding
+     method has no C function of its own), and the call to an undefined
+     sp_<Cls>_<m> did not link (#4852). A caller holding its block as a proc
+     -- a declared `&blk`, or the one a super into a block-taking parent
+     synthesizes -- drives the parent's yields through that proc, as an
+     inlined `inner(&blk)` does; with neither, `block_given?` folds false. */
+  char yprocbuf[128];
+  const char *fwd_yield_proc = NULL;
+  if (block < 0 && s->blk_param && s->blk_param[0] && !s->yields) {
+    snprintf(yprocbuf, sizeof yprocbuf, "lv_%s", rename_local(s->blk_param));
+    fwd_yield_proc = yprocbuf;
+  }
   if (g_nren + m->nlocals >= MAX_RENAME) return 0;
   for (int i = 0; i < m->nlocals; i++) {
     LocalVar *lv = &m->locals[i];
@@ -7706,6 +7802,12 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_block_brk_exc_base = (block == saved_block) ? saved_bbexc : saved_bexc;
   g_brk_ser_var = NULL;
   g_block_param_name = m->blk_param;
+  const char *saved_ypr = g_yield_proc_ref;
+  TyKind saved_yslot = g_yield_slot_ty;
+  if (fwd_yield_proc) {
+    g_yield_proc_ref = fwd_yield_proc;
+    g_yield_slot_ty = as_expr ? comp_ntype(c, id) : TY_UNKNOWN;
+  }
 
   if (as_expr) buf_puts(b, "({\n");
   else { emit_indent(b, indent); buf_puts(b, "{\n"); }
@@ -7726,13 +7828,15 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   int args = nt_ref(c->nt, id, "arguments");
   int argc = 0;
   const int *argv = args >= 0 ? nt_arr(c->nt, args, "arguments", &argc) : NULL;
+  int surplus = is_forwarding ? zsuper_rest_surplus(c, s, m) : -1;
   for (int i = 0; i < m->nparams; i++) {
     emit_indent(b, din);
     { char rn[128]; snprintf(rn, sizeof rn, "_y%d_%s", tag, m->pnames[i]);
       emit_inlined_param_target(c, m, m->pnames[i], rn, b); }
     int sv = g_nren; g_nren = saved_nren;
     if (is_forwarding) {
-      if (i < s->nparams) {
+      if (surplus >= 0 && i == m->rest_idx) emit_zsuper_rest_pack(c, s, m, surplus, b);
+      else if (i < s->nparams && (surplus < 0 || i < m->rest_idx)) {
         /* the forwarded local carries the CHILD's type; box it when the
            parent's slot is boxed, as the ordinary inline binder does */
         LocalVar *ep = scope_local(s, s->pnames[i]);
@@ -7743,7 +7847,7 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
         if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, b);
         else buf_puts(b, txt);
       }
-      else { g_nren = sv; emit_arg_or_default(c, m, i, -1, b); sv = g_nren; }
+      else { g_nren = sv; emit_zsuper_param_fill(c, m, i, b); sv = g_nren; }
     }
     else {
       emit_arg_or_default(c, m, i, i < argc ? argv[i] : -1, b);
@@ -7779,6 +7883,7 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_block_brk_ebase = saved_bbe; g_yield_blk_brk_efallback = saved_yfbe;
   g_block_brk_exc_base = saved_bbexc; g_brk_exc_base = saved_bexc;
   g_brk_ser_var = saved_ser; g_brk_ensure_base = saved_ebase;
+  g_yield_proc_ref = saved_ypr; g_yield_slot_ty = saved_yslot;
   return 1;
 }
 
@@ -7832,6 +7937,8 @@ void emit_super(Compiler *c, int id, Buf *b) {
     if (ty && sp_streq(ty, "ForwardingSuperNode")) {
       Scope *pm = &c->scopes[cmi];
       int n = s->nparams < pm->nparams ? s->nparams : pm->nparams;
+      int surplus = zsuper_rest_surplus(c, s, pm);
+      if (surplus >= 0) n = pm->rest_idx;
       for (int i = 0; i < n; i++) {
         LocalVar *src = scope_local(s, s->pnames[i]);
         LocalVar *dst = scope_local(pm, pm->pnames[i]);
@@ -7849,10 +7956,13 @@ void emit_super(Compiler *c, int id, Buf *b) {
       /* the parent's extra parameters take their defaults (#4852) */
       for (int i = n; i < pm->nparams; i++) {
         buf_puts(b, i == 0 ? "" : ", ");
-        emit_arg_or_default(c, pm, i, -1, b);
+        if (surplus >= 0 && i == pm->rest_idx) emit_zsuper_rest_pack(c, s, pm, surplus, b);
+        else emit_zsuper_param_fill(c, pm, i, b);
       }
     }
     else emit_args_filled(c, cmi, nt_ref(c->nt, id, "arguments"), "", b);
+    emit_super_block_arg(c, id, s, &c->scopes[cmi],
+                         c->scopes[cmi].nparams > 0 || cmethod_takes_self_cls(c, cmi), b);
     buf_puts(b, ")");
     return;
   }
@@ -8011,6 +8121,8 @@ void emit_super(Compiler *c, int id, Buf *b) {
   if (ty && sp_streq(ty, "ForwardingSuperNode")) {
     Scope *pm = &c->scopes[mi];
     int n = s->nparams < pm->nparams ? s->nparams : pm->nparams;
+    int surplus = zsuper_rest_surplus(c, s, pm);
+    if (surplus >= 0) n = pm->rest_idx;
     for (int i = 0; i < n; i++) {
       LocalVar *src = scope_local(s, s->pnames[i]);
       LocalVar *dst = scope_local(pm, pm->pnames[i]);
@@ -8036,12 +8148,14 @@ void emit_super(Compiler *c, int id, Buf *b) {
        count and the C had too few arguments (#4852). */
     for (int i = n; i < pm->nparams; i++) {
       buf_puts(b, ", ");
-      emit_arg_or_default(c, pm, i, -1, b);
+      if (surplus >= 0 && i == pm->rest_idx) emit_zsuper_rest_pack(c, s, pm, surplus, b);
+      else emit_zsuper_param_fill(c, pm, i, b);
     }
   }
   else {
     emit_args_filled(c, mi, nt_ref(c->nt, id, "arguments"), ", ", b);
   }
+  emit_super_block_arg(c, id, s, &c->scopes[mi], 1, b);
   buf_puts(b, ")");
 }
 
