@@ -3377,33 +3377,67 @@ static char *rewrite_syntax_sugar(char *source) {
       size_t j3 = i + 13 + (plural ? 1 : 0);
       while (j3 < len && (source[j3] == ' ' || source[j3] == '(')) j3++;
       if ((pv3 == '\n' || pv3 == ';') && j3 < len && source[j3] == ':') {
-        /* parse the symbol list on this line */
-        char syms[17][160]; int nsym = 0;
+        /* parse the symbol list. It may continue onto following lines --
+           after a trailing comma, inside the call's parentheses, or after a
+           backslash -- as CRuby reads it; those newlines are counted and
+           re-emitted after the rewrite so the line count is preserved. Only
+           the methods on the first line were defined before, and the rest
+           were dropped silently or left as a stray expression (#4822). */
+        int paren3 = 0;
+        { size_t pj = i + 13 + (plural ? 1 : 0);
+          while (pj < j3) { if (source[pj] == '(') paren3++; pj++; } }
+        size_t symcap = 16; int nsym = 0;
+        char (*syms)[160] = malloc(sizeof(*syms) * symcap);
+        if (!syms) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
+        int nl3 = 0, bad3 = 0;
         size_t k3 = j3;
-        while (k3 < len && source[k3] != '\n' && nsym < 17) {
-          while (k3 < len && (source[k3] == ' ' || source[k3] == ',' ||
-                              source[k3] == '(' || source[k3] == ')')) k3++;
+        int after_comma = 0;
+        while (k3 < len) {
+          /* separators, and a line break where the list continues */
+          while (k3 < len) {
+            char ch = source[k3];
+            if (ch == ' ' || ch == '\t' || ch == '\r') { k3++; continue; }
+            if (ch == ',') { after_comma = 1; k3++; continue; }
+            if (ch == '(') { paren3++; k3++; continue; }
+            if (ch == ')') { if (paren3 > 0) paren3--; k3++; continue; }
+            if (ch == '\\' && k3 + 1 < len && source[k3 + 1] == '\n') { nl3++; k3 += 2; continue; }
+            if (ch == '\n' && (after_comma || paren3 > 0)) { nl3++; k3++; continue; }
+            break;
+          }
           if (k3 >= len || source[k3] != ':') break;
+          after_comma = 0;
           k3++;
           size_t s3 = k3;
           if (k3 < len && source[k3] == '@') k3++;
           while (k3 < len && sp_is_method_name_char(source[k3])) k3++;
           size_t l3 = k3 - s3;
-          if (l3 == 0 || l3 >= sizeof(syms[0])) { nsym = 0; break; }
+          if (l3 == 0 || l3 >= sizeof(syms[0])) { bad3 = 1; break; }
+          if ((size_t)nsym == symcap) {
+            symcap *= 2;
+            char (*ns)[160] = realloc(syms, sizeof(*syms) * symcap);
+            if (!ns) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
+            syms = ns;
+          }
           memcpy(syms[nsym], source + s3, l3);
           syms[nsym][l3] = 0;
           nsym++;
         }
+        if (bad3) nsym = 0;
         /* trailing junk after the list (a real expression) -> leave alone */
         size_t t3 = k3;
         while (t3 < len && (source[t3] == ' ' || source[t3] == ')' ||
                             source[t3] == '\r')) t3++;
-        int clean = (t3 >= len || source[t3] == '\n' || source[t3] == '#');
-        int min_syms = plural ? 2 : 2;
-        int max_syms = plural ? 17 : 3;
+        int clean = paren3 == 0 && !after_comma &&
+                    (t3 >= len || source[t3] == '\n' || source[t3] == '#');
+        int min_syms = 2;
+        int max_syms = plural ? nsym : 3;
+        char *line3 = NULL;
         if (nsym >= min_syms && nsym <= max_syms && clean) {
           const char *recvtxt = syms[0];
-          char line3[2048]; line3[0] = 0;
+          size_t cap3 = 64 + (size_t)nsym * 512;
+          line3 = malloc(cap3);
+          if (!line3) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
+          line3[0] = 0;
           /* One forwarding def. A setter alias (`:timer_a=`) cannot be an
              endless def (the grammar forbids `def x=(v) = ...`), so it is a
              one-line classic def whose body is the assignment: the same
@@ -3422,23 +3456,28 @@ static char *rewrite_syntax_sugar(char *source) {
           if (!plural) {
             const char *meth3 = syms[1];
             const char *als3 = nsym == 3 ? syms[2] : syms[1];
-            FW_DEF(line3, sizeof line3, als3, meth3);
+            FW_DEF(line3, cap3, als3, meth3);
           }
           else {
             size_t off3 = 0;
             for (int q3 = 1; q3 < nsym; q3++) {
-              if (q3 > 1) { off3 += (size_t)snprintf(line3 + off3, sizeof line3 - off3, "; "); }
-              if (off3 < sizeof line3 - 1) { FW_DEF(line3 + off3, sizeof line3 - off3, syms[q3], syms[q3]); off3 += strlen(line3 + off3); }
-              if (off3 >= sizeof line3 - 1) { line3[0] = 0; break; }
+              if (q3 > 1) { off3 += (size_t)snprintf(line3 + off3, cap3 - off3, "; "); }
+              FW_DEF(line3 + off3, cap3 - off3, syms[q3], syms[q3]);
+              off3 += strlen(line3 + off3);
             }
           }
           #undef FW_DEF
-          if (line3[0]) {
-            OUT_STR(line3);
-            i = t3;   /* resume at end-of-line remainder (newline/comment) */
-            continue;
-          }
         }
+        free(syms);
+        if (line3 && line3[0]) {
+          OUT_STR(line3);
+          free(line3);
+          /* the continuation lines the list spanned, as blank lines */
+          for (int q3 = 0; q3 < nl3; q3++) OUT_STR("\n");
+          i = t3;   /* resume at end-of-line remainder (newline/comment) */
+          continue;
+        }
+        free(line3);
       }
     }
     /* `.__send__(...)` is not rewritten here either. It used to be, on the

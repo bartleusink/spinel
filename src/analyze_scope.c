@@ -3545,9 +3545,40 @@ static void check_class_redeclarations(Compiler *c) {
 }
 
 /* Resolve each class's superclass index from its ClassNode. */
+/* Forwardable's def_delegator / def_delegators are rewritten by the parser
+   into forwarding defs when their arguments are a literal symbol list
+   (spinel_parse.c). A call that is still here is one that rewrite could not
+   read -- a splatted or computed name list, a string receiver -- and the
+   bundled Forwardable module is empty, so it defined nothing and every
+   delegated call raised NoMethodError at run time (#4822). Refuse it where
+   it is written instead. */
+static void check_unrewritten_delegators(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    if (nt_ref(nt, id, "receiver") >= 0) continue;
+    const char *nm = nt_str(nt, id, "name");
+    /* the def_* spellings only: `delegate` is an ordinary name elsewhere */
+    if (!nm || (!sp_streq(nm, "def_delegator") && !sp_streq(nm, "def_delegators") &&
+                !sp_streq(nm, "def_instance_delegator") &&
+                !sp_streq(nm, "def_instance_delegators")))
+      continue;
+    /* a program that defines the name itself is calling its own method */
+    int user = 0;
+    for (int k = 0; k < c->nclasses && !user; k++)
+      if (comp_cmethod_in_class(c, k, nm) >= 0 || comp_method_in_class(c, k, nm) >= 0) user = 1;
+    if (user) continue;
+    char msg[256];
+    snprintf(msg, sizeof msg,
+             "%s with arguments other than a literal symbol list is not supported "
+             "(write the names as symbols: `%s :@target, :name, ...`)", nm, nm);
+    unsupported_feature(c, id, msg);
+  }
+}
+
 void resolve_parents(Compiler *c) {
   check_class_redeclarations(c);
   check_blk_param_writes(c);
+  check_unrewritten_delegators(c);
   const NodeTable *nt = c->nt;
   for (int i = 0; i < c->nclasses; i++) {
     int sc = nt_ref(nt, c->classes[i].def_node, "superclass");

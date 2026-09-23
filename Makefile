@@ -992,6 +992,11 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (#4480: a typed array copied into a mutated general-Array parameter compiled)"; ok=0; \
 	else grep -q "which the method mutates" "$$tmp/tp.out" || \
 	  { echo "reject-test: FAIL (#4480: rejected without saying why)"; sed -n 1,5p "$$tmp/tp.out"; ok=0; }; fi; \
+	t=test/reject/def_delegators_splat.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/dd.c" >"$$tmp/dd.out" 2>&1; then \
+	  echo "reject-test: FAIL (a def_delegators the parser could not rewrite compiled)"; ok=0; \
+	else grep -q "def_delegators with arguments other than a literal symbol list" "$$tmp/dd.out" || \
+	  { echo "reject-test: FAIL (a def_delegators refused without saying why)"; sed -n 1,5p "$$tmp/dd.out"; ok=0; }; fi; \
 	t=test/reject/block_param_assigned.rb; \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/bp.c" >"$$tmp/bp.out" 2>&1; then \
 	  echo "reject-test: FAIL (an assignment to a &block parameter compiled)"; ok=0; \
