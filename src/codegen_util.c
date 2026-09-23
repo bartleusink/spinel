@@ -2589,7 +2589,13 @@ void emit_node_or_tmp(Compiler *c, int node, int tmp, Buf *b) {
    first. */
 void emit_gc_root_var(Compiler *c, TyKind t, const char *name, Buf *b) {
   if (!ty_gc_rootable(c, t)) return;
-  buf_printf(b, t == TY_POLY ? "SP_GC_ROOT_RBVAL(%s);" : "SP_GC_ROOT(%s);", name);
+  /* a String slot takes the string form: a builder's buffer (marker 0xfd) is
+     kept alive by the handle in front of it, which only sp_mark_string
+     reaches; the object form's header walk skips the buffer, and reads a
+     freed one once the handle is gone (see emit_local_decl) */
+  if (t == TY_POLY) buf_printf(b, "SP_GC_ROOT_RBVAL(%s);", name);
+  else if (t == TY_STRING) buf_printf(b, "SP_GC_ROOT_STR(%s);", name);
+  else buf_printf(b, "SP_GC_ROOT(%s);", name);
 }
 void emit_gc_root_tmp(Compiler *c, TyKind t, int tmp, Buf *b) {
   char name[24]; snprintf(name, sizeof name, "_t%d", tmp);
