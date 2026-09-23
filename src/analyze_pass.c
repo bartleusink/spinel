@@ -8398,6 +8398,16 @@ int infer_block_params(Compiler *c) {
       Scope *hs = comp_scope_of(c, block);
       LocalVar *vp = scope_local_intern(hs, p0); vp->is_block_param = 1;
       TyKind want = sp_streq(name, "each_value") ? ty_hash_val(rt) : ty_hash_key(rt);
+      /* a boxed-value hash whose values are all one class binds that class,
+         decided for the slot as a whole, so it replaces the boxed value type
+         an earlier round joined in (#4846) */
+      if (sp_streq(name, "each_value")) {
+        int hcls = hv_value_class(c, recv);
+        if (hcls >= 0) {
+          if (vp->type != ty_object(hcls)) { vp->type = ty_object(hcls); changed = 1; }
+          continue;
+        }
+      }
       TyKind vm = ty_unify(vp->type, want);
       if (vm != vp->type) { vp->type = vm; changed = 1; }
       continue;

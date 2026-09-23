@@ -17578,7 +17578,42 @@ static int poly_binop_recv_temp(Compiler *c, int recv, int arg, Buf *b, int *stm
   return t;
 }
 
+/* the value read of a one-class hash being emitted in its boxed form */
+static int g_hv_read_node = -1;
+
 static void emit_call_body(Compiler *c, int id, Buf *b) {
+  /* A value read of a boxed-value hash whose values are all one class
+     (hv_value_class): inference typed it as that class, and `values` as an
+     array of it, but the storage is boxed. Emit the read as it always was,
+     then unbox it -- checked, with nil as NULL -- or, for `values`, move the
+     boxed array into an sp_PtrArray of the class (#4846). */
+  {
+    const NodeTable *hnt = c->nt;
+    int hrecv = nt_ref(hnt, id, "receiver");
+    TyKind hwant = comp_ntype(c, id);
+    const char *hn = nt_str(hnt, id, "name");
+    if (hrecv >= 0 && g_hv_read_node != id && hn && nt_ref(hnt, id, "block") < 0 &&
+        (ty_is_object(hwant) || ty_is_obj_array(hwant)) &&
+        (sp_streq(hn, "[]") || sp_streq(hn, "fetch") || sp_streq(hn, "delete") ||
+         sp_streq(hn, "values"))) {
+      TyKind hrt = comp_ntype(c, hrecv);
+      if ((hrt == TY_STR_POLY_HASH || hrt == TY_SYM_POLY_HASH || hrt == TY_POLY_POLY_HASH) &&
+          hv_value_class(c, hrecv) >= 0) {
+        int is_values = sp_streq(hn, "values");
+        int sv_node = g_hv_read_node; g_hv_read_node = id;
+        TyKind sv_ty = c->ntype[id];
+        c->ntype[id] = is_values ? TY_POLY_ARRAY : TY_POLY;
+        Buf inner; memset(&inner, 0, sizeof inner);
+        emit_call(c, id, &inner);
+        c->ntype[id] = sv_ty;
+        g_hv_read_node = sv_node;
+        if (is_values) buf_printf(b, "sp_PolyArray_to_obj_ptr(%s)", inner.p ? inner.p : "NULL");
+        else emit_unbox_text(c, hwant, inner.p ? inner.p : "sp_box_nil()", b);
+        free(inner.p);
+        return;
+      }
+    }
+  }
   /* deep-return pickup (#3227 P6): a marked receiverless call to a method
      whose every return path yields a shared handle -- reset the side
      channel, run the ordinary call (its shared-slot tail read publishes),

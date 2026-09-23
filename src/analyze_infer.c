@@ -227,6 +227,197 @@ int an_user_defines_or_reads(Compiler *c, const char *name) {
 }
 
 void sp_narrow_memo_bump(void) { g_narrow_gen++; }
+
+/* ---- A hash whose values are all one class (#4846) ----
+   `@items = {}` filled only by `@items[k] = item` keeps boxed values (there is
+   no object-valued hash kind), so every read of a value was poly and every
+   call on it a switch over each class answering the name -- the K^2 term of
+   #4847's synthetic program. When every value written into such a slot is
+   an instance of one class (or nil), and the slot is only ever the receiver
+   of a known set of hash operations, the READS are typed as that class: the
+   storage stays boxed, and codegen unboxes each read with the class check
+   emit_unbox_text already makes.
+
+   A slot is an ivar (keyed by the root class of its hierarchy, which shares
+   the storage) or a local (keyed by its scope). It is kept only while:
+     - every assignment to it is an empty `{}`;
+     - every read of it is the receiver of one of the operations below;
+     - every `[]=` / `store` into it writes an object of one class (never nil);
+     - for an ivar, no module method, class method or class body names it.
+   Computed once per fixpoint round, over the whole table. */
+typedef struct { int kind, owner; const char *name; int cls; int bad; int writes; } HvSlot;
+static HvSlot *g_hv = NULL;
+static int g_hv_n = 0, g_hv_cap = 0;
+static unsigned g_hv_gen = 0;
+static int g_hv_building = 0;
+static const NodeTable *g_hv_nt = NULL;
+
+static int hv_root_class(Compiler *c, int cid) {
+  int guard = 0;
+  while (cid >= 0 && c->classes[cid].parent >= 0 && guard++ < 1000) cid = c->classes[cid].parent;
+  return cid;
+}
+/* The slot a read or write node names: kind 0 ivar (owner = root class), kind
+   1 local (owner = scope). 0 when it is neither, or an ivar outside an
+   instance method (poisoned by the caller). */
+static int hv_slot_key(Compiler *c, int node, int *kind, int *owner, const char **name, int *outside) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  *outside = 0;
+  *name = nt_str(nt, node, "name");
+  if (!*name) return 0;
+  Scope *sc = comp_scope_of(c, node);
+  if (k == NK_InstanceVariableReadNode || k == NK_InstanceVariableWriteNode ||
+      k == NK_InstanceVariableOrWriteNode || k == NK_InstanceVariableAndWriteNode ||
+      k == NK_InstanceVariableOperatorWriteNode || k == NK_InstanceVariableTargetNode) {
+    if (!sc || !sc->name || sc->is_cmethod || sc->class_id < 0 ||
+        comp_class_is_module(c, &c->classes[sc->class_id])) { *outside = 1; return 0; }
+    *kind = 0; *owner = hv_root_class(c, sc->class_id); return 1;
+  }
+  if (k == NK_LocalVariableReadNode || k == NK_LocalVariableWriteNode ||
+      k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode ||
+      k == NK_LocalVariableOperatorWriteNode || k == NK_LocalVariableTargetNode) {
+    if (!sc) return 0;
+    *kind = 1; *owner = (int)(sc - c->scopes); return 1;
+  }
+  return 0;
+}
+static HvSlot *hv_find(int kind, int owner, const char *name, int create) {
+  for (int i = 0; i < g_hv_n; i++)
+    if (g_hv[i].kind == kind && g_hv[i].owner == owner && sp_streq(g_hv[i].name, name)) return &g_hv[i];
+  if (!create) return NULL;
+  if (g_hv_n == g_hv_cap) {
+    g_hv_cap = g_hv_cap ? g_hv_cap * 2 : 64;
+    g_hv = realloc(g_hv, sizeof(HvSlot) * (size_t)g_hv_cap);
+    if (!g_hv) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  }
+  HvSlot *h = &g_hv[g_hv_n++];
+  h->kind = kind; h->owner = owner; h->name = name; h->cls = -1; h->bad = 0; h->writes = 0;
+  return h;
+}
+/* The hash operations a slot may be the receiver of, with their argument and
+   block shapes. `[]=` / `store` are the writes. */
+static int hv_op_ok(const NodeTable *nt, int call) {
+  const char *nm = nt_str(nt, call, "name");
+  if (!nm) return 0;
+  int a = nt_ref(nt, call, "arguments");
+  int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  for (int i = 0; i < an; i++) {
+    NodeKind ak = nt_kind(nt, av[i]);
+    if (ak == NK_SplatNode || ak == NK_KeywordHashNode || ak == NK_BlockArgumentNode) return 0;
+  }
+  int blk = nt_ref(nt, call, "block");
+  int has_blk = blk >= 0 && nt_kind(nt, blk) == NK_BlockNode;
+  if (blk >= 0 && !has_blk) return 0;
+  if ((sp_streq(nm, "[]=") || sp_streq(nm, "store")) && an == 2 && !has_blk) return 2;
+  if ((sp_streq(nm, "[]") || sp_streq(nm, "delete")) && an == 1 && !has_blk) return 1;
+  if (sp_streq(nm, "fetch") && an == 1 && !has_blk) return 1;
+  if ((sp_streq(nm, "key?") || sp_streq(nm, "has_key?") || sp_streq(nm, "include?") ||
+       sp_streq(nm, "member?")) && an == 1 && !has_blk) return 1;
+  if ((sp_streq(nm, "size") || sp_streq(nm, "length") || sp_streq(nm, "empty?") ||
+       sp_streq(nm, "keys") || sp_streq(nm, "values") || sp_streq(nm, "clear")) && an == 0 && !has_blk) return 1;
+  if (sp_streq(nm, "each_value") && an == 0 && has_blk) return 1;
+  return 0;
+}
+static int hv_is_poly_hash(TyKind t) {
+  return t == TY_STR_POLY_HASH || t == TY_SYM_POLY_HASH || t == TY_POLY_POLY_HASH;
+}
+static void hv_build(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  g_hv_building = 1;
+  g_hv_n = 0;
+  int n = nt->count;
+  unsigned char *ok = calloc((size_t)(n > 0 ? n : 1), 1);
+  if (!ok) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  /* receivers of allowed operations, and the writes' value classes */
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    int r = nt_ref(nt, id, "receiver");
+    if (r < 0) continue;
+    NodeKind rk = nt_kind(nt, r);
+    if (rk != NK_InstanceVariableReadNode && rk != NK_LocalVariableReadNode) continue;
+    int op = hv_op_ok(nt, id);
+    if (!op) continue;
+    ok[r] = 1;
+    if (op != 2) continue;
+    int kind, owner, outside; const char *name;
+    if (!hv_slot_key(c, r, &kind, &owner, &name, &outside)) continue;
+    HvSlot *h = hv_find(kind, owner, name, 1);
+    int a = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = nt_arr(nt, a, "arguments", &an);
+    TyKind vt = infer_type(c, av[1]);
+    h->writes++;
+    /* a nil value would reach each_value / values as a NULL the loop body
+       then calls on; a hash that ever stores nil stays boxed */
+    if (!ty_is_object(vt)) { h->bad = 1; continue; }
+    int vc = ty_object_class(vt);
+    if (h->cls < 0) h->cls = vc;
+    else if (h->cls != vc) h->bad = 1;
+  }
+  /* every other appearance of a slot: a read that is not such a receiver, or
+     an assignment other than an empty `{}`, disqualifies it; an ivar named
+     outside an instance method poisons the name */
+  for (int id = 0; id < n; id++) {
+    NodeKind k = nt_kind(nt, id);
+    int is_read = (k == NK_InstanceVariableReadNode || k == NK_LocalVariableReadNode);
+    int is_ivw = (k == NK_InstanceVariableWriteNode || k == NK_InstanceVariableOrWriteNode ||
+                  k == NK_InstanceVariableAndWriteNode || k == NK_InstanceVariableOperatorWriteNode ||
+                  k == NK_InstanceVariableTargetNode);
+    int is_lvw = (k == NK_LocalVariableWriteNode || k == NK_LocalVariableOrWriteNode ||
+                  k == NK_LocalVariableAndWriteNode || k == NK_LocalVariableOperatorWriteNode ||
+                  k == NK_LocalVariableTargetNode);
+    if (!is_read && !is_ivw && !is_lvw) continue;
+    int kind, owner, outside; const char *name;
+    if (!hv_slot_key(c, id, &kind, &owner, &name, &outside)) {
+      if (outside && name)
+        for (int i = 0; i < g_hv_n; i++)
+          if (g_hv[i].kind == 0 && sp_streq(g_hv[i].name, name)) g_hv[i].bad = 1;
+      continue;
+    }
+    HvSlot *h = hv_find(kind, owner, name, 0);
+    if (!h) continue;
+    if (is_read) { if (!ok[id]) h->bad = 1; continue; }
+    int v = (k == NK_InstanceVariableWriteNode || k == NK_LocalVariableWriteNode) ? nt_ref(nt, id, "value") : -1;
+    int en = -1;
+    if (v >= 0 && nt_kind(nt, v) == NK_HashNode) nt_arr(nt, v, "elements", &en);
+    if (en != 0) h->bad = 1;
+  }
+  /* the name poisoning above only reaches slots already seen; do it again now
+     that every slot exists */
+  for (int id = 0; id < n; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_InstanceVariableReadNode && k != NK_InstanceVariableWriteNode) continue;
+    int kind, owner, outside; const char *name;
+    if (!hv_slot_key(c, id, &kind, &owner, &name, &outside) && outside && name)
+      for (int i = 0; i < g_hv_n; i++)
+        if (g_hv[i].kind == 0 && sp_streq(g_hv[i].name, name)) g_hv[i].bad = 1;
+  }
+  free(ok);
+  g_hv_gen = g_narrow_gen;
+  g_hv_nt = nt;
+  g_hv_building = 0;
+}
+/* The class every value of the hash read by `recv` has, or -1. */
+int hv_value_class(Compiler *c, int recv) {
+  if (recv < 0 || g_hv_building) return -1;
+  NodeKind rk = nt_kind(c->nt, recv);
+  if (rk != NK_InstanceVariableReadNode && rk != NK_LocalVariableReadNode) return -1;
+  if (g_hv_gen != g_narrow_gen || g_hv_nt != c->nt) hv_build(c);
+  int kind, owner, outside; const char *name;
+  if (!hv_slot_key(c, recv, &kind, &owner, &name, &outside)) return -1;
+  HvSlot *h = hv_find(kind, owner, name, 0);
+  if (!h || h->bad || h->cls < 0 || h->writes == 0) return -1;
+  /* the slot must actually be a boxed-value hash */
+  if (kind == 0) {
+    Scope *sc = comp_scope_of(c, recv);
+    int iv = comp_ivar_index(&c->classes[sc->class_id], name);
+    if (iv < 0 || !hv_is_poly_hash(c->classes[sc->class_id].ivar_types[iv])) return -1;
+  }
+  else {
+    LocalVar *lv = scope_local(&c->scopes[owner], name);
+    if (!lv || !hv_is_poly_hash(lv->type)) return -1;
+  }
+  return h->cls;
+}
 static long narrow_key(int which, int cid, const char *ivname) {
   unsigned long h = 1469598103934665603UL ^ (unsigned)which;
   h = (h * 1099511628211UL) ^ (unsigned)cid;
@@ -1445,6 +1636,20 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   if (!g_infer_ignore_brk && call_breaks(c, id)) return TY_POLY;
 
   TyKind rt = recv >= 0 ? infer_type(c, recv) : TY_UNKNOWN;
+  /* A boxed-value hash whose values are all one class: its value reads are
+     that class (nil included, as a NULL pointer), and `values` an array of it
+     (#4846). */
+  if (recv >= 0 && (rt == TY_STR_POLY_HASH || rt == TY_SYM_POLY_HASH || rt == TY_POLY_POLY_HASH)) {
+    const char *hn = nt_str(nt, id, "name");
+    int hargs = nt_ref(nt, id, "arguments");
+    int hac = 0; if (hargs >= 0) nt_arr(nt, hargs, "arguments", &hac);
+    if (hn && nt_ref(nt, id, "block") < 0 &&
+        (((sp_streq(hn, "[]") || sp_streq(hn, "fetch") || sp_streq(hn, "delete")) && hac == 1) ||
+         (sp_streq(hn, "values") && hac == 0))) {
+      int hcls = hv_value_class(c, recv);
+      if (hcls >= 0) return sp_streq(hn, "values") ? ty_obj_array(hcls) : ty_object(hcls);
+    }
+  }
   /* A block call on a poly receiver whose candidates include a YIELDING method
      is served by that method's proc-form clone, which answers poly uniformly
      (its yield is a call on a real proc). This has to precede every

@@ -5319,6 +5319,15 @@ static sp_PolyArray *sp_poly_array_repeat(sp_RbVal a, sp_int n) {
     for (sp_int i = 0; i < len; i++) sp_PolyArray_push(r, src->data[i]);
   return r;
 }
+/* A boxed array whose elements are all objects of one class (or nil), moved
+   into an sp_PtrArray of their pointers: a one-class hash's `values` (#4846). */
+static sp_PtrArray *sp_PolyArray_to_obj_ptr(sp_PolyArray *a) {
+  SP_GC_ROOT(a);
+  sp_PtrArray *r = sp_PtrArray_new(); SP_GC_ROOT(r);
+  for (sp_int i = 0; a && i < a->len; i++)
+    sp_PtrArray_push(r, a->data[i].tag == SP_TAG_OBJ ? a->data[i].v.p : NULL);
+  return r;
+}
 /* Array#concat: append b's elements onto a IN PLACE, returning a (unlike the
    fresh-array sp_PolyArray_concat above). Snapshot b's length first so `a` and
    `b` aliasing the same array still terminates. */

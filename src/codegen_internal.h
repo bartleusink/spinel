@@ -1084,6 +1084,7 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b);
 int class_needs_scan(ClassInfo *ci);
 void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b);
 int comp_class_is_module(Compiler *c, ClassInfo *ci);
+int hv_value_class(Compiler *c, int recv);   /* analyze_infer.c (#4846) */
 void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b);
 int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr);
 void emit_super(Compiler *c, int id, Buf *b);

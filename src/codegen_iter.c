@@ -3347,6 +3347,9 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
       LocalVar *pv = raw ? scope_local(comp_scope_of(c, block), raw) : NULL;
       TyKind want = is_val ? ty_hash_val(rt) : ty_hash_key(rt);
       int box = pv && pv->type == TY_POLY && want != TY_POLY;
+      /* the other way: a one-class hash binds its boxed values unboxed into
+         the class-typed parameter (#4846) */
+      int unbox = is_val && pv && ty_is_object(pv->type) && want == TY_POLY;
       char src[256];
       if (rt == TY_POLY_POLY_HASH) {
         /* PolyPolyHash: ->order[i] is an index; keys/vals hold sp_RbVal */
@@ -3362,6 +3365,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
       emit_indent(b, indent + 1);
       buf_printf(b, "lv_%s = ", p0);
       if (box) emit_boxed_text(c, want, src, b);
+      else if (unbox) emit_unbox_text(c, pv->type, src, b);
       else buf_puts(b, src);
       buf_puts(b, ";\n");
     }
