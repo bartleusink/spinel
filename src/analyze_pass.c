@@ -2735,14 +2735,17 @@ int infer_write_types(Compiler *c) {
     else if (*slot == TY_POLY_POLY_HASH) {
       /* already widest hash type; no further promotion needed */
     }
-    else if (kt == TY_INT && *slot != TY_UNKNOWN && ty_is_array(*slot)) {
+    else if ((kt == TY_INT || kt == TY_POLY) && *slot != TY_UNKNOWN && ty_is_array(*slot)) {
       /* int-key element write into a typed array: a value its element type
          CONCRETELY cannot hold widens the slot to a poly array, mirroring
          `a << x` -- the poly emitters then store the value exactly as CRuby
          does (the former bail left e.g. `a[0] = "s"` on an int array to emit
          invalid C through the typed setter). A TY_POLY value is exempt: the
          typed setter's runtime conversion (sp_poly_to_i etc.) is the
-         long-standing intended path for it. */
+         long-standing intended path for it. A poly KEY into an array slot is
+         an index all the same -- Array#[]= takes an Integer or raises -- so it
+         is the same evidence; without it an object stored at an unpacked
+         index was handed to the int setter (#4832). */
       if (vt != TY_UNKNOWN && vt != TY_POLY &&
           *slot != TY_POLY_ARRAY && vt != ty_array_elem(*slot))
         *slot = TY_POLY_ARRAY;
