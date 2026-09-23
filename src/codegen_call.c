@@ -5425,6 +5425,69 @@ static int emit_poly_str_prearm(Compiler *c, int id, int recv, const char *name,
   return 1;
 }
 
+/* The numeric surface a poly receiver answers for ITSELF, when the poly
+   method dispatch exists only because a user class happens to own the name.
+   Each row is a name whose ordinary emitter declines a contested name (its
+   own `!user_defines_or_reads` guard) and falls through to the dispatch,
+   where the switch's default arm has to answer for a receiver that really is
+   a number.
+
+   One table, because the dispatch asks the same question twice: once to
+   decide whether to open the switch at all -- a colliding class may define
+   the name at a different arity than the call site uses, which leaves the
+   candidate count 0 and every other flag false -- and once to write the
+   default arm. Three separate fixes each added a name to the gate and copied
+   the arm beside the last one (the `ob13`/`ob14`/`ob15` numbering is what
+   that looks like in the end), and the two lists could only stay in step by
+   hand. A fourth name is now one row.
+
+   What the rows differ in is exactly three things: which runtime helper
+   answers, how the argument reaches it, and how its answer is fitted to the
+   slot the dispatch assigns into. */
+typedef enum {
+  NPA_BOXED,       /* the helper answers sp_RbVal: straight into a poly slot, unboxed into a scalar one */
+  NPA_PAIR,        /* ... and answers a PAIR, which no scalar slot can hold: divmod, gcdlcm */
+  NPA_FLOAT,       /* sp_float */
+  NPA_INT_ARRAY,   /* sp_IntArray * */
+  NPA_BOOL         /* sp_bool */
+} NumArmKind;
+
+static const struct {
+  const char *nm;
+  int min_argc, max_argc;
+  const char *fn;     /* the helper at min_argc */
+  const char *fn2;    /* ... and the one a second argument selects (pow's modulus) */
+  NumArmKind kind;
+  int arg_int;        /* the argument goes over as a machine int, not boxed (digits' base) */
+  int extra;          /* a trailing constant the helper takes, -1 for none */
+  TyKind box_as;      /* for NPA_PAIR / NPA_INT_ARRAY: what the poly slot boxes it as */
+} SP_NUM_ARM[] = {
+  {"gcd",       1, 1, "sp_poly_int_gcd",     NULL,                  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {"lcm",       1, 1, "sp_poly_int_lcm",     NULL,                  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {"ceildiv",   1, 1, "sp_poly_int_ceildiv", NULL,                  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {"gcdlcm",    1, 1, "sp_poly_int_gcdlcm",  NULL,                  NPA_PAIR,      0, -1, TY_POLY_ARRAY},
+  {"pow",       1, 2, "sp_poly_pow",         "sp_poly_int_powmod",  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {"digits",    1, 1, "sp_poly_int_digits",  NULL,                  NPA_INT_ARRAY, 1, -1, TY_INT_ARRAY},
+  {"allbits?",  1, 1, "sp_poly_int_bits_test", NULL,                NPA_BOOL,      0,  0, TY_UNKNOWN},
+  {"anybits?",  1, 1, "sp_poly_int_bits_test", NULL,                NPA_BOOL,      0,  1, TY_UNKNOWN},
+  {"nobits?",   1, 1, "sp_poly_int_bits_test", NULL,                NPA_BOOL,      0,  2, TY_UNKNOWN},
+  {"divmod",    1, 1, "sp_poly_divmod",      NULL,                  NPA_PAIR,      0, -1, TY_UNKNOWN},
+  {"remainder", 1, 1, "sp_poly_remainder",   NULL,                  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {"fdiv",      1, 1, "sp_poly_fdiv",        NULL,                  NPA_FLOAT,     0, -1, TY_UNKNOWN},
+  {"quo",       1, 1, "sp_poly_quo",         NULL,                  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {"modulo",    1, 1, "sp_poly_modulo",      NULL,                  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {"div",       1, 1, "sp_poly_div_m",       NULL,                  NPA_BOXED,     0, -1, TY_UNKNOWN},
+  {NULL, 0, 0, NULL, NULL, NPA_BOXED, 0, -1, TY_UNKNOWN}
+};
+
+static int poly_num_arm(const char *name, int argc) {
+  if (!name) return -1;
+  for (int i = 0; SP_NUM_ARM[i].nm; i++)
+    if (sp_streq(name, SP_NUM_ARM[i].nm) &&
+        argc >= SP_NUM_ARM[i].min_argc && argc <= SP_NUM_ARM[i].max_argc) return i;
+  return -1;
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -6653,14 +6716,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        every is_* flag above false. Without this the whole dispatch declined
        here, and the call fell through to the "no candidates" NoMethodError
        two frames up rather than reaching the numeric default arm below. */
-    int is_numeric_poly_arm =
-      ((sp_streq(name, "gcd") || sp_streq(name, "lcm") || sp_streq(name, "ceildiv")) && argc == 1) ||
-      (sp_streq(name, "gcdlcm") && argc == 1) ||
-      (sp_streq(name, "pow") && (argc == 1 || argc == 2)) ||
-      (sp_streq(name, "digits") && argc == 1) ||
-      ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1) ||
-      ((sp_streq(name, "divmod") || sp_streq(name, "remainder") || sp_streq(name, "fdiv")) && argc == 1) ||
-      ((sp_streq(name, "quo") || sp_streq(name, "modulo") || sp_streq(name, "div")) && argc == 1);
+    int is_numeric_poly_arm = poly_num_arm(name, argc) >= 0;
     if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_numeric_poly_arm) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
@@ -7940,166 +7996,67 @@ else {
            runtime helpers are the ones the no-user-class path already calls
            (codegen_call_recv.c's `sp_poly_int_*` table), and they raise for
            a receiver that is not a number, as CRuby does. */
-        else if ((sp_streq(name, "gcd") || sp_streq(name, "lcm") ||
-                  sp_streq(name, "gcdlcm") || sp_streq(name, "ceildiv")) && argc == 1) {
-          Buf ob9; memset(&ob9, 0, sizeof ob9);
-          { char on9[32]; snprintf(on9, sizeof on9, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&ob9, on9);
-            else emit_boxed_text(c, atmp_ty[0], on9, &ob9); }
-          const char *arg9 = ob9.p ? ob9.p : "sp_box_nil()";
-          if (sp_streq(name, "gcdlcm")) {
-            /* the only one of the four that answers an array, not a number */
-            if (ret == TY_POLY) {
-              char gv9[128]; snprintf(gv9, sizeof gv9, "sp_poly_int_gcdlcm(_t%d, %s)", tv, arg9);
-              buf_printf(b, " _t%d = ", tr); emit_boxed_text(c, TY_POLY_ARRAY, gv9, b); buf_puts(b, "; break;");
+        /* The numeric surface, from the table beside emit_poly_method_dispatch:
+           box the argument the dispatch already hoisted, call the helper the
+           no-user-class path calls, and fit the answer to the slot. */
+        else if (poly_num_arm(name, argc) >= 0) {
+          int ai = poly_num_arm(name, argc);
+          Buf ab9; memset(&ab9, 0, sizeof ab9);
+          { char an9[32]; snprintf(an9, sizeof an9, "_t%d", atmp[0]);
+            if (SP_NUM_ARM[ai].arg_int) {
+              if (atmp_ty[0] == TY_POLY) buf_printf(&ab9, "sp_poly_to_i(_t%d)", atmp[0]);
+              else buf_printf(&ab9, "(sp_int)_t%d", atmp[0]);
             }
-            else buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
+            else if (atmp_ty[0] == TY_POLY) buf_puts(&ab9, an9);
+            else emit_boxed_text(c, atmp_ty[0], an9, &ab9); }
+          const char *a9 = ab9.p ? ab9.p : "sp_box_nil()";
+          Buf bb9; memset(&bb9, 0, sizeof bb9);
+          const char *fn9 = SP_NUM_ARM[ai].fn;
+          if (argc > SP_NUM_ARM[ai].min_argc && SP_NUM_ARM[ai].fn2) {
+            fn9 = SP_NUM_ARM[ai].fn2;
+            char bn9[32]; snprintf(bn9, sizeof bn9, "_t%d", atmp[1]);
+            if (atmp_ty[1] == TY_POLY) buf_puts(&bb9, bn9);
+            else emit_boxed_text(c, atmp_ty[1], bn9, &bb9);
           }
+          char gv9[320];
+          if (bb9.p)
+            snprintf(gv9, sizeof gv9, "%s(_t%d, %s, %s)", fn9, tv, a9, bb9.p);
+          else if (SP_NUM_ARM[ai].extra >= 0)
+            snprintf(gv9, sizeof gv9, "%s(_t%d, %s, %d)", fn9, tv, a9, SP_NUM_ARM[ai].extra);
+          else
+            snprintf(gv9, sizeof gv9, "%s(_t%d, %s)", fn9, tv, a9);
+          /* A pair has no scalar form at all: the slot the dispatch assigns
+             into cannot hold one, so the arm raises there rather than build a
+             value it would have to throw away. */
+          if (SP_NUM_ARM[ai].kind == NPA_PAIR && ret != TY_POLY)
+            buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
           else {
-            const char *fn9 = sp_streq(name, "gcd") ? "sp_poly_int_gcd" :
-                              sp_streq(name, "lcm") ? "sp_poly_int_lcm" : "sp_poly_int_ceildiv";
-            char gv9[160]; snprintf(gv9, sizeof gv9, "%s(_t%d, %s)", fn9, tv, arg9);
             buf_printf(b, " _t%d = ", tr);
-            if (ret == TY_POLY) buf_puts(b, gv9);
-            else emit_unbox_text(c, ret, gv9, b);
+            switch (SP_NUM_ARM[ai].kind) {
+              case NPA_BOXED:
+                if (ret == TY_POLY) buf_puts(b, gv9);
+                else emit_unbox_text(c, ret, gv9, b);
+                break;
+              case NPA_PAIR:
+                if (SP_NUM_ARM[ai].box_as != TY_UNKNOWN) emit_boxed_text(c, SP_NUM_ARM[ai].box_as, gv9, b);
+                else buf_puts(b, gv9);
+                break;
+              case NPA_FLOAT:
+                if (ret == TY_POLY) emit_boxed_text(c, TY_FLOAT, gv9, b);
+                else buf_puts(b, gv9);
+                break;
+              case NPA_INT_ARRAY:
+                if (ret == TY_POLY) emit_boxed_text(c, TY_INT_ARRAY, gv9, b);
+                else buf_puts(b, gv9);
+                break;
+              case NPA_BOOL:
+                if (ret == TY_POLY) buf_printf(b, "sp_box_bool(%s)", gv9);
+                else buf_puts(b, gv9);
+                break;
+            }
             buf_puts(b, "; break;");
           }
-          free(ob9.p);
-        }
-        else if (sp_streq(name, "pow") && (argc == 1 || argc == 2)) {
-          Buf eb9; memset(&eb9, 0, sizeof eb9);
-          { char en9[32]; snprintf(en9, sizeof en9, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&eb9, en9);
-            else emit_boxed_text(c, atmp_ty[0], en9, &eb9); }
-          char gv9[256];
-          if (argc == 1)
-            snprintf(gv9, sizeof gv9, "sp_poly_pow(_t%d, %s)", tv, eb9.p ? eb9.p : "sp_box_nil()");
-          else {
-            Buf mb9; memset(&mb9, 0, sizeof mb9);
-            { char mn9[32]; snprintf(mn9, sizeof mn9, "_t%d", atmp[1]);
-              if (atmp_ty[1] == TY_POLY) buf_puts(&mb9, mn9);
-              else emit_boxed_text(c, atmp_ty[1], mn9, &mb9); }
-            snprintf(gv9, sizeof gv9, "sp_poly_int_powmod(_t%d, %s, %s)", tv,
-                     eb9.p ? eb9.p : "sp_box_nil()", mb9.p ? mb9.p : "sp_box_nil()");
-            free(mb9.p);
-          }
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) buf_puts(b, gv9);
-          else emit_unbox_text(c, ret, gv9, b);
-          buf_puts(b, "; break;");
-          free(eb9.p);
-        }
-        else if (sp_streq(name, "digits") && argc == 1) {
-          char bs9[64];
-          if (atmp_ty[0] == TY_POLY) snprintf(bs9, sizeof bs9, "sp_poly_to_i(_t%d)", atmp[0]);
-          else snprintf(bs9, sizeof bs9, "(sp_int)_t%d", atmp[0]);
-          char gv9[128]; snprintf(gv9, sizeof gv9, "sp_poly_int_digits(_t%d, %s)", tv, bs9);
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) emit_boxed_text(c, TY_INT_ARRAY, gv9, b);
-          else buf_puts(b, gv9);
-          buf_puts(b, "; break;");
-        }
-        else if ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") ||
-                  sp_streq(name, "nobits?")) && argc == 1) {
-          Buf mb9; memset(&mb9, 0, sizeof mb9);
-          { char mn9[32]; snprintf(mn9, sizeof mn9, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&mb9, mn9);
-            else emit_boxed_text(c, atmp_ty[0], mn9, &mb9); }
-          int which9 = sp_streq(name, "allbits?") ? 0 : sp_streq(name, "anybits?") ? 1 : 2;
-          char gv9[160];
-          snprintf(gv9, sizeof gv9, "sp_poly_int_bits_test(_t%d, %s, %d)", tv,
-                   mb9.p ? mb9.p : "sp_box_nil()", which9);
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) buf_printf(b, "sp_box_bool(%s)", gv9);
-          else buf_puts(b, gv9);
-          buf_puts(b, "; break;");
-          free(mb9.p);
-        }
-        /* Numeric#divmod/#remainder/#fdiv reaching this dispatch only
-           because a user class owns the name: the runtime helpers are the
-           ones the no-user-class path uses (the "poly arithmetic" arm
-           above, codegen_call.c's own emit_call), which decline this
-           dispatch outright when the name is contested and fall through
-           to here instead. */
-        else if (sp_streq(name, "divmod") && argc == 1) {
-          Buf ob10; memset(&ob10, 0, sizeof ob10);
-          { char on10[32]; snprintf(on10, sizeof on10, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&ob10, on10);
-            else emit_boxed_text(c, atmp_ty[0], on10, &ob10); }
-          char gv10[160]; snprintf(gv10, sizeof gv10, "sp_poly_divmod(_t%d, %s)", tv, ob10.p ? ob10.p : "sp_box_nil()");
-          if (ret == TY_POLY) buf_printf(b, " _t%d = %s; break;", tr, gv10);
-          else buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
-          free(ob10.p);
-        }
-        else if (sp_streq(name, "remainder") && argc == 1) {
-          Buf ob11; memset(&ob11, 0, sizeof ob11);
-          { char on11[32]; snprintf(on11, sizeof on11, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&ob11, on11);
-            else emit_boxed_text(c, atmp_ty[0], on11, &ob11); }
-          char gv11[160]; snprintf(gv11, sizeof gv11, "sp_poly_remainder(_t%d, %s)", tv, ob11.p ? ob11.p : "sp_box_nil()");
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) buf_puts(b, gv11);
-          else emit_unbox_text(c, ret, gv11, b);
-          buf_puts(b, "; break;");
-          free(ob11.p);
-        }
-        else if (sp_streq(name, "fdiv") && argc == 1) {
-          Buf ob12; memset(&ob12, 0, sizeof ob12);
-          { char on12[32]; snprintf(on12, sizeof on12, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&ob12, on12);
-            else emit_boxed_text(c, atmp_ty[0], on12, &ob12); }
-          char gv12[160]; snprintf(gv12, sizeof gv12, "sp_poly_fdiv(_t%d, %s)", tv, ob12.p ? ob12.p : "sp_box_nil()");
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) emit_boxed_text(c, TY_FLOAT, gv12, b);
-          else buf_puts(b, gv12);
-          buf_puts(b, "; break;");
-          free(ob12.p);
-        }
-        /* Numeric#quo/#modulo/#div reaching this dispatch only because a
-           user class owns the name: the same shape as divmod/remainder/fdiv
-           just above -- the runtime helpers are the ones the no-user-class
-           path uses (the "poly arithmetic" arm's own `!user_defines_or_reads`
-           guard, above in emit_call), which decline this dispatch outright
-           when the name is contested and fall through to here instead. */
-        else if (sp_streq(name, "quo") && argc == 1) {
-          Buf ob13; memset(&ob13, 0, sizeof ob13);
-          { char on13[32]; snprintf(on13, sizeof on13, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&ob13, on13);
-            else emit_boxed_text(c, atmp_ty[0], on13, &ob13); }
-          char gv13[160]; snprintf(gv13, sizeof gv13, "sp_poly_quo(_t%d, %s)", tv, ob13.p ? ob13.p : "sp_box_nil()");
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) buf_puts(b, gv13);
-          else emit_unbox_text(c, ret, gv13, b);
-          buf_puts(b, "; break;");
-          free(ob13.p);
-        }
-        else if (sp_streq(name, "modulo") && argc == 1) {
-          Buf ob14; memset(&ob14, 0, sizeof ob14);
-          { char on14[32]; snprintf(on14, sizeof on14, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&ob14, on14);
-            else emit_boxed_text(c, atmp_ty[0], on14, &ob14); }
-          /* the collision-dispatch default uses the stricter "modulo" guard
-             (sp_poly_modulo), not sp_poly_mod itself: `%` accepts a String
-             receiver, but Numeric#modulo does not (CRuby has no
-             String#modulo), and the raised message must name "modulo". */
-          char gv14[160]; snprintf(gv14, sizeof gv14, "sp_poly_modulo(_t%d, %s)", tv, ob14.p ? ob14.p : "sp_box_nil()");
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) buf_puts(b, gv14);
-          else emit_unbox_text(c, ret, gv14, b);
-          buf_puts(b, "; break;");
-          free(ob14.p);
-        }
-        else if (sp_streq(name, "div") && argc == 1) {
-          Buf ob15; memset(&ob15, 0, sizeof ob15);
-          { char on15[32]; snprintf(on15, sizeof on15, "_t%d", atmp[0]);
-            if (atmp_ty[0] == TY_POLY) buf_puts(&ob15, on15);
-            else emit_boxed_text(c, atmp_ty[0], on15, &ob15); }
-          char gv15[160]; snprintf(gv15, sizeof gv15, "sp_poly_div_m(_t%d, %s)", tv, ob15.p ? ob15.p : "sp_box_nil()");
-          buf_printf(b, " _t%d = ", tr);
-          if (ret == TY_POLY) buf_puts(b, gv15);
-          else emit_unbox_text(c, ret, gv15, b);
-          buf_puts(b, "; break;");
-          free(ob15.p);
+          free(ab9.p); free(bb9.p);
         }
         /* index/rindex also belong to String, whose box carries no cls_id, so
            no case above can claim it. Answer it here, ahead of the raise, or a
