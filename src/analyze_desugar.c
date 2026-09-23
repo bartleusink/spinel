@@ -1085,7 +1085,7 @@ int desugar_dynamic_send(Compiler *c) {
       if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
       const char *nm = nt_str(nt, id, "name"); if (!nm) continue;
       int is = 0; for (int k = 0; sends[k]; k++) if (sp_streq(nm, sends[k])) { is = 1; break; }
-      if (!is || nt_ref(nt, id, "receiver") < 0) continue;
+      if (!is) continue;
       int dn = 0; nt_arr(nt, id, "dyn_send_arms", &dn); if (dn > 0) continue;
       int a = nt_ref(nt, id, "arguments"); if (a < 0) continue;
       int ac = 0; const int *av = nt_arr(nt, a, "arguments", &ac);
@@ -1155,7 +1155,28 @@ int desugar_dynamic_send(Compiler *c) {
     int is_send = 0; for (int k = 0; sends[k]; k++) if (sp_streq(nm, sends[k])) { is_send = 1; break; }
     if (!is_send) continue;
     int recv = nt_ref(nt, id, "receiver");
-    if (recv < 0) continue;                            /* implicit self handled elsewhere */
+    if (recv < 0) {
+      /* A receiverless `send(name, ...)` in a method is `self.send(name, ...)`:
+         send ignores visibility, so the two reach the same (private) methods,
+         and the explicit form already lowers (#4851). public_send differs --
+         it refuses a private target either way -- and is left alone. Only a
+         runtime name: a literal one is rewritten earlier. */
+      if (sp_streq(nm, "public_send")) continue;
+      Scope *ss = comp_scope_of(c, id);
+      if (!ss || !ss->name) continue;
+      int sa = nt_ref(nt, id, "arguments");
+      int sac = 0; const int *sav = sa >= 0 ? nt_arr(nt, sa, "arguments", &sac) : NULL;
+      if (sac < 1 || !sav) continue;
+      NodeKind s0 = nt_kind(nt, sav[0]);
+      if (s0 == NK_SymbolNode || s0 == NK_StringNode) continue;
+      int sn = nt_new_node(nt, "SelfNode");
+      if (sn < 0) continue;
+      comp_grow_node_arrays(c);
+      c->nscope[sn] = c->nscope[id];
+      nt_node_set_ref(nt, id, "receiver", sn);
+      recv = sn;
+      changed = 1;
+    }
     { int dn = 0; nt_arr(nt, id, "dyn_send_arms", &dn); if (dn > 0) continue; }  /* already lowered */
     int args = nt_ref(nt, id, "arguments");
     if (args < 0) continue;
