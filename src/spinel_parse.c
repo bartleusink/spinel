@@ -122,6 +122,13 @@ static char *g_source_file_escaped = NULL;  /* escape_str(g_source_file), set on
    `node_line` field so codegen can place C `#line` directives. Off by
    default so the AST text format (and golden tests) are unchanged. */
 static int g_emit_line = 0;
+/* The buffer-line -> (file, line) map is built for every program, not only
+   under g_emit_line: `__FILE__` and `__dir__` in a required file answer
+   that file, not the entry script (#4839), and only the map knows which file
+   a node came from once the requires are spliced into one buffer. The
+   PUSH/POP marker lines it is rebuilt from are comments. g_emit_line still
+   decides whether nodes carry their line for `#line` directives. */
+static int g_src_map = 1;
 /* --emit-types (SPINEL_EMIT_TYPES) also gets each node's END position, so a
    consumer can pick the tightest span under a cursor: `pts`, `pts.map { }`
    and `.inspect` all start at one column. Only then: two more attributes on
@@ -226,6 +233,26 @@ static void sp_fsl_splice(unsigned char **buf, size_t *n, size_t at,
 static int *sp_line_file = NULL;  /* buffer line (1-based) -> file id */
 static int *sp_line_orig = NULL;  /* buffer line (1-based) -> original line */
 static int sp_line_map_n = 0;
+static char **sp_file_table;   /* id -> path; defined with the map builder below */
+
+/* The file a node was written in when that is a required file, or NULL for
+   the entry script (file id 0) and when the map could not be built. */
+static const char *sp_node_required_file(const pm_node_t *node) {
+  if (sp_line_map_n <= 0) return NULL;
+  pm_line_column_t lc = pm_newline_list_line_column(&g_parser->newline_list,
+                                                    node->location.start,
+                                                    g_parser->start_line);
+  if (lc.line < 1 || lc.line > sp_line_map_n || sp_line_orig[lc.line] <= 0) return NULL;
+  int fid = sp_line_file[lc.line];
+  return fid > 0 ? sp_file_table[fid] : NULL;
+}
+
+/* What `__FILE__` answers in a required file: its absolute path, as CRuby
+   gives for require_relative and for a -I load path. Caller frees. */
+static char *sp_required_file_path(const char *path) {
+  char *abs = realpath(path, NULL);
+  return abs ? abs : strdup(path);
+}
 
 static char *cstr(pm_constant_id_t id) {
   if (id == 0) return strdup("");
@@ -557,6 +584,19 @@ static int flatten(pm_node_t *node) {
     /* A bare identifier (no receiver/parens/args) is a variable-or-method
        read: an unresolved one is CRuby's NameError, not NoMethodError. */
     if (PM_NODE_FLAG_P(node, PM_CALL_NODE_FLAGS_VARIABLE_CALL)) I("vcall", 1);
+    /* `__dir__` in a required file is that file's directory: carry the file
+       for the compile-time folds, which otherwise see only the entry script */
+    if (!n->receiver && !n->arguments) {
+      char *cn = cstr(n->name);
+      const char *rf = strcmp(cn, "__dir__") == 0 ? sp_node_required_file(node) : NULL;
+      if (rf) {
+        char *ap = sp_required_file_path(rf);
+        char *esc = escape_str((const uint8_t *)ap, strlen(ap));
+        emit_str(id, "src_file", esc);
+        free(esc); free(ap);
+      }
+      free(cn);
+    }
     break;
   }
   case PM_CONSTANT_WRITE_NODE: {
@@ -1318,17 +1358,27 @@ else {
   case PM_SOURCE_LINE_NODE: {
     N("SourceLineNode");
     int32_t line = pm_newline_list_line(&g_parser->newline_list, node->location.start, g_parser->start_line);
+    /* the line in the file it was written in: the buffer line counts every
+       required file spliced in above it */
+    if (sp_line_map_n > 0 && line >= 1 && line <= sp_line_map_n && sp_line_orig[line] > 0)
+      line = sp_line_orig[line];
     I("start_line", (long long)line);
     break;
   }
   case PM_SOURCE_FILE_NODE: {
-    /* `__FILE__`. Spinel inlines `require`/`require_relative` at parse
-       time so we cannot recover the per-call-site source file; we
-       always return the toplevel script path passed to spinel_parse,
-       documented in test/source_file.rb. The escaped form is cached
-       in g_source_file_escaped at init since it never changes. */
+    /* `__FILE__`. The entry script answers the path spinel was given
+       (escaped once, in g_source_file_escaped); a required file answers
+       its own absolute path, which the source map attributes the node to
+       (#4839). */
     N("SourceFileNode");
-    emit_str(id, "content", g_source_file_escaped);
+    { const char *rf = sp_node_required_file(node);
+      if (rf) {
+        char *ap = sp_required_file_path(rf);
+        char *esc = escape_str((const uint8_t *)ap, strlen(ap));
+        emit_str(id, "content", esc);
+        free(esc); free(ap);
+      }
+      else emit_str(id, "content", g_source_file_escaped); }
     if (sp_node_fsl(node)) I("fzl", 1);  /* __FILE__ is a literal of its file */
     break;
   }
@@ -2060,7 +2110,7 @@ static void sp_includes_free(void) {
 #define SP_PUSH_PREFIX "#<SPINEL_PUSH>"
 #define SP_POP_PREFIX "#<SPINEL_POP>"
 
-static char **sp_file_table = NULL;  /* id -> path */
+static char **sp_file_table = NULL;  /* id -> path (declared above flatten) */
 static int sp_file_count = 0, sp_file_cap = 0;
 
 static int sp_intern_file(const char *path) {
@@ -2082,7 +2132,7 @@ static int sp_intern_file(const char *path) {
    PUSH <path> / POP marker lines. Takes ownership of `content`; returns it
    unchanged when not in debug mode. */
 static char *sp_wrap_included(char *content, const char *path) {
-  if (!g_emit_line) return content;
+  if (!g_src_map) return content;
   size_t clen = strlen(content);
   int need_nl = (clen > 0 && content[clen - 1] != '\n') ? 1 : 0;
   size_t total = strlen(SP_PUSH_PREFIX) + strlen(path) + 1 + clen + need_nl
@@ -2214,7 +2264,7 @@ static void sp_normalize_dots(char *path) {
    file's flag lines to match so the buffer stays aligned with the text. */
 static void sp_fsl_pad_wrap(unsigned char **v, size_t *n) {
   unsigned char z = 0;
-  if (!g_emit_line) return;
+  if (!g_src_map) return;
   sp_fsl_splice(v, n, 0, 0, &z, 1);
   sp_fsl_splice(v, n, *n, 0, &z, 1);
 }
@@ -3645,7 +3695,7 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
      stays aligned with the parsed node lines; if that ever fails to hold,
      disable the map rather than emit wrong attributions. */
   char *premap = NULL;
-  if (g_emit_line) {
+  if (g_src_map) {
     premap = strdup(source);
     if (!premap) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
   }
@@ -3662,7 +3712,7 @@ else {
     g_fsl_lines = NULL;
     g_fsl_nlines = 0;
   }
-  if (g_emit_line) {
+  if (g_src_map) {
     size_t la = 1, lb = 1;
     for (const char *p = premap; *p; p++) if (*p == '\n') la++;
     for (const char *p = source; *p; p++) if (*p == '\n') lb++;

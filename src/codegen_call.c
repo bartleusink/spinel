@@ -23146,7 +23146,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   /* __dir__ -> the source file's directory (compile-time literal, mirroring
      the legacy generator). */
   if (recv < 0 && sp_streq(name, "__dir__") && argc == 0) {
-    const char *sf = nt->source_file;
+    /* a required file's own directory, which the parser stamped (#4839) */
+    const char *sf = nt_str(nt, id, "src_file");
+    if (!sf) sf = nt->source_file;
     char dir[1024];
     if (sf && strrchr(sf, '/')) { size_t n = (size_t)(strrchr(sf, '/') - sf); if (n >= sizeof dir) n = sizeof dir - 1; if (n == 0) { dir[0] = '/'; dir[1] = 0; }
 else { memcpy(dir, sf, n); dir[n] = 0; } }

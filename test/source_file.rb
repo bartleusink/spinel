@@ -1,9 +1,8 @@
 # SourceFileNode -- the `__FILE__` keyword.
 #
-# Spinel inlines `require`/`require_relative` at parse time, so call
-# sites in different source files are not distinguished. `__FILE__`
-# always returns the toplevel script path passed to spinel_parse,
-# matching CRuby's behavior for top-level uses.
+# In the entry script `__FILE__` is the path spinel was given, as CRuby's
+# is for the script it runs; a required file answers its own absolute
+# path (test/source_file_required.rb).
 #
 # This test exercises __FILE__ end-to-end: it must (a) emit the path,
 # (b) flow as `string` through type inference (so dispatch picks the
