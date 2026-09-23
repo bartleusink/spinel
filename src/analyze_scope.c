@@ -4180,18 +4180,41 @@ void unmark_referenced_module_sources(Compiler *c) {
 void register_extends(Compiler *c) {
   const NodeTable *nt = c->nt;
   int did_clone = 0;
+  /* Every class and module body, with the class it defines, collected once in
+     node order. Asking each class to rescan the whole table and look every
+     body's name up again was classes x nodes x (a linear name lookup, the
+     index is not frozen yet): the largest single cost of analysis on a
+     program with many classes (#4847). The per-class walk below visits the
+     same bodies in the same order. Names do not change here, and a class
+     this pass creates has no body of its own. */
+  int nbody = 0, capbody = 16;
+  int *body_node = malloc(sizeof(int) * (size_t)capbody);
+  int *body_cls = malloc(sizeof(int) * (size_t)capbody);
+  if (!body_node || !body_cls) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int cn = 0; cn < nt->count; cn++) {
+    if (nt_kind(nt, cn) != NK_ClassNode && nt_kind(nt, cn) != NK_ModuleNode) continue;
+    int cp = nt_ref(nt, cn, "constant_path");
+    const char *cnm = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    /* the body this class is defined by, named the way every other pass
+       reads a ClassNode's name */
+    int bci = cnm ? comp_class_index(c, cnm) : -1;
+    if (bci < 0) continue;
+    if (nbody == capbody) {
+      capbody *= 2;
+      body_node = realloc(body_node, sizeof(int) * (size_t)capbody);
+      body_cls = realloc(body_cls, sizeof(int) * (size_t)capbody);
+      if (!body_node || !body_cls) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    body_node[nbody] = cn; body_cls[nbody] = bci; nbody++;
+  }
   for (int ci = 0; ci < c->nclasses; ci++) {
    /* Every body that defines this class, not only the first: `extend M` is
       commonly written in a REOPENING of the class, and reading def_node alone
       never saw it, so the module's methods were never transplanted and a call
       to one did not resolve (#3802). */
-   for (int cn = 0; cn < nt->count; cn++) {
-    if (nt_kind(nt, cn) != NK_ClassNode && nt_kind(nt, cn) != NK_ModuleNode) continue;
-    { int cp = nt_ref(nt, cn, "constant_path");
-      const char *cnm = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
-      /* the body this class is defined by, named the way every other pass
-         reads a ClassNode's name */
-      if (!cnm || comp_class_index(c, cnm) != ci) continue; }
+   for (int bi = 0; bi < nbody; bi++) {
+    if (body_cls[bi] != ci) continue;
+    int cn = body_node[bi];
     int body = nt_ref(nt, cn, "body");
     int n = 0;
     const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
@@ -4287,6 +4310,7 @@ void register_extends(Compiler *c) {
      before this pass: a local first assigned in the clone had no slot, so
      it was never declared and every read of it answered nil (#4535). The
      include and inherited-class-method clones re-register the same way. */
+  free(body_node); free(body_cls);
   if (did_clone) register_locals(c);
 }
 
