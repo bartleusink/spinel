@@ -2444,7 +2444,15 @@ static int emit_dynamic_send(Compiler *c, int id, Buf *b) {
   buf_printf(b, "({ sp_sym _t%d = ", t);
   if (st == TY_SYMBOL) emit_expr(c, sym, b);
   else if (st == TY_STRING) { buf_puts(b, "sp_sym_intern("); emit_expr(c, sym, b); buf_puts(b, ")"); }
-  else { buf_puts(b, "sp_sym_intern(sp_poly_to_s("); emit_boxed(c, sym, b); buf_puts(b, "))"); }
+  else {
+    /* a boxed Symbol already carries its sp_sym; only a String name is
+       interned, where rendering the Symbol to text and interning it back ran
+       on every call (#4854) */
+    int tn = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tn); emit_boxed(c, sym, b);
+    buf_printf(b, "; _t%d.tag == SP_TAG_SYM ? (sp_sym)_t%d.v.i : sp_sym_intern(sp_poly_to_s(_t%d)); })",
+               tn, tn, tn);
+  }
   buf_printf(b, "; sp_RbVal _r%d; ", t);
   Buf *sv_pre = g_pre;
   for (int k = 0; k < narm; k++) {
@@ -2469,7 +2477,10 @@ static int emit_dynamic_send(Compiler *c, int id, Buf *b) {
     g_unsup_probe = sv_probe;
     g_pre = sv_pre;
     if (ok) {
-      buf_printf(b, "if (_t%d == sp_sym_intern(\"%s\")) { ", t, nm);
+      /* the arm's name as the compile-time symbol it is, the way a literal
+         `:name` is emitted: interning it here cost a table probe per arm per
+         call (#4854). A name interned at run time resolves to the same id. */
+      buf_printf(b, "if (_t%d == (sp_sym)%d) { ", t, comp_sym_intern(c, nm));
       if (pre.p && pre.len) buf_puts(b, pre.p);
       buf_printf(b, "_r%d = ", t);
       emit_boxed_text(c, at, body.p ? body.p : "0", b);
