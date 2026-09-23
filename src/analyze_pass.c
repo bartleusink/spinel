@@ -3760,6 +3760,77 @@ int bind_coerce_operator_params(Compiler *c) {
     TyKind mg = ty_unify(cp->type, TY_POLY);
     if (mg != cp->type) { cp->type = mg; changed = 1; }
   }
+  /* A user `<=>` has a caller with no call node of its own:
+     sp_obj_cmp_dispatch, the boxed hook the runtime comparator installs for
+     sort / min / max / clamp and for every Comparable operator on a boxed
+     receiver. That caller hands the operand over as an sp_RbVal and cannot
+     know what is in it -- `money.clamp(1..5)` arrives at the very same `<=>`
+     with an Integer.
+
+     Typed from the statically resolved call sites alone, the parameter
+     settled on whatever those passed: one `a <=> b` between two Money objects
+     anywhere in the program pinned it to Money. Two things then went wrong at
+     once. The body's own `other.is_a?(Integer)` branch folded away as dead,
+     so the class stopped implementing the comparison it wrote; and the hook
+     guarded its arm on a Money operand (it shapes the arm from this very
+     type), so an Integer operand fell through to not-comparable and
+     `money.clamp(1..5)` raised "comparison of Money with 1 failed" for a
+     class that compares them perfectly well. Removing either the bare `<=>`
+     or the clamp left the rest correct, which is the signature of a parameter
+     type that did not account for every reachable caller.
+
+     Bound poly only where the BODY asks whether the operand is something
+     OTHER than the method's own class. Two narrower shapes must not be
+     widened, and both are common. A `<=>` written as `@x <=> other.x` names
+     one kind of operand and nothing else, so the hook's class-guarded arm is
+     exactly right for it. So does `return nil unless other.is_a?(Set)`, which
+     is Set's own: the guard and the hook's arm say the same thing, and a
+     narrowed parameter answers not-comparable for everything else just as the
+     body would. Widening those two as well was measured at 61 of 3819 corpus
+     files changing, Set's whole specialization among them, for no change in
+     any answer.
+
+     A test against a DIFFERENT class is the author saying the method takes
+     more than one kind of operand -- Money's `other.is_a?(Integer)` arm --
+     and that is the case, and the only case, that narrowing destroys.
+     `respond_to?` names no class at all, so it counts as asking about
+     something else. */
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    int isa = nm && (sp_streq(nm, "is_a?") || sp_streq(nm, "kind_of?") ||
+                     sp_streq(nm, "instance_of?"));
+    int rtq = nm && sp_streq(nm, "respond_to?");
+    if (!isa && !rtq) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    const char *rty = nt_type(nt, recv);
+    if (!rty || !sp_streq(rty, "LocalVariableReadNode")) continue;
+    const char *rn = nt_str(nt, recv, "name");
+    if (!rn) continue;
+    Scope *sc = comp_scope_of(c, id);
+    if (!sc || !sc->name || !sp_streq(sc->name, "<=>")) continue;
+    if (sc->class_id < 0 || sc->nparams != 1 || !sc->pnames[0]) continue;
+    if (sc->rest_idx >= 0 || !sp_streq(rn, sc->pnames[0])) continue;
+    if (isa) {
+      /* the class asked about: a bare constant, or the last segment of a
+         path. An expression names no class we can compare, so it counts as
+         asking about something else. */
+      int ca = nt_ref(nt, id, "arguments");
+      int nargs = 0; const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &nargs) : NULL;
+      if (av && nargs == 1) {
+        const char *aty = nt_type(nt, av[0]);
+        const char *cn = NULL;
+        if (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode")))
+          cn = nt_str(nt, av[0], "name");
+        if (cn && sc->class_id < c->nclasses && c->classes[sc->class_id].name &&
+            sp_streq(cn, c->classes[sc->class_id].name)) continue;   /* its own class */
+      }
+    }
+    LocalVar *p = scope_local(sc, sc->pnames[0]);
+    if (!p || p->rbs_seeded) continue;
+    TyKind mg = ty_unify(p->type, TY_POLY);
+    if (mg != p->type) { p->type = mg; changed = 1; }
+  }
   /* An operator reached through a POLY receiver goes out to the runtime's
      user-binop dispatch, which hands the argument over boxed -- it cannot know
      what the argument is. So the operator's parameter has to be able to hold
