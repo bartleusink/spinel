@@ -2423,6 +2423,21 @@ static void scope_numbered_block_params(Compiler *c) {
   free(per_scope);
 }
 
+/* Every parameter kind that binds a name: a block parameter or block-local
+   shadowing any of them needs its own slot, not just a shadowed required
+   parameter. Counting only RequiredParameterNode left `def m(q = 7)` with a
+   `|x; q|` block writing the method's q, and `*q` / `**q` / `&q` sharing the
+   C slot with a different C type, which did not compile. */
+static int is_name_binding_param(const char *ty) {
+  return ty && (sp_streq(ty, "RequiredParameterNode") ||
+                sp_streq(ty, "OptionalParameterNode") ||
+                sp_streq(ty, "RestParameterNode") ||
+                sp_streq(ty, "RequiredKeywordParameterNode") ||
+                sp_streq(ty, "OptionalKeywordParameterNode") ||
+                sp_streq(ty, "KeywordRestParameterNode") ||
+                sp_streq(ty, "BlockParameterNode"));
+}
+
 void rename_shadowing_block_params(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count;
@@ -2440,7 +2455,7 @@ void rename_shadowing_block_params(Compiler *c) {
   /* inbody membership via generation stamp (avoids an O(n) memset per block). */
   int *inbody = calloc((size_t)n, sizeof(int));
   if (!inbody) { free(owner); return; }
-  /* All local-variable-write and required-block-param nodes, collected once;
+  /* All local-variable-write and parameter nodes, collected once;
      the per-param collision scan iterates this set rather than all n nodes (it
      re-reads each name fresh, so a rename made earlier in this pass is still
      reflected). */
@@ -2449,7 +2464,7 @@ void rename_shadowing_block_params(Compiler *c) {
   if (!wp) { free(owner); free(inbody); return; }
   for (int w = 0; w < n; w++) {
     const char *wty = nt_type(nt, w);
-    if (lv_node_is_write(wty) || (wty && sp_streq(wty, "RequiredParameterNode"))) wp[wpn++] = w;
+    if (lv_node_is_write(wty) || is_name_binding_param(wty)) wp[wpn++] = w;
   }
   BlkpIdx ix;
   if (!blkp_idx_init(&ix, nt, wp, wpn)) { free(wp); free(inbody); free(owner); return; }
@@ -2530,7 +2545,7 @@ void rename_shadowing_block_params(Compiler *c) {
       while (!collide && blkp_scan_next(&sc, &w)) {
         if (inbody[w] == gen) continue;
         const char *wty = nt_type(nt, w);
-        int is_param_node = wty && sp_streq(wty, "RequiredParameterNode");
+        int is_param_node = is_name_binding_param(wty);
         /* don't let this block's own parameter nodes count as a collision */
         if (is_param_node) {
           int own = 0;
