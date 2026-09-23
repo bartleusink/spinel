@@ -5531,7 +5531,7 @@ static int poly_num_arm(const char *name, int argc) {
 static int emit_poly_builtin_default(Compiler *c, int id, int recv, const char *name,
                                      int argc, const int *argv, const int *atmp,
                                      const TyKind *atmp_ty, TyKind ret, int tv, int tr,
-                                     Buf *b) {
+                                     int label, Buf *b) {
   const NodeTable *nt = c->nt;
   if (recv < 0 || !name) return 0;
   if (nt_ref(nt, id, "block") >= 0) return 0;
@@ -5577,7 +5577,7 @@ static int emit_poly_builtin_default(Compiler *c, int id, int recv, const char *
     if (g_pre && g_pre->len != sv_pre) { g_pre->len = sv_pre; g_pre->p[sv_pre] = 0; }
     free(ib.p); return 0;
   }
-  buf_printf(b, " default: _t%d = %s; break;", tr, ib.p);
+  buf_printf(b, "%s _t%d = %s; break;", label ? " default:" : "", tr, ib.p);
   free(ib.p);
   return 1;
 }
@@ -6601,7 +6601,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       }
       if (!obj_default_done)
         obj_default_done = emit_poly_builtin_default(c, id, recv, name, 0, NULL, NULL, NULL,
-                                                     ret, tv, tr, b);
+                                                     ret, tv, tr, 1, b);
       if (!obj_default_done)
         buf_printf(b, " default: sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
       buf_printf(b, " } _t%d; })", tr);
@@ -7158,6 +7158,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       if (kwh < 0 && !has_splat_arg)
         emit_poly_str_prearm(c, id, recv, name, argc, argv, atmp, atmp_ty, ret, tv, tr, b);
       buf_puts(b, "switch (");
+      /* where this switch starts, so its end can tell whether any arm below
+         wrote the `default:` label (see the builtin default at the close) */
+      size_t sw_start = b->len;
       emit_poly_dispatch_key(c, tv, cls0_cand2, prim_cand2, b);
       buf_puts(b, ") {");
       for (int k = 0; k < c->nclasses; k++) {
@@ -8081,6 +8084,7 @@ else {
           !is_push && !is_cover && !is_gcdlcm && !is_strdel && !is_strsplit &&
           !is_pdelete && !is_pdig && !is_pvalues_at && !is_pfirstn && !is_pmerge) {
         buf_puts(b, " default:");
+        size_t dl_pos = b->len;   /* the builtin fallback below reads it */
         /* `replace` reaches this dispatch only because a user class owns the
            name; a String, Array or Hash receiver still has to be replaced
            rather than told it has no such method. Same shape as the to_i /
@@ -8233,7 +8237,18 @@ else {
           }
           free(ab5.p);
         }
-        buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
+        /* a receiver no arm above claimed may still be a builtin that answers
+           the name (Array#shift(n) under a user shift(n), #4831): ask the
+           builtin surface before raising. Only where the default is still
+           open -- nothing after the label yet, or only guarded arms, which
+           end in `}`. A name arm above that already wrote the default's
+           whole body (`gcd`'s ends `break;`) leaves what follows unreachable,
+           and a builtin answer there was not even of the slot's type. */
+        int dl_open = b->len == dl_pos || (b->len > 0 && b->p[b->len - 1] == '}');
+        if (!dl_open ||
+            !emit_poly_builtin_default(c, id, recv, name, argc, argv, atmp, atmp_ty,
+                                       ret, tv, tr, 0, b))
+          buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
       }
       /* `[]` gets a default of its own. The arms above enumerate the kinds
          someone thought to add -- every ARRAY kind, the string- and
@@ -8352,6 +8367,16 @@ else {
                buf_puts(b, "; break;"); }
         free(kb.p); free(db.p);
       }
+      /* No arm wrote a default: a receiver that is really a builtin fell
+         through to the result's initializer or to nothing at all. Ask the
+         builtin surface, as the zero-argument dispatch does. The offset is
+         recorded when the switch was opened, not searched for in the text,
+         so the receiver's rewrite to a frame slot does not matter; a
+         `default:` belonging to an arm's own inlined switch only makes this
+         decline, leaving the switch as it was (#4831). */
+      if (!is_setter_val && !strstr(b->p + sw_start, " default:"))
+        emit_poly_builtin_default(c, id, recv, name, argc, argv, atmp, atmp_ty,
+                                  ret, tv, tr, 1, b);
       buf_printf(b, " } _t%d; })", is_setter_val ? atmp[0] : tr);
       free(atmp);
       free(atmp_ty);

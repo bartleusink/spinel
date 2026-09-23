@@ -3212,10 +3212,17 @@ else {
     return TY_POLY;
 
   /* Array#pop(n) / #shift(n) on a boxed array answer an Array of the removed
-     elements (#3613) */
+     elements (#3613) -- unless a program class also answers the name, when
+     the dispatch writes that class's result into the same slot, and only a
+     boxed one holds both (#4831; the push rule above for the same reason). */
   if (recv >= 0 && rt == TY_POLY && argc == 1 &&
-      (sp_streq(name, "pop") || sp_streq(name, "shift")))
+      (sp_streq(name, "pop") || sp_streq(name, "shift"))) {
+    if (c->poly_builtin_ty && id < c->node_cap && c->poly_builtin_ty[id] == TY_UNKNOWN)
+      c->poly_builtin_ty[id] = TY_POLY_ARRAY;   /* the dispatch's builtin default */
+    for (int k = 0; k < c->nclasses; k++)
+      if (comp_poly_arm_defines_n(c, k, name, argc)) return TY_POLY;
     return TY_POLY_ARRAY;
+  }
 
   /* TY_QUEUE instance methods */
   if (recv >= 0 && rt == TY_QUEUE) {
