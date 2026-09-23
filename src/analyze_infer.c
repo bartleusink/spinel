@@ -1969,6 +1969,15 @@ static TyKind infer_call_inner(Compiler *c, int id) {
         TyKind ball = yield_value_type(c, emi);
         g_yvt_unify_all = sv_ua;
         if (ball != bfirst && ball != TY_UNKNOWN) return TY_POLY; }
+      /* No call site could say what the block answers -- a method that
+         declares `&blk` and calls it without ever yielding has none of the
+         yield machinery's routes to one, and a module method reached through
+         `extend` is called with a proc built at the call site rather than
+         spliced into it. Unknown is not an answer here: it degrades, and the
+         degrade is silent, `blk.call.to_s` folding to the empty string and
+         `blk.call.inspect` to "[]" (the nil-degrade placeholders in
+         emit_call). The value is decided at run time, which is poly. */
+      if (bfirst == TY_UNKNOWN || bfirst == TY_VOID) return TY_POLY;
       return bfirst;
     }
   }
