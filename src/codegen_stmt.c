@@ -1445,6 +1445,30 @@ static int local_is_bounded_counter(Compiler *c, int id, const char *nm, LocalVa
   return ok;
 }
 
+/* Ruby reads the slot of `x OP= v` before it evaluates v. An rhs that leaves a
+   prelude in g_pre -- an array literal is built there -- runs it ahead of the
+   op-assign line, so an rhs that writes the slot (`$a |= [f]` with f
+   reassigning $a) had the operation read the NEW value; an rhs with no
+   prelude (`$a |= f`) sits beside the slot read as a sibling C argument,
+   whose order C leaves unspecified. For an effectful rhs, read the slot into
+   a rooted temp inserted in g_pre at `pre_mark`, ahead of any prelude, and
+   answer the temp as the operation's input; otherwise answer `lval` (#4875). */
+static const char *array_op_assign_src(Compiler *c, const char *lval, const char *k,
+                                       int v, size_t pre_mark, char *tn, size_t tnsz) {
+  if (!g_pre || !subtree_has_side_effect(c, v)) return lval;
+  int t = ++g_tmp;
+  snprintf(tn, tnsz, "_t%d", t);
+  Buf cap; memset(&cap, 0, sizeof cap);
+  emit_indent(&cap, g_indent); buf_printf(&cap, "sp_%sArray *_t%d = %s;\n", k, t, lval);
+  emit_indent(&cap, g_indent); buf_printf(&cap, "SP_GC_ROOT(_t%d);\n", t);
+  char *prelude = strdup(g_pre->len > pre_mark ? g_pre->p + pre_mark : "");
+  buf_erase(g_pre, pre_mark, g_pre->len - pre_mark);
+  buf_puts(g_pre, cap.p);
+  buf_puts(g_pre, prelude);
+  free(prelude); free(cap.p);
+  return tn;
+}
+
 /* Array op-assign on any slot -- a local, an ivar, a global, a class
    variable -- as `x = x OP v`, `lval` naming the slot and `t` its array type:
    `|=` `&=` `-=` through the same typed set-op helpers the binary `a | b`
@@ -1463,10 +1487,16 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
   if (sp_streq(op, "|") || sp_streq(op, "&") || sp_streq(op, "-")) {
     if (vt != t && vt != TY_UNKNOWN) return 0;
     const char *fn = sp_streq(op, "&") ? "intersect" : (sp_streq(op, "|") ? "union" : "difference");
-    buf_printf(b, "%s = sp_%sArray_%s(%s, ", lval, k, fn, lval);
-    if (vt == TY_UNKNOWN) buf_puts(b, "NULL");
-    else emit_expr(c, v, b);
+    size_t pre_mark = g_pre ? g_pre->len : 0;
+    Buf rb; memset(&rb, 0, sizeof rb);
+    if (vt == TY_UNKNOWN) buf_puts(&rb, "NULL");
+    else emit_expr(c, v, &rb);
+    char tn[32];
+    const char *src = array_op_assign_src(c, lval, k, v, pre_mark, tn, sizeof tn);
+    buf_printf(b, "%s = sp_%sArray_%s(%s, ", lval, k, fn, src);
+    buf_puts(b, rb.p ? rb.p : "");
     buf_puts(b, ");\n");
+    free(rb.p);
     return 1;
   }
   if (sp_streq(op, "+")) {
@@ -1478,16 +1508,28 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
       rhs_empty = (nel == 0);
     }
     if (vt != t && !rhs_empty) return 0;
-    buf_printf(b, "%s = sp_%sArray_concat(%s, ", lval, k, lval);
-    if (rhs_empty) buf_puts(b, "NULL");
-    else emit_expr(c, v, b);
+    size_t pre_mark = g_pre ? g_pre->len : 0;
+    Buf rb; memset(&rb, 0, sizeof rb);
+    if (rhs_empty) buf_puts(&rb, "NULL");
+    else emit_expr(c, v, &rb);
+    char tn[32];
+    const char *src = array_op_assign_src(c, lval, k, v, pre_mark, tn, sizeof tn);
+    buf_printf(b, "%s = sp_%sArray_concat(%s, ", lval, k, src);
+    buf_puts(b, rb.p ? rb.p : "");
     buf_puts(b, ");\n");
+    free(rb.p);
     return 1;
   }
   if (sp_streq(op, "*") && (vt == TY_INT || vt == TY_POLY)) {
     int ta = ++g_tmp, tn = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp;
-    buf_printf(b, "{ sp_%sArray *_t%d = %s; sp_int _t%d = ", k, ta, lval, tn);
-    emit_int_expr(c, v, b);
+    size_t pre_mark = g_pre ? g_pre->len : 0;
+    Buf rb; memset(&rb, 0, sizeof rb);
+    emit_int_expr(c, v, &rb);
+    char tsrc[32];
+    const char *src = array_op_assign_src(c, lval, k, v, pre_mark, tsrc, sizeof tsrc);
+    buf_printf(b, "{ sp_%sArray *_t%d = %s; sp_int _t%d = ", k, ta, src, tn);
+    buf_puts(b, rb.p ? rb.p : "");
+    free(rb.p);
     buf_printf(b, "; if (_t%d < 0) sp_raise_cls(\"ArgumentError\", \"negative argument\");"
                   " sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);"
                   " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
@@ -1634,13 +1676,8 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
       int nel = 0; nt_arr(nt, v, "elements", &nel);
       rhs_empty_lit = (nel == 0);
     }
-    if (k && (vt == t || rhs_empty_lit)) {
-      buf_printf(b, "%s = sp_%sArray_concat(%s, ", lval, k, lval);
-      if (rhs_empty_lit) buf_puts(b, "NULL");
-      else emit_expr(c, v, b);
-      buf_puts(b, ");\n");
+    if (k && (vt == t || rhs_empty_lit) && emit_array_op_assign(c, lval, t, op, v, b))
       return;
-    }
   }
   if (ty_is_object(t)) {
     int defcls2 = -1;
@@ -8027,12 +8064,7 @@ else {
           int nel2 = 0; nt_arr(nt, ival2, "elements", &nel2);
           rhs_empty2 = (nel2 == 0);
         } }
-      if (k2 && (rvt2 == vt || rhs_empty2)) {
-        buf_printf(b, "%s = sp_%sArray_concat(%s, ", ref, k2, ref);
-        if (rhs_empty2) buf_puts(b, "NULL");
-        else emit_expr(c, ival2, b);
-        buf_puts(b, ");\n");
-      }
+      if (k2 && (rvt2 == vt || rhs_empty2) && emit_array_op_assign(c, ref, vt, op, ival2, b)) { }
       else if (vt == TY_POLY_ARRAY) {
         buf_printf(b, "%s = sp_poly_to_poly_array(sp_poly_add(sp_box_poly_array(%s), ",
                    ref, ref);
@@ -8258,10 +8290,20 @@ else {
         unsupported(c, id, "call operator write (operator on a string attribute)");
       if (ivt == TY_POLY && !cpf && !bitop)
         unsupported(c, id, "call operator write (operator on a boxed attribute)");
+      /* the receiver is bound in g_pre, ahead of any prelude the rhs leaves
+         there: Ruby evaluates it first, and an array slot's op-assign reads
+         the slot through it in g_pre, so it is rooted across that prelude's
+         allocations (#4875) */
       int trecv = ++g_tmp;
-      emit_indent(b, indent);
-      emit_ctype(c, rt, b);
-      buf_printf(b, " _t%d = ", trecv); emit_expr(c, recv, b); buf_puts(b, ";\n");
+      Buf rx; memset(&rx, 0, sizeof rx);
+      emit_expr(c, recv, &rx);
+      Buf *rb = g_pre ? g_pre : b;
+      emit_indent(rb, g_pre ? g_indent : indent);
+      emit_ctype(c, rt, rb);
+      buf_printf(rb, " _t%d = ", trecv); buf_puts(rb, rx.p ? rx.p : ""); buf_puts(rb, ";");
+      if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) { buf_puts(rb, " "); emit_gc_root_tmp(c, rt, trecv, rb); }
+      buf_puts(rb, "\n");
+      free(rx.p);
       const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
       emit_indent(b, indent);
       if (ivt == TY_STRING) {
