@@ -2089,10 +2089,8 @@ int method_call_param_shift(Compiler *c, int mn, int mi) {
    cannot be inlined at its call sites). Shared by the inliner and the
    valued-break detector. */
 int scope_has_return(Compiler *c, int scope_idx) {
-  for (int id = 0; id < c->nt->count; id++) {
-    const char *ty = nt_type(c->nt, id);
-    if (ty && sp_streq(ty, "ReturnNode") && c->nscope[id] == scope_idx) return 1;
-  }
+  NT_FOREACH_KIND(c->nt, NK_ReturnNode, id)
+    if (c->nscope[id] == scope_idx) return 1;
   return 0;
 }
 

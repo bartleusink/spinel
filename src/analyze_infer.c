@@ -7178,12 +7178,11 @@ TyKind infer_uncached(Compiler *c, int id) {
        bare-yield tail is handled per-site by emit_block_invoke_coerced /
        method_call_ret and must keep its concrete first-site type. */
     if (yield_value_diverges(c, ymi)) {
-      for (int w = 0; w < nt->count; w++) {
-        NodeKind wk = nt_kind(nt, w);
-        if ((wk == NK_LocalVariableWriteNode || wk == NK_LocalVariableOperatorWriteNode ||
-             wk == NK_LocalVariableOrWriteNode || wk == NK_LocalVariableAndWriteNode) &&
-            nt_ref(nt, w, "value") == id) return TY_POLY;
-      }
+      static const NodeKind lw_kinds[] = { NK_LocalVariableWriteNode, NK_LocalVariableOperatorWriteNode,
+                                           NK_LocalVariableOrWriteNode, NK_LocalVariableAndWriteNode };
+      for (int wk = 0; wk < 4; wk++)
+        NT_FOREACH_KIND(nt, lw_kinds[wk], w)
+          if (nt_ref(nt, w, "value") == id) return TY_POLY;
       /* A yield whose value leaves through an ENSURE frame is in the same
          position as one written to a local, for the same reason: the frame
          carries the value in a slot of its own, and that slot settles its type
@@ -7195,8 +7194,7 @@ TyKind infer_uncached(Compiler *c, int id) {
          says true and 21, and a pair whose types do not share a C slot stopped
          the build instead. Poly makes the slot a boxed carrier, and each
          inlined site boxes its own value. */
-      for (int w = 0; w < nt->count; w++) {
-        if (nt_kind(nt, w) != NK_BeginNode) continue;
+      NT_FOREACH_KIND(nt, NK_BeginNode, w) {
         if (nt_ref(nt, w, "ensure_clause") < 0) continue;
         int st = nt_ref(nt, w, "statements");
         if (st < 0) continue;
