@@ -6859,7 +6859,12 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       int provided = -1;
       { int slot = arg_slot_for_param(c, m, i, pos_argc);
         if (slot >= 0 && slot < pos_argc) provided = argv ? argv[slot] : -1; }
-      if (provided < 0 && kwh >= 0 && m->pnames[i]) provided = kwh_lookup(nt, kwh, m->pnames[i]);
+      /* only a keyword parameter binds a key by name; a keyword hash no
+         parameter takes is one more positional argument, and fills the
+         first unfilled slot -- the rules the path below follows (#4869) */
+      if (provided < 0 && kwh >= 0 && m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]))
+        provided = kwh_lookup(nt, kwh, m->pnames[i]);
+      if (provided < 0 && kwh_positional_slot(c, m, kwh, pos_argc) == i) provided = kwh;
       Buf vb; memset(&vb, 0, sizeof vb);
       /* A provided (caller) argument is emitted with the sibling-param renames
          OFF -- only a callee default expression should resolve param references
