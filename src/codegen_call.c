@@ -8982,6 +8982,20 @@ static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Bu
     buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", sp_box_class(_t%d))); } _t%d; })", kt, rt2);
 }
 
+/* The trailing block slot of a class's constructor, for the class-value
+   `new` dispatch arms: an initialize that keeps a named `&blk` (and does not
+   yield) takes it as a C parameter. These dispatches are only reached with no
+   block at the call, so the slot is NULL. Leaving it out put a call with too
+   few arguments into every such arm -- a class the receiver was never going
+   to be stopped the build (#4855). `lead` is the separator after the
+   positional arguments. */
+static void emit_ctor_block_slot(Compiler *c, int initm, const char *lead, Buf *b) {
+  if (initm < 0) return;
+  Scope *is = &c->scopes[initm];
+  if (!is->blk_param || !is->blk_param[0] || is->yields) return;
+  buf_printf(b, "%sNULL", lead);
+}
+
 static int emit_class_new_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -26981,6 +26995,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         if (pt == TY_POLY) buf_puts(b, tn);
         else emit_unbox_text(c, pt, tn, b);
       }
+      emit_ctor_block_slot(c, initm, np > 0 ? ", " : "", b);
       if (c->classes[ci].is_value_type) buf_printf(b, "));break;");
       else buf_printf(b, "),%d);break;", ci);
     }
@@ -27048,6 +27063,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       Buf ab9; memset(&ab9, 0, sizeof ab9);
       if (initm >= 0 && c->scopes[initm].nparams > 0)
         emit_args_filled(c, initm, -1, "", &ab9);
+      emit_ctor_block_slot(c, initm, ab9.p && ab9.p[0] ? ", " : "", &ab9);
       const char *args9 = ab9.p ? ab9.p : "";
       /* a value-type object returns by value: box via its vobj boxer, not
          sp_box_obj which expects a heap pointer (#2450) */
@@ -27110,6 +27126,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         }
         Buf ad; memset(&ad, 0, sizeof ad);
         emit_args_filled(c, initm, -1, "", &ad);
+        emit_ctor_block_slot(c, initm, ad.p && ad.p[0] ? ", " : "", &ad);
         if (c->classes[ci].is_value_type)
           buf_printf(b, "sp_box_vobj_%s(sp_%s_new(%s)); break;",
                      c->classes[ci].c_name, c->classes[ci].c_name, ad.p ? ad.p : "");
@@ -27157,6 +27174,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, pt, tn, &ub);
         buf_puts(b, ub.p ? ub.p : tn); free(ub.p);
       }
+      emit_ctor_block_slot(c, initm, np > 0 ? ", " : "", b);
       if (c->classes[ci].is_value_type) buf_puts(b, ")); break;");
       else buf_printf(b, "),%d); break;", ci);
     }
