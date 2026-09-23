@@ -971,6 +971,7 @@ int emit_output_call(Compiler *c, int id, Buf *b, int indent);
 int emit_output_spilled(Compiler *c, const char *name, int argc, const int *argv, Buf *b, int indent);
 void emit_assign(Compiler *c, int id, Buf *b, int indent);
 void emit_op_assign(Compiler *c, int id, Buf *b, int indent);
+int emit_array_op_assign(Compiler *c, const char *lval, TyKind t, const char *op, int v, Buf *b);
 void emit_cond(Compiler *c, int id, Buf *b);
 int static_isa_cond(Compiler *c, int pred);
 int static_nil_ivar_cond(Compiler *c, int pred);
