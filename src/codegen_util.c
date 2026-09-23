@@ -512,6 +512,14 @@ const char *g_proc_return_home = NULL;
    resolves against the new instance rather than the caller's self. */
 const char *g_ctor_self = NULL;
 const char *g_ctor_self_deref = NULL;
+/* While a dispatch arm binds its method's arguments: the receiver, cast to the
+   arm's class, that method's scope, and the expression depth of the arm's call.
+   A default the arm itself omits reads self (`def m(x, y = @extra)`) against
+   the receiver, not the caller's self; a call nested in an argument sits
+   deeper and binds its own. */
+const char *g_arm_self = NULL;
+const Scope *g_arm_scope = NULL;
+int g_arm_depth = -1;
 /* Emitting the body of a non-lambda proc created at top level: a `return`
    there is a TOP-LEVEL return, which ends the script (#3663). */
 int g_proc_toplevel_return = 0;

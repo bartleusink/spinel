@@ -5381,7 +5381,28 @@ static int scope_mutates_array_local(Compiler *c, int mi, const char *name, int 
   return 0;
 }
 
+static void emit_arg_or_default_at(Compiler *c, Scope *m, int idx, int provided, Buf *out);
+
+/* A default a dispatch arm omits runs on the receiver as the arm's class: the
+   caller's self may be another class, or none at all at top level (#4873). */
 void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
+  if (provided >= 0 || !g_arm_self || g_arm_scope != m || g_arm_depth != g_expr_depth ||
+      !m->pdefault || m->pdefault[idx] < 0) {
+    emit_arg_or_default_at(c, m, idx, provided, out);
+    return;
+  }
+  const char *sv_self = g_self, *sv_deref = g_self_deref, *sv_arm = g_arm_self;
+  int sv_emcls = g_emitting_class_id;
+  g_self = g_arm_self;
+  g_self_deref = "->";
+  g_emitting_class_id = m->class_id;
+  g_arm_self = NULL;
+  emit_arg_or_default_at(c, m, idx, provided, out);
+  g_self = sv_self; g_self_deref = sv_deref; g_arm_self = sv_arm;
+  g_emitting_class_id = sv_emcls;
+}
+
+static void emit_arg_or_default_at(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_INT;
   /* A hash argument of a different KIND than the parameter's slot: the two are
@@ -7229,10 +7250,16 @@ static void emit_dispatch_arm_call(Compiler *c, int kd, int kmi, const char *sel
   Buf apre; memset(&apre, 0, sizeof apre);
   Buf call; memset(&call, 0, sizeof call);
   Buf *sv_pre = g_pre; int sv_ind = g_indent;
+  const char *sv_arm_self = g_arm_self; const Scope *sv_arm_scope = g_arm_scope;
+  int sv_arm_depth = g_arm_depth;
+  char arm_self[160];
+  snprintf(arm_self, sizeof arm_self, "((sp_%s *)%s)", cn, selfptr);
   g_pre = &apre; g_indent = 0;
+  g_arm_self = arm_self; g_arm_scope = s; g_arm_depth = g_expr_depth;
   buf_printf(&call, "sp_%s_%s((sp_%s *)%s", cn, mc(s->name), cn, selfptr);
   emit_args_filled(c, kmi, argsNode, ", ", &call);
   g_pre = sv_pre; g_indent = sv_ind;
+  g_arm_self = sv_arm_self; g_arm_scope = sv_arm_scope; g_arm_depth = sv_arm_depth;
   if (arm_takes_blk(s)) {
     if (blk_tmp >= 0) buf_printf(&call, ", _t%d", blk_tmp);
     else buf_puts(&call, ", NULL");

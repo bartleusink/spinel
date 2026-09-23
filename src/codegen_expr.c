@@ -1112,7 +1112,19 @@ static int emit_array_op_assign_value(Compiler *c, const char *ref, TyKind t,
   return ok;
 }
 
+static void emit_expr_node(Compiler *c, int id, Buf *b);
+
+/* How many expressions enclose the one being emitted: a call nested in an
+   argument sits deeper than the call that takes the argument. */
+int g_expr_depth = 0;
+
 void emit_expr(Compiler *c, int id, Buf *b) {
+  g_expr_depth++;
+  emit_expr_node(c, id, b);
+  g_expr_depth--;
+}
+
+static void emit_expr_node(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
   if (!ty) unsupported(c, id, "expression (no type)");
