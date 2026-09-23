@@ -265,6 +265,20 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         buf_puts(&conv, "sp_time_to_s_v(");
         EMIT_IV(); buf_puts(&conv, ")");
       }
+      /* a Range interpolates as its to_s, the same renderers Range#to_s
+         lowers to; with no arm every Range kind was refused (#4824) */
+      else if (t == TY_RANGE) {
+        buf_puts(&conv, "sp_range_str(");
+        EMIT_IV(); buf_puts(&conv, ")");
+      }
+      else if (t == TY_FLOAT_RANGE) {
+        buf_puts(&conv, "sp_frange_inspect(");
+        EMIT_IV(); buf_puts(&conv, ")");
+      }
+      else if (t == TY_STR_RANGE) {
+        buf_puts(&conv, "sp_srange_to_s(");
+        EMIT_IV(); buf_puts(&conv, ")");
+      }
       else if (t == TY_REGEX) {
         buf_puts(&conv, "sp_re_to_s_str((void *)(");
         EMIT_IV(); buf_puts(&conv, "))");
