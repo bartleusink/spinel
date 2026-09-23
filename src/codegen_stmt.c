@@ -2144,8 +2144,9 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
   { const char *_ra = resolve_class_alias(c, cn); if (_ra) cn = _ra; }
   if (sp_streq(cn, "Integer") || sp_streq(cn, "Fixnum"))
     buf_printf(b, "%s.tag == SP_TAG_INT", tmp);
+  /* a mutable String boxes as its handle; a box with no handle is not one */
   else if (sp_streq(cn, "String"))
-    buf_printf(b, "%s.tag == SP_TAG_STR", tmp);
+    buf_printf(b, "(%s.tag == SP_TAG_STR || (sp_poly_is_strbuf(%s) && %s.v.p))", tmp, tmp, tmp);
   else if (sp_streq(cn, "Float"))
     buf_printf(b, "%s.tag == SP_TAG_FLT", tmp);
   else if (sp_streq(cn, "Symbol"))
