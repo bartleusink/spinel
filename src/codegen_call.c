@@ -1,4 +1,6 @@
 #include "codegen_internal.h"
+/* the `&.` proc call currently being emitted inside its own nil guard */
+static int g_sn_proc_node = -1;
 
 /* The call whose poly-hash face is being re-emitted, so the arm that installs
    the face does not fire again on its own substituted receiver. */
@@ -21214,6 +21216,32 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       (sp_streq(name, "call") || sp_streq(name, "()") || sp_streq(name, "[]") ||
        (sp_streq(name, "===") && argc == 1))) {
     TyKind rty = comp_ntype(c, id);          /* the call's result = proc's body return */
+    /* `pr&.call(...)`: a nil proc answers nil and the call does not run. The
+       receiver goes into a temp the call below reads (through the argument
+       override), so it is evaluated once. Without this the nil receiver
+       reached sp_proc_recv, which raises -- as `pr.call` should (#4844). */
+    { const char *cop = nt_str(nt, id, "call_operator");
+      if (cop && sp_streq(cop, "&.") && g_sn_proc_node != id && g_n_argov < MAX_ARG_OVERRIDE) {
+        int tq = ++g_tmp;
+        Buf rq; memset(&rq, 0, sizeof rq); emit_expr(c, recv, &rq);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_Proc *_t%d = %s; SP_GC_ROOT(_t%d);\n", tq, rq.p ? rq.p : "NULL", tq);
+        free(rq.p);
+        int slot = g_n_argov++;
+        g_argov_node[slot] = recv;
+        snprintf(g_argov_text[slot], sizeof g_argov_text[0], "_t%d", tq);
+        int sv = g_sn_proc_node; g_sn_proc_node = id;
+        Buf cb; memset(&cb, 0, sizeof cb);
+        emit_expr(c, id, &cb);
+        g_sn_proc_node = sv;
+        g_n_argov--;
+        const char *nilv = rty == TY_POLY || rty == TY_UNKNOWN ? "sp_box_nil()"
+                         : rty == TY_INT ? "SP_INT_NIL"
+                         : rty == TY_FLOAT ? "sp_float_nil()" : default_value(rty);
+        buf_printf(b, "(_t%d ? %s : %s)", tq, cb.p ? cb.p : nilv, nilv);
+        free(cb.p);
+        return;
+      } }
     /* a nil receiver raises NoMethodError, except for `===`, which nil
        answers itself (false) */
     int proc_nil_raises = !sp_streq(name, "===");
