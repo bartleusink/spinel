@@ -8811,6 +8811,125 @@ static TyKind ivar_write_slot_ty(Compiler *c, int id) {
   return TY_UNKNOWN;
 }
 
+/* Does the call pass keyword arguments -- a literal `k: v` or a `**h`? */
+static int call_has_keyword_args(const NodeTable *nt, const int *argv, int argc) {
+  /* Keywords beside at least one positional. A sole keyword hash is the
+     Struct/Data member form (`d.class.new(x: 1)`), which the positional
+     dispatch already builds from the hash, member by member. */
+  if (argc < 2) return 0;
+  for (int a = 0; a < argc; a++)
+    if (argv && nt_kind(nt, argv[a]) == NK_KeywordHashNode) return 1;
+  return 0;
+}
+
+/* Can `initialize` (scope initm) take this call: the positional count within
+   its required..required+optional range (or any, with a rest), every literal
+   keyword one it names (or a **rest), and every required keyword supplied
+   (or a **splat that might supply it)? Read off the def's own parameter
+   lists, which say which of pnames are keywords. */
+static int init_accepts_kw_call(Compiler *c, int initm, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  Scope *sc = &c->scopes[initm];
+  int pn = sc->def_node >= 0 ? nt_ref(nt, sc->def_node, "parameters") : -1;
+  int nreq = 0, nopt = 0, npost = 0, nkw = 0;
+  const int *kws = NULL;
+  int has_rest = 0, has_kwrest = 0;
+  if (pn >= 0) {
+    nt_arr(nt, pn, "requireds", &nreq);
+    nt_arr(nt, pn, "optionals", &nopt);
+    nt_arr(nt, pn, "posts", &npost);
+    kws = nt_arr(nt, pn, "keywords", &nkw);
+    has_rest = nt_ref(nt, pn, "rest") >= 0;
+    has_kwrest = nt_ref(nt, pn, "keyword_rest") >= 0;
+  }
+  int npos = 0, kwsplat = 0, kwh = -1;
+  for (int a = 0; a < argc; a++) {
+    NodeKind k = nt_kind(nt, argv[a]);
+    if (k == NK_KeywordHashNode) kwh = argv[a];
+    else if (k == NK_BlockArgumentNode) continue;
+    else if (k == NK_SplatNode) return 0;   /* a runtime length: not judged here */
+    else npos++;
+  }
+  if (npos < nreq + npost) return 0;
+  if (!has_rest && npos > nreq + npost + nopt) return 0;
+  int ne = 0;
+  const int *els = kwh >= 0 ? nt_arr(nt, kwh, "elements", &ne) : NULL;
+  for (int e = 0; e < ne; e++) {
+    if (nt_kind(nt, els[e]) == NK_AssocSplatNode) { kwsplat = 1; continue; }
+    int key = nt_ref(nt, els[e], "key");
+    const char *kn = key >= 0 && nt_kind(nt, key) == NK_SymbolNode ? nt_str(nt, key, "value") : NULL;
+    if (!kn) return 0;
+    int known = has_kwrest;
+    for (int i = 0; i < nkw && !known; i++) {
+      const char *pn2 = nt_str(nt, kws[i], "name");
+      if (pn2 && sp_streq(pn2, kn)) known = 1;
+    }
+    if (!known) return 0;
+  }
+  if (!kwsplat)
+    for (int i = 0; i < nkw; i++) {
+      if (!nt_type(nt, kws[i]) || !sp_streq(nt_type(nt, kws[i]), "RequiredKeywordParameterNode")) continue;
+      const char *pn2 = nt_str(nt, kws[i], "name");
+      int given = 0;
+      for (int e = 0; e < ne && !given; e++) {
+        int key = nt_ref(nt, els[e], "key");
+        const char *kn = key >= 0 ? nt_str(nt, key, "value") : NULL;
+        if (kn && pn2 && sp_streq(kn, pn2)) given = 1;
+      }
+      if (!given) return 0;
+    }
+  if (nkw == 0 && !has_kwrest && (ne > 0)) return 0;
+  return 1;
+}
+
+/* `klass.new(..., k: v)` on a class known only at run time, the receiver a
+   Class value (boxed = 0) or a boxed value (boxed = 1). One arm per class
+   whose initialize takes this call's shape, the arguments laid out as a call
+   to that initialize would be -- keywords by name, defaults filled -- with
+   emit_args_filled, which a static `K.new(...)` uses. The arguments are
+   evaluated inside the arm taken, so once. */
+static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int argc; const int *argv = call_args(nt, id, &argc);
+  int kt = ++g_tmp, rt2 = ++g_tmp;
+  buf_printf(b, "({ %s _t%d = ", boxed ? "sp_RbVal" : "sp_Class", kt); emit_expr(c, recv, b);
+  buf_printf(b, "; sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    if (is_builtin_reopen(c->classes[ci].name) || c->classes[ci].is_native_class ||
+        c->classes[ci].is_struct) continue;
+    int initm = comp_method_in_chain(c, ci, "initialize", NULL);
+    if (initm < 0) continue;
+    if (!init_accepts_kw_call(c, initm, argv, argc)) {
+      /* the class exists and constructs, just not with these arguments:
+         CRuby's ArgumentError, not the NoMethodError of the default */
+      if (c->classes[ci].instantiated)
+        buf_printf(b, "case %d: sp_raise_cls(\"ArgumentError\", \"wrong arguments for %s#initialize\"); break; ",
+                   ci, c->classes[ci].name);
+      continue;
+    }
+    /* the layout's own statements (a keyword check, a hoisted argument)
+       belong to this arm: ahead of the switch every arm's check ran for
+       every class, and one class's keywords were unknown to the next */
+    Buf apre; memset(&apre, 0, sizeof apre);
+    Buf aval; memset(&aval, 0, sizeof aval);
+    Buf *sv_pre = g_pre; g_pre = &apre;
+    emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", &aval);
+    g_pre = sv_pre;
+    buf_printf(b, "case %d: { %s _t%d=", ci, apre.p ? apre.p : "", rt2);
+    if (c->classes[ci].is_value_type)
+      buf_printf(b, "sp_box_vobj_%s(sp_%s_new(%s)); } break; ", c->classes[ci].c_name,
+                 c->classes[ci].c_name, aval.p ? aval.p : "");
+    else
+      buf_printf(b, "sp_box_obj(sp_%s_new(%s), %d); } break; ", c->classes[ci].c_name,
+                 aval.p ? aval.p : "", ci);
+    free(apre.p); free(aval.p);
+  }
+  if (boxed)
+    buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", _t%d)); } _t%d; })", kt, rt2);
+  else
+    buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", sp_box_class(_t%d))); } _t%d; })", kt, rt2);
+}
+
 static int emit_class_new_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -26697,6 +26816,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        (nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "SelfNode"))) &&
       comp_ntype(c, id) == TY_POLY) {
     int kt = ++g_tmp, rt2 = ++g_tmp;
+    /* Keyword arguments: the positional-only arms below counted the keyword
+       hash as one more positional and matched no class, so the switch came
+       out empty and every call raised NoMethodError (#4845). Here each class
+       whose initialize takes this call's shape gets an arm that lays the
+       arguments out as a call to that initialize would, keywords by name and
+       defaults filled -- the same emit_args_filled a static `K.new(...)`
+       uses. The arguments are evaluated inside the arm taken, once. */
+    if (call_has_keyword_args(nt, argv, argc)) {
+      emit_class_value_new_kw(c, id, recv, 0, b);
+      return;
+    }
     int *atmp = calloc((size_t)argc, sizeof(int));
     buf_printf(b, "({ sp_Class _t%d = ", kt); emit_expr(c, recv, b); buf_puts(b, "; ");
     for (int a = 0; a < argc; a++) {
@@ -26889,6 +27019,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
      CRuby's ArgumentError/NoMethodError. (#2888) */
   if (recv >= 0 && sp_streq(name, "new") && comp_ntype(c, recv) == TY_POLY &&
       nt_ref(nt, id, "block") < 0) {
+    /* keyword arguments: laid out per class by name, as in the Class-valued
+       form above (#4845) -- positionally they bound `k: v` to a parameter */
+    if (call_has_keyword_args(nt, argv, argc)) {
+      emit_class_value_new_kw(c, id, recv, 1, b);
+      return;
+    }
     int kt = ++g_tmp, rt2 = ++g_tmp;
     int *atmp = argc ? calloc(argc, sizeof(int)) : NULL;
     buf_printf(b, "({ sp_RbVal _t%d = ", kt); emit_expr(c, recv, b); buf_puts(b, "; ");
