@@ -1775,7 +1775,7 @@ const char *array_kind(TyKind t) {
    are not walked here. */
 const char *array_iter_kind(TyKind t) {
   if (t == TY_POLY_ARRAY) return "Poly";
-  if (t == TY_INT_ARRAY_ARRAY || t == TY_FLOAT_ARRAY_ARRAY) return "Ptr";
+  if (ty_is_ptr_array(t)) return "Ptr";   /* a numeric table's rows, or objects */
   return array_kind(t);
 }
 void emit_c_escaped_n(Buf *b, const char *s, size_t len) {

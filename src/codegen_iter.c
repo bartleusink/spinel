@@ -3384,7 +3384,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   }
 
   /* array.each_with_index { |x, i| ... } */
-  if (sp_streq(name, "each_with_index") && ty_is_array(rt)) {
+  if (sp_streq(name, "each_with_index") && (ty_is_array(rt) || ty_is_obj_array(rt))) {
     const char *k = array_iter_kind(rt);
     if (!k) return 0;
     const char *p1 = block_param_name(c, block, 1); if (p1) p1 = rename_local(p1);
@@ -3883,7 +3883,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
   if ((sp_streq(name, "each") || sp_streq(name, "each_entry") || sp_streq(name, "reverse_each")) &&
-      ty_is_array(rt)) {
+      (ty_is_array(rt) || ty_is_obj_array(rt))) {   /* an object array walks as sp_PtrArray (#4846) */
     const char *k = array_iter_kind(rt);
     if (!k) return 0;
     int rev = sp_streq(name, "reverse_each");

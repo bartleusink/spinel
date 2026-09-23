@@ -15,3 +15,6 @@ widen(1, 2)
 widen("s", 3)
 r = widen(nil, 4)
 p r
+# keeps `pts` a mixed (poly) array, so line 13 is a class switch whatever
+# the object-array narrowing decides (#4846)
+pts << 1 if ARGV.size > 99

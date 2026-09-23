@@ -267,7 +267,10 @@ TyKind ty_array_elem(TyKind arr) {
     case TY_STR_ARRAY:       return TY_STRING;
     case TY_INT_ARRAY_ARRAY: return TY_INT_ARRAY;
     case TY_FLOAT_ARRAY_ARRAY: return TY_FLOAT_ARRAY;
-    default:                 return TY_POLY;
+    default:
+      /* a narrowed object array holds one class, unboxed (#4846) */
+      if (ty_is_obj_array(arr)) return ty_object(ty_obj_array_class(arr));
+      return TY_POLY;
   }
 }
 /* ty_array_of deliberately does NOT map TY_INT_ARRAY -> TY_INT_ARRAY_ARRAY, nor

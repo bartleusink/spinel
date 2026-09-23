@@ -4366,7 +4366,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     buf_printf(b, "_t%d", tres2);
     return 1;
   }
-  if (!ty_is_array(rt) && !range_recv) return 0;
+  if (!ty_is_array(rt) && !ty_is_ptr_array(rt) && !range_recv) return 0;
   const char *k = range_recv ? "Int" : array_iter_kind(rt);
   if (!k) return 0;
 

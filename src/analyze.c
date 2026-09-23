@@ -6860,6 +6860,24 @@ static int desugar_to_enum(Compiler *c) {
    ONCE, after the fixpoint, so the new type never feeds forward inference. */
 /* A slot is a local (lv), a method's value (lv NULL, sidx the method), or an
    @ivar of one class (ici/iiv, sidx -1; #4444). */
+/* Does block `blk` contain another block or a lambda anywhere in its body? */
+static int oa_block_has_nested_block_in(const NodeTable *nt, int n) {
+  if (n < 0) return 0;
+  NodeKind k = nt_kind(nt, n);
+  if (k == NK_BlockNode || k == NK_LambdaNode) return 1;
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++) if (oa_block_has_nested_block_in(nt, nt_ref_at(nt, n, i))) return 1;
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) if (oa_block_has_nested_block_in(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+static int oa_block_has_nested_block(const NodeTable *nt, int blk) {
+  return blk >= 0 && oa_block_has_nested_block_in(nt, nt_ref(nt, blk, "body"));
+}
+
 typedef struct { int sidx; LocalVar *lv; int cls; int alive; int uf; int needs_cmp; int row_iter; int saw_call; TyKind old_pin; int ici, iiv; } OAS;
 
 /* The (sidx, lv) -> first slot index map, so a lookup is not a scan of every
@@ -7978,12 +7996,19 @@ static int narrow_object_arrays(Compiler *c) {
         }
       }
       /* each / each_with_index / zip / map / reduce yield the row. Admitted
-         here so the slot can still narrow; resolution keeps that narrow only
-         for a nested numeric table, where the emitter walks sp_PtrArray.
-         An object array with the same call stays boxed. */
+         here so the slot can still narrow. A nested numeric table takes all
+         of them. An object array takes the walks -- each, reverse_each,
+         each_entry, each_with_index, map, collect -- whose emitters bind an
+         sp_X * element (#4846); a reduce, an inject or a zip (bit 2) keeps it
+         boxed, those emitters walking only numeric rows. */
       else if (nested_row_iter_call(c, id)) {
         claimed[recv] = 1;
-        sl[S].row_iter = 1;
+        int fold = name && (sp_streq(name, "reduce") || sp_streq(name, "inject") ||
+                            sp_streq(name, "zip"));
+        sl[S].row_iter |= fold ? 2 : 1;
+        /* a block with a block of its own may be lifted into a proc, whose
+           parameter passing does not carry a typed object element yet (bit 4) */
+        if (oa_block_has_nested_block(nt, nt_ref(nt, id, "block"))) sl[S].row_iter |= 4;
       }
       else sl[S].alive = 0;
     }
@@ -8097,6 +8122,7 @@ static int narrow_object_arrays(Compiler *c) {
       if (oa_tmi < 0) {
         if (k == 0 && name && sp_streq(name, "zip") && nested_row_iter_call(c, id)) {
           claimed[a] = 1;
+          sl[S].row_iter |= 2;   /* a zip's argument: numeric rows only (#4846) */
           continue;
         }
         sl[S].alive = 0;
@@ -8246,7 +8272,7 @@ static int narrow_object_arrays(Compiler *c) {
     if (r == i) continue;
     sl[r].cls = oa_cls_join(sl[r].cls, sl[i].cls);
     if (sl[i].needs_cmp) sl[r].needs_cmp = 1;
-    if (sl[i].row_iter) sl[r].row_iter = 1;
+    sl[r].row_iter |= sl[i].row_iter;
     if (!sl[i].alive) sl[r].alive = 0;
   }
   for (int i = 0; i < n; i++) {
@@ -8287,10 +8313,18 @@ static int narrow_object_arrays(Compiler *c) {
       else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
       continue;
     }
-    /* A block iterator is kept only when the element is a numeric row.
-       The same call on an object array would narrow a table the emitters
-       do not walk. */
-    if (sl[r].row_iter && !OA_CLS_IS_NESTED(sl[r].cls)) {
+    /* A block iterator is kept for a numeric row, and for an object element
+       only when it is one of the walks (bit 1): a reduce, an inject or a zip
+       (bit 2) on an object array would narrow a table those emitters do not
+       walk. */
+    /* ... and only while nothing yet unsupported comes with it: a block that
+       nests another (bit 4), or an element class that is itself Enumerable,
+       whose Enumerable methods have no emitter on a typed receiver. */
+    if (!OA_CLS_IS_NESTED(sl[r].cls) &&
+        ((sl[r].row_iter & 6) ||
+         (sl[r].row_iter && sl[r].cls >= 0 &&
+          (an_class_includes_enumerable(c, sl[r].cls) ||
+           comp_method_in_chain(c, sl[r].cls, "each", NULL) >= 0)))) {
       OA_DROP_SRC_STAMP();
       if (sl[i].ici >= 0) continue;
       if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
