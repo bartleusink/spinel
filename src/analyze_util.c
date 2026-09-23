@@ -1010,10 +1010,34 @@ static int yvt_call_forwards_block(const NodeTable *nt, int cid) {
   return an == 1 && av && nt_type(nt, av[0]) &&
          sp_streq(nt_type(nt, av[0]), "ForwardingArgumentsNode");
 }
+/* Could block-passing call site `cid` reach method `mi` at all? A callee is
+   found by name: the call's own name, that name through an `alias`, or `new`
+   for `initialize` (yvt_callee_index). So a call whose name is none of those
+   cannot, and the resolution -- a receiver type inference per call -- is
+   skipped for it. Every yielding method used to resolve every block call in
+   the program, methods x calls per round (#4847). An aliased name, and a
+   prepend shadow (named `__prep_N_m`), are left to the full resolution. */
+static unsigned char *yvt_alias_name = NULL;   /* per yvt_ids entry: its name is an alias somewhere */
+static int yvt_name_is_alias(Compiler *c, const char *cn) {
+  for (int k = 0; k < c->nclasses; k++)
+    for (int i = 0; i < c->classes[k].naliases; i++)
+      if (c->classes[k].alias_new[i] && sp_streq(c->classes[k].alias_new[i], cn)) return 1;
+  return 0;
+}
+static int yvt_may_reach(Compiler *c, int ii, int mi) {
+  const char *mn = c->scopes[mi].name;
+  const char *cn = nt_str(c->nt, yvt_ids[ii], "name");
+  if (!mn || !cn) return 1;
+  if (sp_streq(cn, mn)) return 1;
+  if (sp_streq(cn, "new") && sp_streq(mn, "initialize")) return 1;
+  if (strncmp(mn, "__prep_", 7) == 0) return 1;
+  return yvt_alias_name && yvt_alias_name[ii];
+}
 static void yvt_build(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count;
-  free(yvt_ids); free(yvt_sup_ids);
+  free(yvt_ids); free(yvt_sup_ids); free(yvt_alias_name);
+  yvt_alias_name = NULL;
   yvt_ids = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
   yvt_sup_ids = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
   yvt_n = 0; yvt_sup_n = 0;
@@ -1032,6 +1056,12 @@ static void yvt_build(Compiler *c) {
     if (nt_ref(nt, cid, "block") < 0 && !yvt_call_forwards_block(nt, cid)) continue;
     yvt_ids[yvt_n++] = cid;
   }
+  yvt_alias_name = malloc((size_t)(yvt_n > 0 ? yvt_n : 1));
+  if (yvt_alias_name)
+    for (int ii = 0; ii < yvt_n; ii++) {
+      const char *cn = nt_str(nt, yvt_ids[ii], "name");
+      yvt_alias_name[ii] = cn ? (unsigned char)yvt_name_is_alias(c, cn) : 1;
+    }
 }
 /* Which method does block-passing call site `cid` reach? Shared by
    yield_value_type and yield_block_tails so the two agree on what counts as a
@@ -1133,6 +1163,7 @@ TyKind yield_value_type(Compiler *c, int mi) {
     /* A `callee(...)` forward carries its block implicitly inside the `...`
        (no explicit block node); treat it as a forwarded block too. */
     int fwd_args = yvt_call_forwards_block(nt, cid);
+    if (!yvt_may_reach(c, ii, mi)) continue;
     /* skip calls that live inside method mi itself (recursive self-calls);
        only external call sites provide a concrete block value type */
     if ((int)(comp_scope_of(c, cid) - c->scopes) == mi) continue;
@@ -1241,6 +1272,7 @@ int yield_block_tails(Compiler *c, int mi, int *out, int max) {
     int cid = yvt_ids[ii];
     int blk = nt_ref(nt, cid, "block");
     int fwd_args = yvt_call_forwards_block(nt, cid);
+    if (!yvt_may_reach(c, ii, mi)) continue;
     if ((int)(comp_scope_of(c, cid) - c->scopes) == mi) continue;
     if (yvt_callee_index(c, cid) != mi) continue;
     const char *blkty = blk >= 0 ? nt_type(nt, blk) : NULL;
