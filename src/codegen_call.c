@@ -21186,6 +21186,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       (sp_streq(name, "call") || sp_streq(name, "()") || sp_streq(name, "[]") ||
        (sp_streq(name, "===") && argc == 1))) {
     TyKind rty = comp_ntype(c, id);          /* the call's result = proc's body return */
+    /* a nil receiver raises NoMethodError, except for `===`, which nil
+       answers itself (false) */
+    int proc_nil_raises = !sp_streq(name, "===");
+    const char *proc_meth = sp_streq(name, "[]") ? "[]"
+                          : nt_str(nt, id, "written_name") ? nt_str(nt, id, "written_name")
+                          : "call";
     /* `.call { |x| ... }`: the literal block rides the _sp_proc_blk
        side-channel to the callee's &block param (#2648) */
     {
@@ -21237,7 +21243,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           free(ab.p);
         }
         buf_puts(b, "((void)sp_proc_call_spread(");
+        if (proc_nil_raises) buf_puts(b, "sp_proc_recv(");
         emit_expr(c, recv, b);
+        if (proc_nil_raises) buf_printf(b, ", \"%s\")", proc_meth);
         buf_printf(b, ", sp_box_poly_array(_t%d)), ", ta);
         emit_proc_ret_unbox(c, rty, b);
         buf_puts(b, ")");
@@ -21248,6 +21256,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        (see emit_proc_literal); evaluate the call for effect, then unbox the slot
        to the call's inferred type. */
     buf_puts(b, "((void)sp_proc_call(");
+    if (proc_nil_raises) buf_puts(b, "sp_proc_recv(");
     /* The receiver and the argument list are two operands of ONE C call, and C
        does not order them. A receiver that is itself a call publishes into --
        and its callee's prologue then clears -- the same _sp_proc_poly_args
@@ -21277,6 +21286,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_printf(b, "_t%d", tr);
       }
     }
+    if (proc_nil_raises) buf_printf(b, ", \"%s\")", proc_meth);
     buf_puts(b, ", ");
     emit_proc_call_args(c, argc, argv, b, 1);  /* emits args + the closing `)` */
     buf_puts(b, ", ");

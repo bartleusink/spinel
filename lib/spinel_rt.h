@@ -12420,6 +12420,15 @@ sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args);
 #else
 sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args) { if (!p || !p->fn) return 0; if (!args) { sp_int noargs[16] = {0}; return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, 0, noargs); } return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, argc, args); }
 #endif
+/* The receiver of a written `<proc>.call` / `.()` / `[]` / `.yield`. A nil
+   Proc slot is NULL, and sp_proc_call answers 0 for NULL because the runtime
+   passes an absent block that way on purpose; a call the program wrote on
+   nil is CRuby's NoMethodError instead (`def m(&b) = b.call(1)` called with
+   no block silently did nothing). */
+static inline sp_Proc *sp_proc_recv(sp_Proc *p, const char *meth) {
+  if (!p) sp_raise_nomethod(sp_nomethod_msg(meth, sp_box_nil()));
+  return p;
+}
 /* `yield` through a block that arrived as a proc parameter (a proc form, a
    lowered yielder, a forwarded &blk): no block is LocalJumpError, as the
    static yield-without-block emitter already raises, not a silent nil. */

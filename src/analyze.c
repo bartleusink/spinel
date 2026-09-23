@@ -5738,6 +5738,8 @@ int desugar_enum_method_recv(Compiler *c) {
       /* Proc#yield is exactly #call */
       int yrc = nt_ref(nt, id, "receiver");
       if (yrc >= 0 && infer_type(c, yrc) == TY_PROC) {
+        /* the spelling the program wrote, for a NoMethodError on nil */
+        nt_node_set_str(nt, id, "written_name", "yield");
         nt_node_set_str(nt, id, "name", "call");
         changed = 1;
       }

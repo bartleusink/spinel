@@ -839,10 +839,11 @@ int is_block_call(Compiler *c, int id) {
 }
 
 /* A `<&block-param>.call(...)` on the inlined method's block param while NO
-   block is supplied at this site (g_block_id<0). This arises when a real-
-   function forwarder with no block of its own inlines a target that calls its
-   &block: the path is dead for any real caller (a block-requiring method
-   invoked without one raises), but must still compile. Caller emits nil. */
+   block is supplied at this site (g_block_id<0): a bare `m` of
+   `def m(&b) = b.call(1)`, or a real-function forwarder with no block of its
+   own inlining such a target. The parameter is nil there, so unless a
+   forwarded real proc stands in for it (g_yield_proc_ref) the caller emits
+   the NoMethodError CRuby raises for `nil.call`. */
 int is_blockless_block_param_call(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (!g_block_param_name || !g_block_param_name[0] || g_block_id >= 0) return 0;
@@ -854,6 +855,15 @@ int is_blockless_block_param_call(Compiler *c, int id) {
   if (recv < 0 || !nt_type(nt, recv) || !sp_streq(nt_type(nt, recv), "LocalVariableReadNode")) return 0;
   const char *rn = nt_str(nt, recv, "name");
   return rn && sp_streq(rn, g_block_param_name);
+}
+
+/* The method name CRuby's NoMethodError names for such a call on nil:
+   `b.()` is sugar for `b.call`, `b[x]` is its own method, and a `b.yield`
+   was renamed to `call` by inference but keeps what it was written as. */
+const char *blockless_block_param_call_name(Compiler *c, int id) {
+  const char *nm = nt_str(c->nt, id, "name");
+  const char *wn = nt_str(c->nt, id, "written_name");
+  return (nm && sp_streq(nm, "[]")) ? "[]" : wn ? wn : "call";
 }
 
 /* Emit a call to the forwarded real-proc block (g_yield_proc_ref) with the

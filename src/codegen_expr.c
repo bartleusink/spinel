@@ -2035,7 +2035,10 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   }
   if (is_blockless_block_param_call(c, id)) {
     /* A forwarded real proc (caller nil-checks its &block): <blk>.call(args)
-       invokes the proc. Otherwise it is a genuinely dead path (no block). */
+       invokes the proc. Otherwise this site passed no block, so the parameter
+       is nil and the call raises NoMethodError, as CRuby's does. It is not a
+       dead path: `def m(&b) = b.call(1)` called bare reaches it, and emitting
+       only the result's default value made the call silently do nothing. */
     if (g_yield_proc_ref)
       /* In a proc form the code AROUND the yield was typed from the inlined
          view -- `yield(1) + yield(2)` compiled its operands as sp_int -- so
@@ -2053,8 +2056,13 @@ void emit_expr(Compiler *c, int id, Buf *b) {
                              (g_pf_emitting || _ynt != TY_UNKNOWN)
                                ? _ynt : g_yield_slot_ty,
                              b, 0, 1); }
-    else
-      buf_puts(b, default_value(comp_ntype(c, id)));
+    else {
+      TyKind _bt = comp_ntype(c, id);
+      buf_printf(b, "((void)sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())), %s)",
+                 blockless_block_param_call_name(c, id),
+                 (_bt == TY_POLY || _bt == TY_UNKNOWN || _bt == TY_NIL || _bt == TY_VOID)
+                   ? "sp_box_nil()" : default_value(_bt));
+    }
     return;
   }
   if (sp_streq(ty, "SelfNode")) { buf_puts(b, g_self); return; }  /* self is the object reference (pointer) */
