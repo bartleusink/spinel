@@ -3285,8 +3285,11 @@ else {
          whose nil default is a NULL hash: it rendered as `{}` and any Hash
          method on it dereferenced the NULL (#3911). This is the type-inference
          half of the binding rule in kwh_consumed_by_kwparam. */
-      if (!any_kw_bound && m->kwrest_idx < 0 && pos_argc < max_bind && max_bind > 0) {
-        LocalVar *p = m->pnames[pos_argc] ? scope_local(m, m->pnames[pos_argc]) : NULL;
+      /* The parameter is the one the hash funds as one more argument, which
+         with a leading optional is not the one at index pos_argc. */
+      int kslot = pos_argc < max_bind ? kwh_arg_param(c, m, pos_argc) : -1;
+      if (!any_kw_bound && m->kwrest_idx < 0 && kslot >= 0 && kslot < max_bind) {
+        LocalVar *p = m->pnames[kslot] ? scope_local(m, m->pnames[kslot]) : NULL;
         if (p && !p->rbs_seeded) {
           TyKind kwt = infer_type(c, kwh);
           if (!ty_is_hash(kwt)) kwt = TY_SYM_POLY_HASH;
