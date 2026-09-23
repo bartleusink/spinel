@@ -4294,6 +4294,9 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
        and `nil.map { }` answered [] (#4485) */
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_poly_iter_check(_t%d, \"%s\");\n", trecv2, name);
+    /* a Range walks as its members (#4837) */
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "_t%d = sp_poly_iter_subject(_t%d);\n", trecv2, trecv2);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = sp_poly_length(_t%d);\n", tn2, trecv2);
     emit_indent(g_pre, g_indent);

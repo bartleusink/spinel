@@ -4742,6 +4742,10 @@ static void sp_poly_arr_writeback(sp_RbVal orig, sp_PolyArray *work) {
 static sp_PolyArray *sp_enum_items_from(sp_RbVal v);   /* fwd: hash -> [key, value] pairs */
 static sp_PolyArray *sp_poly_arr_recv(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_OBJ && sp_poly_is_array_kind(v.cls_id)) return sp_poly_to_poly_array(v);
+  /* an Integer or String Range enumerates its members: select / filter /
+     reject on a boxed one raised NoMethodError naming Range (#4837) */
+  if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE))
+    return sp_enum_items_from(v);
   /* A boxed Hash enumerates as its [key, value] pairs, which is what every
      Enumerable name reaching here wants (#3449). The few whose Hash result is
      itself a Hash rebuild one from the pairs at their own call site. */
@@ -7491,11 +7495,21 @@ static sp_PolyPolyHash *sp_PolyPolyHash_from_poly(sp_RbVal src);
    of the receiver the loop handed back (#3987). A user object is let through --
    it may define its own each, and the to_a normalization ahead of this runs
    first. */
+/* What a boxed receiver's map / collect walks by index: a Range's members
+   as an array (the walk reads a length and then elements, and a Range has
+   neither), anything else as it is. An endless Range raises RangeError here
+   rather than loop forever (#4837). */
+static sp_PolyArray *sp_enum_items_from(sp_RbVal v);
+static sp_RbVal sp_poly_iter_subject(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE))
+    return sp_box_poly_array(sp_enum_items_from(v));
+  return v;
+}
 static void sp_poly_iter_check(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_OBJ &&
       (v.cls_id >= 0 || sp_poly_is_array_kind(v.cls_id) ||
        sp_poly_is_hash_kind(v.cls_id) || v.cls_id == SP_BUILTIN_RANGE ||
-       v.cls_id == SP_BUILTIN_ENUMERATOR))
+       v.cls_id == SP_BUILTIN_STR_RANGE || v.cls_id == SP_BUILTIN_ENUMERATOR))
     return;
   sp_raise_poly_nomethod(m, v);
 }
@@ -9320,6 +9334,16 @@ static sp_RbVal sp_poly_span_subject(sp_RbVal v) {
 }
 static sp_RbVal sp_poly_arr_take(sp_RbVal v, sp_int n) {
   if (n < 0) sp_raise_cls("ArgumentError", "negative array size");
+  /* Range#first(n) on a boxed Integer Range: the leading members, built
+     directly so an endless range is fine. sp_poly_length has no Range arm
+     (a Range has no #length), and the call answered [] (#4837). */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE && v.v.p) {
+    sp_Range r = *(sp_Range *)v.v.p;
+    sp_IntArray *out = sp_IntArray_new(); SP_GC_ROOT(out);
+    sp_int stop = r.last == INTPTR_MAX ? INTPTR_MAX : (r.excl ? r.last : r.last + 1);
+    for (sp_int x = r.first, k = 0; k < n && x < stop; x++, k++) sp_IntArray_push(out, x);
+    return sp_box_poly_array(sp_IntArray_to_poly(out));
+  }
   v = sp_poly_span_subject(v);
   sp_int alen = sp_poly_length(v);
   return sp_poly_arr_span(v, 0, n > alen ? alen : n);
