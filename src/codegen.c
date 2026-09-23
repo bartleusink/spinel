@@ -3642,6 +3642,9 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   emit_scope_decls(c, s, b);
   TyKind saved_rt = g_ret_type;
   int saved_ed = g_ensure_depth; g_ensure_depth = 0;
+  /* the body's own ensure regions reuse the stack from index 0: keep the
+     enclosing function's entries, which a later break or next there reads */
+  EnsureCtx saved_estk[MAX_ENSURE_DEPTH]; memcpy(saved_estk, g_ensure_stack, sizeof saved_estk);
   int saved_emcls = g_emitting_class_id; g_emitting_class_id = s->class_id;
   const char *saved_dmn = g_dm_subst_name; int saved_dmnode = g_dm_subst_node;
   g_dm_subst_name = s->dm_subst_name; g_dm_subst_node = s->dm_subst_node;
@@ -3759,6 +3762,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   g_self_deref = saved_deref;
   g_self = saved_self9;
   g_ret_type = saved_rt; g_ensure_depth = saved_ed;
+  memcpy(g_ensure_stack, saved_estk, sizeof saved_estk);
   g_emitting_class_id = saved_emcls;
   g_dm_subst_name = saved_dmn; g_dm_subst_node = saved_dmnode;
   g_current_scope_is_lowered = saved_lowered;
@@ -4746,6 +4750,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
      inside another such body did not compile (#4547). The proc-literal
      emitter starts its body at depth 0 for the same reason. */
   int sv_fib_ensd = g_ensure_depth, sv_fib_lensb = g_loop_ensure_base;
+  EnsureCtx sv_fib_estk[MAX_ENSURE_DEPTH]; memcpy(sv_fib_estk, g_ensure_stack, sizeof sv_fib_estk);
   g_ensure_depth = 0; g_loop_ensure_base = 0;
   int sv_yblkc = g_yblk_celled;
   {
@@ -4813,6 +4818,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   if (!g_no_root_frame) gc_frame_build(pb, fib_frame_ins);
   g_c_loop_depth = sv_fib_loopd;
   g_ensure_depth = sv_fib_ensd; g_loop_ensure_base = sv_fib_lensb;
+  memcpy(g_ensure_stack, sv_fib_estk, sizeof sv_fib_estk);
 
   /* Append the completed body to g_procs. Any nested fiber bodies emitted
      while building body_buf already appended themselves to g_procs, so they
@@ -5612,6 +5618,7 @@ else if (orecv >= 0 && onm) {
   TyKind sv_rt = g_ret_type; int sv_rp = g_result_poly;
   const char *sv_cap_struct = g_cap_struct; NameSet *sv_cap_names = g_cap_names;
   int sv_ensure_depth = g_ensure_depth;
+  EnsureCtx sv_estk[MAX_ENSURE_DEPTH]; memcpy(sv_estk, g_ensure_stack, sizeof sv_estk);
   /* The proc body is a fresh function: the method's proc-return funnel does not
      apply, but a non-local `return` longjmps to the home frame read from the
      capture. Save/clear the method funnel and set the proc-return home accessor. */
@@ -6094,6 +6101,7 @@ else if (orecv >= 0 && onm) {
   g_block_param_name = sv_bpn; g_self = sv_self; g_result_var = sv_rv; g_ret_type = sv_rt;
   g_self_deref = sv_deref;
   g_cap_struct = sv_cap_struct; g_cap_names = sv_cap_names; g_ensure_depth = sv_ensure_depth;
+  memcpy(g_ensure_stack, sv_estk, sizeof sv_estk);
   g_brk_ser_var = sv_bser; g_brk_skip_id = sv_bskip;
   g_proc_body_kind = sv_pbk; g_proc_brk_home = sv_pbh;
   g_result_poly = sv_rp;

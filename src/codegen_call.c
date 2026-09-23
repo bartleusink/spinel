@@ -18483,6 +18483,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         emit_indent(g_pre, g_indent); emit_ctype(c, bt, g_pre);
         buf_printf(g_pre, " _t%d = %s;\n", t,
                    bt == TY_RANGE ? "(sp_Range){0}" : default_value(bt));
+        /* rooted like the while form's: a `break <v>` stores it here and then
+           runs the ensure bodies it leaves, which may allocate */
+        if (bt == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", t); }
+        else if (needs_root(bt)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t); }
         /* Kernel#loop rescues StopIteration to terminate; wrap in a setjmp. */
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_exc_check_depth();\n");
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots;\n");
@@ -18497,6 +18501,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         int sv_lexc = g_loop_exc_base;
         g_exc_frame_depth++;
         g_loop_exc_base = g_exc_frame_depth;
+        /* a C loop like the statement form's (emit_loop_body): a break or
+           next crossing an ensure opened in the body runs it, then leaves */
+        int sv_lens = g_loop_ensure_base; g_loop_ensure_base = g_ensure_depth;
+        g_c_loop_depth++;
         int sv_iep = g_ie_res_poly;
         const char *sv_bj = g_brk_ser_var; g_brk_ser_var = NULL;  /* break here targets this loop */
         g_ie_res_poly = (bt == TY_POLY);   /* box a scalar `break <v>` into the poly slot */
@@ -18505,6 +18513,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         int lbody = nt_ref(nt, blk, "body");
         emit_stmts(c, lbody, g_pre, g_indent + 2);
         g_exc_frame_depth--;
+        g_c_loop_depth--;
+        g_loop_ensure_base = sv_lens;
         g_loop_break_var = sv_lb;
         g_loop_exc_base = sv_lexc;
         g_ie_res_poly = sv_iep;
@@ -26708,9 +26718,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         int sv_iep = g_ie_res_poly;
         g_ie_res_poly = (scalar_res && body_ty == TY_POLY);
         char bvbuf[32];
-        int sv_lexc2 = g_loop_exc_base;
+        int sv_lexc2 = g_loop_exc_base, sv_lens2 = g_loop_ensure_base;
         if (ie_bn_wrap) {
           g_loop_exc_base = g_exc_frame_depth;   /* break/next exit the do{}while(0) */
+          g_loop_ensure_base = g_ensure_depth;   /* ... and run only ensures opened inside it */
           emit_indent(g_pre, g_indent); buf_puts(g_pre, "do {\n"); g_indent++;
           if (scalar_res) { snprintf(bvbuf, sizeof bvbuf, "_t%d", tres); g_loop_break_var = bvbuf; g_ie_next_var = bvbuf; }
           else { g_loop_break_var = NULL; g_ie_next_var = NULL; }
@@ -26737,7 +26748,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           g_loop_break_var = sv_lb; g_ie_next_var = sv_nx;
           g_indent--; emit_indent(g_pre, g_indent); buf_puts(g_pre, "} while (0);\n");
         }
-        g_loop_exc_base = sv_lexc2;
+        g_loop_exc_base = sv_lexc2; g_loop_ensure_base = sv_lens2;
         g_ie_res_poly = sv_iep;
         g_brk_ser_var = sv_bser;
         g_ie_discard_value = saved_discard;
