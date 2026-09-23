@@ -153,10 +153,14 @@ overflow (e.g. a `q = q * k` accumulator) are still auto-promoted to Bigint;
 Spinel can read RBS files to seed the analyzer. When invoked with
 `--rbs DIR`, `spinel` runs `spinel_rbs_extract` over a directory of
 `*.rbs` files (the same layout `rbs` and Steep use) and feeds the
-resulting seed into the analyzer. Seeds are advisory -- inference still runs on top and
-widens on observed contradiction, so a wrong or unrepresentable seed
-is at worst a no-op. See [docs/rbs-extract.md](docs/rbs-extract.md)
-for the supported subset.
+resulting seed into the analyzer. A signature Spinel cannot represent
+is dropped, and inference falls back to what it would infer anyway. One
+it can is an assertion, not a hint: it pins the slot. A contradiction
+the compiler can see is a compile error (see
+[Contradictions](docs/rbs-extract.md#contradictions)); a value that only
+turns out wrong at run time, narrowed out of a box into the slot, is
+reinterpreted rather than widened. See
+[docs/rbs-extract.md](docs/rbs-extract.md) for the supported subset.
 
 ## Benchmarks
 

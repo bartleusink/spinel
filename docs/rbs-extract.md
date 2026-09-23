@@ -30,7 +30,7 @@ class C
   def get;    @v;      end
 end
 c = C.new
-c.set("hello")
+c.set(["hello", 1][0])
 p c.get
 ```
 
@@ -43,10 +43,14 @@ end
 | build            | output              |
 | ---------------- | ------------------- |
 | no `--rbs`       | `"hello"`           |
-| with the seed    | `99242550607929`    |
+| with the seed    | `4296622121`        |
 | CRuby            | `"hello"`           |
 
-That number is the String pointer read back as an `Integer`.
+That number is the String pointer read back as an `Integer`, so it
+varies with where the String was allocated. The
+String arrives boxed, read out of a mixed Array; stored straight from
+a literal it would be a statically known contradiction, which is
+refused at compile time (see [Contradictions](#contradictions)).
 
 So write signatures that describe the program, not signatures you would
 like to be true. A seed is closer to a `reinterpret_cast` than to a
