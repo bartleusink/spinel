@@ -590,8 +590,8 @@ Workflow:
 
 - Open a focused PR. Small and contained merges faster than sweeping
   refactors.
-- Make `make` close (`gen2.c == gen3.c`) and `make test` / `make bench`
-  pass before pushing.
+- Make `make gate` pass before pushing (`make test`, `make bench` and
+  `make optcarrot`, the checks CI runs).
 - Add a regression test under `test/` for any fix or new feature; the
   harness compares Spinel's output against CRuby on the same source,
   so the test usually doesn't need to assert anything beyond `puts`.
