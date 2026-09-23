@@ -1365,8 +1365,11 @@ int desugar_array_at(Compiler *c) {
    ordinary call machinery handle them; the accessor case is left alone, where
    the direct ivar store is worth keeping.
 
-   The receiver is evaluated twice, so only a form with no work behind it and
-   no side effect qualifies: a local, self, an ivar or a constant. */
+   The receiver is evaluated twice, so a form with no work behind it and no
+   side effect -- a local, self, an ivar or a constant -- is simply cloned.
+   Any other receiver (`reg.value |= bit` through a reader, `self.reg.x`,
+   `regs[0].x`) is evaluated once into a fresh local first, as CRuby does,
+   and both calls read that local; those were refused outright (#4826). */
 int desugar_call_op_write(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -1380,9 +1383,9 @@ int desugar_call_op_write(Compiler *c) {
     int val = nt_ref(nt, id, "value");
     if (recv < 0 || !attr || !op || val < 0) continue;
     const char *rty = nt_type(nt, recv);
-    if (!rty || !(sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "SelfNode") ||
-                  sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "ConstantReadNode")))
-      continue;
+    if (!rty) continue;
+    int simple = sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "SelfNode") ||
+                 sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "ConstantReadNode");
     char wname[300];
     snprintf(wname, sizeof wname, "%s=", attr);
     int has_def_writer = 0;
@@ -1391,6 +1394,48 @@ int desugar_call_op_write(Compiler *c) {
     if (!has_def_writer) continue;                 /* attr_writer: keep the store */
     char aname[300]; snprintf(aname, sizeof aname, "%s", attr);
     char opname[64]; snprintf(opname, sizeof opname, "%s", op);
+    if (!simple) {
+      /* (__cow_N = recv; __cow_N.attr = __cow_N.attr op value) */
+      char tname[48]; snprintf(tname, sizeof tname, "__cow_%d", id);
+      int first = nt->count;
+      int tw = nt_new_node(nt, "LocalVariableWriteNode");
+      int tr1 = nt_new_node(nt, "LocalVariableReadNode");
+      int tr2 = nt_new_node(nt, "LocalVariableReadNode");
+      int rd = nt_new_node(nt, "CallNode");
+      int binargs = nt_new_node(nt, "ArgumentsNode");
+      int bin = nt_new_node(nt, "CallNode");
+      int wargs = nt_new_node(nt, "ArgumentsNode");
+      int wc = nt_new_node(nt, "CallNode");
+      int stmts = nt_new_node(nt, "StatementsNode");
+      if (tw < 0 || tr1 < 0 || tr2 < 0 || rd < 0 || binargs < 0 || bin < 0 ||
+          wargs < 0 || wc < 0 || stmts < 0) continue;
+      nt_node_set_str(nt, tw, "name", tname);
+      nt_node_set_ref(nt, tw, "value", recv);
+      nt_node_set_str(nt, tr1, "name", tname);
+      nt_node_set_str(nt, tr2, "name", tname);
+      nt_node_set_ref(nt, rd, "receiver", tr1);
+      nt_node_set_str(nt, rd, "name", aname);
+      { int one[1]; one[0] = val; nt_node_set_arr(nt, binargs, "arguments", one, 1); }
+      nt_node_set_ref(nt, bin, "receiver", rd);
+      nt_node_set_str(nt, bin, "name", opname);
+      nt_node_set_ref(nt, bin, "arguments", binargs);
+      { int one[1]; one[0] = bin; nt_node_set_arr(nt, wargs, "arguments", one, 1); }
+      nt_node_set_ref(nt, wc, "receiver", tr2);
+      nt_node_set_str(nt, wc, "name", wname);
+      nt_node_set_ref(nt, wc, "arguments", wargs);
+      { int two[2]; two[0] = tw; two[1] = wc; nt_node_set_arr(nt, stmts, "body", two, 2); }
+      nt_node_set_type(nt, id, "ParenthesesNode");
+      nt_node_set_ref(nt, id, "body", stmts);
+      nt_node_set_ref(nt, id, "receiver", -1);
+      nt_node_set_ref(nt, id, "value", -1);
+      comp_grow_node_arrays(c);
+      int encl = c->nscope[id];
+      for (int j = first; j < nt->count; j++) c->nscope[j] = encl;
+      /* locals were collected before the fixpoint; this one is new */
+      scope_local_intern(comp_scope_of(c, tw), tname);
+      changed = 1;
+      continue;
+    }
     int recv2 = nt_clone_subtree(nt, recv);
     if (recv2 < 0) continue;
     int base = nt->count;
