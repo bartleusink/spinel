@@ -31186,6 +31186,46 @@ else {
       free(rb.p);
       return;
     }
+    /* ... and the answer that comment deferred. An operand whose class has no
+       usable #to_str does not enter the conversion above, and CRuby does not
+       stop there either: rb_str_cmp_m falls back to rb_invcmp, which asks the
+       OPERAND to compare itself against the string and negates the answer,
+       nil when the class has no `<=>` of its own or answers nil with one.
+       `"abc" <=> obj` raised NoMethodError naming String#<=>, a method String
+       has, for every such class.
+
+       sp_str_cmp_obj carries the rule, and the emitter is where it has to be
+       decided: a Symbol receiver is boxed as its NAME, so the runtime cannot
+       tell `:s <=> obj` -- which CRuby answers nil, as every non-String
+       receiver does -- from this. The Symbol arm above declines a poly
+       operand, which is exactly the pair that would be confused, so the
+       receiver is asked for its own inferred type here too. */
+    /* Is this receiver a Symbol wearing a String's type? A Symbol renders as
+       its name, and by here the desugar has already turned `:s` into
+       `:s.to_s`, a CallNode whose own type is TY_STRING -- so neither the
+       node kind nor the inferred type says Symbol on its own. All three
+       spellings are asked. */
+    { const char *rvt_s = nt_type(nt, recv);
+      int recv_is_sym = (infer_type(c, recv) == TY_SYMBOL) ||
+                        (rvt_s && sp_streq(rvt_s, "SymbolNode"));
+      if (!recv_is_sym && rvt_s && sp_streq(rvt_s, "CallNode")) {
+        const char *rcn = nt_str(nt, recv, "name");
+        int rr = nt_ref(nt, recv, "receiver");
+        const char *rrt = rr >= 0 ? nt_type(nt, rr) : NULL;
+        if (rcn && sp_streq(rcn, "to_s") &&
+            ((rrt && sp_streq(rrt, "SymbolNode")) || (rr >= 0 && infer_type(c, rr) == TY_SYMBOL)))
+          recv_is_sym = 1;
+      }
+    if (lrt == TY_STRING && !recv_is_sym &&
+        !str_cmp_conv_shape(c, argv[0]) &&
+        (ty_is_object(lat) || lat == TY_POLY || lat == TY_UNKNOWN)) {
+      int boxed_out = comp_ntype(c, id) == TY_POLY;
+      if (boxed_out) buf_puts(b, "sp_box_int_or_nil(");
+      buf_puts(b, "sp_str_cmp_obj("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      if (boxed_out) buf_puts(b, ")");
+      return;
+    } }
     if (lrt == TY_STRING && lat == TY_STRING) {
       int tc = ++g_tmp;
       buf_printf(b, "({ int _t%d = sp_str_cmp_bytes(", tc); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);

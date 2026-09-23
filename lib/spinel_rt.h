@@ -3646,6 +3646,31 @@ static sp_int sp_poly_spaceship(sp_RbVal a, sp_RbVal b) {
   if (sp_poly_eq(a, b)) return 0;
   return SP_INT_NIL;
 }
+/* String#<=> alone falls back to rb_invcmp: an operand that is neither a
+   string nor convertible by #to_str is asked to compare itself AGAINST the
+   string and its answer is negated, giving nil when the operand's class has
+   no `<=>` of its own or answers nil with one. Spinel raised NoMethodError
+   naming String#<=>, a method String has, for every such class.
+
+   It cannot live in sp_poly_cmp, where the ordinary comparison ends: a
+   Symbol receiver is boxed as its NAME, so an SP_TAG_STR operand pair there
+   may be `:s <=> obj`, which CRuby answers nil -- Integer, Float, Symbol,
+   Array and nil all do. Only the emitter knows which receiver it had, so the
+   rule sits in a helper it calls for a String and nothing else.
+
+   rb_cmpint normalizes before the negation, so a class answering 7 orders
+   the pair rather than negating to -7. */
+static sp_int sp_str_cmp_obj(const char *s, sp_RbVal o) {
+  sp_RbVal a = sp_box_str(s);
+  sp_int r = sp_poly_spaceship(a, o);
+  if (r != SP_INT_NIL) return r;
+  if (o.tag == SP_TAG_OBJ && o.cls_id >= 0 && sp_obj_cmp_hook) {
+    sp_bool ok = FALSE;
+    sp_int ir = sp_obj_cmp_hook(o, a, &ok);
+    if (ok) return (ir < 0) - (ir > 0);
+  }
+  return SP_INT_NIL;
+}
 /* nil has no `<`, `<=`, `>`, `>=`, `between?` or `clamp`. CRuby answers
    NoMethodError for those, not Comparable's ArgumentError -- that one is for
    a pair whose `<=>` says nil, which is a different complaint and belongs to
