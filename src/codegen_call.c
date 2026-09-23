@@ -8878,7 +8878,10 @@ static int init_accepts_kw_call(Compiler *c, int initm, const int *argv, int arg
       }
       if (!given) return 0;
     }
-  if (nkw == 0 && !has_kwrest && (ne > 0)) return 0;
+  /* No keywords taken: only a `**h` that turns out empty can reach it, which
+     the static layout already handles (an empty splat adds nothing). A
+     literal keyword there was rejected above as unknown (#4849). */
+  if (nkw == 0 && !has_kwrest && ne > 0 && !kwsplat) return 0;
   return 1;
 }
 
@@ -8888,6 +8891,15 @@ static int init_accepts_kw_call(Compiler *c, int initm, const int *argv, int arg
    to that initialize would be -- keywords by name, defaults filled -- with
    emit_args_filled, which a static `K.new(...)` uses. The arguments are
    evaluated inside the arm taken, so once. */
+/* Does this initialize take keywords at all (named or **rest)? */
+static int init_takes_keywords(Compiler *c, int initm) {
+  const NodeTable *nt = c->nt;
+  int pn = c->scopes[initm].def_node >= 0 ? nt_ref(nt, c->scopes[initm].def_node, "parameters") : -1;
+  if (pn < 0) return 0;
+  int nkw = 0; nt_arr(nt, pn, "keywords", &nkw);
+  return nkw > 0 || nt_ref(nt, pn, "keyword_rest") >= 0;
+}
+
 static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Buf *b) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
@@ -8913,6 +8925,46 @@ static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Bu
     Buf apre; memset(&apre, 0, sizeof apre);
     Buf aval; memset(&aval, 0, sizeof aval);
     Buf *sv_pre = g_pre; g_pre = &apre;
+    /* An initialize that takes no keywords, reached with `**h`: the layout
+       drops the splat, which is right only when h is empty. A non-empty one
+       is one argument too many, CRuby's ArgumentError (#4849). */
+    if (!init_takes_keywords(c, initm)) {
+      int npos = 0, nreq = 0, nopt = 0;
+      for (int a = 0; a < argc; a++) {
+        NodeKind ak = nt_kind(nt, argv[a]);
+        if (ak != NK_KeywordHashNode && ak != NK_BlockArgumentNode) npos++;
+      }
+      int pn = c->scopes[initm].def_node >= 0 ? nt_ref(nt, c->scopes[initm].def_node, "parameters") : -1;
+      if (pn >= 0) { nt_arr(nt, pn, "requireds", &nreq); nt_arr(nt, pn, "optionals", &nopt); }
+      char expect[48];
+      if (nopt) snprintf(expect, sizeof expect, "%d..%d", nreq, nreq + nopt);
+      else snprintf(expect, sizeof expect, "%d", nreq);
+      for (int a = 0; a < argc; a++) {
+        if (nt_kind(nt, argv[a]) != NK_KeywordHashNode) continue;
+        int en = 0; const int *els = nt_arr(nt, argv[a], "elements", &en);
+        for (int e = 0; e < en; e++) {
+          if (nt_kind(nt, els[e]) != NK_AssocSplatNode) continue;
+          int sv = nt_ref(nt, els[e], "value");
+          buf_puts(&apre, "if (sp_poly_length(");
+          if (sv >= 0) emit_boxed(c, sv, &apre);
+          else {
+            /* anonymous `**`: the enclosing method's own keyword rest */
+            Scope *es = comp_scope_of(c, id);
+            const char *kn = (es && es->kwrest_idx >= 0) ? es->pnames[es->kwrest_idx] : NULL;
+            LocalVar *kl = kn ? scope_local(es, kn) : NULL;
+            if (!kl) { buf_puts(&apre, "sp_box_nil()"); }
+            else {
+              Buf lr; memset(&lr, 0, sizeof lr);
+              emit_local_ref(c, els[e], kn, &lr);
+              emit_boxed_text(c, kl->type, lr.p ? lr.p : "0", &apre);
+              free(lr.p);
+            }
+          }
+          buf_printf(&apre, ") != 0) sp_raise_cls(\"ArgumentError\", \"wrong number of arguments (given %d, expected %s)\"); ",
+                     npos + 1, expect);
+        }
+      }
+    }
     emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", &aval);
     g_pre = sv_pre;
     buf_printf(b, "case %d: { %s _t%d=", ci, apre.p ? apre.p : "", rt2);
