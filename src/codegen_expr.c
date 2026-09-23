@@ -1005,6 +1005,16 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
   TyKind want = comp_ntype(c, id);
   if (want == TY_UNKNOWN || want == TY_VOID) want = TY_POLY;
   TyKind rdt = (rk == SP_MEMBER_METHOD) ? (TyKind)c->scopes[rmi].ret : TY_UNKNOWN;
+  /* A generated reader is the ivar itself, read straight off the struct, so
+     the temp takes the ivar's own type. Taking the expression's type put a
+     boxed ivar into an sp_int when the def writer had no other call site to
+     type its parameter (#4827); the arms below convert to `want`. */
+  if (rk != SP_MEMBER_METHOD) {
+    char rivn[300]; snprintf(rivn, sizeof rivn, "@%s", attr);
+    int riv = comp_ivar_index(&c->classes[cid], rivn);
+    TyKind ivt = riv >= 0 ? c->classes[cid].ivar_types[riv] : TY_UNKNOWN;
+    if (ivt != TY_UNKNOWN && ivt != TY_VOID && ivt != TY_NIL) rdt = ivt;
+  }
   if (rdt == TY_UNKNOWN || rdt == TY_VOID) rdt = want;
   TyKind vt = comp_ntype(c, v);
   /* TY_NIL joins them: emit_ctype spells it `void`, so a literal nil on the
