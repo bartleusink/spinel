@@ -10976,6 +10976,18 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   if (want_poly && vty != TY_POLY) emit_boxed(c, is_subst ? g_dm_subst_node : id, b);
   else if (!g_result_var && emit_ret_hash_widen_conv(c, g_ret_type, vty, is_subst ? g_dm_subst_node : id, b)) { }
   else if (!g_result_var && emit_ret_poly_array_conv(c, g_ret_type, vty, is_subst ? g_dm_subst_node : id, b)) { }
+  /* A `loop` whose body leaves only by `return` has no value of its own: it
+     types nil, and its emitter answers the boxed StopIteration result. Under
+     a nullable pointer return slot (the returns' `sp_PolyArray *` joined
+     with that nil) the boxed value was returned as it stood, and the C did
+     not compile (#4836). Run it, then answer the slot's nil. */
+  else if (!g_result_var && !want_poly && (vty == TY_NIL || vty == TY_UNKNOWN) &&
+           !is_subst && nt_kind(nt, id) == NK_CallNode && nt_ref(nt, id, "receiver") < 0 &&
+           nt_str(nt, id, "name") && sp_streq(nt_str(nt, id, "name"), "loop") &&
+           nt_ref(nt, id, "block") >= 0) {
+    buf_puts(b, "((void)("); emit_expr(c, id, b); buf_puts(b, "), ");
+    emit_ret_nil(c, g_ret_type, b); buf_puts(b, ")");
+  }
   /* a poly tail value feeding a narrower (non-poly) return slot -- a scalar
      method(:sym) target, or an RBS-typed String/object method whose body yields
      poly -- needs coercing. (Only for a real return slot, not a begin/rescue
