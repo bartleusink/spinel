@@ -1454,8 +1454,8 @@ static int local_is_bounded_counter(Compiler *c, int id, const char *nm, LocalVa
    local arm had it: an ivar, global or class variable fell to the raw C
    operator, `|` between two array pointers, which did not compile (#4833).
    The caller has emitted the indent. Answers 1 when it emitted the write. */
-static int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
-                                const char *op, int v, Buf *b) {
+int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
+                         const char *op, int v, Buf *b) {
   if (!op || !(ty_is_array(t) || t == TY_POLY_ARRAY)) return 0;
   const char *k = (t == TY_POLY_ARRAY) ? "Poly" : array_kind(t);
   if (!k) return 0;

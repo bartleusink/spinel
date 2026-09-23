@@ -1097,6 +1097,21 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
   return 1;
 }
 
+/* `$g |= v` / `@@a |= v` (and `&=` `-=` `+=` `*=`) on an array slot as a
+   value -- a method's last expression, a block's, an assignment's rhs: the
+   statement form's array write, then the updated slot. The value arm emitted
+   the raw C operator, `|` between two array pointers, which did not compile
+   (#4833 fixed the statement form only). Answers 1 when it emitted. */
+static int emit_array_op_assign_value(Compiler *c, const char *ref, TyKind t,
+                                      const char *op, int v, Buf *b) {
+  if (!(ty_is_array(t) || t == TY_POLY_ARRAY)) return 0;
+  Buf ab; memset(&ab, 0, sizeof ab);
+  int ok = emit_array_op_assign(c, ref, t, op, v, &ab);
+  if (ok) buf_printf(b, "({ %s%s; })", ab.p, ref);
+  free(ab.p);
+  return ok;
+}
+
 void emit_expr(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
@@ -2162,10 +2177,12 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     if (!lv) { unsupported(c, id, "global variable op-write (unregistered global)"); return; }
     const char *op = nt_str(nt, id, "binary_operator");
     int v = nt_ref(nt, id, "value");
+    char gref[256]; snprintf(gref, sizeof gref, "gv_%s", rn);
     if (lv->type == TY_STRING && op && sp_streq(op, "+")) {
       buf_printf(b, "(gv_%s = sp_str_concat(gv_%s, ", rn, rn);
       emit_expr(c, v, b); buf_puts(b, "))");
     }
+    else if (emit_array_op_assign_value(c, gref, lv->type, op, v, b)) { }
     else {
       buf_printf(b, "(gv_%s %s= ", rn, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ")");
@@ -2188,6 +2205,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       buf_printf(b, "(%s = sp_str_plus(%s, ", ref, ref);
       emit_expr(c, v, b); buf_puts(b, "))");
     }
+    else if (emit_array_op_assign_value(c, ref, ct, op, v, b)) { }
     else if (ct == TY_POLY) {
       const char *pfn = sp_streq(op ? op : "+", "+") ? "sp_poly_add"
                       : sp_streq(op, "-") ? "sp_poly_sub"
