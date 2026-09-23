@@ -1058,6 +1058,28 @@ double, so that case raises `Math::DomainError` loudly (the class
 every float power to a boxed union. Compute via `Complex(x) ** y` where the
 complex result is really wanted.
 
+#### `const_get` takes a literal name
+
+Constants are resolved at compile time, so `const_get` has to name its
+constant as a literal Symbol or String:
+
+```ruby
+module Carts
+  TYPES = { 0 => :A, 1 => :B }
+  def self.build(t, x) = const_get(TYPES.fetch(t)).new(x)   # refused
+end
+```
+
+A name known only at run time is refused where it is written. Map the names
+to the classes themselves instead, which is the same table one step earlier:
+
+```ruby
+module Carts
+  TYPES = { 0 => A, 1 => B }
+  def self.build(t, x) = TYPES.fetch(t).new(x)
+end
+```
+
 #### `defined?(@ivar)` is answered at compile time
 
 CRuby answers `defined?(@ivar)` from the object's runtime state: `nil` until

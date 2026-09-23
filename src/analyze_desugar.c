@@ -149,6 +149,35 @@ int desugar_class_body_bare_new(Compiler *c) {
   return changed;
 }
 
+/* A receiverless `const_get(:K)` in a class method, or in the class body
+   itself, is sent to the class -- the implicit self there. It was left without
+   a receiver, typed nothing, and the call on its value raised NoMethodError
+   for "unknown" at run time (#4843). Give it self, as `self.const_get(:K)`,
+   which already resolves. In an instance method self is an instance, which
+   has no const_get, so that is left for the ordinary NoMethodError. */
+int desugar_bare_const_get(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !sp_streq(nm, "const_get")) continue;
+    if (nt_ref(nt, id, "receiver") >= 0) continue;
+    if (id >= c->node_cap) continue;
+    Scope *sc = comp_scope_of(c, id);
+    int in_cmethod = sc && sc->name && sc->is_cmethod && sc->class_id >= 0;
+    int in_body = (!sc || !sc->name) && c->node_cbody[id] >= 0;
+    if (!in_cmethod && !in_body) continue;
+    int sn = nt_new_node(nt, "SelfNode");
+    if (sn < 0) continue;
+    comp_grow_node_arrays(c);
+    c->nscope[sn] = c->nscope[id];
+    c->node_cbody[sn] = c->node_cbody[id];
+    nt_node_set_ref(nt, id, "receiver", sn);
+    changed = 1;
+  }
+  return changed;
+}
+
 /* Proc#>> / #<< with a Method operand: wrap the Method side in #to_proc at the
    AST, so composition always runs proc-to-proc. The to_proc emission builds a
    real trampoline proc that publishes its boxed result through the return

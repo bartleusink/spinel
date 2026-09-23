@@ -14551,6 +14551,7 @@ void analyze_program(Compiler *c) {
     ch |= pad_unsupplied_params(c);            /* under-supplied call: placeholder param type */
     ch |= desugar_builtin_method_obj(c);       /* builtin recv.method(:sym) -> wrapper def */
     ch |= desugar_class_body_bare_new(c);      /* class body `new(x)` -> `Klass.new(x)` */
+    ch |= desugar_bare_const_get(c);           /* cmethod `const_get(:K)` -> `self.const_get(:K)` */
     ch |= desugar_include_math(c);             /* include Math: sqrt(x) -> Math.sqrt(x) */
     ch |= desugar_kernel_recv(c);              /* Kernel.puts x -> puts x */
     ch |= desugar_class_literal_ctors(c);      /* Array[a,b] -> [a,b]; Range.new -> (a..b) */
