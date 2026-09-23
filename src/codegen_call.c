@@ -5488,6 +5488,95 @@ static int poly_num_arm(const char *name, int argc) {
   return -1;
 }
 
+/* Last resort before the switch's raising default: ask the ordinary call
+   emission what a builtin receiver would answer, and make that the default
+   arm. The dispatch is only reached because a user class owns the name, so
+   inside the arm the value is NOT one of those classes -- g_poly_builtin_arm
+   says so, and user_defines_or_reads then answers 0 for every guard that
+   consults it, which is what lets the builtin surface serve the call exactly
+   as it would in a program with no user class of that name.
+
+   This is the same re-entry the container arm (#3459) and the String tag
+   pre-arm (#4816) use. Having it here is what stops the numeric table above
+   from needing a row per name: a name the table does not carry gets whatever
+   the surface serves, and a name it does carry keeps the table's arm, which
+   is the one measured against.
+
+   Cost, since it is paid at every dispatch that would otherwise raise: 2212
+   such sites across the 3827-program corpus, 0.6 per program, against 3.05s
+   to emit the whole corpus. The ask is one expression emission into a
+   throwaway buffer.
+
+   Only the zero-argument dispatch calls it. The one with arguments writes
+   its default from several arms already -- the numeric table's, the
+   container reads' -- and appending a second `default:` label is a C error
+   rather than a fallback; finding out whether one is already there means
+   knowing where the switch being built starts, which the emitted text does
+   not say once the receiver has been rewritten to a GC frame slot. Two
+   attempts at reading it out of the buffer each left more programs failing
+   to compile than they fixed, so the arm stays where the question does not
+   arise. Fifteen of the names the corpus audit found are still uncovered for
+   that reason.
+
+   It declines in the three places the String pre-arm declines, for the same
+   reasons: an emission that hoists a statement into the prelude would run it
+   for every receiver, an argument with a side effect must read the temp the
+   dispatch already hoisted rather than run twice, and a raise token adds
+   nothing over the default already there. */
+static int emit_poly_builtin_default(Compiler *c, int id, int recv, const char *name,
+                                     int argc, const int *argv, const int *atmp,
+                                     const TyKind *atmp_ty, TyKind ret, int tv, int tr,
+                                     Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (recv < 0 || !name) return 0;
+  if (nt_ref(nt, id, "block") >= 0) return 0;
+  if (g_pd_skip == id || g_n_argov + argc + 1 > MAX_ARG_OVERRIDE) return 0;
+  if (argc > 0 && (!atmp || !atmp_ty)) return 0;
+  for (int a = 0; a < argc; a++)
+    if (subtree_has_side_effect(c, argv[a]) && comp_ntype(c, argv[a]) != atmp_ty[a])
+      return 0;
+  TyKind bt = (c->poly_builtin_ty && id < c->node_cap)
+                ? c->poly_builtin_ty[id] : TY_UNKNOWN;
+  if (bt == TY_UNKNOWN) return 0;
+  if (ret != TY_POLY && bt != ret) return 0;
+  int slot = g_n_argov++;
+  g_argov_node[slot] = recv;
+  snprintf(g_argov_text[slot], sizeof g_argov_text[0], "_t%d", tv);
+  int nov = 0;
+  for (int a = 0; a < argc; a++) {
+    if (!subtree_has_side_effect(c, argv[a])) continue;
+    int as = g_n_argov++; nov++;
+    g_argov_node[as] = argv[a];
+    snprintf(g_argov_text[as], sizeof g_argov_text[0], "_t%d", atmp[a]);
+  }
+  int sv_pd = g_pd_skip, sv_fb = g_poly_builtin_arm;
+  g_pd_skip = id; g_poly_builtin_arm = 1;
+  size_t sv_pre = g_pre ? g_pre->len : 0;
+  TyKind sv_ty = c->ntype[id];
+  c->ntype[id] = bt;
+  Buf ib; memset(&ib, 0, sizeof ib);
+  if (ret == TY_POLY && bt != TY_POLY) {
+    Buf nb; memset(&nb, 0, sizeof nb);
+    emit_expr(c, id, &nb);
+    emit_boxed_text(c, bt, nb.p ? nb.p : "0", &ib);
+    free(nb.p);
+  }
+  else emit_expr(c, id, &ib);
+  c->ntype[id] = sv_ty;
+  g_pd_skip = sv_pd; g_poly_builtin_arm = sv_fb;
+  g_n_argov -= nov + 1;
+  if (!ib.p || strncmp(ib.p, "sp_raise_nomethod(", 18) == 0 ||
+      strncmp(ib.p, "sp_raise_poly_nomethod(", 23) == 0 ||
+      strstr(ib.p, "sp_raise_cls(\"NoMethodError\"") != NULL ||
+      (g_pre && g_pre->len != sv_pre)) {
+    if (g_pre && g_pre->len != sv_pre) { g_pre->len = sv_pre; g_pre->p[sv_pre] = 0; }
+    free(ib.p); return 0;
+  }
+  buf_printf(b, " default: _t%d = %s; break;", tr, ib.p);
+  free(ib.p);
+  return 1;
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -6501,6 +6590,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         else buf_puts(b, av);
         buf_puts(b, "; break;");
       }
+      if (!obj_default_done)
+        obj_default_done = emit_poly_builtin_default(c, id, recv, name, 0, NULL, NULL, NULL,
+                                                     ret, tv, tr, b);
       if (!obj_default_done)
         buf_printf(b, " default: sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
       buf_printf(b, " } _t%d; })", tr);

@@ -1,0 +1,11 @@
+:shadow
+:shadow
+:shadow
+:shadow
+Integer
+Float
+true
+294
+:abc
+[3, 1, 2]
+NoMethodError

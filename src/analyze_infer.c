@@ -4920,6 +4920,17 @@ else {
           an_builtin_only = 0;
           narrow_memo_put(bk, (int)bt);
         }
+        /* Record what the builtin surface alone answers, the way the
+           container and String reads above do. It is already computed here
+           for every name, and the poly dispatch's default arm needs it to
+           shape an arm for a receiver that really is a builtin -- otherwise
+           the arm has to be written out by hand, one name at a time, which
+           is how the same gap came back three times. Only when it is not
+           already set: the reads above ask a narrower question first and
+           their answer is the one their arms were built against. */
+        if (bt != TY_UNKNOWN && bt != TY_VOID && c->poly_builtin_ty &&
+            id < c->node_cap && c->poly_builtin_ty[id] == TY_UNKNOWN)
+          c->poly_builtin_ty[id] = bt;
         if (bt != TY_UNKNOWN && bt != TY_VOID && bt != r) return TY_POLY;
       }
       if (found) return r;
