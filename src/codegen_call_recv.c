@@ -3,6 +3,24 @@
    movement, no logic change. */
 
 #include "codegen_internal.h"
+
+/* Integer Array#delete(v) as an sp_int (SP_INT_NIL for nothing deleted). A
+   boxed needle that is not an Integer deletes nothing -- it cannot equal an
+   element -- where passing the sp_RbVal as the element did not compile
+   (#4835). */
+static void emit_int_array_delete(Compiler *c, const char *arr, int arg, Buf *b) {
+  TyKind at = comp_ntype(c, arg);
+  if (at == TY_POLY || at == TY_NIL) {
+    int tv = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, arg, b);
+    buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_delete(%s, _t%d.v.i) : SP_INT_NIL; })",
+               tv, arr, tv);
+    return;
+  }
+  buf_printf(b, "sp_IntArray_delete(%s, ", arr);
+  emit_expr(c, arg, b);
+  buf_puts(b, ")");
+}
 #include "analyze.h"
 
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b);
@@ -3371,9 +3389,9 @@ else {
             snprintf(tyb, sizeof tyb, "sp_%sArray *", k);
             int cdb = hold_recv_open(c, recv, 0, tyb, "SP_GC_ROOT", b, &rdb);
             if (rt == TY_INT_ARRAY) {
-              buf_printf(b, "({ sp_int _t%d = sp_IntArray_delete(%s, ", tdr, rdb.p);
-              emit_expr(c, argv[0], b);
-              buf_printf(b, "); _t%d != SP_INT_NIL ? sp_box_int(_t%d) : ", tdr, tdr);
+              buf_printf(b, "({ sp_int _t%d = ", tdr);
+              emit_int_array_delete(c, rdb.p, argv[0], b);
+              buf_printf(b, "; _t%d != SP_INT_NIL ? sp_box_int(_t%d) : ", tdr, tdr);
             }
             else if (rt == TY_FLOAT_ARRAY) {
               buf_printf(b, "({ sp_float _t%d = sp_FloatArray_delete%s(%s, ", tdr, df_boxed ? "_key" : "", rdb.p);
@@ -3405,11 +3423,14 @@ else {
         Buf rdl; char tyl[32];
         snprintf(tyl, sizeof tyl, "sp_%sArray *", k);
         int cdl = hold_recv_open(c, recv, 0, tyl, "SP_GC_ROOT", b, &rdl);
-        buf_printf(b, "sp_%sArray_delete%s(%s, ", k, df_boxed ? "_key" : "", rdl.p);
-        if (df_boxed) emit_boxed(c, argv[0], b);
-        else if (rt == TY_FLOAT_ARRAY) emit_float_expr(c, argv[0], b);
-        else emit_expr(c, argv[0], b);
-        buf_puts(b, ")");
+        if (rt == TY_INT_ARRAY) emit_int_array_delete(c, rdl.p, argv[0], b);
+        else {
+          buf_printf(b, "sp_%sArray_delete%s(%s, ", k, df_boxed ? "_key" : "", rdl.p);
+          if (df_boxed) emit_boxed(c, argv[0], b);
+          else if (rt == TY_FLOAT_ARRAY) emit_float_expr(c, argv[0], b);
+          else emit_expr(c, argv[0], b);
+          buf_puts(b, ")");
+        }
         free(rdl.p);
         if (cdl) buf_puts(b, "; })");
         return 1;
@@ -3748,11 +3769,23 @@ else {
           else                              buf_puts(b, " 0; })");
           return 1;
         }
-        emit_ctype(c, ty_array_elem(rt), b);
-        buf_printf(b, " _t%d = ", tv); emit_expr(c, argv[0], b); buf_puts(b, ";");
+        /* A boxed value is compared as Ruby's ==, element boxed: unboxing it
+           to the element type raised for a value of another kind, and put an
+           sp_RbVal into an sp_int for an Integer array (#4835). */
+        TyKind cat = comp_ntype(c, argv[0]);
+        int cboxed = (cat == TY_POLY || cat == TY_NIL);
+        if (cboxed) { buf_printf(b, " sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b); buf_puts(b, ";"); }
+        else { emit_ctype(c, ty_array_elem(rt), b);
+               buf_printf(b, " _t%d = ", tv); emit_expr(c, argv[0], b); buf_puts(b, ";"); }
         buf_printf(b, " sp_int _t%d = 0;", tc);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++)", ti, ti, k, ta, ti);
-        if (rt == TY_STR_ARRAY)
+        if (cboxed) {
+          char el[96]; snprintf(el, sizeof el, "sp_%sArray_get(_t%d, _t%d)", k, ta, ti);
+          buf_puts(b, " if (sp_poly_eq(");
+          emit_boxed_text(c, ty_array_elem(rt), el, b);
+          buf_printf(b, ", _t%d)) _t%d++;", tv, tc);
+        }
+        else if (rt == TY_STR_ARRAY)
           buf_printf(b, " if (sp_str_cmp_bytes(sp_%sArray_get(_t%d, _t%d), _t%d) == 0) _t%d++;", k, ta, ti, tv, tc);
         else
           buf_printf(b, " if (sp_%sArray_get(_t%d, _t%d) == _t%d) _t%d++;", k, ta, ti, tv, tc);
@@ -3987,6 +4020,16 @@ else {
           emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
           return 1;
         }
+        if (rt == TY_INT_ARRAY && (a0 == TY_POLY || a0 == TY_NIL)) {
+          /* the Integer twin of the String arm below: only an Integer can be
+             there, where unboxing the needle raised TypeError (#4835) */
+          int ta = ++g_tmp, tv = ++g_tmp;
+          buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+          buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+          buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : sp_box_nil(); })",
+                     tv, fn, ta, tv);
+          return 1;
+        }
         if (rt == TY_STR_ARRAY && (a0 == TY_POLY || a0 == TY_NIL)) {
           /* a boxed needle into a String array: a String compares, anything
              else (nil first of all) is simply not there. The boxed value
@@ -4042,6 +4085,17 @@ else {
           buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
           buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : FALSE; })",
                      tv, fn, ta, tv);
+          return 1;
+        }
+        /* The same for an Integer array: a search for a value of another kind
+           is a well-defined "not there" (false / no index), where unboxing the
+           needle raised the conversion TypeError (#4835). */
+        if (rt == TY_INT_ARRAY && (sat == TY_POLY || sat == TY_NIL)) {
+          int ta = ++g_tmp, tv = ++g_tmp;
+          buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+          buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+          buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : %s; })",
+                     tv, fn, ta, tv, sp_streq(fn, "include") ? "FALSE" : "(sp_int)-1");
           return 1;
         }
         /* held across the needle, which may allocate */
