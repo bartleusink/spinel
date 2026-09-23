@@ -1778,7 +1778,28 @@ void fix_struct_block_scopes(Compiler *c) {
     const int *stmts = nt_arr(nt, bbody, "body", &bn);
     for (int k = 0; k < bn; k++) {
       const char *sty = nt_type(nt, stmts[k]);
-      if (!sty || !sp_streq(sty, "DefNode")) continue;
+      if (!sty) continue;
+      /* `class << self` in the block: walk_scope already made its defs class
+         methods, but of no class (the block had none yet), so they were
+         missing from the struct and a bare `new` in one had no receiver
+         (#4823). Home them the same way. */
+      if (sp_streq(sty, "SingletonClassNode")) {
+        int sx = nt_ref(nt, stmts[k], "expression");
+        if (sx < 0 || nt_kind(nt, sx) != NK_SelfNode) continue;
+        int sb = nt_ref(nt, stmts[k], "body");
+        int sn = 0;
+        const int *sst = sb >= 0 ? nt_arr(nt, sb, "body", &sn) : NULL;
+        for (int j = 0; j < sn; j++) {
+          if (nt_kind(nt, sst[j]) != NK_DefNode) continue;
+          for (int s = 0; s < c->nscopes; s++)
+            if (c->scopes[s].def_node == sst[j] && c->scopes[s].is_cmethod) {
+              c->scopes[s].class_id = ci;
+              break;
+            }
+        }
+        continue;
+      }
+      if (!sp_streq(sty, "DefNode")) continue;
       int dn = stmts[k];
       /* Find the scope whose def_node == dn and fix its class_id */
       for (int s = 0; s < c->nscopes; s++) {
