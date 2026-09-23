@@ -992,6 +992,11 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (#4480: a typed array copied into a mutated general-Array parameter compiled)"; ok=0; \
 	else grep -q "which the method mutates" "$$tmp/tp.out" || \
 	  { echo "reject-test: FAIL (#4480: rejected without saying why)"; sed -n 1,5p "$$tmp/tp.out"; ok=0; }; fi; \
+	t=test/reject/block_param_assigned.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/bp.c" >"$$tmp/bp.out" 2>&1; then \
+	  echo "reject-test: FAIL (an assignment to a &block parameter compiled)"; ok=0; \
+	else grep -q "a block parameter is read-only in spinel" "$$tmp/bp.out" || \
+	  { echo "reject-test: FAIL (a &block assignment rejected without saying why)"; sed -n 1,5p "$$tmp/bp.out"; ok=0; }; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 

@@ -3350,6 +3350,98 @@ static int const_value_is_class_like(Compiler *c, int v) {
   }
 }
 
+/* A method's `&block` parameter is read-only in spinel. Assigning to it is
+   refused at compile time, with the rewrite that does the same thing.
+
+   Why it is refused rather than compiled: a method that yields is inlined
+   at each call site, and there its block is not a value -- it is the
+   caller's block CODE, pasted in at the yields. Every read of the name is
+   answered statically from whether this site passed one, and a write has no
+   variable to land in: `b = nil` emitted an assignment to an lv_b that
+   nothing declares, and the C build stopped with an error naming it. A
+   method that does not yield has a real proc variable, and could take the
+   write; but which of the two a method is depends on whether a `yield`
+   appears anywhere in its body, so allowing it there would make an
+   unrelated `b = ...` line stop compiling the day someone adds a yield
+   elsewhere. One rule, checkable on the line itself, is the usable one.
+
+   Little is lost. In CRuby a reassigned block parameter does not change
+   what `yield` or `block_given?` see -- only later reads of the local --
+   so in a yielding method the write rarely means what it looks like. And
+   the idiom it serves, a default block (`b ||= proc { ... }`), is the same
+   program written against a fresh local: `blk = b || proc { ... }`.
+
+   A write from inside a nested block (`each { b = nil }`) reaches the
+   parameter too, unless that block -- or one between it and the def --
+   declares its own `b`, as a block parameter or a block-local (`|b|`,
+   `|x; b|`): a block's `locals` lists exactly those, and past one that
+   names it the search stops. A nested def is a scope of its own and is not
+   searched at all. (The node table does not carry prism's `depth`, which
+   would say this directly.) */
+/* Does a block's `locals` list (comma-separated) name `nm`? */
+static int blk_locals_have(const char *locals, const char *nm) {
+  if (!locals || !nm) return 0;
+  size_t n = strlen(nm);
+  const char *p = locals;
+  while (*p) {
+    const char *e = strchr(p, ',');
+    size_t len = e ? (size_t)(e - p) : strlen(p);
+    if (len == n && strncmp(p, nm, n) == 0) return 1;
+    if (!e) break;
+    p = e + 1;
+  }
+  return 0;
+}
+
+static void check_blk_param_writes_in(Compiler *c, int node, const char *bp,
+                                      const char *meth) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode) return;
+  /* a block that declares its own `bp` shadows the parameter for everything
+     inside it */
+  if ((k == NK_BlockNode || k == NK_LambdaNode) &&
+      blk_locals_have(nt_str(nt, node, "locals"), bp)) return;
+  if (k == NK_LocalVariableWriteNode || k == NK_LocalVariableOperatorWriteNode ||
+      k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode) {
+    const char *wn = nt_str(nt, node, "name");
+    if (wn && sp_streq(wn, bp)) {
+      char msg[512];
+      snprintf(msg, sizeof msg,
+               "assignment to the block parameter &%s of `%s` is not supported: "
+               "a block parameter is read-only in spinel "
+               "(assign to a new local instead, e.g. `blk = %s || proc { ... }`)",
+               bp, meth ? meth : "?", bp);
+      unsupported_feature(c, node, msg);
+    }
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++)
+    check_blk_param_writes_in(c, nt_ref_at(nt, node, i), bp, meth);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++)
+      check_blk_param_writes_in(c, ids[j], bp, meth);
+  }
+}
+
+static void check_blk_param_writes(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    if (nt_kind(nt, id) != NK_DefNode) continue;
+    int pn = nt_ref(nt, id, "parameters");
+    if (pn < 0) continue;
+    int bpn = nt_ref(nt, pn, "block");
+    if (bpn < 0 || !nt_type(nt, bpn) || !sp_streq(nt_type(nt, bpn), "BlockParameterNode")) continue;
+    const char *bn = nt_str(nt, bpn, "name");
+    if (!bn || !bn[0]) continue;   /* an anonymous `&` has no name to assign */
+    check_blk_param_writes_in(c, nt_ref(nt, id, "body"), bn, nt_str(nt, id, "name"));
+  }
+}
+
 static void check_class_redeclarations(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count;
@@ -3432,6 +3524,7 @@ static void check_class_redeclarations(Compiler *c) {
 /* Resolve each class's superclass index from its ClassNode. */
 void resolve_parents(Compiler *c) {
   check_class_redeclarations(c);
+  check_blk_param_writes(c);
   const NodeTable *nt = c->nt;
   for (int i = 0; i < c->nclasses; i++) {
     int sc = nt_ref(nt, c->classes[i].def_node, "superclass");
