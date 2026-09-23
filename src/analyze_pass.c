@@ -3910,6 +3910,61 @@ int bind_coerce_operator_params(Compiler *c) {
   return changed;
 }
 
+/* Struct construction: positional (or keyword) args set the member ivars
+   in order. Shared by every spelling that constructs the struct: the
+   constant, a qualified path, a local holding an anonymous struct, and a
+   bare `new` / `self.new` in one of the struct's own class methods, which
+   typed nothing and left every member boxed (#4842). */
+static int struct_new_types_members(Compiler *c, int id, int ci) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  ClassInfo *cls = &c->classes[ci];
+  int args = nt_ref(nt, id, "arguments");
+  int an = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  int kwh = (an == 1 && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode")) ? argv[0] : -1;
+  for (int a = 0; a < cls->nivars; a++) {
+    /* a member not supplied at this construction can be nil */
+    const char *mname = cls->ivars[a] + 1;
+    int kn = 0;
+    const int *ke = kwh >= 0 ? nt_arr(nt, kwh, "elements", &kn) : NULL;
+    int vnode = -1;
+    if (kwh >= 0) {
+      for (int e = 0; e < kn; e++) {
+        int key = nt_ref(nt, ke[e], "key");
+        if (key >= 0 && nt_type(nt, key) && sp_streq(nt_type(nt, key), "SymbolNode") &&
+            nt_str(nt, key, "value") && sp_streq(nt_str(nt, key, "value"), mname)) { vnode = nt_ref(nt, ke[e], "value"); break; }
+      }
+    }
+    else if (a < an) vnode = argv[a];
+    if (class_ivar_pinned(cls, cls->ivars[a])) continue;
+    TyKind at = vnode >= 0 ? infer_type(c, vnode) : TY_NIL;
+    /* An empty container literal (or `Array.new` / `Hash.new`) has
+       no type of its own until a use fills it in, and a member
+       has no write of its own to be filled through: it stayed
+       UNKNOWN to the backstop and read back boxed. Take the empty
+       container's kind, the way an `@ivar = []` write does
+       (#4460). */
+    if (at == TY_UNKNOWN && vnode >= 0) {
+      NodeKind vk = nt_kind(nt, vnode);
+      if (vk == NK_ArrayNode) at = TY_POLY_ARRAY;
+      else if (vk == NK_HashNode) at = TY_POLY_POLY_HASH;
+      else if (vk == NK_CallNode) {
+        const char *vn = nt_str(nt, vnode, "name"); int vr = nt_ref(nt, vnode, "receiver");
+        int va = nt_ref(nt, vnode, "arguments"); int van = 0; if (va >= 0) nt_arr(nt, va, "arguments", &van);
+        const char *vrn = vr >= 0 && nt_kind(nt, vr) == NK_ConstantReadNode ? nt_str(nt, vr, "name") : NULL;
+        if (vn && vrn && sp_streq(vn, "new") && van == 0 && nt_ref(nt, vnode, "block") < 0) {
+          if (sp_streq(vrn, "Array")) at = TY_POLY_ARRAY;
+          else if (sp_streq(vrn, "Hash")) at = TY_POLY_POLY_HASH;
+        }
+      }
+    }
+    TyKind m = ty_unify(cls->ivar_types[a], at);
+    if (m != cls->ivar_types[a]) { cls->ivar_types[a] = m; changed = 1; }
+  }
+  return changed;
+}
+
 int infer_param_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -4129,8 +4184,12 @@ int infer_param_types(Compiler *c) {
       if (name && sp_streq(name, "new")) {
         Scope *s = comp_scope_of(c, id);
         if (s && s->is_cmethod && s->class_id >= 0) {
-          int initmi = comp_method_in_chain(c, s->class_id, "initialize", NULL);
-          if (initmi >= 0) changed |= bind_call_params(c, id, initmi);
+          if (c->classes[s->class_id].is_struct)
+            changed |= struct_new_types_members(c, id, s->class_id);
+          else {
+            int initmi = comp_method_in_chain(c, s->class_id, "initialize", NULL);
+            if (initmi >= 0) changed |= bind_call_params(c, id, initmi);
+          }
         }
         continue;
       }
@@ -4266,51 +4325,7 @@ int infer_param_types(Compiler *c) {
         int ci = lci >= 0 ? lci : comp_class_index(c, nt_str(nt, recv, "name"));
         if (ci >= 0) {
           if (sp_streq(name, "new") && c->classes[ci].is_struct) {
-            /* Struct construction: positional args set member ivars in order. */
-            ClassInfo *cls = &c->classes[ci];
-            int args = nt_ref(nt, id, "arguments");
-            int an = 0;
-            const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
-            int kwh = (an == 1 && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode")) ? argv[0] : -1;
-            for (int a = 0; a < cls->nivars; a++) {
-              /* a member not supplied at this construction can be nil */
-              const char *mname = cls->ivars[a] + 1;
-              int kn = 0;
-              const int *ke = kwh >= 0 ? nt_arr(nt, kwh, "elements", &kn) : NULL;
-              int vnode = -1;
-              if (kwh >= 0) {
-                for (int e = 0; e < kn; e++) {
-                  int key = nt_ref(nt, ke[e], "key");
-                  if (key >= 0 && nt_type(nt, key) && sp_streq(nt_type(nt, key), "SymbolNode") &&
-                      nt_str(nt, key, "value") && sp_streq(nt_str(nt, key, "value"), mname)) { vnode = nt_ref(nt, ke[e], "value"); break; }
-                }
-              }
-              else if (a < an) vnode = argv[a];
-              if (class_ivar_pinned(cls, cls->ivars[a])) continue;
-              TyKind at = vnode >= 0 ? infer_type(c, vnode) : TY_NIL;
-              /* An empty container literal (or `Array.new` / `Hash.new`) has
-                 no type of its own until a use fills it in, and a member
-                 has no write of its own to be filled through: it stayed
-                 UNKNOWN to the backstop and read back boxed. Take the empty
-                 container's kind, the way an `@ivar = []` write does
-                 (#4460). */
-              if (at == TY_UNKNOWN && vnode >= 0) {
-                NodeKind vk = nt_kind(nt, vnode);
-                if (vk == NK_ArrayNode) at = TY_POLY_ARRAY;
-                else if (vk == NK_HashNode) at = TY_POLY_POLY_HASH;
-                else if (vk == NK_CallNode) {
-                  const char *vn = nt_str(nt, vnode, "name"); int vr = nt_ref(nt, vnode, "receiver");
-                  int va = nt_ref(nt, vnode, "arguments"); int van = 0; if (va >= 0) nt_arr(nt, va, "arguments", &van);
-                  const char *vrn = vr >= 0 && nt_kind(nt, vr) == NK_ConstantReadNode ? nt_str(nt, vr, "name") : NULL;
-                  if (vn && vrn && sp_streq(vn, "new") && van == 0 && nt_ref(nt, vnode, "block") < 0) {
-                    if (sp_streq(vrn, "Array")) at = TY_POLY_ARRAY;
-                    else if (sp_streq(vrn, "Hash")) at = TY_POLY_POLY_HASH;
-                  }
-                }
-              }
-              TyKind m = ty_unify(cls->ivar_types[a], at);
-              if (m != cls->ivar_types[a]) { cls->ivar_types[a] = m; changed = 1; }
-            }
+            changed |= struct_new_types_members(c, id, ci);
             continue;
           }
           if (sp_streq(name, "new")) {
@@ -4324,6 +4339,12 @@ int infer_param_types(Compiler *c) {
             changed |= bind_call_params(c, id, comp_cmethod_in_chain(c, ci, name, NULL));
           continue;
         }
+      }
+      /* `self.new(...)` in a struct's own class method constructs it too */
+      if (sp_streq(name, "new") && rty && sp_streq(rty, "SelfNode")) {
+        Scope *ss = comp_scope_of(c, id);
+        if (ss && ss->is_cmethod && ss->class_id >= 0 && c->classes[ss->class_id].is_struct)
+          changed |= struct_new_types_members(c, id, ss->class_id);
       }
       if (sp_streq(name, "new")) continue;
     }

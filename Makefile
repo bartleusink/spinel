@@ -2044,6 +2044,10 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	  $(SPINEL) "$$f" -o "$$tmp/ibin" >/dev/null 2>&1 || { echo "infer-test: FAIL ($$f: the emitted C does not compile)"; ok=0; continue; }; \
 	  "$$tmp/ibin" >/dev/null 2>&1 || { echo "infer-test: FAIL ($$f: the program does not run)"; ok=0; }; \
 	done; \
+	$(SPINEL) test/infer/struct_cmethod_bare_new.rb -c --no-line-map -o "$$tmp/sn.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (struct_cmethod_bare_new: -c)"; ok=0; }; \
+	for m in 'sp_sym iv_op;' 'sp_int iv_n;' 'sp_int iv_a;' 'const char \* iv_b;' 'sp_int iv_v;'; do \
+	  grep -q "$$m" "$$tmp/sn.c" || { echo "infer-test: FAIL (struct_cmethod_bare_new: member not typed: $$m)"; ok=0; }; \
+	done; \
 	$(SPINEL) test/infer/emit_types_fields.rb --emit-types -o "$$tmp/et.json" >/dev/null 2>&1 || { echo "infer-test: FAIL (--emit-types on emit_types_fields)"; exit 1; }; \
 	grep -q '"line":13,"col":5,"end_line":13,"end_col":8,"kind":"LocalVariableReadNode","name":"pts"' "$$tmp/et.json" || { echo "infer-test: FAIL (--emit-types: a node's span, kind and name)"; ok=0; }; \
 	grep -q '"line":13,"col":5,"end_line":13,"end_col":36,"kind":"CallNode","name":"map"' "$$tmp/et.json" || { echo "infer-test: FAIL (--emit-types: the enclosing call span)"; ok=0; }; \
