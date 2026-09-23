@@ -10073,6 +10073,23 @@ static int node_is_computed_name(const NodeTable *nt, int n) {
    silently raising the wrong NoMethodError for a method the arms never built. */
 static int send_name_is_computed(Compiler *c, int arg) {
   const NodeTable *nt = c->nt;
+  /* An element read out of a named container (`PLAN[i]`, `PLAN.first`,
+     `TABLE.fetch(k)`, `@plan[i]`) is the same kind of name a block parameter
+     over that container is: one of the values the container was filled with,
+     which the arm set already covers when those are literals. It was refused
+     as computed, with the refusal misreading `send` itself as undefined
+     (#4850). */
+  if (nt_kind(nt, arg) == NK_CallNode) {
+    const char *en = nt_str(nt, arg, "name");
+    int er = nt_ref(nt, arg, "receiver");
+    NodeKind rk = er >= 0 ? nt_kind(nt, er) : NK_NONE;
+    if (en && (sp_streq(en, "[]") || sp_streq(en, "first") || sp_streq(en, "last") ||
+               sp_streq(en, "fetch") || sp_streq(en, "at") || sp_streq(en, "dig") ||
+               sp_streq(en, "sample")) &&
+        (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ||
+         rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode))
+      return 0;
+  }
   if (node_is_computed_name(nt, arg)) return 1;
   const char *aty = arg >= 0 ? nt_type(nt, arg) : NULL;
   if (!aty || !sp_streq(aty, "LocalVariableReadNode")) return 0;

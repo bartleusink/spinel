@@ -1338,8 +1338,12 @@ __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what
       }
       if (ty_is_object(rvt)) {
         int cid = ty_object_class(rvt);
+        /* a name every object answers (`send`, `tap`, ...) is not the
+           program's NoMethodError: that refusal is a spinel gap, and saying
+           "undefined method 'send'" pointed at the wrong thing (#4850) */
         if (cid >= 0 && cid < c->nclasses && !c->classes[cid].is_native_class &&
-            comp_method_in_chain(c, cid, mname, NULL) < 0) {
+            comp_method_in_chain(c, cid, mname, NULL) < 0 &&
+            !builtin_object_method_known(mname)) {
           const char *cn = class_ruby_name(c, cid);
           snprintf(msg, sizeof msg, "undefined method '%s' for an instance of %s (NoMethodError)", mname, cn ? cn : "Object");
           unsup_leave(file, ln, msg);
