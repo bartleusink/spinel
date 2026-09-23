@@ -2597,10 +2597,13 @@ void emit_method_signature(Compiler *c, Scope *s, Buf *b) {
     emit_ctype(c, pt, b);
     buf_printf(b, " lv_%s", s->pnames[i]);
   }
-  /* &block param that escapes (not inlined): passes the block as sp_Proc * */
+  /* &block param that escapes (not inlined): passes the block as sp_Proc *.
+     const: a method's block parameter is read-only (check_blk_param_writes
+     refuses an assignment), so a write that got past that check stops the C
+     build instead of running. */
   if (s->blk_param && s->blk_param[0] && !s->yields) {
     if (wrote++) buf_puts(b, ", ");
-    buf_printf(b, "sp_Proc *lv_%s", s->blk_param);
+    buf_printf(b, "sp_Proc *const lv_%s", s->blk_param);
   }
   if (!wrote) buf_puts(b, "void");
   buf_puts(b, ")");
@@ -6658,7 +6661,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
       }
       if (init_has_blk) {
         if (s->nparams > 0) buf_puts(b, ", ");
-        buf_printf(b, "sp_Proc *lv_%s", s->blk_param);
+        buf_printf(b, "sp_Proc *const lv_%s", s->blk_param);
       }
     }
     else buf_puts(b, "void");
@@ -6722,7 +6725,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
     }
     if (init_has_blk) {
       if (s->nparams > 0) buf_puts(b, ", ");
-      buf_printf(b, "sp_Proc *lv_%s", s->blk_param);
+      buf_printf(b, "sp_Proc *const lv_%s", s->blk_param);
     }
   }
   else {
