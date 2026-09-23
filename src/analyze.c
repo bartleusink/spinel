@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include "analyze_internal.h"
 
 
@@ -6832,8 +6833,36 @@ static int desugar_to_enum(Compiler *c) {
    @ivar of one class (ici/iiv, sidx -1; #4444). */
 typedef struct { int sidx; LocalVar *lv; int cls; int alive; int uf; int needs_cmp; int row_iter; int saw_call; TyKind old_pin; int ici, iiv; } OAS;
 
+/* The (sidx, lv) -> first slot index map, so a lookup is not a scan of every
+   slot: the pass asks once per node, and the slot list grows with the
+   program. Built on first use for a given (sl, n) and dropped by
+   oa_index_reset() when the pass starts over; an index is the FIRST matching
+   slot, which is what the scan answered. */
+static struct { const OAS *sl; int n, cap; int *tab; } g_oa_ix;
+static void oa_index_reset(void) { g_oa_ix.sl = NULL; g_oa_ix.n = -1; }
+static unsigned oa_hash(int sidx, const LocalVar *lv) {
+  uint64_t h = (uint64_t)(uintptr_t)lv * 0x9E3779B97F4A7C15ull ^ (uint64_t)(uint32_t)sidx * 0xC2B2AE3D27D4EB4Full;
+  return (unsigned)(h ^ (h >> 29));
+}
 static int oa_find(OAS *sl, int n, int sidx, LocalVar *lv) {
-  for (int i = 0; i < n; i++) if (sl[i].sidx == sidx && sl[i].lv == lv && sl[i].ici < 0) return i;
+  if (g_oa_ix.sl != sl || g_oa_ix.n != n) {
+    int cap = 16; while (cap < 2 * n) cap <<= 1;
+    if (cap > g_oa_ix.cap) { free(g_oa_ix.tab); g_oa_ix.tab = (int *)malloc(sizeof(int) * cap); g_oa_ix.cap = cap; }
+    for (int i = 0; i < g_oa_ix.cap; i++) g_oa_ix.tab[i] = -1;
+    unsigned mask = (unsigned)g_oa_ix.cap - 1;
+    for (int i = 0; i < n; i++) {
+      if (sl[i].ici >= 0) continue;
+      unsigned h = oa_hash(sl[i].sidx, sl[i].lv) & mask;
+      while (g_oa_ix.tab[h] >= 0 && !(sl[g_oa_ix.tab[h]].sidx == sl[i].sidx && sl[g_oa_ix.tab[h]].lv == sl[i].lv)) h = (h + 1) & mask;
+      if (g_oa_ix.tab[h] < 0) g_oa_ix.tab[h] = i;   /* keep the first */
+    }
+    g_oa_ix.sl = sl; g_oa_ix.n = n;
+  }
+  unsigned mask = (unsigned)g_oa_ix.cap - 1;
+  for (unsigned h = oa_hash(sidx, lv) & mask; g_oa_ix.tab[h] >= 0; h = (h + 1) & mask) {
+    const OAS *e = &sl[g_oa_ix.tab[h]];
+    if (e->sidx == sidx && e->lv == lv) return g_oa_ix.tab[h];
+  }
   return -1;
 }
 static int oa_find_iv(OAS *sl, int n, int ici, int iiv) {
@@ -7558,6 +7587,7 @@ static int narrow_object_arrays(Compiler *c) {
   /* 1. candidate slots: POLY_ARRAY locals/params (skip block params + rbs). */
   int cap = 16, n = 0;
   OAS *sl = (OAS *)malloc(sizeof(OAS) * cap);
+  oa_index_reset();
   g_oa_empt_n = 0;
   g_oa_src_n = 0;
   /* Drop every want this pass stamped on a map source in an earlier round,
@@ -12425,8 +12455,8 @@ static void check_seed_contradictions(Compiler *c) {
        explicit return inside this scope */
     int sites[64]; int nsites = 0;
     sites[nsites++] = sc->body;
-    for (int id = 0; id < nt->count && nsites < 64; id++) {
-      if (nt_kind(nt, id) != NK_ReturnNode) continue;
+    NT_FOREACH_KIND(nt, NK_ReturnNode, id) {
+      if (nsites >= 64) break;
       if (c->nscope[id] != s) continue;
       int rv = nt_ref(nt, id, "arguments");
       if (rv < 0) continue;

@@ -7564,8 +7564,7 @@ int infer_block_params(Compiler *c) {
           TyKind at = as_elem;
           if (at == TY_UNKNOWN) {
             at = infer_type(c, yargs[k]);
-            for (int _yi = 0; _yi < nt->count; _yi++) {
-              if (nt_kind(nt, _yi) != NK_YieldNode) continue;
+            NT_FOREACH_KIND(nt, NK_YieldNode, _yi) {
               if (c->nscope[_yi] != yld_mi || _yi == yn) continue;
               int _ya2 = nt_ref(nt, _yi, "arguments");
               int _yc2 = 0;
@@ -7588,8 +7587,7 @@ int infer_block_params(Compiler *c) {
         /* Params beyond the first yield's arity might still be nil if there
            are other yields with fewer args. Find the min yield arity. */
         int min_yc = yc;
-        for (int _yi = 0; _yi < nt->count; _yi++) {
-          if (!nt_type(nt, _yi) || !sp_streq(nt_type(nt, _yi), "YieldNode")) continue;
+        NT_FOREACH_KIND(nt, NK_YieldNode, _yi) {
           if (c->nscope[_yi] != yld_mi) continue;
           int _ya = nt_ref(nt, _yi, "arguments");
           int _yc = 0;
