@@ -187,6 +187,21 @@ void sp_PolyArray_splice(sp_PolyArray*a,sp_int start,sp_int len,sp_RbVal src){
   if(s<0)s+=alen;
   if(len<0){sp_raise_cls("IndexError",sp_sprintf("negative length (%lld)",(long long)len));return;}
   if(s<0){sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)start,(long long)-alen));return;}
+  /* Equal-length replacement inside the array is a pure overwrite, as in the
+     typed splices above: no snapshot buffer, no tail copy, no pushes. It was
+     ~190x the typed arrays' cost on `colors[x, 8] = chunk` (#4841). One
+     barrier covers the stores, as sp_PolyArray_set takes one; a poly source
+     may be this very array, hence memmove. */
+  if(len>0&&s+len<=alen&&src.tag==SP_TAG_OBJ&&src.v.p){
+    sp_RbVal*dst=a->data+s;
+    switch(src.cls_id){
+      case SP_BUILTIN_POLY_ARRAY:{sp_PolyArray*x=(sp_PolyArray*)src.v.p;if(x->len==len){sp_gc_wb((void*)a);memmove(dst,x->data,sizeof(sp_RbVal)*(size_t)len);return;}break;}
+      case SP_BUILTIN_INT_ARRAY:{sp_IntArray*x=(sp_IntArray*)src.v.p;if(x->len==len){sp_gc_wb((void*)a);for(sp_int i=0;i<len;i++)dst[i]=sp_box_int(x->data[x->start+i]);return;}break;}
+      case SP_BUILTIN_FLT_ARRAY:{sp_FloatArray*x=(sp_FloatArray*)src.v.p;if(x->len==len){sp_gc_wb((void*)a);for(sp_int i=0;i<len;i++)dst[i]=sp_box_float(x->data[i]);return;}break;}
+      case SP_BUILTIN_STR_ARRAY:{sp_StrArray*x=(sp_StrArray*)src.v.p;if(x->len==len){sp_gc_wb((void*)a);for(sp_int i=0;i<len;i++)dst[i]=sp_box_str(x->data[i]);return;}break;}
+      default:break;
+    }
+  }
   /* snapshot the source elements as boxed values. src's class id decides
      array-vs-single-element (Ruby splices an Array RHS, inserts anything
      else). A user object with to_ary is coerced at COMPILE time when its
