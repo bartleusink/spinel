@@ -251,6 +251,10 @@ int ctor_needs_self_defaults(Compiler *c, int initm, int argc);
 void emit_ctor_alloc_init(Compiler *c, int cid, int initm, int argsNode, Buf *b);
 extern const char *g_ctor_self;
 extern const char *g_ctor_self_deref;
+extern const char *g_arm_self;
+extern const Scope *g_arm_scope;
+extern int g_arm_depth;
+extern int g_expr_depth;
 extern int g_proc_toplevel_return;
 extern int g_exc_frame_depth;      /* live begin/rescue setjmp frames (see codegen_util.c) */
 extern int g_method_pr_exc_depth;
