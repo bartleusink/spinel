@@ -2455,6 +2455,18 @@ static const char *exc_when_cls_name(Compiler *c, const char *cn) {
   return q ? q : cn;
 }
 
+/* A user object is a BasicObject, and an Object and a Kernel unless its class
+   descends from an explicit `< BasicObject` (#2703) or is a reopened
+   `class BasicObject` itself. */
+static int obj_is_root_class(Compiler *c, int cid, const char *cn) {
+  if (comp_const(c, cn)) return 0;   /* the program reassigns the name */
+  if (sp_streq(cn, "BasicObject")) return 1;
+  if (!sp_streq(cn, "Object") && !sp_streq(cn, "Kernel")) return 0;
+  const char *rn = class_ruby_name(c, cid);
+  if (rn && sp_streq(rn, "BasicObject")) return 0;
+  return !class_is_blank_slate(c, cid);
+}
+
 static int g_pm_hash_sink_indent = 0;
 
 /* The `keys` argument a hash pattern hands #deconstruct_keys: an Array of the
@@ -2538,6 +2550,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
     if (ty_is_object(pt)) {
       int cid = ty_object_class(pt);
       int tcid = comp_class_index(c, cn2);
+      if (obj_is_root_class(c, cid, cn2)) { buf_puts(b, "1"); return 1; }
       if (tcid >= 0 && (cid == tcid || is_descendant(c, cid, tcid))) { buf_puts(b, "1"); return 1; }
       if (tcid >= 0 && is_descendant(c, tcid, cid)) {
         const char *acc = comp_ty_value_obj(c, pt) ? "." : "->";
@@ -4410,7 +4423,8 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           else if (cn2 && ty_is_object(pt)) {
             int cid = ty_object_class(pt);
             int tcid = comp_class_index(c, cn2);
-            int yes = (tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid));
+            int yes = obj_is_root_class(c, cid, cn2) ||
+                      ((tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid)));
             buf_printf(b, "%d", yes ? 1 : 0);
           }
           else if (cn2 && pt == TY_CLASS) {
@@ -4827,7 +4841,8 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
         }
         else if (cn2 && ty_is_object(pt)) {
           int cid = ty_object_class(pt); int tcid = comp_class_index(c, cn2);
-          int yes = (tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid));
+          int yes = obj_is_root_class(c, cid, cn2) ||
+                    ((tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid)));
           buf_printf(b, "%d", yes ? 1 : 0);
         }
         else if (cn2 && pt == TY_CLASS) {
