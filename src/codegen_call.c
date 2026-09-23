@@ -29387,9 +29387,28 @@ else {
           char _aself[32]; snprintf(_aself, sizeof _aself, "_t%d", _atmp);
           buf_printf(b, "({ sp_%s *_t%d = ", c->classes[_arc].c_name, _atmp); emit_expr(c, recv, b); buf_puts(b, "; ");
           emit_frozen_obj_guard(c, _arc, _aself, b);
+          /* a typed slot (an --rbs seed pins one) given a boxed value: the
+             slot takes it unboxed, and the assignment's value is still the
+             right-hand side, boxed as it came. Stored raw, an sp_RbVal went
+             into an sp_int and the C did not compile (#4856). */
+          if (argc >= 1 && _aivt != TY_POLY && _aivt != TY_UNKNOWN &&
+              comp_ntype(c, argv[0]) == TY_POLY) {
+            int _tvv = ++g_tmp;
+            char _tvn[32]; snprintf(_tvn, sizeof _tvn, "_t%d", _tvv);
+            buf_printf(b, "sp_RbVal %s = ", _tvn); emit_expr(c, argv[0], b);
+            buf_printf(b, "; SP_GC_ROOT_RBVAL(%s); _t%d->iv_%s = ", _tvn, _atmp, iv_c(_abase));
+            emit_unbox_text(c, _aivt, _tvn, b);
+            TyKind _nt = comp_ntype(c, id);
+            if (_nt == TY_POLY || _nt == TY_UNKNOWN) buf_printf(b, "; %s; })", _tvn);
+            else buf_printf(b, "; _t%d->iv_%s; })", _atmp, iv_c(_abase));
+            return;
+          }
           buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
           if (argc >= 1) {
             if (_aivt == TY_POLY && comp_ntype(c, argv[0]) != TY_POLY) emit_boxed(c, argv[0], b);
+            /* the other way: a typed slot (an --rbs seed pins it) given a
+               boxed value, which the statement form already unboxes; stored
+               raw, an sp_RbVal went into an sp_int (#4856) */
             else emit_expr(c, argv[0], b);
           }
           else buf_puts(b, "0");
