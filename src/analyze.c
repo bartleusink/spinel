@@ -5265,6 +5265,35 @@ int desugar_enum_method_recv(Compiler *c) {
         }
       }
     }
+    /* `x.to_h { |..| pair }` on a value only known at run time is
+       `x.map { |..| pair }.to_h`: Array#to_h, Hash#to_h and Enumerable#to_h
+       with a block all build the hash from the block's pairs. The boxed
+       dispatch has the blockless to_h and a boxed map, but no block form of
+       to_h, so the call compiled to an unconditional NoMethodError naming the
+       very class that defines it (#4838). A typed receiver keeps its own
+       emitter; a program class with its own to_h keeps it too, since the
+       boxed value may be one of those. */
+    if (nm && sp_streq(nm, "to_h") && nt_kind(nt, nt_ref(nt, id, "block")) == NK_BlockNode &&
+        nt_ref(nt, id, "arguments") < 0) {
+      int trecv = nt_ref(nt, id, "receiver");
+      int user_to_h = 0;
+      for (int ci = 0; ci < c->nclasses && !user_to_h; ci++)
+        if (comp_method_in_class(c, ci, "to_h") >= 0) user_to_h = 1;
+      if (trecv >= 0 && !user_to_h && infer_type(c, trecv) == TY_POLY) {
+        int mapc = nt_new_node(nt, "CallNode");
+        if (mapc >= 0) {
+          nt_node_set_str(nt, mapc, "name", "map");
+          nt_node_set_ref(nt, mapc, "receiver", trecv);
+          nt_node_set_ref(nt, mapc, "block", nt_ref(nt, id, "block"));
+          nt_node_set_ref(nt, id, "receiver", mapc);
+          nt_node_set_ref(nt, id, "block", -1);
+          comp_grow_node_arrays(c);
+          c->nscope[mapc] = c->nscope[id];
+          changed = 1;
+          continue;
+        }
+      }
+    }
     /* Enumerable#each_entry on a receiver whose #each yields ONE value per
        element is #each: same elements, same receiver as the value. That is
        every builtin enumerable -- an Array/Range/Enumerator element, a Hash
