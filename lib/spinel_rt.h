@@ -10156,6 +10156,15 @@ static sp_Proc *sp_poly_to_proc(sp_RbVal v) {
   sp_raise_cls("TypeError", "callable object is expected");
   return NULL;
 }
+/* The same conversion for a `&callable` ARGUMENT, where nil is not an error:
+   `m(&nil)` is CRuby's way of passing no block at all, and a program whose
+   block is decided at run time (`m(&(cond ? nil : pr))`) writes exactly that.
+   Composition keeps the strict form above -- `f >> nil` is a TypeError there,
+   as CRuby's Proc#>> says. */
+static sp_Proc *sp_poly_to_block(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) return NULL;
+  return sp_poly_to_proc(v);
+}
 
 /* A Method read back out of a container has only its sp_BoundMethod: #owner
    comes from the compile-time rendering it carries ("#<Method: Owner#name>"),

@@ -4103,6 +4103,22 @@ int infer_param_types(Compiler *c) {
       changed |= widen_proc_params_poly(c, recv);
     }
 
+    /* `m(&pr)` where whether there IS a proc is decided at run time: the
+       value is poly (a proc or nil), so nothing at the call site can bind
+       the literal's parameters to what `m` yields, and the yield hands them
+       over through the boxed side-channel. Typed from nothing, the literal
+       read its parameter as the default scalar -- `proc { |x| x.path }`
+       passed an object asked it for a method Integer has, at run time, with
+       nothing raised at compile time. The same widening the composition and
+       curry sites above do, for the same reason. A proc whose presence is
+       STATIC keeps its bound parameter types: it is spliced, not boxed. */
+    { int bnode = nt_ref(nt, id, "block");
+      if (bnode >= 0 && nt_kind(nt, bnode) == NK_BlockArgumentNode) {
+        int bexpr = nt_ref(nt, bnode, "expression");
+        if (bexpr >= 0 && infer_type(c, bexpr) == TY_POLY)
+          changed |= widen_proc_params_poly(c, bexpr);
+      } }
+
     if (recv < 0) {
       /* bare `new(args)` inside a class method constructs the enclosing
          (possibly specialized) class -> bind args to that class's
@@ -5891,6 +5907,32 @@ static int fwd_callable_def(Compiler *c, int ref, int *out_body, int *out_pn) {
   }
   int create = -1;
   if (sp_streq(ty, "LambdaNode") || is_proc_create(c, ref)) create = ref;
+  /* A conditional whose arms decide whether there is a callable at all --
+     `pr = cond ? nil : proc { |x| ... }` -- carries the literal in one arm.
+     Stopping at the IfNode left the literal's parameters bound by nothing.
+     Either arm may hold it; the first that resolves wins, as the local and
+     constant routes below take the first write that does. */
+  else if (sp_streq(ty, "IfNode") || sp_streq(ty, "UnlessNode")) {
+    static int fcd_idepth = 0;
+    if (fcd_idepth < 64) {
+      fcd_idepth++;
+      int arms[2];
+      arms[0] = nt_ref(nt, ref, "statements");
+      arms[1] = nt_ref(nt, ref, sp_streq(ty, "UnlessNode") ? "else_clause" : "subsequent");
+      int ok3 = 0;
+      for (int ai = 0; ai < 2 && !ok3; ai++) {
+        int arm = arms[ai];
+        if (arm < 0) continue;
+        const char *aty = nt_type(nt, arm);
+        if (aty && sp_streq(aty, "ElseNode")) arm = nt_ref(nt, arm, "statements");
+        if (arm < 0) continue;
+        int an4 = 0; const int *ab4 = nt_arr(nt, arm, "body", &an4);
+        if (ab4 && an4 > 0) ok3 = fwd_callable_def(c, ab4[an4 - 1], out_body, out_pn);
+      }
+      fcd_idepth--;
+      if (ok3) return 1;
+    }
+  }
   else if (sp_streq(ty, "ConstantReadNode")) {
     /* A lambda held in a CONSTANT resolves the same way one held in a local
        does. Without this the chain could not see the base proc's arity, so a

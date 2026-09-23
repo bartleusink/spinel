@@ -453,7 +453,8 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     emit_indent(b, indent + 1);
     buf_printf(b, "sp_Proc *_t%d = ", fwd_proc_tmp);
     if (comp_ntype(c, fwd_proc_expr) == TY_PROC) emit_expr(c, fwd_proc_expr, b);
-    else { buf_puts(b, "sp_poly_to_proc("); emit_boxed(c, fwd_proc_expr, b); buf_puts(b, ")"); }
+    /* nil here is "no block", not a TypeError: see sp_poly_to_block */
+    else { buf_puts(b, "sp_poly_to_block("); emit_boxed(c, fwd_proc_expr, b); buf_puts(b, ")"); }
     buf_printf(b, "; SP_GC_ROOT(_t%d);\n", fwd_proc_tmp);
   }
   /* instance method: bind self to the receiver. A heap object is a pointer; a

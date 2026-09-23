@@ -1722,7 +1722,17 @@ void emit_cond(Compiler *c, int id, Buf *b) {
       const char *nm = nt_str(c->nt, id, "name");
       Scope *s = nm ? comp_scope_of(c, id) : NULL;
       if (s && s->blk_param && nm && sp_streq(s->blk_param, nm) && s->yields) {
-        buf_puts(b, g_block_id >= 0 ? "1" : "0");
+        /* Three answers, not two, and the `blk.nil?` arm in emit_expr has
+           carried all three since it was written: a literal block spliced
+           here is present, a FORWARDED real proc is present exactly when its
+           pointer is, and anything else has none. Reading the middle one as
+           "none" is what `with_f(&maybe_nil_proc)` did -- the guard folded to
+           the blockless arm, `return f unless block` ran, and the call
+           answered that return's type while the proc it had been handed went
+           uncalled. */
+        if (g_block_id >= 0) buf_puts(b, "1");
+        else if (g_yield_proc_ref) buf_printf(b, "((%s) != NULL)", g_yield_proc_ref);
+        else buf_puts(b, "0");
         return;
       }
     }
