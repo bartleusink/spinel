@@ -5432,14 +5432,19 @@ static int emit_poly_str_prearm(Compiler *c, int id, int recv, const char *name,
    where the switch's default arm has to answer for a receiver that really is
    a number.
 
-   One table, because the dispatch asks the same question twice: once to
-   decide whether to open the switch at all -- a colliding class may define
-   the name at a different arity than the call site uses, which leaves the
-   candidate count 0 and every other flag false -- and once to write the
-   default arm. Three separate fixes each added a name to the gate and copied
-   the arm beside the last one (the `ob13`/`ob14`/`ob15` numbering is what
-   that looks like in the end), and the two lists could only stay in step by
-   hand. A fourth name is now one row.
+   Three separate fixes each copied the arm beside the last one -- the
+   `ob13` / `ob14` / `ob15` numbering is what that looks like in the end --
+   so a fourth name is one row here instead.
+
+   The table ALSO gated whether the switch opened at all, because a
+   colliding class may define the name at an arity the call site does not
+   use, which leaves the candidate count 0 and every other flag false. That
+   was the wrong place to answer it, and the gate below answers it properly
+   now by asking whether any user class owns the NAME, which is the question
+   the emitters themselves ask when they stand down. So this is a table of
+   arms only. Reading it as a gate had swallowed `str.start_with?`,
+   `arr.flatten`, `h.default` and a dozen more that no numeric row was ever
+   going to cover.
 
    What the rows differ in is exactly three things: which runtime helper
    answers, how the argument reaches it, and how its answer is fitted to the
@@ -5668,8 +5673,12 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        method the receiver has.
 
        Three fixes patched this one name family at a time by naming the
-       numeric methods in the gate (is_numeric_poly_arm, whose table is
-       above). They were a piece of this: the same hole swallowed
+       numeric methods in the gate. That list is gone now: asking by name
+       subsumes it, and with it here the generated C of all 3819 corpus
+       programs is byte-identical either way. The table it came from stays,
+       for the ARMS -- what a numeric name answers is still spelled there --
+       but the table never needed a say in whether the switch opens. They
+       were a piece of this: the same hole swallowed
        `str.start_with?`, `arr.flatten`, `h.default`, `(1..5).size`,
        `sym.to_sym` and a dozen more, none of them numeric, none of them
        ever reported. Asking the same question the emitters asked closes it
@@ -6831,11 +6840,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        every is_* flag above false. Without this the whole dispatch declined
        here, and the call fell through to the "no candidates" NoMethodError
        two frames up rather than reaching the numeric default arm below. */
-    int is_numeric_poly_arm = poly_num_arm(name, argc) >= 0;
     /* see the zero-argument gate's own note: the emitters stand down by
        name, so the dispatch has to open by name too */
     int name_taken2 = user_defines_or_reads(c, name);
-    if (ncand > 0 || name_taken2 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_numeric_poly_arm) {
+    if (ncand > 0 || name_taken2 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
       /* `x = v` through a writer: the value is v as written, so the arms call
