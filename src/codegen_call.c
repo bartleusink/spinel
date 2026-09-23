@@ -9215,7 +9215,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         int ucnew = comp_cmethod_in_chain(c, ci, "new", NULL);
         if (ucnew >= 0) {
           int defcls2 = -1; comp_cmethod_in_chain(c, ci, "new", &defcls2);
-          buf_printf(b, "sp_%s_s_new(", c->classes[defcls2 >= 0 ? defcls2 : ci].c_name);
+          buf_printf(b, "sp_%s_s_%s(", c->classes[defcls2 >= 0 ? defcls2 : ci].c_name, mc("new"));
           emit_args_filled(c, ucnew, nt_ref(nt, id, "arguments"), "", b);
           buf_puts(b, ")");
           return 1;
@@ -25923,7 +25923,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
                       " *_t%d = *_t%d; SP_GC_ROOT(_t%d); ",
                    to, cn, td, cn,
                    class_needs_scan(dci) ? "sp_" : "", class_needs_scan(dci) ? cn : "NULL",
-                   class_needs_scan(dci) ? "_scan" : "", td, to, td);
+                   class_needs_scan(dci) ? "__gc_scan" : "", td, to, td);
         /* The struct copy carries the ORIGINAL's cls_id, which for a singleton
            receiver is the synthesized subclass: the copy then answered that
            class's methods at run time, while `respond_to?` -- reading the
@@ -27006,7 +27006,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       if (ucnew >= 0) {
         /* user-defined def self.new: call it as a regular class method */
         int defcls2 = -1; comp_cmethod_in_chain(c, ci, "new", &defcls2);
-        buf_printf(b, "sp_%s_s_new(", c->classes[defcls2 >= 0 ? defcls2 : ci].c_name);
+        buf_printf(b, "sp_%s_s_%s(", c->classes[defcls2 >= 0 ? defcls2 : ci].c_name, mc("new"));
         emit_args_filled(c, ucnew, nt_ref(nt, id, "arguments"), "", b);
         buf_puts(b, ")");
         return;

@@ -4544,7 +4544,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
     if (cap_self && !self_is_value)
       buf_printf(&g_proc_protos, "  if (_c->self_ptr) sp_gc_mark((void *)_c->self_ptr);\n");
     else if (cap_self && class_needs_scan(&c->classes[encl->class_id]))
-      buf_printf(&g_proc_protos, "  sp_%s_scan(&_c->self_val);\n", cap_self_class);
+      buf_printf(&g_proc_protos, "  sp_%s__gc_scan(&_c->self_val);\n", cap_self_class);
     for (int i = 0; i < ncap; i++) {
       LocalVar *lv = encl ? scope_local(encl, caps.v[i]) : NULL;
       TyKind ct = lv ? lv->type : TY_POLY;
@@ -5597,7 +5597,7 @@ else if (orecv >= 0 && onm) {
     }
     if (cap_self && self_is_value) {
       if (class_needs_scan(&c->classes[bs->class_id]))
-        buf_printf(&g_procs, "  sp_%s_scan(&_c->__self_val);\n", self_cls);
+        buf_printf(&g_procs, "  sp_%s__gc_scan(&_c->__self_val);\n", self_cls);
     }
     else if (cap_self) buf_puts(&g_procs, "  if (_c->__self) sp_gc_mark(_c->__self);\n");
     buf_puts(&g_procs, "}\n");
@@ -6378,7 +6378,7 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
      heap ivar, its `msg` (a managed string in the dedicated struct) must
      be marked or it is swept while the exception is in flight. */
   if (!class_needs_scan(ci) && !is_exc_iv) return;
-  buf_printf(b, "static void sp_%s_scan(void *p) {\n", ci->c_name);
+  buf_printf(b, "static void sp_%s__gc_scan(void *p) {\n", ci->c_name);
   buf_printf(b, "  sp_%s *o = (sp_%s *)p;\n", ci->c_name, ci->c_name);
   if (is_exc_iv) {
     buf_puts(b, "  sp_mark_string(o->msg);\n");
@@ -6497,7 +6497,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
       buf_printf(b, "  sp_%s *self = SP_POOL_NEW(%s, %s%s%s);\n",
                 ci->c_name, ci->c_name,
                 class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
-                class_needs_scan(ci) ? "_scan" : "");
+                class_needs_scan(ci) ? "__gc_scan" : "");
       buf_puts(b, "  SP_GC_ROOT(self);\n");
       buf_printf(b, "  self->cls_id = %d;\n", ctor_cls_id(c, cid));
       emit_ivar_nil_inits(b, ci, "self->", "  ", ";\n");
@@ -6551,7 +6551,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_printf(b, "  sp_%s *self = SP_POOL_NEW(%s, %s%s%s);\n",
               ci->c_name, ci->c_name,
               class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
-              class_needs_scan(ci) ? "_scan" : "");
+              class_needs_scan(ci) ? "__gc_scan" : "");
     buf_puts(b, "  SP_GC_ROOT(self);\n");
     buf_printf(b, "  self->cls_id = %d;\n", ctor_cls_id(c, cid));
     for (int i = 0; i < ci->nivars; i++)
@@ -6700,7 +6700,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
       else if (needs_root(it)) buf_printf(b, "  SP_GC_ROOT(v.iv_%s);\n", iv);
     }
     if (class_needs_scan(ci))
-      buf_printf(b, "  sp_%s *p = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s_scan);\n",
+      buf_printf(b, "  sp_%s *p = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s__gc_scan);\n",
                  ci->c_name, ci->c_name, ci->c_name, ci->c_name);
     else
       buf_printf(b, "  sp_%s *p = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, NULL);\n",
@@ -6746,7 +6746,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
          (sp_exc_new_sub would only size the 3-field base). The leading
          members mirror sp_Exception so the raise/message machinery's casts
          work; the ivars live after and are set by initialize. */
-      buf_printf(b, ") {\n  sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s_scan);\n",
+      buf_printf(b, ") {\n  sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s__gc_scan);\n",
                  ci->c_name, ci->c_name, ci->c_name, ci->c_name);
       buf_printf(b, "  self->cls_name = \"%s\";\n", cn2);
       buf_printf(b, "  self->parent_cls_name = \"%s\";\n", par);
@@ -6763,7 +6763,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
   buf_printf(b, ") {\n  sp_%s *self = SP_POOL_NEW(%s, %s%s%s);\n",
             ci->c_name, ci->c_name,
             class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
-            class_needs_scan(ci) ? "_scan" : "");
+            class_needs_scan(ci) ? "__gc_scan" : "");
   buf_printf(b, "  SP_GC_ROOT(self);\n");
   buf_printf(b, "  self->cls_id = %d;\n", ctor_cls_id(c, cid));
   /* memset zero-inits fields, but a poly ivar's zero pattern is not nil and an
@@ -6813,7 +6813,7 @@ void emit_obj_alloc_expr(Compiler *c, int cid, Buf *b) {
                   " _t%d->cls_id = %d;",
                ci->c_name, t, ci->c_name,
                class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
-               class_needs_scan(ci) ? "_scan" : "", t, t, t, cid);
+               class_needs_scan(ci) ? "__gc_scan" : "", t, t, t, cid);
     char lv[32]; snprintf(lv, sizeof lv, "_t%d->", t);
     emit_ivar_nil_inits(b, ci, lv, " ", ";");
     buf_printf(b, " _t%d; })", t);
@@ -8633,7 +8633,7 @@ void emit_regex_section(Compiler *c, Buf *b) {
     int is_exc_iv = ci->nivars > 0 && class_is_exc_subclass(c, aci);
     if (!class_needs_scan(ci) && !is_exc_iv) continue;   /* no scan emitted */
     const char *rn = class_ruby_name(c, aci) ? class_ruby_name(c, aci) : ci->name;
-    buf_printf(b, "    sp_alloc_report_tag((void *)sp_%s_scan, \"%s\");\n", ci->c_name, rn);
+    buf_printf(b, "    sp_alloc_report_tag((void *)sp_%s__gc_scan, \"%s\");\n", ci->c_name, rn);
   }
   buf_puts(b, "  }\n");
   if (g_uses_symbols)

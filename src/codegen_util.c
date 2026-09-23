@@ -2276,6 +2276,14 @@ const char *mc(const char *name) {
     memcpy(buf + j, tok, tl); j += (int)tl;
   }
   buf[j] = '\0';
+  /* A method is emitted as sp_<Class>_<mc(name)>, and sp_<Class>_new is the
+     generated constructor: an instance method named `new` redefined it, and
+     the call bound to the zero-argument constructor (#4829). Every user of a
+     method's C name goes through here, so the rename is seen consistently;
+     the class-side `self.new` (sp_<Class>_s_new__m) moves with it. The GC
+     scan function, the other generated helper a method name could hit, is
+     named sp_<Class>__gc_scan for the same reason. */
+  if (strcmp(buf, "new") == 0) return "new__m";
   return buf;
 }
 
