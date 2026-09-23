@@ -2522,6 +2522,13 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       buf_printf(b, "sp_exc_is_a((sp_Exception *)_t%d, \"%s\")", t, exc_when_cls_name(c, cn2));
       return 1;
     }
+    if (pt == TY_BOOL && (sp_streq(cn2, "TrueClass") || sp_streq(cn2, "FalseClass")) &&
+        !comp_const(c, cn2)) {
+      /* true vs false is the value, not the static type -- as in `when` (#2966);
+         a program that reassigns the constant names some other class */
+      buf_printf(b, "(_t%d %s)", t, sp_streq(cn2, "TrueClass") ? "!= 0" : "== 0");
+      return 1;
+    }
     /* A user object scrutinee: the class-name table below only knows the
        builtins, so `case obj; in SomeClass` folded to a constant false for
        every user class -- including a Struct or a Data value against its own
