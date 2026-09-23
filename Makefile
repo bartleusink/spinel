@@ -4,6 +4,7 @@
 #   make              Build the C compiler (runtime + spinel + tools)
 #   make test         Run the feature tests (always a fresh run)
 #   make bench        Run benchmarks vs CRuby
+#   make bench-compile  Time analysis/emission on a synthetic program at K=100, 200
 #   make optcarrot    End-to-end optcarrot integration test
 #   make check        Fast pre-commit: rebuild + tests
 #   make gate         Full pre-push: test || bench || optcarrot
@@ -1884,6 +1885,15 @@ test/%.rb.err.expected: test/%.rb
 # collide) AND stable across runs, so the generated C's embedded __FILE__ stays
 # constant and the cc (ccache) cache keeps hitting -- a per-run mktemp path would
 # defeat it. Verdicts are aggregated in benchmark order (deterministic).
+# Compile-time scaling (#4847): spinel's analysis and C emission on the
+# synthetic program of tools/compile_scale_gen.rb at two sizes, with the growth
+# between them. Read the ratio, not the seconds (the program is linear in K).
+# `ruby tools/compile_scale.rb --cc --check K...` also builds and checks.
+BENCH_COMPILE_K ?= 100 200
+.PHONY: bench-compile
+bench-compile: $(SPINEL)
+	@ruby tools/compile_scale.rb $(BENCH_COMPILE_K)
+
 bench: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@rm -rf build/bench-results; mkdir -p build/bench-results

@@ -69,6 +69,16 @@ Inline a `require_relative` graph into one self-contained file, so
 spinel-flatten [-o OUT] app.rb
 ```
 
+## compile_scale
+
+`make bench-compile` (or `ruby tools/compile_scale.rb [--cc] [--check] K...`)
+generates the synthetic program of `compile_scale_gen.rb` -- K units of a
+model, a store, a subclass of a shared base and a driver (#4847) -- and times
+spinel's analysis (`--emit-rbs`) and C emission (`-c`) at each K, printing the
+growth between consecutive sizes. The program is linear in K, so a linear
+phase shows x2 per doubling. `--cc` also builds the binary; `--check` compares
+its output with CRuby's.
+
 ## Adding a tool
 
 Drop `tools/<name>.rb` (subset Ruby, `require_relative "tool_common"`
