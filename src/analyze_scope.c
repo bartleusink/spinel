@@ -5127,6 +5127,19 @@ int infer_ivar_types(Compiler *c) {
         else
           vt = ci->ivar_types[iv];  /* keep existing type, don't widen */
       }
+      /* An Array slot's `*= n` repeats it, and `|=` `&=` `-=` `+=` with an
+         array of its own kind combine two of them: the result is the slot's
+         own array type. Unifying the RHS instead made `@a *= 2` an Integer
+         write, boxed the slot, and every `|=` on it went to the integer
+         bit operator (#4833). */
+      else if (sp_streq(ty, "InstanceVariableOperatorWriteNode") &&
+               (ty_is_array(ci->ivar_types[iv]) || ci->ivar_types[iv] == TY_POLY_ARRAY)) {
+        const char *op2 = nt_str(nt, id, "binary_operator");
+        if (op2 && ((sp_streq(op2, "*") && vt == TY_INT) ||
+                    ((sp_streq(op2, "|") || sp_streq(op2, "&") || sp_streq(op2, "-") ||
+                      sp_streq(op2, "+")) && vt == ci->ivar_types[iv])))
+          vt = ci->ivar_types[iv];
+      }
       /* A narrowed int table is pinned: its own write reads TY_POLY_ARRAY,
          and the two array kinds unify to the plain poly SCALAR -- re-deriving
          it here would replace the narrowed type with something strictly

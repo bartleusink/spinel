@@ -1445,6 +1445,65 @@ static int local_is_bounded_counter(Compiler *c, int id, const char *nm, LocalVa
   return ok;
 }
 
+/* Array op-assign on any slot -- a local, an ivar, a global, a class
+   variable -- as `x = x OP v`, `lval` naming the slot and `t` its array type:
+   `|=` `&=` `-=` through the same typed set-op helpers the binary `a | b`
+   path uses, `+=` as a same-kind concat, and `*=` with an Integer as the
+   repeat Array#* makes. The rhs of a set op or `+` must be the same array
+   kind (or an empty `[]` literal). Only the
+   local arm had it: an ivar, global or class variable fell to the raw C
+   operator, `|` between two array pointers, which did not compile (#4833).
+   The caller has emitted the indent. Answers 1 when it emitted the write. */
+static int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
+                                const char *op, int v, Buf *b) {
+  if (!op || !(ty_is_array(t) || t == TY_POLY_ARRAY)) return 0;
+  const char *k = (t == TY_POLY_ARRAY) ? "Poly" : array_kind(t);
+  if (!k) return 0;
+  TyKind vt = comp_ntype(c, v);
+  if (sp_streq(op, "|") || sp_streq(op, "&") || sp_streq(op, "-")) {
+    if (vt != t && vt != TY_UNKNOWN) return 0;
+    const char *fn = sp_streq(op, "&") ? "intersect" : (sp_streq(op, "|") ? "union" : "difference");
+    buf_printf(b, "%s = sp_%sArray_%s(%s, ", lval, k, fn, lval);
+    if (vt == TY_UNKNOWN) buf_puts(b, "NULL");
+    else emit_expr(c, v, b);
+    buf_puts(b, ");\n");
+    return 1;
+  }
+  if (sp_streq(op, "+")) {
+    /* same-kind concat; an empty `[]` literal rhs concatenates NULL */
+    int rhs_empty = 0;
+    const char *vty = nt_type(c->nt, v);
+    if (vty && sp_streq(vty, "ArrayNode")) {
+      int nel = 0; nt_arr(c->nt, v, "elements", &nel);
+      rhs_empty = (nel == 0);
+    }
+    if (vt != t && !rhs_empty) return 0;
+    buf_printf(b, "%s = sp_%sArray_concat(%s, ", lval, k, lval);
+    if (rhs_empty) buf_puts(b, "NULL");
+    else emit_expr(c, v, b);
+    buf_puts(b, ");\n");
+    return 1;
+  }
+  if (sp_streq(op, "*") && (vt == TY_INT || vt == TY_POLY)) {
+    int ta = ++g_tmp, tn = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp;
+    buf_printf(b, "{ sp_%sArray *_t%d = %s; sp_int _t%d = ", k, ta, lval, tn);
+    emit_int_expr(c, v, b);
+    buf_printf(b, "; if (_t%d < 0) sp_raise_cls(\"ArgumentError\", \"negative argument\");"
+                  " sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);"
+                  " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
+                  " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)",
+               tn, k, tr, k, tr, ti, ti, tn, ti, tj, tj, ta, tj);
+    /* only an IntArray carries a start offset */
+    if (t == TY_INT_ARRAY)
+      buf_printf(b, " sp_%sArray_push(_t%d, _t%d->data[_t%d->start + _t%d]);", k, tr, ta, ta, tj);
+    else
+      buf_printf(b, " sp_%sArray_push(_t%d, _t%d->data[_t%d]);", k, tr, ta, tj);
+    buf_printf(b, " %s = _t%d; }\n", lval, tr);
+    return 1;
+  }
+  return 0;
+}
+
 static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
                               const char *lval) {
   const NodeTable *nt = c->nt;
@@ -1667,22 +1726,7 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     }
     return;
   }
-  /* Array set-operation op-assign (`a |= b`, `a &= b`, `a -= b`): desugar to
-     `a = a OP b` through the same typed set-op helper the binary `a | b` path
-     uses. The rhs must be the same array kind (or an empty `[]` literal); a
-     mismatched element kind falls through to the loud reject below. */
-  if (ty_is_array(t) && (sp_streq(op, "|") || sp_streq(op, "&") || sp_streq(op, "-"))) {
-    TyKind vt = comp_ntype(c, v);
-    if (vt == t || vt == TY_UNKNOWN) {
-      const char *k = (t == TY_POLY_ARRAY) ? "Poly" : array_kind(t);
-      const char *fn = sp_streq(op, "&") ? "intersect" : (sp_streq(op, "|") ? "union" : "difference");
-      buf_printf(b, "%s = sp_%sArray_%s(%s, ", lval, k, fn, lval);
-      if (vt == TY_UNKNOWN) buf_puts(b, "NULL");
-      else emit_expr(c, v, b);
-      buf_puts(b, ");\n");
-      return;
-    }
-  }
+  if (emit_array_op_assign(c, lval, t, op, v, b)) return;
   /* A captured local whose type never resolved: the celled path used to send
      every unrecognized type through the int helpers, which is right only when
      the slot really is int-sized. Keep it for the untyped case alone -- a
@@ -7856,6 +7900,7 @@ else {
       buf_printf(b, "%s = sp_str_concat(%s, ", ref, ref);
       emit_expr(c, v, b); buf_puts(b, ");\n");
     }
+    else if (emit_array_op_assign(c, ref, ct, op, v, b)) { }
     else if (ct == TY_POLY) {
       /* a widened cvar op-assign routes through the tag-dispatching sp_poly_<op>
          (mirrors the local op-assign poly arm). */
@@ -7972,6 +8017,7 @@ else {
         unsupported(c, id, "ivar += with a mismatched array kind");
       }
     }
+    else if (emit_array_op_assign(c, ref, vt, op, nt_ref(nt, id, "value"), b)) { }
     else if (op && ty_is_object(vt)) {
       int idefcls = -1;
       int icid = ty_object_class(vt);
@@ -8211,6 +8257,11 @@ else {
         if (rhst == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, val, b); buf_puts(b, ")"); }
         else emit_expr(c, val, b);
         buf_puts(b, ")));\n");
+      }
+      else if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) {
+        char aref[400]; snprintf(aref, sizeof aref, "_t%d%siv_%s", trecv, acc, rn);
+        if (!emit_array_op_assign(c, aref, ivt, op, val, b))
+          unsupported(c, id, "call operator write (operator on an array attribute)");
       }
       else {
         buf_printf(b, "_t%d%siv_%s = _t%d%siv_%s %s ", trecv, acc, rn, trecv, acc, rn, op ? op : "+");
@@ -8653,10 +8704,12 @@ else {
     const char *op = nt_str(nt, id, "binary_operator");
     int v = nt_ref(nt, id, "value");
     emit_indent(b, indent);
+    char gref[256]; snprintf(gref, sizeof gref, "gv_%s", rn);
     if (lv->type == TY_STRING && op && sp_streq(op, "+")) {
       buf_printf(b, "gv_%s = sp_str_concat(gv_%s, ", rn, rn);
       emit_expr(c, v, b); buf_puts(b, ");\n");
     }
+    else if (emit_array_op_assign(c, gref, lv->type, op, v, b)) { }
     else {
       buf_printf(b, "gv_%s %s= ", rn, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ";\n");
