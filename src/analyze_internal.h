@@ -366,6 +366,9 @@ int class_is_exc_subclass(Compiler *c, int ci);
 int exc_subclass_defines(Compiler *c, const char *name);
 /* Defined in codegen_fold.c; 1 if class `k` is `anc` or a descendant of it. */
 int is_descendant(Compiler *c, int k, int anc);
+/* Defined in codegen_fold.c; the parameter a keyword hash binds as one more
+   positional argument after `pos_argc` others, or -1. */
+int kwh_arg_param(Compiler *c, Scope *m, int pos_argc);
 
 /* --ext-entry designations (see codegen_internal.h / ext-design.md) */
 extern const char *g_ext_entries;

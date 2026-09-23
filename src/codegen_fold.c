@@ -5871,9 +5871,10 @@ static const char *anon_kwrest_name(Compiler *c, int node) {
 static int kwh_consumed_by_kwparam(Compiler *c, Scope *m, int kwh);
 
 /* The parameter index a collapsed keyword hash fills, or -1 when none does.
-   Ruby packs a braceless `f(k: 1)` into the first UNFILLED positional
-   parameter when the callee declares no keyword parameter that takes a key --
-   `def f(opts)` and `def f(opts = {})` alike. The slot has to be able to hold
+   Ruby passes a braceless `f(k: 1)` as one more positional argument when the
+   callee declares no keyword parameter that takes a key -- `def f(opts)` and
+   `def f(opts = {})` alike -- so it lands where that argument binds: a
+   required parameter after the optionals before any optional (#4877). The slot has to be able to hold
    a hash, so a concretely-typed one (an int param bound elsewhere) declines
    and the rest takes it instead.
 
@@ -5884,14 +5885,28 @@ static int kwh_consumed_by_kwparam(Compiler *c, Scope *m, int kwh);
 int kwh_positional_slot(Compiler *c, Scope *m, int kwh, int pos_argc) {
   if (kwh < 0 || !m || m->kwrest_idx >= 0) return -1;
   if (kwh_consumed_by_kwparam(c, m, kwh)) return -1;
-  if (pos_argc < 0 || pos_argc >= m->nparams) return -1;
-  if (pos_argc == m->rest_idx) return -1;
-  const char *pn = m->pnames ? m->pnames[pos_argc] : NULL;
+  int slot = kwh_arg_param(c, m, pos_argc);
+  if (slot < 0 || slot == m->rest_idx) return -1;
+  const char *pn = m->pnames ? m->pnames[slot] : NULL;
   if (!pn || callee_param_is_declared_kwarg(c, m, pn)) return -1;
   LocalVar *p = scope_local(m, pn);
   TyKind pt = p ? p->type : TY_UNKNOWN;
   if (!ty_is_hash(pt) && pt != TY_POLY) return -1;
-  return pos_argc;
+  return slot;
+}
+
+/* The parameter a keyword hash binds as one more positional argument after
+   `pos_argc` others, or -1. It is the last of pos_argc + 1 arguments, bound the
+   way arg_slot_for_param binds any argument: the required parameters are
+   funded first, so with a leading optional `def h(a = {}, c); h(k: 9)` binds
+   `c` and leaves `a` at its default. Answering parameter pos_argc gave `a` the
+   hash and `c` nothing. Blind to parameter types: kwh_positional_slot adds
+   whether the parameter can hold the hash, and inference asks here to type it. */
+int kwh_arg_param(Compiler *c, Scope *m, int pos_argc) {
+  if (!m || pos_argc < 0 || pos_argc >= m->nparams) return -1;
+  for (int i = 0; i < m->nparams; i++)
+    if (arg_slot_for_param(c, m, i, pos_argc + 1) == pos_argc) return i;
+  return -1;
 }
 
 /* Ruby packs a keyword hash no parameter consumed into the *rest as one
@@ -6667,6 +6682,11 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
     kwh = argv[argc - 1];
     pos_argc = argc - 1;
   }
+  /* A keyword hash that binds positionally is one more argument, and with a
+     leading optional it moves the others too: `def h(a = {}, c)` called
+     `h(1, k: 9)` gives `a` the 1 and `c` the hash. So parameters are mapped
+     over this count; the hash itself is argv[pos_argc]. */
+  int bind_argc = pos_argc + (kwh_positional_slot(c, m, kwh, pos_argc) >= 0 ? 1 : 0);
   /* Arity / keyword validation, in CRuby's words, raised at RUNTIME just
      before the call would run (dead code stays silent, matching CRuby;
      the argument slots keep their compat pads). Only fully static shapes
@@ -6878,7 +6898,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       TyKind pt = plv ? plv->type : TY_POLY;
       int byref = plv && plv->byref_out;
       int provided = -1;
-      { int slot = arg_slot_for_param(c, m, i, pos_argc);
+      { int slot = arg_slot_for_param(c, m, i, bind_argc);
         if (slot >= 0 && slot < pos_argc) provided = argv ? argv[slot] : -1; }
       /* only a keyword parameter binds a key by name; a keyword hash no
          parameter takes is one more positional argument, and fills the
@@ -7106,14 +7126,14 @@ else {
         else
           buf_printf(out, "_t%d", krhash);
       }
-      else if (arg_slot_for_param(c, m, i, pos_argc) >= 0 &&
+      else if (arg_slot_for_param(c, m, i, bind_argc) >= 0 &&
                !callee_param_is_declared_kwarg(c, m, m->pnames[i])) {
         /* a declared KEYWORD param is never bound by position: only a
            positional param takes a surplus positional arg here. An unmatched
            keyword param falls through to its default below (#3114). (A `...`
            forwarding method's synthesized positional params are not declared
            keywords, so they still bind here.) */
-        emit_arg_rooted(c, m, i, argv[arg_slot_for_param(c, m, i, pos_argc)], out);
+        emit_arg_rooted(c, m, i, argv[arg_slot_for_param(c, m, i, bind_argc)], out);
       }
       else {
         /* No positional arg and no keyword match. If the param is hash-typed
@@ -7431,6 +7451,10 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
       sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
     kwh_d = argv[argc - 1]; pos_argc_d = argc - 1;
   }
+  /* a keyword hash binding positionally is one more argument, which moves the
+     others past a leading optional (as in emit_args_filled) */
+  int kslot_d = m ? kwh_positional_slot(c, m, kwh_d, pos_argc_d) : -1;
+  int bind_argc_d = pos_argc_d + (kslot_d >= 0 ? 1 : 0);
   /* The count a rest-parameter target refuses for lack of arguments, by the
      rule the by-name lowering follows: a rest lifts the upper bound, not the
      requirement below it, and `P.new.m` on `def m(x, *y)` ran the body with a
@@ -7642,7 +7666,8 @@ else {
       /* no base implementation (the method exists only in subclasses): the
          slots are the call's positionals as given, and the parameter map is
          each implementation's own (#4514) */
-      int _sl = m ? arg_slot_for_param(c, m, k, pos_argc_d) : (k < pos_argc_d ? k : -1);
+      int _sl = m ? arg_slot_for_param(c, m, k, bind_argc_d) : (k < pos_argc_d ? k : -1);
+      if (_sl >= pos_argc_d) _sl = -1;   /* the keyword hash's own slot: bound below */
       /* a parameter after the rest is filled from the END of the call's
          positionals -- the rest takes the middle (#3204's neighbour rule, the
          one emit_args_filled and the inline lowerings already follow) */
@@ -7662,13 +7687,11 @@ else {
       /* Options-hash idiom: a trailing keyword hash whose keys name no
          parameter collapses into the first unfilled positional param when
          that param is hash- or poly-typed -- Ruby packs `f(key: v)` into the
-         positional `data`. Mirrors the emit_args_filled path (#3191). */
-      if (provided < 0 && kwh_d >= 0 && k == pos_argc_d && !is_kwp_d &&
-          !(m && m->kwrest_idx == k)) {
-        TyKind pt_d = p ? p->type : TY_INT;
-        if ((ty_is_hash(pt_d) || pt_d == TY_POLY) && !kwh_consumed_by_kwparam(c, m, kwh_d))
-          provided = kwh_d;
-      }
+         positional `data`. Mirrors the emit_args_filled path (#3191), and
+         asks the same helper which parameter that is: with a leading
+         optional it is not the one at index pos_argc_d. */
+      if (provided < 0 && kslot_d >= 0 && k == kslot_d && !is_kwp_d)
+        provided = kwh_d;
       if (m && m->kwrest_idx >= 0 && k == m->kwrest_idx) {
         /* `**kwrest` callee param: collect the call's unbound keywords. */
         int krhash = emit_kwrest_collect(c, m, kwh_d, ds_tmp_d, ds_type_d, argsNode);
