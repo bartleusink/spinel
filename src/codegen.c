@@ -11820,6 +11820,15 @@ char *codegen_program(const NodeTable *nt) {
       }
       for (int j = 0; j < ci->nsg_readers; j++)
         buf_printf(&mk, "  sp_mark_rbval(sg_%s_%s);\n", ci->name, ci->sg_readers[j]);
+      /* class variables are file-scope statics too; one that alone holds an
+         object (`@@a |= [x]` rebinding it) was freed under it (#4864) */
+      for (int j = 0; j < ci->ncvars; j++) {
+        TyKind t = ci->cvar_types[j] == TY_UNKNOWN ? TY_INT : ci->cvar_types[j];
+        const char *cv = ci->cvars[j] + 2;
+        if (t == TY_STRING) buf_printf(&mk, "  sp_mark_string(cvar_%s_%s);\n", ci->name, cv);
+        else if (t == TY_POLY) buf_printf(&mk, "  sp_mark_rbval(cvar_%s_%s);\n", ci->name, cv);
+        else if (needs_root(t)) buf_printf(&mk, "  if (cvar_%s_%s) sp_gc_mark((void *)cvar_%s_%s);\n", ci->name, cv, ci->name, cv);
+      }
     }
     /* $0 and the proc calling convention's side channel are marked by the
        runtime's own sp_re_mark_globals (lib/spinel_rt.h), so a program with
