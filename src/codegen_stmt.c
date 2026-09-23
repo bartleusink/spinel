@@ -6696,8 +6696,11 @@ void emit_line_directive(Compiler *c, int id, Buf *b) {
   if (!path || !*path) path = "source.rb";
   /* A `#line` directive must start a line. When this statement is emitted
      mid-line (e.g. an inlined block/proc body written after `{ `), break the
-     line first so the `#` lands in column 0 rather than as a stray token. */
-  if (b->len > 0 && b->p[b->len - 1] != '\n') buf_puts(b, "\n");
+     line first so the `#` lands in column 0 rather than as a stray token.
+     An EMPTY buffer is a captured prelude that is spliced in later, wherever
+     its consumer is -- a case arm splices it after `case 1LL: { `, mid-line
+     (#4830) -- so it gets the break too; a blank line costs nothing. */
+  if (b->len == 0 || b->p[b->len - 1] != '\n') buf_puts(b, "\n");
   buf_printf(b, "#line %d \"%s\"\n", ln, path);
 }
 
