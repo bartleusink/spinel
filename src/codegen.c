@@ -3155,6 +3155,36 @@ static int frame_convertible(FrameTemp *t) {
    otherwise. `ins` is the offset just past the SP_GC_SAVE statement -- the
    function's top scope, where the frame is declared and from where the body
    is read. */
+/* A Ruby statement that lowers to several C lines has one #line at its top,
+   and the preprocessor counts on from it: a C error near the end of an
+   inline loop was reported at a Ruby line past the end of the file (#4940).
+   Every line of the run is that statement's, so the directive is repeated
+   before each line of it. Not after a line ending in a backslash (a macro's
+   continuation) or before another directive. Measured on optcarrot: 65% more
+   lines, no change in the C compiler's time. */
+static void line_map_reanchor(Buf *b) {
+  if (!b->p || b->len == 0) return;
+  Buf o; memset(&o, 0, sizeof o);
+  const char *p = b->p, *end = b->p + b->len;
+  const char *cur = NULL; size_t curn = 0;   /* the directive in effect */
+  int after = 0, prev_cont = 0;
+  while (p < end) {
+    const char *nl = memchr(p, '\n', (size_t)(end - p));
+    size_t n = nl ? (size_t)(nl - p) + 1 : (size_t)(end - p);
+    int is_dir = n >= 6 && strncmp(p, "#line ", 6) == 0;
+    if (is_dir) { cur = p; curn = n; after = 0; }
+    else if (cur && after > 0 && !prev_cont && p[0] != '#') buf_putn(&o, cur, curn);
+    buf_putn(&o, p, n);
+    if (!is_dir) after++;
+    size_t tl = n;
+    while (tl > 0 && (p[tl - 1] == '\n' || p[tl - 1] == '\r')) tl--;
+    prev_cont = tl > 0 && p[tl - 1] == '\\';
+    p += n;
+  }
+  free(b->p);
+  *b = o;
+}
+
 static int gc_frame_build(Buf *b, size_t ins) {
   if (ins >= b->len) return 0;
   const char *p = b->p;
@@ -12318,6 +12348,7 @@ char *codegen_program(const NodeTable *nt) {
      constructors and main are emitted by different paths, and hooking them one
      at a time left a quarter of the stores bare. */
   gc_wb_insert(c, &b, 0);
+  if (g_line_map) line_map_reanchor(&b);
   free(g_procs.p); free(g_proc_protos.p);
   free(g_pd_protos.p); free(g_pd_defs.p);
   memset(&g_pd_protos, 0, sizeof g_pd_protos); memset(&g_pd_defs, 0, sizeof g_pd_defs);
