@@ -4327,3 +4327,18 @@ sp_bool sp_warning_enabled(const char *cat) {
 void sp_warning_warn(const char *msg) {
   if (msg) fputs(msg, stderr);
 }
+
+/* FrozenError for a store into a frozen Array: the receiver is staged for
+   FrozenError#receiver and its inspect ends the message, as CRuby's
+   "can't modify frozen Array: [1, 2]" does (#4924). */
+void sp_raise_frozen_array_rv(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);
+  const char *msg = &("\xff" "can't modify frozen Array")[1];
+  if (sp_poly_inspect_fn) {
+    const char *ins = sp_poly_inspect_fn(v); SP_GC_ROOT_STR(ins);
+    msg = sp_str_concat(&("\xff" "can't modify frozen Array: ")[1], ins);
+  }
+  SP_GC_ROOT_STR(msg);
+  sp_exc_stage_recv(v);
+  sp_raise_cls("FrozenError", msg);
+}

@@ -73,7 +73,7 @@ TypeError: cannot store String into an Array[Array[Integer]]: a typed array hold
 TypeError: cannot store String into an Array[Array[Integer]]: a typed array holds one kind of element
 3
 true
-FrozenError: can't modify frozen Array
+FrozenError: can't modify frozen Array: [[1, 1], [1, 1], [2, 2]]
 true
 == f
 [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]
@@ -150,7 +150,7 @@ TypeError: cannot store String into an Array[Array[Float]]: a typed array holds 
 TypeError: cannot store String into an Array[Array[Float]]: a typed array holds one kind of element
 3
 true
-FrozenError: can't modify frozen Array
+FrozenError: can't modify frozen Array: [[0.5, 0.5], [0.5, 0.5], [1.0, 1.0]]
 true
 == o
 [#<Item 0>, #<Item 1>, #<Item 2>]
@@ -227,7 +227,7 @@ TypeError: cannot store String into an Array[Item]: a typed array holds one kind
 TypeError: cannot store String into an Array[Item]: a typed array holds one kind of element
 3
 true
-FrozenError: can't modify frozen Array
+FrozenError: can't modify frozen Array: [#<Item 1>, #<Item 1>, #<Item 2>]
 true
 == n
 nil
