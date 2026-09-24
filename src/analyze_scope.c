@@ -3130,6 +3130,17 @@ static int node_is_empty_hash_producer(Compiler *c, int node) {
   return 0;
 }
 
+/* The type a slot holding `cur` takes when it is also written nil. A slot
+   whose C form has a nil of its own (NULL, or the Integer/Float sentinel)
+   keeps its type; a bool, a Symbol, a Class, a Rational and a Complex have no
+   spare value, so the nil boxes the slot -- the join ty_unify gives a local
+   written both. The ivar, cvar and gvar write passes skipped every nil write,
+   so such a slot kept the bare type and its nil read back as false (or the
+   zero Symbol): `@v.nil?` folded to false and `p @v` printed false. */
+static TyKind nil_write_type(TyKind cur) {
+  return an_ty_holds_nil(cur) ? cur : TY_POLY;
+}
+
 int infer_global_const_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -3160,7 +3171,10 @@ int infer_global_const_types(Compiler *c) {
           if (en == 0) vt = TY_POLY_ARRAY;
         }
       }
-      if (vt == TY_NIL) continue;
+      if (vt == TY_NIL) {
+        if (lv && nil_write_type(lv->type) != lv->type) { lv->type = nil_write_type(lv->type); changed = 1; }
+        continue;
+      }
     }
     else if (sp_streq(ty, "GlobalVariableOperatorWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
@@ -3177,7 +3191,10 @@ int infer_global_const_types(Compiler *c) {
       const char *rn = nm ? comp_resolve_gvar(c, nm + 1) : NULL;
       if (rn) lv = comp_gvar(c, rn);
       vt = infer_type(c, nt_ref(nt, id, "value"));
-      if (vt == TY_NIL) continue;
+      if (vt == TY_NIL) {
+        if (lv && nil_write_type(lv->type) != lv->type) { lv->type = nil_write_type(lv->type); changed = 1; }
+        continue;
+      }
     }
     else if (sp_streq(ty, "ConstantWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
@@ -5041,6 +5058,7 @@ int infer_cvar_types(Compiler *c) {
         int idx = comp_cvar_intern(&c->classes[ci], nm);
         int vnode = nt_ref(nt, s, "value");
         TyKind vt = cvar_empty_container_type(c, vnode, nm, infer_type(c, vnode));
+        if (vt == TY_NIL) vt = nil_write_type(c->classes[ci].cvar_types[idx]);
         if (vt == TY_NIL) continue;
         TyKind merged = ty_unify(c->classes[ci].cvar_types[idx], vt);
         if (merged != c->classes[ci].cvar_types[idx]) { c->classes[ci].cvar_types[idx] = merged; changed = 1; }
@@ -5075,6 +5093,7 @@ int infer_cvar_types(Compiler *c) {
     int idx = comp_cvar_intern(ci, nm);
     int vnode = nt_ref(nt, id, "value");
     TyKind vt = cvar_empty_container_type(c, vnode, nm, infer_type(c, vnode));
+    if (vt == TY_NIL) vt = nil_write_type(ci->cvar_types[idx]);
     if (vt == TY_NIL) continue;
     TyKind merged = ty_unify(ci->cvar_types[idx], vt);
     if (merged != ci->cvar_types[idx]) { ci->cvar_types[idx] = merged; changed = 1; }
@@ -5113,6 +5132,7 @@ int infer_cvar_types(Compiler *c) {
     int idx = comp_cvar_intern(ci, nm);
     int vnode = nt_ref(nt, id, "value");
     TyKind vt = cvar_empty_container_type(c, vnode, nm, infer_type(c, vnode));
+    if (vt == TY_NIL) vt = nil_write_type(ci->cvar_types[idx]);
     if (vt == TY_NIL) continue;
     TyKind merged = ty_unify(ci->cvar_types[idx], vt);
     if (merged != ci->cvar_types[idx]) { ci->cvar_types[idx] = merged; changed = 1; }
@@ -5159,9 +5179,49 @@ static TyKind ivar_nullable_int_ternary(Compiler *c, int vnode) {
   return infer_type(c, t_nil ? en : tn) == TY_INT ? TY_INT : TY_UNKNOWN;
 }
 
+/* The ivars written nil somewhere, as (class, name) pairs. infer_ivar_types
+   boxes them after its write sweep, not at the nil write: the re-narrow loop
+   re-clears a poly ivar before every sweep, and a nil write met ahead of the
+   typed write (`@v = nil` in initialize) would see the cleared slot and box
+   nothing, settling the ivar back on the bare type. */
+typedef struct { int n, cap; int *cls; const char **nm; } NilWrites;
+
+static void nil_write_note(NilWrites *w, int cls, const char *nm) {
+  if (cls < 0 || !nm) return;
+  if (w->n == w->cap) {
+    w->cap = w->cap ? w->cap * 2 : 16;
+    w->cls = realloc(w->cls, sizeof(int) * w->cap);
+    w->nm = realloc(w->nm, sizeof(const char *) * w->cap);
+  }
+  w->cls[w->n] = cls; w->nm[w->n] = nm; w->n++;
+}
+
+/* Box each noted slot whose type has no nil of its own, in its class and in
+   every ancestor carrying the same ivar: the layouts stay cast-compatible, and
+   an inherited method reads the slot a subclass wrote nil into (the child
+   side follows through infer_inherited_ivars). */
+static int nil_writes_apply(Compiler *c, NilWrites *w) {
+  int changed = 0;
+  for (int k = 0; k < w->n; k++) {
+    for (int a = w->cls[k]; a >= 0 && a < c->nclasses; a = c->classes[a].parent) {
+      ClassInfo *ci = &c->classes[a];
+      int iv = comp_ivar_index(ci, w->nm[k]);
+      if (iv < 0 || class_ivar_pinned(ci, w->nm[k]) || ci->ivar_int_table[iv]) continue;
+      TyKind t = nil_write_type(ci->ivar_types[iv]);
+      if (t == ci->ivar_types[iv]) continue;
+      sp_ivwatch(w->nm[k], "ivar_nil_write", ci->ivar_types[iv], t);
+      ci->ivar_types[iv] = t;
+      changed = 1;
+    }
+  }
+  free(w->cls); free(w->nm);
+  return changed;
+}
+
 int infer_ivar_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  NilWrites nilw = {0};
   if (dn_nscopes != c->nscopes || dn_count != nt->count) dn_build(c);
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
@@ -5197,10 +5257,12 @@ int infer_ivar_types(Compiler *c) {
       const char *nm = nt_str(nt, id, "name");
       int vnode = nt_ref(nt, id, "value");
       TyKind vt = infer_type(c, vnode);
-      if (vt == TY_NIL) continue;  /* nil write doesn't pin the ivar type */
-      /* `@a = @b = nil`: the chain writes nil to every target; don't let the
-         inner slot's unified type (from its other writes) pin this ivar. */
-      if (comp_nil_chain_bottom(nt, vnode) >= 0) continue;
+      /* A nil write doesn't pin the ivar type, but it can box it (see
+         nil_write_type). `@a = @b = nil`: the chain writes nil to every
+         target; don't let the inner slot's unified type (from its other
+         writes) pin this ivar. */
+      int nil_write = !sp_streq(ty, "InstanceVariableOperatorWriteNode") &&
+                      (vt == TY_NIL || comp_nil_chain_bottom(nt, vnode) >= 0);
       if (vt == TY_POLY && ivar_nullable_int_ternary(c, vnode) == TY_INT) vt = TY_INT;
       Scope *s = comp_scope_of(c, id);
       int cls_id2 = s->class_id;
@@ -5209,6 +5271,21 @@ int infer_ivar_types(Compiler *c) {
          to that class/module object, like its class methods see it -- attribute
          it to the enclosing class-body rather than the Toplevel pseudo-class. */
       if (cls_id2 < 0 && c->node_cbody[id] >= 0) cls_id2 = c->node_cbody[id];
+      if (nil_write) {
+        nil_write_note(&nilw, cls_id2 >= 0 ? cls_id2 : comp_class_index(c, "Toplevel"), nm);
+        /* the transplanted copies of this method (see below) */
+        if (s->class_id >= 0 && s->def_node >= 0) {
+          int use_idx = dn_head && dn_nscopes == c->nscopes && s->def_node < dn_count;
+          int si = use_idx ? dn_head[s->def_node] : 0;
+          for (; use_idx ? (si >= 0) : (si < c->nscopes); si = use_idx ? dn_next[si] : si + 1) {
+            Scope *ts = &c->scopes[si];
+            if (ts->def_node != s->def_node || ts->class_id == s->class_id || ts->class_id < 0) continue;
+            nil_write_note(&nilw, ts->class_id, nm);
+          }
+        }
+        continue;
+      }
+      if (vt == TY_NIL) continue;
       if (cls_id2 < 0) {
         /* Top-level method: track ivars in the Toplevel pseudo-class */
         int old_nc = c->nclasses;
@@ -5318,7 +5395,8 @@ int infer_ivar_types(Compiler *c) {
               int iv = comp_ivar_intern(ci, sym);
               if (ci->nivars != old_ni) changed = 1;
               TyKind vt = infer_type(c, sav[1]);
-              if (vt != TY_NIL && !class_ivar_pinned(ci, sym)) {
+              if (vt == TY_NIL) nil_write_note(&nilw, tcid, sym);
+              else if (!class_ivar_pinned(ci, sym)) {
                 TyKind merged = ty_unify(ci->ivar_types[iv], vt);
                 if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
               }
@@ -5342,10 +5420,19 @@ int infer_ivar_types(Compiler *c) {
       const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
       if (an < 1) continue;
       TyKind vt = infer_type(c, argv[0]);
-      if (vt == TY_NIL) continue;  /* a nil write doesn't pin the ivar type */
       char ivname[256];
       snprintf(ivname, sizeof ivname, "@%s", base);
       TyKind rt = infer_type(c, recv);
+      if (vt == TY_NIL) {
+        /* a nil write doesn't pin the ivar type, but it can box it: the
+           receiver's class, or every class this writer could reach */
+        for (int ci2 = 0; ci2 < c->nclasses; ci2++) {
+          if (ty_is_object(rt) && ci2 != ty_object_class(rt)) continue;
+          int iv = comp_is_writer(&c->classes[ci2], base) ? comp_ivar_index(&c->classes[ci2], ivname) : -1;
+          if (iv >= 0) nil_write_note(&nilw, ci2, c->classes[ci2].ivars[iv]);
+        }
+        continue;
+      }
       if (ty_is_object(rt)) {
         /* concrete receiver: attribute to its class. */
         ClassInfo *ci = &c->classes[ty_object_class(rt)];
@@ -5380,6 +5467,7 @@ int infer_ivar_types(Compiler *c) {
       }
     }
   }
+  changed |= nil_writes_apply(c, &nilw);
   return changed;
 }
 
