@@ -4105,6 +4105,8 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, "\n");
     emit_indent(b, indent); buf_printf(b, "sp_int _t%d = ", tnn); emit_int_expr(c, eav[0], b); buf_puts(b, ";\n");
     emit_indent(b, indent);
+    buf_printf(b, "if (_t%d <= 0) sp_raise_cls(\"ArgumentError\", \"invalid size\");\n", tnn);
+    emit_indent(b, indent);
     buf_printf(b, "for (sp_int _t%d = 0; _t%d + _t%d - 1 < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, tnn, k, ta, ti);
     if (np == 1) {
       const char *pn = block_param_name(c, block, 0);
@@ -4463,6 +4465,9 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, "\n");
     emit_indent(b, indent); buf_printf(b, "sp_int _t%d = ", ts);
     emit_int_expr(c, es_argv[0], b); buf_puts(b, ";\n");
+    /* a size of 0 stepped the loop by nothing, forever */
+    emit_indent(b, indent);
+    buf_printf(b, "if (_t%d <= 0) sp_raise_cls(\"ArgumentError\", \"invalid slice size\");\n", ts);
     emit_indent(b, indent);
     buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d += _t%d) {\n",
                ti, ti, k, ta, ti, ts);
