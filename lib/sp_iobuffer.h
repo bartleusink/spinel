@@ -151,6 +151,12 @@ sp_int sp_IOBuffer_pwrite_io(sp_IOBuffer *b, sp_RbVal io, sp_int from, sp_int le
    stands for nil (the file's size from `offset`). */
 sp_IOBuffer *sp_IOBuffer_become_map(sp_IOBuffer *b, sp_RbVal io, sp_int size, sp_int offset, sp_int flags);
 
+/* FFI: the base address C receives for a buffer in an ffi_func pointer
+   argument; `writing` is 0 only for :buffer_in. The _ptr form takes a boxed
+   argument and passes anything but an IO::Buffer through as its pointer. */
+void *sp_IOBuffer_ffi_base(sp_IOBuffer *b, sp_int writing);
+void *sp_IOBuffer_ffi_ptr(sp_RbVal v, sp_int cls_id, sp_int writing);
+
 /* IO::Buffer::PAGE_SIZE (the mapped-allocation threshold) */
 sp_int sp_IOBuffer_page_size(void);
 

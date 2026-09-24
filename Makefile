@@ -1013,6 +1013,11 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a recursive default reading the block compiled)"; ok=0; \
 	else grep -q "calls \`m\` again with that argument omitted" "$$tmp/rd.out" || \
 	  { echo "reject-test: FAIL (a recursive default refused without saying why)"; sed -n 1,5p "$$tmp/rd.out"; ok=0; }; fi; \
+	t=test/reject/ffi_ptr_ruby_object.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/fp.c" >"$$tmp/fp.out" 2>&1; then \
+	  echo "reject-test: FAIL (a Ruby object passed to an ffi pointer slot compiled)"; ok=0; \
+	else grep -q "a Ruby object has no C address" "$$tmp/fp.out" || \
+	  { echo "reject-test: FAIL (an ffi pointer slot refused a Ruby object without saying why)"; sed -n 1,5p "$$tmp/fp.out"; ok=0; }; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 
