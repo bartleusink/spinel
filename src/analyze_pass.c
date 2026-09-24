@@ -325,6 +325,36 @@ static TyKind aset_value_type(Compiler *c, int recv) {
   return aset_value_type_ex(c, recv, NULL);
 }
 
+/* Whether some call of the method `sc` by name passes a boxed value (not
+   an empty `{}`), or one not typed yet, in positional slot p. Matched by
+   name, so a same-named method elsewhere only makes this more careful. */
+static int param_gets_boxed_arg(Compiler *c, Scope *sc, int p) {
+  const NodeTable *nt = c->nt;
+  if (!sc->name) return 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !sp_streq(nm, sc->name)) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    if (p >= an) continue;
+    NodeKind ak = nt_kind(nt, av[p]);
+    if (ak == NK_SplatNode) return 1;
+    if (ak == NK_HashNode || ak == NK_KeywordHashNode) continue;
+    TyKind at = infer_type(c, av[p]);
+    if (at == TY_POLY) return 1;
+    /* not typed yet: wait for it rather than decide the parameter now,
+       unless it is a local only ever given an empty `{}` (the container
+       the narrowing exists for) */
+    if (at == TY_UNKNOWN) {
+      if (ak != NK_LocalVariableReadNode) return 1;
+      const char *an = nt_str(nt, av[p], "name");
+      Scope *as = an ? comp_scope_of(c, av[p]) : NULL;
+      if (!as || !local_all_writes_empty_hash(c, as, an)) return 1;
+    }
+  }
+  return 0;
+}
+
 int infer_param_hash_value(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -387,6 +417,11 @@ int infer_param_hash_value(Compiler *c) {
         saw = 1;
       }
       if (!saw || ambiguous) continue;
+      /* A boxed parameter some caller hands a boxed value is that caller's
+         object, whatever kind it holds at run time: narrowing it cast a
+         `Hash.new(0)` (a poly-keyed hash) to the string-keyed struct and the
+         counting loop ran off its table (tally(hash) in builtins/). */
+      if (seedable && param_gets_boxed_arg(c, sc, p)) continue;
       TyKind hv = ty_hash_of(kt, vt);
       if (hv == TY_UNKNOWN) continue;
       if (empty_hash_default && !seedable) {
@@ -3887,6 +3922,13 @@ int infer_hash_params(Compiler *c) {
     Scope *s = comp_scope_of(c, id);
     LocalVar *lv = scope_local(s, nt_str(nt, recv, "name"));
     if (!lv || !lv->is_param || lv->type != TY_UNKNOWN) continue;
+    /* a caller's boxed hash, or one not typed yet, is not this body's to
+       decide: typed here, the call converted a copy and the callee's
+       writes never reached the caller's hash */
+    { int pi = -1;
+      for (int q = 0; q < s->nparams; q++)
+        if (s->pnames && s->pnames[q] && sp_streq(s->pnames[q], nt_str(nt, recv, "name"))) { pi = q; break; }
+      if (pi >= 0 && param_gets_boxed_arg(c, s, pi)) continue; }
     /* Literal-key [] / fetch: infer specific variant */
     if (sp_streq(name, "[]") || sp_streq(name, "fetch")) {
       int args = nt_ref(nt, id, "arguments");
