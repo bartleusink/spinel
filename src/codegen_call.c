@@ -12402,6 +12402,13 @@ void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
      -- name-matching alone would be wrong for a user `each`). */
   int self_ret = wrecv >= 0 && call_user_yield_mi(c, id) < 0 &&
                  brk_iter_returns_self(wname);
+  /* `e.each { }` over an Enumerator walks the Enumerator itself (see
+     emit_iteration_stmt): the marked `to_a` hop in front of it is never
+     evaluated, so the Enumerator is what is held and answered */
+  if (self_ret && nt_kind(nt, wrecv) == NK_CallNode && nt_str(nt, wrecv, "enum_each_wrap") &&
+      nt_ref(nt, wrecv, "receiver") >= 0 &&
+      comp_ntype(c, nt_ref(nt, wrecv, "receiver")) == TY_ENUMERATOR)
+    wrecv = nt_ref(nt, wrecv, "receiver");
   int sv_ig = g_infer_ignore_brk; g_infer_ignore_brk = 1;
   TyKind normal_ty = self_ret ? comp_ntype(c, wrecv) : infer_uncached(c, id);
   g_infer_ignore_brk = sv_ig;

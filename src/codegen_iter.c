@@ -2893,6 +2893,70 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
      the only emitter with arms for both (#3409). */
   if (poly_block_call_needs_dispatch(c, id)) return 0;
 
+  /* `e.each { }` on an Enumerator, as a statement: the analysis routed it
+     through a `to_a` it marked, which never ends for an endless or generator
+     Enumerator ([1, 2].cycle, Enumerator.new { loop { } }). Pull the elements
+     one at a time instead, from a walk of its own (the Enumerator's #next
+     cursor is not touched), so a `break` in the block ends it. */
+  int ewi_walk = sp_streq(name, "each_with_index");
+  if ((sp_streq(name, "each") || ewi_walk) && recv >= 0 && nt_kind(nt, recv) == NK_CallNode &&
+      nt_str(nt, recv, "enum_each_wrap") && nt_type(nt, block) &&
+      sp_streq(nt_type(nt, block), "BlockNode")) {
+    int er = nt_ref(nt, recv, "receiver");
+    if (er >= 0 && comp_ntype(c, er) == TY_ENUMERATOR) {
+      const char *q0 = block_param_name(c, block, 0), *q1 = block_param_name(c, block, 1);
+      Scope *bsc = comp_scope_of(c, block);
+      int body = nt_ref(nt, block, "body");
+      int te = ++g_tmp, tf = ++g_tmp, ti = ++g_tmp, tv = ++g_tmp, ti2 = ++g_tmp;
+      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, er, &rb);
+      emit_indent(b, indent);
+      buf_printf(b, "{ sp_Enumerator *_t%d = %s; SP_GC_ROOT(_t%d);\n", te, rb.p ? rb.p : "NULL", te);
+      free(rb.p);
+      emit_indent(b, indent + 1);
+      buf_printf(b, "sp_Fiber *_t%d = (_t%d && _t%d->gen) ? sp_Fiber_new(_t%d->gen) : NULL; SP_GC_ROOT(_t%d);\n",
+                 tf, te, te, te, tf);
+      emit_indent(b, indent + 1);
+      buf_printf(b, "if (_t%d && _t%d->gen_cap) { sp_gc_wb((void *)_t%d); _t%d->user_data = _t%d->gen_cap; }\n",
+                 tf, te, tf, tf, te);
+      emit_indent(b, indent + 1);
+      buf_printf(b, "sp_int _t%d = 0, _t%d = 0; sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);\n", ti, ti2, tv, tv);
+      emit_indent(b, indent + 1);
+      buf_puts(b, "for (;;) {\n");
+      emit_indent(b, indent + 2);
+      buf_printf(b, "if (_t%d) { if (!sp_Fiber_alive(_t%d)) break; _t%d = sp_Fiber_resume(_t%d, sp_box_nil()); if (!sp_Fiber_alive(_t%d)) break; }\n",
+                 tf, tf, tv, tf, tf);
+      emit_indent(b, indent + 2);
+      buf_printf(b, "else { if (_t%d && _t%d->endless && _t%d->items && _t%d->items->len > 0 && _t%d >= _t%d->items->len) _t%d = 0;"
+                    " if (!_t%d || !_t%d->items || _t%d >= _t%d->items->len) break; _t%d = _t%d->items->data[_t%d++]; }\n",
+                 te, te, te, te, ti, te, ti, te, te, ti, te, tv, te, ti);
+      emit_indent(b, indent + 2);
+      buf_printf(b, "_t%d++;\n", ti2);   /* the element's index, for each_with_index */
+      /* one parameter binds the element; two autosplat an array element,
+         or for each_with_index take the element and its index */
+      const char *qs[2] = { q0, q1 };
+      for (int k = 0; k < 2; k++) {
+        if (!qs[k]) continue;
+        LocalVar *lvq = bsc ? scope_local(bsc, qs[k]) : NULL;
+        if (!lvq) continue;
+        char vx[48];
+        if (ewi_walk && k == 1) snprintf(vx, sizeof vx, "sp_box_int(_t%d - 1)", ti2);
+        else if (q1 && !ewi_walk) snprintf(vx, sizeof vx, "sp_poly_arr_get(_t%d, %d)", tv, k);
+        else snprintf(vx, sizeof vx, "_t%d", tv);
+        emit_indent(b, indent + 2);
+        buf_printf(b, "lv_%s = ", rename_local(qs[k]));
+        if (lvq->type == TY_POLY || lvq->type == TY_UNKNOWN) buf_puts(b, vx);
+        else emit_unbox_text(c, lvq->type, vx, b);
+        buf_puts(b, ";\n");
+      }
+      emit_loop_body(c, body, b, indent + 2);
+      emit_indent(b, indent + 1);
+      buf_puts(b, "}\n");
+      emit_indent(b, indent);
+      buf_puts(b, "}\n");
+      return 1;
+    }
+  }
+
   /* `xs.each(&h)` forwards a real callable: there is no block body to splice,
      and the loops below would run with an empty one -- silently doing nothing.
      On a receiver only known at run time, hand the proc to the enumerable

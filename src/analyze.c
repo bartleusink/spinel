@@ -6201,6 +6201,10 @@ int desugar_enum_method_recv(Compiler *c) {
          which the call then answered (#3857). */
       if (nt_int(nt, id, "enum_self_result", -1) >= 0)
         nt_node_set_str(nt, wrap, "enum_recv", "1");
+      /* a statement `e.each { }` pulls the elements one at a time instead
+         (codegen): an endless Enumerator has no array to read */
+      if ((sp_streq(nm, "each") || sp_streq(nm, "each_with_index")) && nt_ref(nt, id, "block") >= 0)
+        nt_node_set_str(nt, wrap, "enum_each_wrap", "1");
       nt_node_set_str(nt, wrap, "name", "to_a");
       nt_node_set_ref(nt, wrap, "receiver", recv);
       nt_node_set_ref(nt, id, "receiver", wrap);

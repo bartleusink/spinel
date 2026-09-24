@@ -3232,6 +3232,9 @@ int desugar_builtin_enum_calls(Compiler *c) {
        the existing typed emitter, which already gets this right
        (enumerator_block_returns_self.rb, issue_3315_int_enum_with_index_block.rb). */
     if (sp_streq(name, "each_with_index") && rt == TY_ENUMERATOR) continue;
+    /* ...and one the analysis already routed through a marked `to_a` hop
+       (enum_each_wrap): codegen walks the Enumerator itself */
+    if (nt_kind(nt, recv) == NK_CallNode && nt_str(nt, recv, "enum_each_wrap")) continue;
     /* find/detect reachable from an optional/keyword parameter's default
        value: see find_calls_in_param_defaults. */
     if (in_default && in_default[id] &&
