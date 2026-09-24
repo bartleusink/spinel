@@ -1444,6 +1444,8 @@ rbs-seed-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-rbsseed.XXXXXX); ok=1; \
 	$(SPINEL) test/rbs-seed/attr_writer_poly_value.rb --rbs test/rbs-seed/sig -o "$$tmp/awp" >/dev/null 2>&1 && \
 	  "$$tmp/awp" > "$$tmp/awp.out" 2>/dev/null && cmp -s "$$tmp/awp.out" test/rbs-seed/attr_writer_poly_value.expected || { echo "rbs-seed-test: FAIL (#4856 a boxed value into an --rbs Integer attr as a method's value)"; ok=0; }; \
+	$(SPINEL) test/rbs-seed/hash_or_write_index_setter.rb --rbs test/rbs-seed/sig -o "$$tmp/hos" >/dev/null 2>&1 && \
+	  "$$tmp/hos" > "$$tmp/hos.out" 2>/dev/null && cmp -s "$$tmp/hos.out" test/rbs-seed/hash_or_write_index_setter.expected || { echo "rbs-seed-test: FAIL (#4889 an index write into (@h ||= {}) bound a user []=)"; ok=0; }; \
 	$(SPINEL) test/rbs-seed/bare_call_override_unify.rb --rbs test/rbs-seed/sig -o "$$tmp/bco" >/dev/null 2>&1 && \
 	  "$$tmp/bco" > "$$tmp/bco.out" 2>/dev/null && cmp -s "$$tmp/bco.out" test/rbs-seed/bare_call_override_unify.expected || { echo "rbs-seed-test: FAIL (#4600 bare call to an overridden method under a declared return)"; ok=0; }; \
 	$(SPINEL) test/rbs-seed/declared_param_reassigned_poly.rb --rbs test/rbs-seed/sig -o "$$tmp/dpr" >/dev/null 2>&1 && \
@@ -2068,6 +2070,9 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	done; \
 	$(SPINEL) test/infer/hash_one_class_each_value.rb -c --no-line-map -o "$$tmp/hoc.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (hash_one_class_each_value: -c)"; ok=0; }; \
 	grep -q 'sp_Item \* lv_it' "$$tmp/hoc.c" && grep -q 'sp_Item_describe((sp_Item \*)lv_it)' "$$tmp/hoc.c" || { echo "infer-test: FAIL (#4846 a one-class hash's each_value is not typed)"; ok=0; }; \
+	$(SPINEL) test/infer/hash_or_write_index_setter.rb -c --no-line-map -o "$$tmp/hos.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (hash_or_write_index_setter: -c)"; ok=0; }; \
+	grep -q 'sp_PolyPolyHash \* iv_traps;' "$$tmp/hos.c" && grep -q 'sp_PolyPolyHash \* iv_hooks;' "$$tmp/hos.c" || { echo "infer-test: FAIL (#4889 an index write into (@h ||= {}) left @h boxed)"; ok=0; }; \
+	grep -q 'sp_OrwMem_poke(sp_OrwMem \*self, sp_int lv_addr, sp_int lv_value)' "$$tmp/hos.c" || { echo "infer-test: FAIL (#4889 a Hash index write widened an unrelated user []=)"; ok=0; }; \
 	$(SPINEL) test/infer/object_array_map.rb -c --no-line-map -o "$$tmp/oam.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (object_array_map: -c)"; ok=0; }; \
 	grep -q 'sp_PtrArray \* iv_list;' "$$tmp/oam.c" || { echo "infer-test: FAIL (#4846 an array of one class walked by map stayed boxed)"; ok=0; }; \
 	grep -q '(lv_x)->iv_name' "$$tmp/oam.c" || { echo "infer-test: FAIL (#4846 an element call is not a direct read)"; ok=0; }; \
