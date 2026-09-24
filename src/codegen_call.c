@@ -28982,11 +28982,12 @@ else {
           if (ffi_find_callback(c, rcmod, c->ffi_funcs[fi].args[hi]) >= 0) { hdr_call = 1; break; }
         /* A trailing :varargs spec: the declared specs cover only the fixed
            leading args; every extra actual arg is passed through with C's
-           default argument promotions. No extern is emitted for a variadic
-           function (see codegen.c); the call casts the header-declared symbol
-           to a variadic function pointer -- `((ret (*)(fixed..., ...))name)` --
-           which cannot conflict with a fortified libc declaration and carries
-           no `format` attribute, so gcc does not format-check the call. */
+           default argument promotions. A variadic function with fixed args
+           has its own `...` extern under the private name (codegen.c); one
+           with none, or one taking a callback, has no extern, and the call
+           casts the header-declared symbol to a variadic function pointer --
+           `((ret (*)(...))name)`. Neither carries a `format` attribute, so gcc
+           does not format-check the call. */
         int is_vararg = call_argc > 0 && sp_streq(c->ffi_funcs[fi].args[call_argc - 1], "varargs");
         int fixed_argc = is_vararg ? call_argc - 1 : call_argc;
         /* `blocking: true`: the arguments are evaluated into temps first (they
@@ -28998,7 +28999,7 @@ else {
         int tb = blocking ? ++g_tmp : 0;
         /* Build the raw C call */
         Buf call_buf; memset(&call_buf, 0, sizeof call_buf);
-        if (is_vararg) {
+        if (is_vararg && (fixed_argc == 0 || hdr_call)) {
           buf_printf(&call_buf, "((%s (*)(", ffi_c_type(ret_spec));
           for (int ai = 0; ai < fixed_argc; ai++) {
             if (ai) buf_puts(&call_buf, ", ");
@@ -29007,7 +29008,8 @@ else {
           if (fixed_argc) buf_puts(&call_buf, ", ");
           buf_printf(&call_buf, "...))%s)", c->ffi_funcs[fi].csym ? c->ffi_funcs[fi].csym : c->ffi_funcs[fi].name);
         }
-        else buf_puts(&call_buf, c->ffi_funcs[fi].csym ? c->ffi_funcs[fi].csym : c->ffi_funcs[fi].name);
+        else if (hdr_call) buf_puts(&call_buf, c->ffi_funcs[fi].csym ? c->ffi_funcs[fi].csym : c->ffi_funcs[fi].name);
+        else ffi_extern_name(c, fi, &call_buf);   /* the asm-labelled extern (codegen.c) */
         buf_puts(&call_buf, "(");
         for (int ai = 0; ai < fixed_argc && ai < argc; ai++) {
           if (ai) buf_puts(&call_buf, ", ");

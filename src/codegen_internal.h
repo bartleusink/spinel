@@ -683,6 +683,7 @@ const char *ffi_c_type(const char *spec);
 /* Map an FFI type spec string to the C type used in extern prototypes.
    Uses standard C types to avoid conflicting with system headers. */
 const char *ffi_cb_arg_ctype(const char *spec);
+void ffi_extern_name(Compiler *c, int fi, Buf *out);
 int ty_is_struct_valued(TyKind t);   /* see codegen_util.c: struct passed by value */
 const char *native_c_type(const char *spec);
 const char *default_value(TyKind t);

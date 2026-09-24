@@ -1481,6 +1481,19 @@ const char *ffi_c_type(const char *spec) {
   return info ? info->c_type : "void";
 }
 
+/* The C name an ffi_func's extern is declared and called under. The prototype
+   is built from the spec types, which need not match a header that also
+   declares the symbol (fopen's FILE * is our void *, strchr's char * our
+   const char *), and C rejects two declarations of one name with different
+   types. So the extern takes a private name per ffi_func and binds it to the
+   real symbol with an asm label (SP_FFI_SYM in the emitted prologue): no
+   header declaration, function-like macro or second module binding the same
+   symbol under other specs can conflict with it. */
+void ffi_extern_name(Compiler *c, int fi, Buf *out) {
+  const char *sym = c->ffi_funcs[fi].csym ? c->ffi_funcs[fi].csym : c->ffi_funcs[fi].name;
+  buf_printf(out, "sp_ffi_f%d_%s", fi, sym);
+}
+
 /* The C type of one ffi_callback argument, used to build the trampoline's own
    pointer type. A :ptr callback arg is `const void*` -- the near-universal shape
    of C comparator/visitor callbacks (qsort, bsearch, ...) -- so the generated
