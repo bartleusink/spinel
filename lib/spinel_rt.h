@@ -3023,6 +3023,13 @@ static sp_float sp_num_to_f(sp_RbVal v) {
   if (v.tag == SP_TAG_BIGINT) return (sp_float)sp_bigint_to_int((sp_Bigint *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RATIONAL && v.v.p)
     return sp_rational_to_f(*(sp_Rational *)v.v.p);
+  /* a Numeric of the program's own converts through its #to_f, as
+     rb_to_float asks it to (the generated bridge's row 4 answers only for
+     such a class) */
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && sp_obj_conv_fn) {
+    sp_RbVal _a = sp_box_nil();
+    if (sp_obj_conv_fn((int)v.cls_id, v.v.p, 4, &_a) && _a.tag == SP_TAG_FLT) return _a.v.f;
+  }
   const char *w = v.tag == SP_TAG_NIL ? "nil"
                 : v.tag == SP_TAG_BOOL ? (v.v.b ? "true" : "false")
                 : sp_poly_class_name(v);

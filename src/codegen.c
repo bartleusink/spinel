@@ -679,9 +679,26 @@ void emit_int_expr_conv(Compiler *c, int node, Buf *b) {
 /* Emit a node as an sp_float. A poly value is unboxed via sp_poly_to_f; a
    numeric value is plain-cast, matching the legacy `(sp_float)(...)`. The
    slot follows CRuby's rb_to_float, which converts only a Numeric: a String,
-   Symbol, nil, boolean, container or user object (its #to_f is not asked) is
+   Symbol, nil, boolean, container or user object (its #to_f is not asked,
+   unless the class is a Numeric of the program's own) is
    "can't convert X into Float" -- where the raw pointer used to be cast to
    double and stop the C build (Math.sqrt(obj), Float#rationalize("x")). */
+/* Is class `cid` a Numeric of the program's own (`class D < Numeric`, or
+   under one)? rb_to_float converts those through their #to_f. */
+static int class_is_user_numeric(Compiler *c, int cid) {
+  const NodeTable *nt = c->nt;
+  for (int k = cid, hop = 0; k >= 0 && hop < 64; k = c->classes[k].parent, hop++) {
+    int dn = c->classes[k].def_node;
+    if (dn < 0 || nt_kind(nt, dn) != NK_ClassNode) continue;
+    int sup = nt_ref(nt, dn, "superclass");
+    if (sup < 0) continue;
+    NodeKind sk = nt_kind(nt, sup);
+    const char *sn = (sk == NK_ConstantReadNode || sk == NK_ConstantPathNode) ? nt_str(nt, sup, "name") : NULL;
+    if (sn && sp_streq(sn, "Numeric")) return 1;
+  }
+  return 0;
+}
+
 void emit_float_expr(Compiler *c, int node, Buf *b) {
   if (yield_site_type(c, node) == TY_POLY) {
     buf_puts(b, "sp_poly_to_f("); emit_expr(c, node, b); buf_puts(b, ")");
@@ -692,6 +709,13 @@ void emit_float_expr(Compiler *c, int node, Buf *b) {
     buf_puts(b, "sp_bigint_to_double("); emit_expr(c, node, b); buf_puts(b, ")");
     return;
   }
+  /* a Numeric of the program's own converts through its #to_f, as
+     rb_to_float asks it to (BigDecimal into Math.sqrt) */
+  if (ty_is_object(t) && ty_object_class(t) >= 0 && ty_object_class(t) < c->nclasses &&
+      class_is_user_numeric(c, ty_object_class(t)) &&
+      comp_method_in_chain(c, ty_object_class(t), "to_f", NULL) >= 0 &&
+      emit_obj_conv(c, node, "to_f", TY_FLOAT, "Float", b))
+    return;
   const char *cn = conv_cls_name_of(c, t);
   if (cn && t != TY_INT && t != TY_FLOAT) {
     buf_puts(b, "({ (void)(");
@@ -7457,6 +7481,26 @@ static void emit_kconv_bridge(Compiler *c, Buf *b) {
         buf_printf(b, "({ sp_float _f = %s; sp_float_is_nil(_f) ? sp_box_nil() : sp_box_float(_f); })", call);
       else emit_boxed_text(c, rt, call, b);
       buf_puts(b, "; return 1;\n");
+    }
+    /* row 4: #to_f for a Math argument, which rb_to_float converts only
+       for a Numeric (the runtime's sp_num_to_f) */
+    if (class_is_user_numeric(c, i)) {
+      int tmi = -1;
+      int callee = conv_bridge_callee(c, i, "to_f", TY_UNKNOWN, 1, &tmi);
+      if (callee >= 0) {
+        if (rows++ == 0) buf_printf(b, "    case %d: switch (which) {\n", i);
+        char call[256];
+        snprintf(call, sizeof call, "sp_%s_%s(%s(sp_%s *)p%s)", c->classes[callee].c_name,
+                 mc(c->scopes[tmi].name),
+                 comp_ty_value_obj(c, ty_object(callee)) ? "*" : "", c->classes[callee].c_name,
+                 bridge_blk_arg(c, tmi));
+        TyKind rt = (TyKind)c->scopes[tmi].ret;
+        buf_puts(b, "      case 4: if (out) *out = ");
+        if (rt == TY_FLOAT)
+          buf_printf(b, "({ sp_float _f = %s; sp_float_is_nil(_f) ? sp_box_nil() : sp_box_float(_f); })", call);
+        else emit_boxed_text(c, rt, call, b);
+        buf_puts(b, "; return 1;\n");
+      }
     }
     if (rows) buf_puts(b, "      default: return 0;\n    }\n");
   }

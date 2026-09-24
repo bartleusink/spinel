@@ -385,10 +385,18 @@ void compute_reachable(Compiler *c) {
       if (sp_streq(nm, "Integer")) has_kint = 1;
       else if (sp_streq(nm, "Float")) has_kflt = 1;
     }
-    c->uses_kconv = has_kint || has_kflt;
+    /* a Numeric of the program's own converts through its #to_f wherever a
+       Float argument is taken (Math.sqrt(big_decimal)): the same bridge */
+    int has_unum = 0;
+    NT_FOREACH_KIND(c->nt, NK_ClassNode, cid) {
+      int sup = nt_ref(c->nt, cid, "superclass");
+      const char *sn = sup >= 0 ? nt_str(c->nt, sup, "name") : NULL;
+      if (sn && sp_streq(sn, "Numeric")) has_unum = 1;
+    }
+    c->uses_kconv = has_kint || has_kflt || has_unum;
     if (has_kint) { MARK_NAME("to_int"); MARK_NAME("to_str"); MARK_NAME("to_i"); }
-    if (has_kflt) MARK_NAME("to_f");
-    if (has_kint || has_kflt)
+    if (has_kflt || has_unum) MARK_NAME("to_f");
+    if (has_kint || has_kflt || has_unum)
       while (qhead < qtail) { int s = queue[qhead++]; for (int ni = 0; ni < sc_n[s]; ni++) MARK_NAME(scope_calls[s][ni]); }
   }
 
