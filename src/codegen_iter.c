@@ -958,6 +958,7 @@ static int block_tail_needs_value_form(Compiler *c, int id) {
   return iter_value_answers_recv(c, id) && tail_iter_receiver(c, id) < 0;
 }
 
+static int subtree_has_own_redo_ex(const NodeTable *nt, int id, int follow_yield);
 void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_expr,
                        TyKind want_ty) {
   /* want_ty: the consumer's slot type for the block's value (the YieldNode's
@@ -1558,6 +1559,19 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       emit_indent(b, indent); buf_puts(b, "do {\n");
     }
   }
+  /* A `redo` in the block re-runs the block's body with the same arguments,
+     not the loop around the yield: the label goes on the splice, after the
+     parameters are bound. The loop's own label re-ran the callee's loop body
+     (a builtin's `buf << x` pushed the element again), and a yield outside
+     any loop had none at all (`continue` outside a loop). */
+  int rd_lbl = 0;
+  if (bbody >= 0 && subtree_has_own_redo_ex(nt, bbody, 0) &&
+      g_redo_depth < (int)(sizeof g_redo_stack / sizeof g_redo_stack[0])) {
+    rd_lbl = ++g_tmp;
+    g_redo_stack[g_redo_depth++] = rd_lbl;
+    if (as_expr) buf_printf(b, "_redo_%d: ; ", rd_lbl);
+    else { emit_indent(b, indent); buf_printf(b, "_redo_%d: ;\n", rd_lbl); }
+  }
   if (nx_own && as_expr && g_ie_next_var && !nx_tail_stmt && bn3 > 0) {
     for (int k3 = 0; k3 < bn3 - 1; k3++) emit_stmt(c, bd3[k3], b, 0);
     /* the tail's prelude stays inside the splice, after the parameter
@@ -1658,6 +1672,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       if (rr4 >= 0) { emit_expr(c, rr4, b); buf_puts(b, "; "); }
     }
   }
+  if (rd_lbl) g_redo_depth--;
   if (nx_own) {
     g_c_loop_depth--;
     g_loop_exc_base = sv_lexc2;
@@ -2037,14 +2052,9 @@ static int subtree_has_own_redo_ex(const NodeTable *nt, int id, int follow_yield
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
   if (sp_streq(ty, "RedoNode")) return 1;
-  /* a yield inside an inlined method's loop splices the call site's block
-     here, and a `redo` in THAT block re-runs this loop body with the same
-     element: `xs.each { |x| yield x, memo }` under a caller whose block
-     redoes had no label and fell to `continue`, which is `next` (the first
-     of the shapes builtins/enumerable.rb runs through). The spliced block
-     is looked into once: a yield inside it belongs to the next level out. */
-  if (sp_streq(ty, "YieldNode") && follow_yield && g_block_id >= 0 &&
-      subtree_has_own_redo_ex(nt, nt_ref(nt, g_block_id, "body"), 0)) return 1;
+  /* a `redo` in a block a yield here splices belongs to that splice, which
+     carries its own label (emit_block_invoke), not to this loop */
+  (void)follow_yield;
   /* nested scope/loop boundaries: a redo inside binds to that inner loop */
   if (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode") ||
       sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "ForNode") ||
