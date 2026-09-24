@@ -3768,6 +3768,25 @@ static int module_function_self_dependent(Compiler *c, int scope_idx) {
   return 0;
 }
 
+/* Copy src's parameter names and defaults into the clone dst, and intern
+   them as param locals so infer_param_types can update their types. */
+static void scope_copy_params(Scope *dst, const Scope *src) {
+  dst->nparams = src->nparams;
+  if (src->nparams <= 0) return;
+  dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
+  dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
+  for (int p = 0; p < src->nparams; p++) {
+    dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
+    dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
+  }
+  for (int p = 0; p < src->nparams; p++) {
+    if (dst->pnames[p]) {
+      LocalVar *lv = scope_local_intern(dst, dst->pnames[p]);
+      lv->is_param = 1;
+    }
+  }
+}
+
 /* Process include calls in a single class body, creating scope copies for each
    included module method. We copy (not mutate) so multiple classes can include
    the same module independently. */
@@ -3994,23 +4013,7 @@ else {
            `Rt.peek` is a real call whoever also includes Rt, so the source is
            not copied AWAY, only copied FROM. */
         if (!src->is_module_function) src->is_transplanted_source = 1;
-        /* Copy parameter names and defaults. */
-        dst->nparams = src->nparams;
-        if (src->nparams > 0) {
-          dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
-          dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
-          for (int p = 0; p < src->nparams; p++) {
-            dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
-            dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
-          }
-          /* Register param locals so infer_param_types can update types. */
-          for (int p = 0; p < src->nparams; p++) {
-            if (dst->pnames[p]) {
-              LocalVar *lv = scope_local_intern(dst, dst->pnames[p]);
-              lv->is_param = 1;
-            }
-          }
-        }
+        scope_copy_params(dst, src);
         /* Scan source body for ivar accesses and register them in the
            destination class so codegen's struct layout includes them. */
         for (int id2 = 0; id2 < nt->count; id2++) {
@@ -4430,21 +4433,7 @@ void register_extends(Compiler *c) {
           dst->rest_idx = src->rest_idx;
           dst->kwrest_idx = src->kwrest_idx;
           if (src->blk_param) dst->blk_param = strdup(src->blk_param);
-          dst->nparams = src->nparams;
-          if (src->nparams > 0) {
-            dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
-            dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
-            for (int p = 0; p < src->nparams; p++) {
-              dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
-              dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
-            }
-            for (int p = 0; p < src->nparams; p++) {
-              if (dst->pnames[p]) {
-                LocalVar *lv = scope_local_intern(dst, dst->pnames[p]);
-                lv->is_param = 1;
-              }
-            }
-          }
+          scope_copy_params(dst, src);
           if (!src->is_module_function) src->is_transplanted_source = 1;
         }
       }
@@ -4635,16 +4624,7 @@ static void specialize_cmethod_for(Compiler *c, int mi, int def_cls, int ci) {
     dst->ret_specialized = 1;
   }
   if (src->blk_param) dst->blk_param = strdup(src->blk_param);
-  dst->nparams = src->nparams;
-  if (src->nparams > 0) {
-    dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
-    dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
-    for (int p = 0; p < src->nparams; p++) {
-      dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
-      dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
-      if (dst->pnames[p]) { LocalVar *lv = scope_local_intern(dst, dst->pnames[p]); lv->is_param = 1; }
-    }
-  }
+  scope_copy_params(dst, src);
   /* Recurse into the inherited intermediates this body reaches. Scan the
      ORIGINAL mi body (cloned nodes are attributed to dst, not mi); a sub-clone
      reallocs c->scopes/c->nscope, so use indices and refetch. */
@@ -4926,20 +4906,7 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
                copied across by hand and their locals re-interned -- exactly
                what the include clone does, and the half my first attempt at
                this omitted (the clone came out with no signature at all). */
-            dst->nparams = sc->nparams;
-            if (sc->nparams > 0) {
-              dst->pnames = malloc(sizeof(char *) * (size_t)sc->nparams);
-              dst->pdefault = malloc(sizeof(int) * (size_t)sc->nparams);
-              for (int pq = 0; pq < sc->nparams; pq++) {
-                dst->pnames[pq] = sc->pnames[pq] ? strdup(sc->pnames[pq]) : NULL;
-                dst->pdefault[pq] = sc->pdefault ? sc->pdefault[pq] : -1;
-              }
-              for (int pq = 0; pq < sc->nparams; pq++)
-                if (dst->pnames[pq]) {
-                  LocalVar *lv = scope_local_intern(dst, dst->pnames[pq]);
-                  lv->is_param = 1;
-                }
-            }
+            scope_copy_params(dst, sc);
             /* the module body's ivars belong to the prepending class's layout */
             for (int id2 = 0; id2 < nt->count; id2++) {
               if (c->nscope[id2] != ms_i) continue;
