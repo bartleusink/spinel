@@ -5624,6 +5624,95 @@ static int emit_poly_aset_default(Compiler *c, const char *name, int argc, const
   return 1;
 }
 
+/* The count check of a poly-dispatch arm whose call ends in a splat: the
+   `sa` arguments ahead of it plus whatever the array temp `st` holds, judged
+   against this arm's positional parameters, as CRuby judges it. Refuses what
+   the arm cannot spread: a **kwrest, a required keyword, a synthesized
+   parameter, and parameters after a rest that the leading arguments may fund. */
+static void emit_poly_splat_arity(Compiler *c, int id, Scope *ms, int sa, int st, Buf *b) {
+  if (ms->cs_synth || ms->kwrest_idx >= 0 ||
+      (ms->rest_idx >= 0 && ms->npost_rest > 0 && sa > ms->rest_idx))
+    unsupported(c, id, "a splat into this parameter list, on a value of more than one type");
+  int req = 0, tot = 0;
+  for (int i = 0; i < ms->nparams; i++) {
+    if (i == ms->rest_idx) continue;
+    const char *pn = ms->pnames ? ms->pnames[i] : NULL;
+    int dflt = ms->pdefault && ms->pdefault[i] >= 0;
+    if (!pn || (pn[0] == '_' && pn[1] == '_') ||
+        (callee_param_is_declared_kwarg(c, ms, pn) && !dflt))
+      unsupported(c, id, "a splat into this parameter list, on a value of more than one type");
+    if (callee_param_is_declared_kwarg(c, ms, pn)) continue;
+    tot++;
+    if (!dflt) req++;
+  }
+  char exp[48];
+  if (ms->rest_idx >= 0) snprintf(exp, sizeof exp, "%d+", req);
+  else if (req == tot) snprintf(exp, sizeof exp, "%d", req);
+  else snprintf(exp, sizeof exp, "%d..%d", req, tot);
+  buf_printf(b, "if (%d + _t%d->len < %d", sa, st, req);
+  if (ms->rest_idx < 0) buf_printf(b, " || %d + _t%d->len > %d", sa, st, tot);
+  buf_printf(b, ") sp_raise_cls(\"ArgumentError\", sp_sprintf(\"wrong number of arguments"
+                " (given %%lld, expected %s)\", (long long)(%d + _t%d->len))); ",
+             exp, sa, st);
+}
+
+/* Parameter `a` of that arm: a leading argument's temp, an element of the
+   array, the rest packed from both, or a parameter after the rest from the
+   array's end. The count was judged by the arm first, so every read below is
+   in range; an optional parameter past the array keeps its default. */
+static void emit_poly_splat_param(Compiler *c, Scope *ms, int a, int sa, const int *atmp,
+                                  const TyKind *atmp_ty, const char *selfp, Buf *pa) {
+  int st = atmp[sa];
+  const char *pnm = ms->pnames[a];
+  LocalVar *pv = scope_local(ms, pnm);
+  TyKind pt = pv ? pv->type : TY_POLY;
+  if (pt == TY_UNKNOWN) pt = TY_POLY;
+  int r = ms->rest_idx, npost = r >= 0 ? ms->npost_rest : 0;
+  const char *saved_self = g_self;
+  if (callee_param_is_declared_kwarg(c, ms, pnm)) {
+    g_self = selfp; emit_arg_or_default(c, ms, a, -1, pa); g_self = saved_self;
+    return;
+  }
+  if (a == r) {
+    int rt = ++g_tmp, ri = ++g_tmp;
+    buf_printf(pa, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", rt, rt);
+    for (int j = r; j < sa; j++) {
+      char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[j]);
+      buf_printf(pa, " sp_PolyArray_push(_t%d, ", rt);
+      if (atmp_ty[j] == TY_POLY) buf_puts(pa, tn); else emit_boxed_text(c, atmp_ty[j], tn, pa);
+      buf_puts(pa, ");");
+    }
+    buf_printf(pa, " for (sp_int _t%d = %d; _t%d < _t%d->len - %d; _t%d++)"
+                   " sp_PolyArray_push(_t%d, sp_PolyArray_get(_t%d, _t%d)); _t%d; })",
+               ri, r > sa ? r - sa : 0, ri, st, npost, ri, rt, st, ri, rt);
+    return;
+  }
+  if (a < sa) {
+    char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
+    TyKind at = atmp_ty[a];
+    if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, pa);
+    else if (at == TY_POLY && pt != TY_POLY) emit_unbox_text(c, pt, tn, pa);
+    else { emit_obj_upcast_prefix(c, pt, at, pa); buf_puts(pa, tn); }
+    return;
+  }
+  char el[96];
+  if (r >= 0 && a > r)
+    snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, _t%d->len - %d)", st, st, npost - (a - r - 1));
+  else
+    snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, %d)", st, a - sa);
+  Buf eb; memset(&eb, 0, sizeof eb);
+  emit_unbox_text(c, pt, el, &eb);
+  if (ms->pdefault && ms->pdefault[a] >= 0) {
+    Buf db; memset(&db, 0, sizeof db);
+    g_self = selfp; emit_arg_or_default(c, ms, a, -1, &db); g_self = saved_self;
+    buf_printf(pa, "(%d < _t%d->len - %d ? %s : %s)", a - sa, st, npost,
+               eb.p ? eb.p : "", db.p ? db.p : default_value(pt));
+    free(db.p);
+  }
+  else buf_puts(pa, eb.p ? eb.p : "");
+  free(eb.p);
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -6889,6 +6978,34 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        name, so the dispatch has to open by name too */
     int name_taken2 = user_defines_or_reads(c, name);
     if (ncand > 0 || name_taken2 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge) {
+      /* A splatted argument spreads across each arm's own parameters: its
+         temp holds the array, and every arm reads its fixed parameters out of
+         it, packs its rest from it and judges the count the array gives. The
+         temp used to be declared with the ELEMENT's type and handed the array
+         whole, so every such call stopped the C build. The spread is read
+         from the array's end, so it has to be the call's last positional,
+         alone, without keywords beside it. */
+      int splat_a = -1;
+      if (has_splat_arg) {
+        for (int a = 0; a < argc; a++) {
+          const char *at3 = nt_type(nt, argv[a]);
+          if (!at3 || !sp_streq(at3, "SplatNode")) continue;
+          if (splat_a >= 0 || a != pos_argc - 1 || kwh >= 0)
+            unsupported(c, id, "a splat before other arguments, or beside keywords, into a method called on a value of more than one type");
+          splat_a = a;
+        }
+        /* the builtin arms below read their argument temps one value each */
+        is_index = is_fetch = is_include = is_intersect = is_arr_index = 0;
+        is_push = is_unshift = is_strdel = is_strpart = is_strsplit = is_pred = 0;
+        is_strftime = is_cover = is_gcdlcm = is_pfirstn = 0;
+        /* the class-side pre-arm fills its parameters one temp each */
+        for (int k = 0; k < c->nclasses; k++) {
+          int kmi = is_builtin_reopen(c->classes[k].name) ? -1
+                                                           : comp_cmethod_in_chain(c, k, name, NULL);
+          if (kmi >= 0 && scope_has_callable_symbol(c, kmi))
+            unsupported(c, id, "a splat into a method called on a value that may be a class");
+        }
+      }
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
       /* `x = v` through a writer: the value is v as written, so the arms call
@@ -6905,6 +7022,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
       for (int a = 0; a < pos_argc; a++) {
         atmp[a] = ++g_tmp;
+        if (a == splat_a) {
+          /* the SplatNode's own lowering: nil to [], a scalar to [v], any
+             array kind rebuilt as a PolyArray */
+          atmp_ty[a] = TY_POLY_ARRAY;
+          buf_printf(b, "sp_PolyArray *_t%d = ", atmp[a]); emit_expr(c, argv[a], b);
+          buf_printf(b, "; SP_GC_ROOT(_t%d); ", atmp[a]);
+          continue;
+        }
         TyKind at = infer_type(c, argv[a]);
         /* A nil/void/unresolved arg has no concrete C storage (emit_ctype would
            print `void`); hold it as a boxed poly so it can flow into a poly
@@ -7174,19 +7299,19 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            funds the declared keyword params it names (#4205) */
         int fills0 = kwh_fills_slot(c, &c->scopes[cls0_mi2], kwh, pos_argc);
         if (fills0 == 0) fills0 = kwh_named_kwarg_fills(c, &c->scopes[cls0_mi2], kwh);
-        cls0_cand2 = pos_argc + fills0 >= c->scopes[cls0_mi2].nrequired;
+        cls0_cand2 = splat_a >= 0 || pos_argc + fills0 >= c->scopes[cls0_mi2].nrequired;
       }
       /* a class-valued receiver dispatches class-side, ahead of the instance
          arms (#4218). Positional calls only: the keyword-hash split binds by
          name against a specific candidate, which this pre-arm does not do. */
-      if (kwh < 0)
+      if (kwh < 0 && splat_a < 0)
         emit_poly_cls_value_prearm(c, name, argc, atmp, atmp_ty, tv, tr, ret, b);
       /* a primitive-reopen candidate needs the tag-mapping key (#4219) */
       int prim_cand2 = 0;
       for (int k = 0; k < c->nclasses && !prim_cand2; k++) {
         if (!class_is_prim_reopen(c, k)) continue;
         int pmi = comp_method_in_chain(c, k, name, NULL);
-        if (pmi >= 0 && pos_argc >= c->scopes[pmi].nrequired &&
+        if (pmi >= 0 && (splat_a >= 0 || pos_argc >= c->scopes[pmi].nrequired) &&
             (scope_has_callable_symbol(c, pmi) || scope_needs_proc_form(c, pmi)))
           prim_cand2 = 1;
       }
@@ -7276,7 +7401,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            keyword hash funds the DECLARED keyword params it names (#4205) */
         { int fills2 = kwh_fills_slot(c, &c->scopes[mi], kwh, pos_argc);
           if (fills2 == 0) fills2 = kwh_named_kwarg_fills(c, &c->scopes[mi], kwh);
-          if (pos_argc + fills2 < c->scopes[mi].nrequired) continue; }
+          /* a splat's count is the array's; the arm judges it at run time */
+          if (splat_a < 0 && pos_argc + fills2 < c->scopes[mi].nrequired) continue; }
         /* A class no value can ever be (never `.new`/`.allocate`/`raise`d, no
            Struct, no Marshal escape) cannot be this poly value's receiver, so
            its arm is dead. Dropping it makes sp_<Class>_<name> an unreferenced
@@ -7321,6 +7447,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
              Positional args at/after the rest map to the rest/tail, not to param
              slot `a`, so skip from the rest index on. */
           if (ks->rest_idx >= 0 && a >= ks->rest_idx) break;
+          /* the splat's elements arrive boxed and unbox to each arm's type */
+          if (a == splat_a) break;
           LocalVar *pv0 = (ks->pnames && ks->pnames[a])
                             ? scope_local(ks, ks->pnames[a]) : NULL;
           TyKind pt0 = pv0 ? pv0->type : TY_UNKNOWN;
@@ -7435,8 +7563,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           Buf pa; memset(&pa, 0, sizeof pa);
           const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
           do {
-
-
+          if (splat_a >= 0) {
+            emit_poly_splat_param(c, ms, a, splat_a, atmp, atmp_ty, selfpbuf2, &pa);
+            continue;
+          }
           /* a **kwrest param collects the keywords no declared keyword param
              consumed (#3268) */
           if (kwh >= 0 && a == ms->kwrest_idx) {
@@ -7616,6 +7746,7 @@ else {
         }
         free(pdpre.p);
         buf_printf(b, " case %d: ", k);
+        if (splat_a >= 0) emit_poly_splat_arity(c, id, ms, splat_a, atmp[splat_a], b);
         /* a proc form carries its own inferred return type (#3399) */
         int pf8 = pfi8 >= 0;
         TyKind mret8 = pf8 ? c->scopes[pfi8].ret : mret;
@@ -7658,7 +7789,7 @@ else {
          hash is read off the CALL, not off a temp -- `exception: false` is
          part of the shape, not an argument that flows -- and the positional
          length rides its already-materialised temp. */
-      if (sp_streq(name, "read_nonblock") && pos_argc == 1) {
+      if (sp_streq(name, "read_nonblock") && pos_argc == 1 && splat_a < 0) {
         int no_exc7 = 0;
         if (kwh >= 0) {
           int e7 = kwh_lookup(nt, kwh, "exception");
@@ -7680,7 +7811,7 @@ else {
         else buf_printf(b, "_t%d", trd7);
         buf_puts(b, "; break; }");
       }
-      if (sp_streq(name, "write") && argc == 1 && kwh < 0) {
+      if (sp_streq(name, "write") && argc == 1 && kwh < 0 && splat_a < 0) {
         int wrv = ++g_tmp;
         if (atmp_ty[0] == TY_STRING) {
           /* String arg: the temp is a const char * from a String source.
@@ -7738,7 +7869,7 @@ else {
          source's length (sp_str_byte_len, so an embedded NUL reaches the
          descriptor) or a converted value's length (strlen of sp_poly_to_s),
          rather than reading it off a marker byte inside the write core. */
-      if (sp_streq(name, "syswrite") && argc == 1 && kwh < 0) {
+      if (sp_streq(name, "syswrite") && argc == 1 && kwh < 0 && splat_a < 0) {
         int wrv = ++g_tmp;
         if (atmp_ty[0] == TY_STRING) {
           if (ret == TY_POLY)
@@ -7990,8 +8121,8 @@ else {
       /* the poly value may actually be a string-keyed hash: dispatch `[]` /
          `fetch` to the matching hash storage, boxing the value into the poly
          result. */
-      int is_aref = sp_streq(name, "[]") && argc == 1;
-      int is_fetch = sp_streq(name, "fetch") && (argc == 1 || argc == 2);
+      int is_aref = sp_streq(name, "[]") && argc == 1 && splat_a < 0;
+      int is_fetch = sp_streq(name, "fetch") && (argc == 1 || argc == 2) && splat_a < 0;
       if ((is_aref || is_fetch) && infer_type(c, argv[0]) == TY_STRING) {
         TyKind trt = is_scalar_ret(ret) ? ret : TY_INT;  /* the result temp's type */
         static const struct { const char *cls, *hn; TyKind vt; } HV[] = {
@@ -8134,7 +8265,7 @@ else {
            name; a String, Array or Hash receiver still has to be replaced
            rather than told it has no such method. Same shape as the to_i /
            to_h / join arms of the zero-argument dispatch (#4240). */
-        if (sp_streq(name, "replace") && argc == 1 && ret == TY_POLY) {
+        if (sp_streq(name, "replace") && argc == 1 && splat_a < 0 && ret == TY_POLY) {
           Buf rb9; memset(&rb9, 0, sizeof rb9);
           { char tn9[32]; snprintf(tn9, sizeof tn9, "_t%d", atmp[0]);
             if (atmp_ty[0] == TY_POLY) buf_puts(&rb9, tn9);
@@ -8149,7 +8280,7 @@ else {
            have their arm in the other dispatch; these answer through the
            boxed helpers the no-user-class path uses. */
         else if ((sp_streq(name, "round") || sp_streq(name, "ceil") ||
-                  sp_streq(name, "floor") || sp_streq(name, "truncate")) && argc == 1) {
+                  sp_streq(name, "floor") || sp_streq(name, "truncate")) && argc == 1 && splat_a < 0) {
           char nd9[64];
           if (atmp_ty[0] == TY_POLY) snprintf(nd9, sizeof nd9, "sp_poly_to_i(_t%d)", atmp[0]);
           else snprintf(nd9, sizeof nd9, "(sp_int)_t%d", atmp[0]);
@@ -8174,7 +8305,7 @@ else {
         /* The numeric surface, from the table beside emit_poly_method_dispatch:
            box the argument the dispatch already hoisted, call the helper the
            no-user-class path calls, and fit the answer to the slot. */
-        else if (poly_num_arm(name, argc) >= 0) {
+        else if (splat_a < 0 && poly_num_arm(name, argc) >= 0) {
           int ai = poly_num_arm(name, argc);
           Buf ab9; memset(&ab9, 0, sizeof ab9);
           { char an9[32]; snprintf(an9, sizeof an9, "_t%d", atmp[0]);
