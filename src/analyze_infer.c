@@ -6637,6 +6637,32 @@ static TyKind an_branch_ty(Compiler *c, int stmts) {
   return t;
 }
 
+/* 1 when a branch's value is an empty `[]` literal, 2 for an empty `{}`. */
+static int branch_tail_empty_container(Compiler *c, int b) {
+  const NodeTable *nt = c->nt;
+  while (b >= 0) {
+    NodeKind k = nt_kind(nt, b);
+    if (k == NK_ElseNode || k == NK_ParenthesesNode) { b = nt_ref(nt, b, k == NK_ElseNode ? "statements" : "body"); continue; }
+    if (k == NK_StatementsNode) {
+      int n = 0; const int *ids = nt_arr(nt, b, "body", &n);
+      if (n <= 0) return 0;
+      b = ids[n - 1];
+      continue;
+    }
+    int n = 0;
+    if (k == NK_ArrayNode) { nt_arr(nt, b, "elements", &n); return n == 0 ? 1 : 0; }
+    if (k == NK_HashNode) { nt_arr(nt, b, "elements", &n); return n == 0 ? 2 : 0; }
+    return 0;
+  }
+  return 0;
+}
+/* the other arm's settled type is not the empty literal's kind of container */
+static int empty_container_disagrees(int kind, TyKind other) {
+  if (other == TY_UNKNOWN || other == TY_NIL || other == TY_VOID || other == TY_POLY) return 0;
+  if (kind == 1) return !ty_is_array(other) && !ty_is_obj_array(other);
+  return !ty_is_hash(other);
+}
+
 TyKind infer_uncached(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
@@ -7212,6 +7238,20 @@ TyKind infer_uncached(Compiler *c, int id) {
     if (ediv && !tdiv) return an_branch_ty(c, then_b);
     TyKind tt = an_branch_ty(c, then_b);
     TyKind et = an_branch_ty(c, else_b);
+    /* An empty `[]` / `{}` arm is still UNKNOWN (its kind comes from its
+       use), and the unify took the other arm's type for it: an object, a
+       String, a number. It is a container all the same, so a non-container
+       other arm makes the answer boxed; `if u then Rel.new else [] end` built
+       an sp_IntArray into an sp_Rel slot (#4938). */
+    { int tk = branch_tail_empty_container(c, then_b), ek = branch_tail_empty_container(c, else_b);
+      if (tt == TY_UNKNOWN && tk && ek == 0 && empty_container_disagrees(tk, et)) return TY_POLY;
+      if (et == TY_UNKNOWN && ek && tk == 0 && empty_container_disagrees(ek, tt)) return TY_POLY;
+      /* ...and against an arm that settles on no type at all (a call nothing
+         answers raises), once the rounds are no longer optimistic, the empty
+         literal is the value: `if q then Parser.new.parse(q) else [] end`
+         answered nil (#4938) */
+      if (!g_infer_optimistic && tt == TY_UNKNOWN && et == TY_UNKNOWN && (tk != 0) != (ek != 0))
+        return (tk ? tk : ek) == 1 ? TY_POLY_ARRAY : TY_POLY_POLY_HASH; }
     return ty_unify(tt, et);
   }
   if (nk == NK_ElseNode) {
