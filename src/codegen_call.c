@@ -5951,8 +5951,12 @@ static int poly_arm_count(Compiler *c, Scope *m, int kwh, int pos_argc, int spla
   if (splat_a >= 0) return 1;   /* judged at run time by emit_poly_splat_arity */
   int fills = kwh_fills_slot(c, m, kwh, pos_argc);
   int named = fills ? 0 : kwh_named_kwarg_fills(c, m, kwh);
+  /* arg_slot_for_param maps a leading optional by position when a *rest or
+     **kw sits in the list, so such an arm keeps the old judgement */
+  if (opt_before_required(m) && (m->rest_idx >= 0 || m->kwrest_idx >= 0))
+    return pos_argc + fills + named >= m->nrequired ? 1 : 0;
   int given = pos_argc + fills;
-  int need = m->nrequired, req = 0, tot = 0, judged = !m->cs_synth;
+  int need = m->nrequired, req = 0, tot = 0, kwd = 0, judged = !m->cs_synth;
   for (int i = 0; i < m->nparams; i++) {
     const char *pn = m->pnames ? m->pnames[i] : NULL;
     int dflt = m->pdefault && m->pdefault[i] >= 0;
@@ -5960,15 +5964,17 @@ static int poly_arm_count(Compiler *c, Scope *m, int kwh, int pos_argc, int spla
     if ((slot || dflt) && i < m->nrequired) need--;
     if (slot) continue;
     if (!pn || (pn[0] == '_' && pn[1] == '_')) { judged = 0; continue; }
-    if (callee_param_is_declared_kwarg(c, m, pn)) continue;
+    if (callee_param_is_declared_kwarg(c, m, pn)) { kwd++; continue; }
     tot++;
     if (!dflt) req++;
   }
   int unbound_kwh = kwh >= 0 && !fills && !named && m->kwrest_idx < 0;
+  /* keywords into a method that declares none are one more positional hash */
+  if (unbound_kwh && !kwd) { given++; unbound_kwh = 0; }
   if (judged && !unbound_kwh && (given < req || (m->rest_idx < 0 && given > tot))) {
-    if (m->rest_idx >= 0) snprintf(exp, n, "%d+", req);
-    else if (req == tot) snprintf(exp, n, "%d", req);
-    else snprintf(exp, n, "%d..%d", req, tot);
+    if (m->rest_idx >= 0) snprintf(exp, n, "given %d, expected %d+", given, req);
+    else if (req == tot) snprintf(exp, n, "given %d, expected %d", given, req);
+    else snprintf(exp, n, "given %d, expected %d..%d", given, req, tot);
     return -1;
   }
   return pos_argc + fills + named >= need ? 1 : 0;
@@ -7742,8 +7748,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         if (!c->classes[k].instantiated && !class_is_prim_reopen(c, k)) continue;
         if (arm_fit < 0) {
           buf_printf(b, " case %d: sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
-                        " (given %d, expected %s)\"); break;",
-                     k, pos_argc + kwh_fills_slot(c, &c->scopes[mi], kwh, pos_argc), arm_exp);
+                        " (%s)\"); break;", k, arm_exp);
           continue;
         }
         /* Skip a method with no standalone definition (DCE-pruned, or inlined
