@@ -14080,6 +14080,7 @@ void analyze_program(Compiler *c) {
   desugar_block_implicit_rest(c);        /* |x,| -> |x, __implicit_rest| (destructures) */
   desugar_block_destructure_params(c);   /* |a,(b,c),d| -> flat param + `b,c = __destr` */
   desugar_enumerator_produce(c);         /* Enumerator.produce -> fiber generator */
+  desugar_recursive_param_defaults(c);   /* def m(x, y = m(..)) -> default helper method */
   qualify_colliding_consts(c);
   qualify_colliding_classes(c);
   walk_scope(c, c->nt->root_id, 0, -1);
