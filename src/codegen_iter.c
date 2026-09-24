@@ -4390,61 +4390,6 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
 
-  /* array.cycle(n) { |p| body } -- repeat n times over the array; the
-     argless form cycles forever (a block `break` is the only exit). Rooted
-     hoist, as each_cons above. */
-  if (sp_streq(name, "cycle") && ty_is_array(rt)) {
-    int args = nt_ref(nt, id, "arguments");
-    int cyc_argc = 0; const int *cyc_argv = args >= 0 ? nt_arr(nt, args, "arguments", &cyc_argc) : NULL;
-    if (cyc_argc > 1) return 0;
-    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
-    if (!k) return 0;
-    TyKind et = ty_array_elem(rt);
-    Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
-    LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
-    TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
-    int use_shadow_cy = clv0 && clv0->type != et && et != TY_UNKNOWN;
-    int ta = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp;
-    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
-    emit_indent(b, indent); emit_ctype(c, rt, b);
-    buf_printf(b, " _t%d = %s; ", ta, rb.p ? rb.p : ""); free(rb.p);
-    emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, "\n");
-    emit_indent(b, indent);
-    if (cyc_argc == 1) {
-      buf_printf(b, "sp_int _t%d = ", tn);
-      emit_int_expr_nilable(c, cyc_argv[0], b); buf_puts(b, ";\n");
-      emit_indent(b, indent);
-      buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) {\n", ti, ti, tn, ti);
-    }
-    else {
-      /* An empty receiver cycles zero times, not forever: the countless form
-         answers nil straight away in CRuby (#3852). */
-      buf_printf(b, "if (sp_%sArray_length(_t%d) > 0) for (;;) {\n", k, ta);
-    }
-    emit_indent(b, indent + 1);
-    buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n", tj, tj, k, ta, tj);
-    int innerIndent = indent + 2;
-    if (use_shadow_cy) {
-      int cyb_bn = 0; const int *cyb_bb = body >= 0 ? nt_arr(nt, body, "body", &cyb_bn) : NULL;
-      clv0->type = et;
-      for (int j = 0; j < cyb_bn; j++) infer_type(c, cyb_bb[j]);
-      emit_indent(b, innerIndent); buf_puts(b, "{\n"); innerIndent++;
-      emit_indent(b, innerIndent); emit_ctype(c, et, b);
-      buf_printf(b, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, ta, tj);
-      emit_loop_body(c, body, b, innerIndent);
-      innerIndent--;
-      emit_indent(b, innerIndent); buf_puts(b, "}\n");
-      clv0->type = csaved0;
-    }
-    else {
-      if (p0) { emit_indent(b, innerIndent); buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, ta, tj); }
-      emit_loop_body(c, body, b, innerIndent);
-    }
-    emit_indent(b, indent + 1); buf_puts(b, "}\n");
-    emit_indent(b, indent); buf_puts(b, "}\n");
-    return 1;
-  }
-
   /* array.each_slice(n) { |p| body } -- yield subarrays of size n. Rooted
      hoist, as each_cons above. */
   if (sp_streq(name, "each_slice") && ty_is_array(rt)) {

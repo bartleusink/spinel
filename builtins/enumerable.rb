@@ -42,6 +42,49 @@ module Enumerable
     end
   end
 
+  # The first round walks the receiver with its own `each`, keeping what it
+  # yields; the later rounds replay those, as CRuby's does. The blockless
+  # form answers an Enumerator the emitter builds (#first(n) on an endless
+  # one is folded there); the rewrite leaves it there.
+  def cycle(n = nil)
+    if block_given?
+      forever = true
+      rounds = 0
+      if n
+        raise TypeError, "no implicit conversion of #{n.class} into Integer" unless n.is_a?(Integer) || n.is_a?(Float)
+        forever = false
+        rounds = n.to_i
+      end
+      if self.is_a?(Array)
+        # an Array is walked again each round, as Array#cycle does (a
+        # change to it between rounds shows)
+        unless empty?
+          r = 0
+          while forever || r < rounds
+            each { |x| yield x }
+            r += 1
+          end
+        end
+      elsif forever || rounds > 0
+        seen = []
+        each do |x|
+          seen << x
+          yield x
+        end
+        unless seen.empty?
+          r = 1
+          while forever || r < rounds
+            seen.each { |x| yield x }
+            r += 1
+          end
+        end
+      end
+      nil
+    else
+      each
+    end
+  end
+
   def partition
     if block_given?
       yes = []

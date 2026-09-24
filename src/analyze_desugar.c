@@ -3161,6 +3161,9 @@ int desugar_builtin_enum_calls(Compiler *c) {
        O(n) walk CRuby's Enumerable#count itself does, which the definition
        below does not special-case; both stay on the existing emitter. */
     if (sp_streq(name, "count") && nt_ref(nt, id, "block") < 0) continue;
+    /* cycle without a block answers an Enumerator (an endless one without a
+       count) that the emitter builds; the definition covers the block form */
+    if (sp_streq(name, "cycle") && nt_ref(nt, id, "block") < 0) continue;
     /* any?/all?/none?/one? without a block ask about each element's own
        truthiness (or, with one argument, a `===` pattern), never the
        block's; both stay on the existing emitter, the way a blockless,
