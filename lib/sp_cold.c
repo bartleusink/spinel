@@ -2549,26 +2549,33 @@ sp_Enumerator *sp_Enumerator_new_from_items(sp_PolyArray *items) {
 /* Lazy with_index over a generator-backed source (blockless Kernel#loop,
    external enumerators): pull one value at a time and pair it with the
    running index, so an infinite source stays drivable via #next (#3236). */
-typedef struct { sp_Enumerator *src; sp_int off; } sp_WiCap;
+/* The walk is the pair's own: a fiber of its own over a generator source and
+   an index of its own over a materialized one, so the source's #next cursor
+   is neither read nor moved (`g.with_index.first(4)` then `g.next` answered
+   the fifth element), and an endless cycle's round starts over. */
+typedef struct { sp_Enumerator *src; sp_int off; sp_Fiber *fib; } sp_WiCap;
 static void sp_wi_cap_scan(void *p) {
   sp_WiCap *cap = (sp_WiCap *)p;
   if (cap->src) sp_gc_mark(cap->src);
+  if (cap->fib) sp_gc_mark(cap->fib);
 }
 static void sp_with_index_gen(sp_Fiber *f) {
   sp_WiCap *cap = (sp_WiCap *)f->user_data;
   sp_Enumerator *s = cap->src;
-  sp_int i = cap->off;
+  sp_int i = cap->off, j = 0;
+  sp_gc_wb((void*)cap); cap->fib = NULL;   /* a rewind starts the walk over */
   for (;;) {
     sp_RbVal v;
     if (s->gen) {
-      if (!s->fib) { s->fib = sp_Fiber_new(s->gen); sp_gc_wb((void*)s); if (s->gen_cap) { sp_gc_wb((void*)s->fib); s->fib->user_data = s->gen_cap; } }
-      if (!sp_Fiber_alive(s->fib)) break;
-      v = sp_Fiber_resume(s->fib, sp_box_nil());
-      if (!sp_Fiber_alive(s->fib)) break;
+      if (!cap->fib) { sp_Fiber *nf = sp_Fiber_new(s->gen); sp_gc_wb((void*)cap); cap->fib = nf; if (s->gen_cap) { sp_gc_wb((void*)nf); nf->user_data = s->gen_cap; } }
+      if (!sp_Fiber_alive(cap->fib)) break;
+      v = sp_Fiber_resume(cap->fib, sp_box_nil());
+      if (!sp_Fiber_alive(cap->fib)) break;
     }
     else {
-      if (!s->items || s->cursor >= s->items->len) break;
-      v = s->items->data[s->cursor++];
+      if (s->endless && s->items && s->items->len > 0 && j >= s->items->len) j = 0;
+      if (!s->items || j >= s->items->len) break;
+      v = s->items->data[j++];
     }
     sp_PolyArray *pair = sp_PolyArray_new();
     SP_GC_ROOT(pair);
@@ -2578,7 +2585,8 @@ static void sp_with_index_gen(sp_Fiber *f) {
   }
 }
 sp_Enumerator *sp_Enumerator_with_index(sp_Enumerator *e, sp_int off) {
-  if (e && e->gen) {
+  /* an endless source pairs lazily too: its pairs never run out */
+  if (e && (e->gen || e->endless)) {
     /* Two allocations, and two things held in nothing but a C local across
        them. The source enumerator dies at the sp_WiCap allocation below --
        which is before the cap exists, so rooting the cap cannot cover it --
