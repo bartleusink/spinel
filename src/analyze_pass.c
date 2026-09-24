@@ -5337,6 +5337,24 @@ static void subtree_self_to_const(Compiler *c, int root, const char *cname, int 
   }
 }
 
+/* Splice a block body into the enclosing scope `encl`: re-home every node
+   that lived in the block's own scope (nested blocks keep theirs). */
+static void rehome_block_body(Compiler *c, int body, int encl) {
+  const NodeTable *nt = c->nt;
+  Scope *bs = comp_scope_of(c, body);
+  int bsi = bs ? (int)(bs - c->scopes) : -1;
+  int stack[256]; int sp = 0; stack[sp++] = body;
+  while (sp > 0 && bsi >= 0) {
+    int nid = stack[--sp];
+    if (nid < 0 || nid >= nt->count) continue;
+    if (c->nscope[nid] == bsi) c->nscope[nid] = encl;
+    const SpNode *nd = &nt->nodes[nid];
+    for (int i2 = 0; i2 < nd->nr && sp < 250; i2++) stack[sp++] = nd->r[i2].ref;
+    for (int i2 = 0; i2 < nd->na; i2++)
+      for (int j2 = 0; j2 < nd->a[i2].n && sp < 250; j2++) stack[sp++] = nd->a[i2].ids[j2];
+  }
+}
+
 /* The value forms of class_eval / class_exec (and module_*): the block is
    evaluated with self = the class, and the call's value is the block's. A
    pure-def body is a compile-time reopen (class_eval_reopen_class) and is left
@@ -5426,20 +5444,7 @@ int desugar_class_eval_value(Compiler *c) {
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     /* splice the body into the enclosing scope: re-home every node that lived
        in the BLOCK's scope (nested blocks keep their own) */
-    {
-      Scope *bs = comp_scope_of(c, body);
-      int stack[256]; int sp = 0; stack[sp++] = body;
-      int bsi = bs ? (int)(bs - c->scopes) : -1;
-      while (sp > 0 && bsi >= 0) {
-        int nid = stack[--sp];
-        if (nid < 0 || nid >= nt->count) continue;
-        if (c->nscope[nid] == bsi) c->nscope[nid] = encl;
-        const SpNode *nd = &nt->nodes[nid];
-        for (int i2 = 0; i2 < nd->nr && sp < 250; i2++) stack[sp++] = nd->r[i2].ref;
-        for (int i2 = 0; i2 < nd->na; i2++)
-          for (int j2 = 0; j2 < nd->a[i2].n && sp < 250; j2++) stack[sp++] = nd->a[i2].ids[j2];
-      }
-    }
+    rehome_block_body(c, body, encl);
     changed = 1;
   }
   return changed;
@@ -5661,20 +5666,7 @@ int desugar_instance_eval_builtin(Compiler *c) {
     comp_grow_node_arrays(c);
     int encl = c->nscope[id];
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
-    {
-      Scope *bs = comp_scope_of(c, body);
-      int stack[256]; int sp = 0; stack[sp++] = body;
-      int bsi = bs ? (int)(bs - c->scopes) : -1;
-      while (sp > 0 && bsi >= 0) {
-        int nid = stack[--sp];
-        if (nid < 0 || nid >= nt->count) continue;
-        if (c->nscope[nid] == bsi) c->nscope[nid] = encl;
-        const SpNode *nd = &nt->nodes[nid];
-        for (int i2 = 0; i2 < nd->nr && sp < 250; i2++) stack[sp++] = nd->r[i2].ref;
-        for (int i2 = 0; i2 < nd->na; i2++)
-          for (int j2 = 0; j2 < nd->a[i2].n && sp < 250; j2++) stack[sp++] = nd->a[i2].ids[j2];
-      }
-    }
+    rehome_block_body(c, body, encl);
     changed = 1;
   }
   return changed;
@@ -6267,20 +6259,7 @@ int desugar_dir_surface(Compiler *c) {
       int encl = c->nscope[id];
       for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
       /* re-home the block body into the enclosing scope */
-      {
-        Scope *bs = comp_scope_of(c, body);
-        int bsi = bs ? (int)(bs - c->scopes) : -1;
-        int stack[256]; int sp = 0; stack[sp++] = body;
-        while (sp > 0 && bsi >= 0) {
-          int nid = stack[--sp];
-          if (nid < 0 || nid >= nt->count) continue;
-          if (c->nscope[nid] == bsi) c->nscope[nid] = encl;
-          const SpNode *nd = &nt->nodes[nid];
-          for (int i2 = 0; i2 < nd->nr && sp < 250; i2++) stack[sp++] = nd->r[i2].ref;
-          for (int i2 = 0; i2 < nd->na; i2++)
-            for (int j2 = 0; j2 < nd->a[i2].n && sp < 250; j2++) stack[sp++] = nd->a[i2].ids[j2];
-        }
-      }
+      rehome_block_body(c, body, encl);
       changed = 1; continue;
     }
   }

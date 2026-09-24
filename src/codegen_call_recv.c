@@ -333,6 +333,80 @@ static int emit_array_block_index(Compiler *c, int id, int recv, TyKind rt, cons
 }
 
 
+/* Materialize each zip argument into a rooted array temp _t<tb[j]>, and
+   rewrite at[j] to the array type the slot ended up holding. */
+static void emit_zip_args(Compiler *c, const int *argv, int nargs, const int *tb, TyKind *at, Buf *b) {
+  for (int j = 0; j < nargs; j++) {
+    /* a Range argument materializes to its int array */
+    if (at[j] == TY_RANGE) {
+      int trj = ++g_tmp;
+      buf_printf(b, " sp_IntArray *_t%d = ({ sp_Range _t%d = ", tb[j], trj);
+      emit_expr(c, argv[j], b);
+      buf_printf(b, "; sp_range_to_ia(_t%d); }); SP_GC_ROOT(_t%d);", trj, tb[j]);
+      at[j] = TY_INT_ARRAY;
+      continue;
+    }
+    /* A scalar argument responds to no :each at all, which is CRuby's
+       TypeError naming its class. Read as a container regardless, a nil
+       became a column of nils, silently, and an Integer or a String
+       stopped the C build. */
+    if (ty_is_object(at[j])) {
+      /* an object answering #to_ary zips as that Array; one answering
+         #each enumerates; any other is the scalar's TypeError */
+      int zdef = -1;
+      TyKind zk = obj_container_conv(c, at[j], "to_ary", &zdef);
+      if (zk != TY_UNKNOWN) {
+        const char *kz = zk == TY_POLY_ARRAY ? "Poly" : array_kind(zk);
+        buf_printf(b, " sp_%sArray *_t%d = ", kz ? kz : "Poly", tb[j]);
+        emit_obj_container_conv(c, argv[j], zdef, "to_ary", b);
+        /* rooted: the answer is the conversion's own allocation, read
+           across every row the loop below allocates */
+        buf_printf(b, "; SP_GC_ROOT(_t%d);", tb[j]);
+        at[j] = kz ? zk : TY_POLY_ARRAY;
+        continue;
+      }
+      int zcid = ty_object_class(at[j]);
+      if (zcid >= 0 && comp_method_in_chain(c, zcid, "each", NULL) < 0) {
+        /* sp_zip_arg would send :each and answer NoMethodError; the
+           class is settled, so name CRuby's TypeError here */
+        buf_printf(b, " sp_PolyArray *_t%d = ({ (void)(", tb[j]); emit_expr(c, argv[j], b);
+        buf_printf(b, "); sp_raise_cls(\"TypeError\", \"wrong argument type %s (must respond to :each)\"); (sp_PolyArray *)0; });",
+                   class_ruby_name(c, zcid));
+        at[j] = TY_POLY_ARRAY;
+        continue;
+      }
+    }
+    if (at[j] == TY_NIL || at[j] == TY_BOOL || at[j] == TY_INT ||
+        at[j] == TY_FLOAT || at[j] == TY_STRING || at[j] == TY_STRBUF ||
+        at[j] == TY_SYMBOL || at[j] == TY_VOID || ty_is_object(at[j]) ||
+        /* a Hash or an Enumerator DOES respond to :each; the same helper
+           materializes it, where the typed line below spelled the slot
+           sp_PolyArray* and assigned an sp_SymPolyHash* to it */
+        ty_is_hash(at[j]) || at[j] == TY_ENUMERATOR) {
+      buf_printf(b, " sp_PolyArray *_t%d = sp_zip_arg(", tb[j]);
+      emit_boxed(c, argv[j], b);
+      buf_puts(b, ");");
+      buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
+      at[j] = TY_POLY_ARRAY;
+      continue;
+    }
+    /* a boxed (poly) argument -- e.g. an outer block param that holds an
+       array at runtime -- must be unboxed to a poly array, not assigned
+       raw into an sp_PolyArray* slot (#3190). */
+    if (at[j] == TY_POLY) {
+      buf_printf(b, " sp_PolyArray *_t%d = sp_poly_to_poly_array(", tb[j]);
+      emit_expr(c, argv[j], b);
+      buf_puts(b, ");");
+      buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
+      at[j] = TY_POLY_ARRAY;
+      continue;
+    }
+    const char *kj = (at[j] == TY_POLY_ARRAY) ? "Poly" : (array_kind(at[j]) ? array_kind(at[j]) : "Poly");
+    buf_printf(b, " sp_%sArray *_t%d = ", kj, tb[j]); emit_expr(c, argv[j], b); buf_puts(b, ";");
+    buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
+  }
+}
+
 /* An operand whose evaluation cannot allocate: a local's read or a scalar
    literal. */
 static int fetch_operand_is_inert(Compiler *c, int n) {
@@ -3086,75 +3160,7 @@ else {
            argument, materialized here and read on every row. Same rule the
            builtin loops follow (#4367, #4369, #4370). */
         buf_printf(b, " SP_GC_ROOT(_t%d);", ta);
-        for (int j = 0; j < nargs; j++) {
-          /* a Range argument materializes to its int array */
-          if (at[j] == TY_RANGE) {
-            int trj = ++g_tmp;
-            buf_printf(b, " sp_IntArray *_t%d = ({ sp_Range _t%d = ", tb[j], trj);
-            emit_expr(c, argv[j], b);
-            buf_printf(b, "; sp_range_to_ia(_t%d); }); SP_GC_ROOT(_t%d);", trj, tb[j]);
-            at[j] = TY_INT_ARRAY;
-            continue;
-          }
-          /* A scalar argument responds to no :each at all, which is CRuby's
-             TypeError naming its class. Read as a container regardless, a nil
-             became a column of nils, silently, and an Integer or a String
-             stopped the C build. */
-          if (ty_is_object(at[j])) {
-            /* an object answering #to_ary zips as that Array; one answering
-               #each enumerates; any other is the scalar's TypeError */
-            int zdef = -1;
-            TyKind zk = obj_container_conv(c, at[j], "to_ary", &zdef);
-            if (zk != TY_UNKNOWN) {
-              const char *kz = zk == TY_POLY_ARRAY ? "Poly" : array_kind(zk);
-              buf_printf(b, " sp_%sArray *_t%d = ", kz ? kz : "Poly", tb[j]);
-              emit_obj_container_conv(c, argv[j], zdef, "to_ary", b);
-              /* rooted: the answer is the conversion's own allocation, read
-                 across every row the loop below allocates */
-              buf_printf(b, "; SP_GC_ROOT(_t%d);", tb[j]);
-              at[j] = kz ? zk : TY_POLY_ARRAY;
-              continue;
-            }
-            int zcid = ty_object_class(at[j]);
-            if (zcid >= 0 && comp_method_in_chain(c, zcid, "each", NULL) < 0) {
-              /* sp_zip_arg would send :each and answer NoMethodError; the
-                 class is settled, so name CRuby's TypeError here */
-              buf_printf(b, " sp_PolyArray *_t%d = ({ (void)(", tb[j]); emit_expr(c, argv[j], b);
-              buf_printf(b, "); sp_raise_cls(\"TypeError\", \"wrong argument type %s (must respond to :each)\"); (sp_PolyArray *)0; });",
-                         class_ruby_name(c, zcid));
-              at[j] = TY_POLY_ARRAY;
-              continue;
-            }
-          }
-          if (at[j] == TY_NIL || at[j] == TY_BOOL || at[j] == TY_INT ||
-              at[j] == TY_FLOAT || at[j] == TY_STRING || at[j] == TY_STRBUF ||
-              at[j] == TY_SYMBOL || at[j] == TY_VOID || ty_is_object(at[j]) ||
-              /* a Hash or an Enumerator DOES respond to :each; the same helper
-                 materializes it, where the typed line below spelled the slot
-                 sp_PolyArray* and assigned an sp_SymPolyHash* to it */
-              ty_is_hash(at[j]) || at[j] == TY_ENUMERATOR) {
-            buf_printf(b, " sp_PolyArray *_t%d = sp_zip_arg(", tb[j]);
-            emit_boxed(c, argv[j], b);
-            buf_puts(b, ");");
-            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
-            at[j] = TY_POLY_ARRAY;
-            continue;
-          }
-          /* a boxed (poly) argument -- e.g. an outer block param that holds an
-             array at runtime -- must be unboxed to a poly array, not assigned
-             raw into an sp_PolyArray* slot (#3190). */
-          if (at[j] == TY_POLY) {
-            buf_printf(b, " sp_PolyArray *_t%d = sp_poly_to_poly_array(", tb[j]);
-            emit_expr(c, argv[j], b);
-            buf_puts(b, ");");
-            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
-            at[j] = TY_POLY_ARRAY;
-            continue;
-          }
-          const char *kj = (at[j] == TY_POLY_ARRAY) ? "Poly" : (array_kind(at[j]) ? array_kind(at[j]) : "Poly");
-          buf_printf(b, " sp_%sArray *_t%d = ", kj, tb[j]); emit_expr(c, argv[j], b); buf_puts(b, ";");
-          buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
-        }
+        emit_zip_args(c, argv, nargs, tb, at, b);
         buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {",
                    ti, ti, ka, ta, ti);
@@ -4696,75 +4702,7 @@ else {
         Buf ra = expr_buf(c, recv);
         buf_printf(b, "({ sp_PolyArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
         buf_printf(b, " SP_GC_ROOT(_t%d);", ta);   /* see the typed arm; the loop re-reads this length every turn and allocates inside it */
-        for (int j = 0; j < nargs; j++) {
-          /* a Range argument materializes to its int array */
-          if (at[j] == TY_RANGE) {
-            int trj = ++g_tmp;
-            buf_printf(b, " sp_IntArray *_t%d = ({ sp_Range _t%d = ", tb[j], trj);
-            emit_expr(c, argv[j], b);
-            buf_printf(b, "; sp_range_to_ia(_t%d); }); SP_GC_ROOT(_t%d);", trj, tb[j]);
-            at[j] = TY_INT_ARRAY;
-            continue;
-          }
-          /* A scalar argument responds to no :each at all, which is CRuby's
-             TypeError naming its class. Read as a container regardless, a nil
-             became a column of nils, silently, and an Integer or a String
-             stopped the C build. */
-          if (ty_is_object(at[j])) {
-            /* an object answering #to_ary zips as that Array; one answering
-               #each enumerates; any other is the scalar's TypeError */
-            int zdef = -1;
-            TyKind zk = obj_container_conv(c, at[j], "to_ary", &zdef);
-            if (zk != TY_UNKNOWN) {
-              const char *kz = zk == TY_POLY_ARRAY ? "Poly" : array_kind(zk);
-              buf_printf(b, " sp_%sArray *_t%d = ", kz ? kz : "Poly", tb[j]);
-              emit_obj_container_conv(c, argv[j], zdef, "to_ary", b);
-              /* rooted: the answer is the conversion's own allocation, read
-                 across every row the loop below allocates */
-              buf_printf(b, "; SP_GC_ROOT(_t%d);", tb[j]);
-              at[j] = kz ? zk : TY_POLY_ARRAY;
-              continue;
-            }
-            int zcid = ty_object_class(at[j]);
-            if (zcid >= 0 && comp_method_in_chain(c, zcid, "each", NULL) < 0) {
-              /* sp_zip_arg would send :each and answer NoMethodError; the
-                 class is settled, so name CRuby's TypeError here */
-              buf_printf(b, " sp_PolyArray *_t%d = ({ (void)(", tb[j]); emit_expr(c, argv[j], b);
-              buf_printf(b, "); sp_raise_cls(\"TypeError\", \"wrong argument type %s (must respond to :each)\"); (sp_PolyArray *)0; });",
-                         class_ruby_name(c, zcid));
-              at[j] = TY_POLY_ARRAY;
-              continue;
-            }
-          }
-          if (at[j] == TY_NIL || at[j] == TY_BOOL || at[j] == TY_INT ||
-              at[j] == TY_FLOAT || at[j] == TY_STRING || at[j] == TY_STRBUF ||
-              at[j] == TY_SYMBOL || at[j] == TY_VOID || ty_is_object(at[j]) ||
-              /* a Hash or an Enumerator DOES respond to :each; the same helper
-                 materializes it, where the typed line below spelled the slot
-                 sp_PolyArray* and assigned an sp_SymPolyHash* to it */
-              ty_is_hash(at[j]) || at[j] == TY_ENUMERATOR) {
-            buf_printf(b, " sp_PolyArray *_t%d = sp_zip_arg(", tb[j]);
-            emit_boxed(c, argv[j], b);
-            buf_puts(b, ");");
-            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
-            at[j] = TY_POLY_ARRAY;
-            continue;
-          }
-          /* a boxed (poly) argument -- e.g. an outer block param that holds an
-             array at runtime -- must be unboxed to a poly array, not assigned
-             raw into an sp_PolyArray* slot (#3190). */
-          if (at[j] == TY_POLY) {
-            buf_printf(b, " sp_PolyArray *_t%d = sp_poly_to_poly_array(", tb[j]);
-            emit_expr(c, argv[j], b);
-            buf_puts(b, ");");
-            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
-            at[j] = TY_POLY_ARRAY;
-            continue;
-          }
-          const char *kj = (at[j] == TY_POLY_ARRAY) ? "Poly" : (array_kind(at[j]) ? array_kind(at[j]) : "Poly");
-          buf_printf(b, " sp_%sArray *_t%d = ", kj, tb[j]); emit_expr(c, argv[j], b); buf_puts(b, ";");
-          buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
-        }
+        emit_zip_args(c, argv, nargs, tb, at, b);
         buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++) {", ti, ti, ta, ti);
         buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new();", tpair);
@@ -7271,7 +7209,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
            did not participate binds nil). */
         int blk = nt_ref(nt, id, "block");
         int re_idx = re_lit_index(c, argv[0]);
-        int has_cap = re_idx >= 0 && re_has_captures(re_lit_src(c, argv[0]));
+        int has_cap = re_idx >= 0 && an_re_has_captures(re_lit_src(c, argv[0]));
         int np = 0; while (block_param_name(c, blk, np)) np++;
         int body = nt_ref(nt, blk, "body");
         int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
@@ -7356,11 +7294,11 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "_t%d", tr);
       }
       else if (sp_streq(name, "scan") && argc == 1 && re_lit_index(c, argv[0]) >= 0 &&
-               !re_has_captures(re_lit_src(c, argv[0]))) {
+               !an_re_has_captures(re_lit_src(c, argv[0]))) {
         buf_printf(b, "sp_re_scan(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
       }
       else if (sp_streq(name, "scan") && argc == 1 && re_lit_index(c, argv[0]) >= 0 &&
-               re_has_captures(re_lit_src(c, argv[0]))) {
+               an_re_has_captures(re_lit_src(c, argv[0]))) {
         buf_printf(b, "sp_re_scan_poly(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
       }
       else if (sp_streq(name, "scan") && argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {

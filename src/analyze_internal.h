@@ -90,7 +90,6 @@ int an_poly_raw_argc(const char *name);
 int an_user_ret_disagrees(Compiler *c, const char *name, TyKind want);
 int an_ty_holds_nil(TyKind t);
 int an_chunk_family_to_a(Compiler *c, int id);
-int an_re_has_captures(const char *src);
 const char *an_regex_lit_src(Compiler *c, int nid);
 int str_in(const char *s, const char *const *set);
 int is_arith_op(const char *op);

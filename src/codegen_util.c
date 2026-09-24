@@ -635,25 +635,6 @@ int re_engine_flags(int pf) {
   if (pf & 16) f |= 6;
   return f;
 }
-int re_has_captures(const char *src) {
-  if (!src) return 0;
-  int in_class = 0;
-  for (const char *p = src; *p; p++) {
-    if (*p == '\\') { if (p[1]) p++; continue; }
-    /* a `(` inside a `[...]` character class is a literal paren, not a group
-       (`/[()]/` has no captures) (#2912) */
-    if (in_class) { if (*p == ']') in_class = 0; continue; }
-    if (*p == '[') { in_class = 1; continue; }
-    if (*p == '(') {
-      if (p[1] != '?') return 1;
-      /* (?<name>...) / (?'name'...) are named CAPTURE groups (lookbehinds
-         (?<= (?<! are not) */
-      if (p[1] == '?' && p[2] == '<' && p[3] != '=' && p[3] != '!') return 1;
-      if (p[1] == '?' && p[2] == 0x27) return 1;
-    }
-  }
-  return 0;
-}
 /* The RegularExpressionNode behind `nid`, or -1 when the pattern is only
    knowable at run time. A bare literal, a constant bound to one
    (`PAT = /re/[.freeze]`, possibly namespaced) and a regex-typed local bound to
