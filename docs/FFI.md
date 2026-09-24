@@ -204,9 +204,18 @@ part of the spec: pass `buf.size` (or a count) as a separate argument.
 
 Lifetime is call-duration only, as for `:int_array`: the buffer is kept
 alive across the call, including a `blocking: true` call during which
-other threads collect, but the C side must not keep the pointer. Freeing
-or resizing the buffer from another thread while a `blocking: true` call
-uses it is a data race.
+other threads collect, but the C side must not keep the pointer. During a
+`blocking: true` call the buffer, and a slice's source, are locked: another
+thread that frees or resizes it gets `IO::Buffer::LockedError` instead of
+releasing memory C is still using. A zero-size buffer or slice passes
+`NULL`, and an instance of a user class held in a boxed value raises
+`TypeError` rather than passing its address.
+
+Nothing checks the length C uses. C sees only the base address, so a
+function that reads or writes past `buf.size` (because the count passed
+beside it is wrong, or because it assumes a larger buffer) overruns the
+buffer, exactly as with `:ptr`, `:int_array` or the ffi gem. Pass the
+buffer's own `size` (or a count derived from it) as the length argument.
 
 ### `ffi_const :NAME, <int>`
 

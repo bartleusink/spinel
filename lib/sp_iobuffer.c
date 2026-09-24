@@ -852,7 +852,32 @@ sp_IOBuffer *sp_IOBuffer_unlock(sp_IOBuffer *b) {
 void *sp_IOBuffer_ffi_base(sp_IOBuffer *b, sp_int writing) {
   if (!b) return NULL;
   if (writing) iob_writable(b);
-  return iob_ptr(b);
+  uint8_t *p = iob_ptr(b);          /* an invalidated slice raises first */
+  return b->size > 0 ? p : NULL;    /* a zero-size view is a null buffer too */
+}
+/* Held across a `blocking: true` call, during which other threads run: the
+   buffer, and a slice's source, are locked so that their free or resize
+   raises LockedError instead of releasing memory C is still using. Answers
+   what it locked (a buffer the program already holds locked stays so), for
+   sp_IOBuffer_ffi_release to undo exactly that. */
+sp_int sp_IOBuffer_ffi_hold(sp_IOBuffer *b) {
+  sp_int m = 0;
+  if (!b) return 0;
+  if (!(b->flags & SP_IOB_LOCKED)) { b->flags |= SP_IOB_LOCKED; m |= 1; }
+  if (b->source && !(b->source->flags & SP_IOB_LOCKED)) { b->source->flags |= SP_IOB_LOCKED; m |= 2; }
+  return m;
+}
+void sp_IOBuffer_ffi_release(sp_IOBuffer *b, sp_int m) {
+  if (!b) return;
+  if (m & 1) b->flags &= ~SP_IOB_LOCKED;
+  if ((m & 2) && b->source) b->source->flags &= ~SP_IOB_LOCKED;
+}
+/* the same for a boxed argument, which may not be a buffer at all */
+sp_int sp_IOBuffer_ffi_hold_v(sp_RbVal v, sp_int cls_id) {
+  return v.tag == SP_TAG_OBJ && v.cls_id == cls_id ? sp_IOBuffer_ffi_hold((sp_IOBuffer *)v.v.p) : 0;
+}
+void sp_IOBuffer_ffi_release_v(sp_RbVal v, sp_int cls_id, sp_int m) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == cls_id) sp_IOBuffer_ffi_release((sp_IOBuffer *)v.v.p, m);
 }
 /* a boxed pointer argument: an IO::Buffer (class `cls_id`) gives its base,
    anything else its raw pointer as before */

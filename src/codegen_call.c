@@ -29547,6 +29547,9 @@ else {
           const FfiSpecInfo *psi = ffi_spec_lookup(c->ffi_funcs[fi].args[ai]);
           if (!psi || !sp_streq(psi->c_type, "void *")) continue;
           TyKind pat = comp_ntype(c, argv[ai]);
+          /* a boxed argument that may be a buffer takes the same ordered,
+             rooted temp, its address taken after every argument has run */
+          if (pat == TY_POLY && iob_cls >= 0) { iob_temps = 1; continue; }
           if (!ty_is_object(pat)) continue;
           if (ty_object_class(pat) == iob_cls) { iob_temps = 1; continue; }
           if (!c->classes[ty_object_class(pat)].is_native_class)
@@ -29555,6 +29558,10 @@ else {
         int use_temps = blocking || iob_temps;
         Buf pre_buf; memset(&pre_buf, 0, sizeof pre_buf);
         Buf base_buf; memset(&base_buf, 0, sizeof base_buf);
+        /* blocking: the buffers are locked across the call (hold after every
+           base is taken, since taking one may raise) and released after it */
+        Buf hold_buf; memset(&hold_buf, 0, sizeof hold_buf);
+        Buf rel_buf; memset(&rel_buf, 0, sizeof rel_buf);
         int tb = use_temps ? ++g_tmp : 0;
         /* Build the raw C call */
         Buf call_buf; memset(&call_buf, 0, sizeof call_buf);
@@ -29585,8 +29592,18 @@ else {
               buf_printf(&pre_buf, "sp_RbVal _bk%d_%d = ", tb, ai);
               emit_expr(c, argv[ai], &pre_buf);
               buf_printf(&pre_buf, "; SP_GC_ROOT_RBVAL(_bk%d_%d); ", tb, ai);
+              /* a user-class instance has no C address: refused here, as the
+                 typed argument is refused while compiling, rather than
+                 handing C the object to write over */
+              buf_printf(&pre_buf, "if (_bk%d_%d.tag == SP_TAG_OBJ && _bk%d_%d.cls_id >= 0 && "
+                                   "_bk%d_%d.cls_id < (sp_int)sizeof sp_ffi_user_cls && sp_ffi_user_cls[_bk%d_%d.cls_id]) "
+                                   "sp_raise_cls(\"TypeError\", sp_sprintf(\"no implicit conversion of %%s into a C pointer\", "
+                                   "sp_poly_class_name(_bk%d_%d))); ",
+                         tb, ai, tb, ai, tb, ai, tb, ai, tb, ai);
               buf_printf(&base_buf, "void * _b%d_%d = sp_IOBuffer_ffi_ptr(_bk%d_%d, %d, %d); ",
                          tb, ai, tb, ai, iob_cls, iob_writing);
+              buf_printf(&hold_buf, "sp_int _bh%d_%d = sp_IOBuffer_ffi_hold_v(_bk%d_%d, %d); ", tb, ai, tb, ai, iob_cls);
+              buf_printf(&rel_buf, "sp_IOBuffer_ffi_release_v(_bk%d_%d, %d, _bh%d_%d); ", tb, ai, iob_cls, tb, ai);
             }
             else {
               buf_printf(&pre_buf, "sp_IOBuffer *_bk%d_%d = ", tb, ai);
@@ -29594,14 +29611,10 @@ else {
               buf_printf(&pre_buf, "; SP_GC_ROOT(_bk%d_%d); ", tb, ai);
               buf_printf(&base_buf, "void * _b%d_%d = sp_IOBuffer_ffi_base(_bk%d_%d, %d); ",
                          tb, ai, tb, ai, iob_writing);
+              buf_printf(&hold_buf, "sp_int _bh%d_%d = sp_IOBuffer_ffi_hold(_bk%d_%d); ", tb, ai, tb, ai);
+              buf_printf(&rel_buf, "sp_IOBuffer_ffi_release(_bk%d_%d, _bh%d_%d); ", tb, ai, tb, ai);
             }
             buf_printf(&call_buf, "_b%d_%d", tb, ai);
-            continue;
-          }
-          if (ptr_slot && iob_cls >= 0 && at == TY_POLY) {
-            buf_puts(&call_buf, "sp_IOBuffer_ffi_ptr(");
-            emit_expr(c, argv[ai], &call_buf);
-            buf_printf(&call_buf, ", %d, %d)", iob_cls, iob_writing);
             continue;
           }
           /* :ptr already emits a void*; str/int_array/float_array carry a const
@@ -29716,11 +29729,13 @@ else {
           /* the worker is out of the world for exactly the call */
           Buf w; memset(&w, 0, sizeof w);
           if (is_void_ret)
-            buf_printf(&w, "({ %s%ssp_native_enter(); %s; sp_native_leave(); })",
-                       pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", call_buf.p);
+            buf_printf(&w, "({ %s%s%ssp_native_enter(); %s; sp_native_leave(); %s})",
+                       pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", hold_buf.p ? hold_buf.p : "",
+                       call_buf.p, rel_buf.p ? rel_buf.p : "");
           else
-            buf_printf(&w, "({ %s%s%s _b%d_r; sp_native_enter(); _b%d_r = %s; sp_native_leave(); _b%d_r; })",
-                       pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", ffi_c_type(ret_spec), tb, tb, call_buf.p, tb);
+            buf_printf(&w, "({ %s%s%s%s _b%d_r; sp_native_enter(); _b%d_r = %s; sp_native_leave(); %s_b%d_r; })",
+                       pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", hold_buf.p ? hold_buf.p : "",
+                       ffi_c_type(ret_spec), tb, tb, call_buf.p, rel_buf.p ? rel_buf.p : "", tb);
           free(call_buf.p); call_buf = w;
         }
         else if (use_temps) {
@@ -29734,6 +29749,8 @@ else {
         }
         free(pre_buf.p);
         free(base_buf.p);
+        free(hold_buf.p);
+        free(rel_buf.p);
         if (is_void_ret) {
           buf_puts(b, "("); buf_puts(b, call_buf.p); buf_puts(b, ", (sp_int)0)");
         }

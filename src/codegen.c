@@ -10838,9 +10838,21 @@ char *codegen_program(const NodeTable *nt) {
       buf_puts(&b, ");\n");
     }
     /* IO::Buffer as an ffi_func pointer argument (codegen_call.c) */
-    if (cf->n_ffi_funcs > 0 && ffi_iobuffer_class(cf) >= 0)
+    if (cf->n_ffi_funcs > 0 && ffi_iobuffer_class(cf) >= 0) {
       buf_puts(&b, "extern void *sp_IOBuffer_ffi_base(sp_IOBuffer *, sp_int);\n"
-                   "extern void *sp_IOBuffer_ffi_ptr(sp_RbVal, sp_int, sp_int);\n");
+                   "extern void *sp_IOBuffer_ffi_ptr(sp_RbVal, sp_int, sp_int);\n"
+                   "extern sp_int sp_IOBuffer_ffi_hold(sp_IOBuffer *);\n"
+                   "extern void sp_IOBuffer_ffi_release(sp_IOBuffer *, sp_int);\n"
+                   "extern sp_int sp_IOBuffer_ffi_hold_v(sp_RbVal, sp_int);\n"
+                   "extern void sp_IOBuffer_ffi_release_v(sp_RbVal, sp_int, sp_int);\n");
+      /* which class ids are user classes, whose instances have no C address:
+         a boxed pointer argument holding one is refused at run time */
+      buf_printf(&b, "static const unsigned char sp_ffi_user_cls[%d] __attribute__((unused)) = {", cf->nclasses > 0 ? cf->nclasses : 1);
+      for (int k = 0; k < cf->nclasses; k++)
+        buf_printf(&b, "%s%d", k ? "," : "", (!cf->classes[k].is_native_class && !is_builtin_reopen(cf->classes[k].name)) ? 1 : 0);
+      if (cf->nclasses == 0) buf_puts(&b, "0");
+      buf_puts(&b, "};\n");
+    }
     /* native_obj link markers: the spinel driver links each object only when
        its module's require-gate feature is enabled (i.e. the require appears). */
     for (int noi = 0; noi < cf->n_native_objs; noi++) {

@@ -156,6 +156,10 @@ sp_IOBuffer *sp_IOBuffer_become_map(sp_IOBuffer *b, sp_RbVal io, sp_int size, sp
    argument and passes anything but an IO::Buffer through as its pointer. */
 void *sp_IOBuffer_ffi_base(sp_IOBuffer *b, sp_int writing);
 void *sp_IOBuffer_ffi_ptr(sp_RbVal v, sp_int cls_id, sp_int writing);
+sp_int sp_IOBuffer_ffi_hold(sp_IOBuffer *b);
+void sp_IOBuffer_ffi_release(sp_IOBuffer *b, sp_int m);
+sp_int sp_IOBuffer_ffi_hold_v(sp_RbVal v, sp_int cls_id);
+void sp_IOBuffer_ffi_release_v(sp_RbVal v, sp_int cls_id, sp_int m);
 
 /* IO::Buffer::PAGE_SIZE (the mapped-allocation threshold) */
 sp_int sp_IOBuffer_page_size(void);
