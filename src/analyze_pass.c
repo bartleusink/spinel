@@ -7629,18 +7629,19 @@ int infer_block_params(Compiler *c) {
     else continue;
     Scope *call_scope = comp_scope_of(c, id);
     int call_cls = call_scope ? call_scope->class_id : -1;
-    for (int w = 0; w < nt->count; w++) {
-      const char *wty = nt_type(nt, w);
-      if (!wty) continue;
+    /* the writes of that name, through the kind index (every match is
+       taken, so the kinds' order does not matter) */
+    static const NodeKind wk_local[] = { NK_LocalVariableWriteNode };
+    static const NodeKind wk_const[] = { NK_ConstantWriteNode, NK_ConstantPathWriteNode };
+    static const NodeKind wk_ivar[] = { NK_InstanceVariableWriteNode };
+    const NodeKind *wks = want_kind == 0 ? wk_local : want_kind == 1 ? wk_const : wk_ivar;
+    int nwk = want_kind == 1 ? 2 : 1;
+    for (int wki = 0; wki < nwk; wki++)
+    NT_FOREACH_KIND(nt, wks[wki], w) {
       if (want_kind == 0) {
-        if (!sp_streq(wty, "LocalVariableWriteNode")) continue;
         if (comp_scope_of(c, w) != call_scope) continue;
       }
-      else if (want_kind == 1) {
-        if (!sp_streq(wty, "ConstantWriteNode") && !sp_streq(wty, "ConstantPathWriteNode")) continue;
-      }
-      else {
-        if (!sp_streq(wty, "InstanceVariableWriteNode")) continue;
+      else if (want_kind == 2) {
         Scope *ws = comp_scope_of(c, w);
         if (!ws || ws->class_id != call_cls) continue;
       }
@@ -8038,9 +8039,7 @@ int infer_block_params(Compiler *c) {
           c->scopes[mi].blk_param && c->scopes[mi].blk_param[0]) {
         const char *bpname = c->scopes[mi].blk_param;
         Scope *bs = comp_scope_of(c, block);
-        for (int bid = 0; bid < nt->count; bid++) {
-          const char *bty2 = nt_type(nt, bid);
-          if (!bty2 || !sp_streq(bty2, "CallNode")) continue;
+        NT_FOREACH_KIND(nt, NK_CallNode, bid) {
           const char *bcn = nt_str(nt, bid, "name");
           if (!bcn || !sp_streq(bcn, "call")) continue;
           int brecv = nt_ref(nt, bid, "receiver");
