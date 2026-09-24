@@ -83,10 +83,22 @@ module URI
     end
   end
 
+  # `URI::HTTPS.build(host: "api.github.com", path: "/x")` -- a URI from
+  # its components rather than from a string. CRuby also takes an Array
+  # of components in order, and validates each one; the keyword form is
+  # the one an application writes, and validation is absent here the way
+  # it is for the component writers above. The port is left nil unless
+  # given, so #to_s leaves it off exactly as CRuby does for the default.
   class HTTP < Generic
+    def self.build(userinfo: nil, host: nil, port: nil, path: "", query: nil, fragment: nil)
+      HTTP.new("http", userinfo, host, port, path, query, fragment)
+    end
   end
 
   class HTTPS < HTTP
+    def self.build(userinfo: nil, host: nil, port: nil, path: "", query: nil, fragment: nil)
+      HTTPS.new("https", userinfo, host, port, path, query, fragment)
+    end
   end
 
   # Percent-encode one www-form component: everything but the unreserved set,
