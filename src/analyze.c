@@ -828,7 +828,12 @@ else {
     int const_is_class = 0;
     if (const_recv) {
       int ci = comp_class_index(c, nt_str(nt, recv, "name"));
-      if (ci >= 0) { const_is_class = 1; mi = comp_cmethod_in_chain(c, ci, name, NULL); }
+      if (ci >= 0) {
+        const_is_class = 1; mi = comp_cmethod_in_chain(c, ci, name, NULL);
+        /* `Klass.new { }` with no `def self.new` hands the block to
+           initialize, which lifts it like any method keeping a real &block */
+        if (mi < 0 && sp_streq(name, "new")) mi = comp_method_in_chain(c, ci, "initialize", NULL);
+      }
     }
     /* A constant that names no class is an ordinary VALUE (`CONFIG.each { }`),
        so it is typed like any other receiver -- including poly, whose dispatch
@@ -14662,6 +14667,10 @@ void analyze_program(Compiler *c) {
                  nt_kind(c->nt, frecv) == NK_ConstantPathNode) {
           int fci = comp_class_index(c, nt_str(c->nt, frecv, "name"));
           if (fci >= 0) fmi = comp_cmethod_in_chain(c, fci, fn, NULL);
+          /* `Klass.new(&b)` with no `def self.new` hands the block to
+             initialize, which may store it */
+          if (fci >= 0 && fmi < 0 && sp_streq(fn, "new"))
+            fmi = comp_method_in_chain(c, fci, "initialize", NULL);
         }
         /* This pass runs before the receiver's type settles, so an unresolved
            receiver falls back to the name: any block-taking method that could

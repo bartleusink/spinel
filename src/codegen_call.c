@@ -10025,11 +10025,17 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         if (initm >= 0 && c->scopes[initm].blk_param && c->scopes[initm].blk_param[0] &&
             !c->scopes[initm].yields) {
           if (c->scopes[initm].nparams > 0) buf_puts(b, ", ");
-          int blk = nt_ref(nt, id, "block");
+          /* A forwarded `&blk` / `&` of an inlined enclosing method resolves to
+             that method's literal block (as in emit_method_call); one that
+             survives names a real proc param (anonymous `&` in a real-function
+             body) and emit_forwarded_proc_arg writes it. */
+          int blk = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
           const char *bty = blk >= 0 ? nt_type(nt, blk) : NULL;
           int bexpr = (bty && sp_streq(bty, "BlockArgumentNode")) ? nt_ref(nt, blk, "expression") : -1;
           if (bty && sp_streq(bty, "BlockNode"))
             emit_proc_literal(c, blk, b);
+          else if (bty && sp_streq(bty, "BlockArgumentNode") && bexpr < 0)
+            emit_forwarded_proc_arg(c, blk, b);
           /* A forwarded `&proc` (BlockArgumentNode) threads the proc value
              itself into the stored `&blk`. This is faithful now that every proc
              publishes its result on the boxed return channel, so a later
