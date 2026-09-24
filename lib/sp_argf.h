@@ -14,7 +14,7 @@
 typedef struct{const char**data;sp_int len;}sp_Argv;
 extern sp_Argv sp_argv;               /* defined in the generated TU */
 
-typedef struct { sp_int idx; FILE *cur; int started; const char *fname; } sp_Argf;
+typedef struct { FILE *cur; int started; const char *fname; } sp_Argf;
 extern sp_Argf sp_argf_obj;            /* defined in the generated TU */
 
 /* the ARGV-as-poly-array materialization cache: allocated lazily by

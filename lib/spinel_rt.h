@@ -1312,7 +1312,7 @@ static const char *sp_program_name = SPL("");
 #ifdef SPINEL_EXT_HOST
 extern sp_Argf sp_argf_obj;
 #else
-sp_Argf sp_argf_obj = {0, NULL, 0, NULL};   /* type in sp_argf.h */
+sp_Argf sp_argf_obj = {NULL, 0, NULL};   /* type in sp_argf.h */
 #endif
 
 /* Mark active in-flight exception messages. Most raises pass string
@@ -1365,6 +1365,7 @@ static void sp_re_mark_globals(void) {
   SP_GLB_PHASE("globals:argv");
   for (sp_int i = 0; i < sp_argv.len; i++) sp_mark_string(sp_argv.data[i]);
   if (sp_argv_array_cache) sp_gc_mark(sp_argv_array_cache);
+  sp_mark_string(sp_argf_obj.fname);   /* the file ARGF took off ARGV */
   SP_GLB_PHASE("globals:exceptions");
   sp_mark_in_flight_exceptions();
   SP_GLB_PHASE("globals:proc-homes");
