@@ -6543,23 +6543,37 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
              instead of casting .v.p to a non-existent sp_<Prim> struct. */
           const char *_dcn = c->classes[defcls].c_name;
           char _dself[320];
+          int _dstruct = 0;   /* the receiver is a struct pointer in .v.p */
           if (sp_streq(_dcn, "Integer") || sp_streq(_dcn, "Numeric")) snprintf(_dself, sizeof _dself, "_t%d.v.i", tv);
           else if (sp_streq(_dcn, "Float")) snprintf(_dself, sizeof _dself, "_t%d.v.f", tv);
           else if (sp_streq(_dcn, "String")) snprintf(_dself, sizeof _dself, "_t%d.v.s", tv);
           else if (sp_streq(_dcn, "Symbol")) snprintf(_dself, sizeof _dself, "(sp_sym)_t%d.v.i", tv);
           /* a by-value (value-type) class method takes self by value:
              dereference the boxed pointer instead of passing it (#2441) */
-          else if (c->classes[defcls].is_value_type)
-            snprintf(_dself, sizeof _dself, "*(sp_%s *)_t%d.v.p", _dcn, tv);
-          else snprintf(_dself, sizeof _dself, "(sp_%s *)_t%d.v.p", _dcn, tv);
+          else if (c->classes[defcls].is_value_type) {
+            snprintf(_dself, sizeof _dself, "*(sp_%s *)_t%d.v.p", _dcn, tv); _dstruct = 1; }
+          else { snprintf(_dself, sizeof _dself, "(sp_%s *)_t%d.v.p", _dcn, tv); _dstruct = 1; }
           /* a yielding candidate is called through its proc-form clone (#3399) */
           int pfi9 = scope_proc_form_of(c, mi);
           buf_printf(&cb, "sp_%s_%s(%s", _dcn,
                      mc(pfi9 >= 0 ? c->scopes[pfi9].name : c->scopes[mi].name), _dself);
           if (c->scopes[mi].nparams > 0) {
             const char *saved_self = g_self;
+            const char *saved_deref = g_self_deref;
             char selfpbuf[320];  /* stack-local: nested inlines each need their own receiver buffer */
-            snprintf(selfpbuf, sizeof selfpbuf, "%s", _dself);
+            /* A default reads the receiver's ivars as `<self><deref><iv>`, so
+               the receiver is parenthesized: a bare cast binds looser than
+               `->`. A by-value class is spelled as the dereferenced value, so
+               a `self` default passes what the callee takes. */
+            if (_dstruct && c->classes[defcls].is_value_type) {
+              snprintf(selfpbuf, sizeof selfpbuf, "(*(sp_%s *)_t%d.v.p)", _dcn, tv);
+              g_self_deref = ".";
+            }
+            else if (_dstruct) {
+              snprintf(selfpbuf, sizeof selfpbuf, "((sp_%s *)_t%d.v.p)", _dcn, tv);
+              g_self_deref = "->";
+            }
+            else snprintf(selfpbuf, sizeof selfpbuf, "%s", _dself);
             g_self = selfpbuf;
             /* the defaults are spelled for the proc form's own parameter
                types when that is the symbol called (#4492) */
@@ -6567,7 +6581,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             for (int a = 0; a < ds->nparams; a++) {
               buf_puts(&cb, ", "); emit_arg_or_default(c, ds, a, -1, &cb);
             }
-            g_self = saved_self;
+            g_self = saved_self; g_self_deref = saved_deref;
           }
           /* self is always the first argument here, so a zero-param method
              still needs the separator the helper only adds after a real
@@ -7815,6 +7829,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         /* Sized for the longest class name a bundle produces: at 64 the cast
            was silently truncated to `..._t2.v` and the build stopped. */
         char selfpbuf2[320];  /* stack-local: nested inlines each need their own receiver buffer */
+        int self2_struct = 0;
         /* A reopened primitive's method takes the unboxed value, not a struct
            pointer -- read the matching union field instead of casting .v.p to
            a non-existent sp_<Prim> struct (#4219), as the zero-arg dispatch's
@@ -7828,8 +7843,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             snprintf(selfpbuf2, sizeof selfpbuf2, "_t%d.v.s", tv);
           else if (sp_streq(_dcn2, "Symbol"))
             snprintf(selfpbuf2, sizeof selfpbuf2, "(sp_sym)_t%d.v.i", tv);
-          else
-            snprintf(selfpbuf2, sizeof selfpbuf2, "(sp_%s *)_t%d.v.p", _dcn2, tv); }
+          /* parenthesized: a default reading an ivar spells `<self>->iv_x`,
+             and a bare cast binds looser than `->` */
+          else {
+            snprintf(selfpbuf2, sizeof selfpbuf2, "((sp_%s *)_t%d.v.p)", _dcn2, tv);
+            self2_struct = 1; } }
         /* The ARGUMENT differs from the inline receiver: a by-value class
            takes self BY VALUE, so the boxed pointer is dereferenced for the
            call while g_self keeps the pointer form its ivar reads want. The
@@ -7840,6 +7858,16 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                    mc(pfi8 >= 0 ? c->scopes[pfi8].name : c->scopes[mi].name),
                    c->classes[defcls].is_value_type ? "*" : "", selfpbuf2);
         const char *saved_self = g_self;
+        /* the defaults below read ivars off this receiver, whatever the
+           calling scope's own self is; a by-value class is the value form */
+        const char *saved_deref = g_self_deref;
+        char selfdbuf2[340];
+        snprintf(selfdbuf2, sizeof selfdbuf2, "%s", selfpbuf2);
+        if (self2_struct && c->classes[defcls].is_value_type) {
+          snprintf(selfdbuf2, sizeof selfdbuf2, "(*%s)", selfpbuf2);
+          g_self_deref = ".";
+        }
+        else if (self2_struct) g_self_deref = "->";
         int r_idx = ms->rest_idx;
         int npost = ms->npost_rest;
         int rest_end = pos_argc - npost;   /* where the *rest collection stops */
@@ -7906,7 +7934,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
               else { emit_obj_upcast_prefix(c, kpt, at, &pa); buf_puts(&pa, tn); }
             }
             else {
-              g_self = selfpbuf2;
+              g_self = selfdbuf2;
               emit_arg_or_default(c, ms, a, -1, &pa);
               g_self = saved_self;
             }
@@ -7994,7 +8022,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             else { emit_obj_upcast_prefix(c, pt, at, &pa); buf_puts(&pa, tn); }
           }
 else {
-            g_self = selfpbuf2;
+            g_self = selfdbuf2;
             emit_arg_or_default(c, ms, a, -1, &pa);
             g_self = saved_self;
           }
@@ -8023,7 +8051,7 @@ else {
           free(pa.p);
         }
         g_nren = pd_ren_base;
-        g_self = saved_self;
+        g_self = saved_self; g_self_deref = saved_deref;
         if (c->scopes[mi].nparams == 0 && c->scopes[mi].blk_param &&
             c->scopes[mi].blk_param[0] && !c->scopes[mi].yields)
           buf_puts(&cb, ", ");   /* self is the first argument; see the zero-arg dispatch */
