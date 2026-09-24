@@ -4163,6 +4163,113 @@ void register_include_attrs(Compiler *c) {
   }
 }
 
+/* The class a `super` from class `ci`'s method `mname` lands on answers it with
+   an attribute: attr_reader/writer/accessor or a Struct member, declared there
+   or by a module it includes. A reader or writer is copied down into every
+   subclass (inherit_members), so the class that declares it is the highest one
+   still holding it; a `def` found on the way up answers first. */
+static int super_lands_on_attr(Compiler *c, int ci, const char *base, int want_write) {
+  char mname[300];
+  snprintf(mname, sizeof mname, want_write ? "%s=" : "%s", base);
+  ClassInfo *self_cls = &c->classes[ci];
+  for (int k = 0; k < self_cls->nincluded_mods; k++) {
+    int mi = self_cls->included_mods[k];
+    if (mi < 0 || mi >= c->nclasses || mi == ci) continue;
+    ClassInfo *mod = &c->classes[mi];
+    if (want_write ? comp_is_writer(mod, base) : comp_is_reader(mod, base)) return 1;
+  }
+  for (int k = self_cls->parent; k >= 0; k = c->classes[k].parent) {
+    if (comp_method_in_class(c, k, mname) >= 0) return 0;
+    ClassInfo *kc = &c->classes[k];
+    if (!(want_write ? comp_is_writer(kc, base) : comp_is_reader(kc, base))) continue;
+    int up = kc->parent;
+    if (up < 0 || !(want_write ? comp_is_writer(&c->classes[up], base)
+                               : comp_is_reader(&c->classes[up], base)))
+      return 1;
+  }
+  return 0;
+}
+
+/* `super` from a method overriding an attribute calls the generated reader or
+   writer, which has no function of its own: it reads or writes the backing
+   ivar. Rewrite the super into that ivar access in place, so the write types
+   the ivar like any other and the value is the written argument. Left alone,
+   the super found no method in the chain and raised NoMethodError. */
+void rewrite_attr_supers(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    NodeKind nk = nt_kind(nt, id);
+    if (nk != NK_SuperNode && nk != NK_ForwardingSuperNode) continue;
+    if (nt_ref(nt, id, "block") >= 0) continue;
+    Scope *s = comp_scope_of(c, id);
+    if (!s || !s->name || s->class_id < 0 || s->is_cmethod) continue;
+    ClassInfo *cls = &c->classes[s->class_id];
+    if (comp_class_is_module(c, cls)) continue;
+    if (comp_prep_chain_target(c, s->class_id, s->name)) continue;
+    const char *uname = comp_prep_user_name(s->name);
+    char base[256];
+    int is_write = name_is_plain_setter(uname);
+    if (is_write) { if (!setter_base_name(uname, base, sizeof base)) continue; }
+    else if (snprintf(base, sizeof base, "%s", uname) >= (int)sizeof base) continue;
+    /* the value a writer's super passes: the one explicit argument, or the
+       method's one plain positional parameter for a bare super */
+    int val = -1;
+    const char *fwd_name = NULL;
+    if (nk == NK_SuperNode) {
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (an != (is_write ? 1 : 0)) continue;
+      if (is_write) {
+        NodeKind ak = nt_kind(nt, av[0]);
+        const char *aty = nt_type(nt, av[0]);
+        if (ak == NK_SplatNode || ak == NK_KeywordHashNode || ak == NK_BlockArgumentNode ||
+            (aty && sp_streq(aty, "ForwardingArgumentsNode")))
+          continue;
+        val = av[0];
+      }
+    }
+    else {
+      int dn = s->def_node;
+      int params = dn >= 0 ? nt_ref(nt, dn, "parameters") : -1;
+      int nkw = 0, nopt = 0, nreq = 0, npost = 0;
+      if (params >= 0) {
+        nt_arr(nt, params, "keywords", &nkw);
+        nt_arr(nt, params, "optionals", &nopt);
+        nt_arr(nt, params, "requireds", &nreq);
+        nt_arr(nt, params, "posts", &npost);
+        if (nt_ref(nt, params, "rest") >= 0 || nt_ref(nt, params, "keyword_rest") >= 0 ||
+            nt_ref(nt, params, "block") >= 0 || nkw || npost)
+          continue;
+      }
+      if (nreq + nopt != (is_write ? 1 : 0) || s->nparams != nreq + nopt) continue;
+      if (is_write) fwd_name = s->pnames[0];
+    }
+    if (!super_lands_on_attr(c, s->class_id, base, is_write)) continue;
+    char ivn[260];
+    snprintf(ivn, sizeof ivn, "@%s", base);
+    int line = (int)nt_int(nt, id, "node_line", 0);
+    int file = (int)nt_int(nt, id, "node_file", 0);
+    if (fwd_name) {
+      val = nt_new_node(nt, "LocalVariableReadNode");
+      if (val < 0) continue;
+      nt_node_set_str(nt, val, "name", fwd_name);
+      nt_node_set_int(nt, val, "depth", 0);
+      if (line) nt_node_set_int(nt, val, "node_line", line);
+      if (file) nt_node_set_int(nt, val, "node_file", file);
+      comp_grow_node_arrays(c);
+      c->nscope[val] = c->nscope[id];
+    }
+    nt_node_reset(nt, id, is_write ? "InstanceVariableWriteNode" : "InstanceVariableReadNode");
+    nt_node_set_str(nt, id, "name", ivn);
+    if (is_write) nt_node_set_ref(nt, id, "value", val);
+    if (line) nt_node_set_int(nt, id, "node_line", line);
+    if (file) nt_node_set_int(nt, id, "node_file", file);
+    comp_ivar_intern(cls, ivn);
+  }
+}
+
 /* A module method named by `Mod.instance_method(:m)` / `Mod.method(:m)` is
    referenced directly, so its own function must be emitted even though an
    include copied it into a class (which marks the source transplanted and

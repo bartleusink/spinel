@@ -207,6 +207,7 @@ void resolve_inherited_aliases(Compiler *c);
 void process_include_body(Compiler *c, int ci, int body_node);
 void register_includes(Compiler *c);
 void register_include_attrs(Compiler *c);
+void rewrite_attr_supers(Compiler *c);
 void unmark_referenced_module_sources(Compiler *c);
 void register_extends(Compiler *c);
 int cmethod_has_bare_new(Compiler *c, int mi);
