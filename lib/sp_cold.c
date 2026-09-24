@@ -3148,7 +3148,32 @@ const char *sp_argf_gets(void) {
     if (!sp_argf_ensure()) return NULL;
     char buf[8192];
     if (fgets(buf, sizeof buf, sp_argf_obj.cur)) {
-      size_t l = strlen(buf); char *r = sp_str_alloc_raw(l + 1); memcpy(r, buf, l + 1); return r;
+      size_t l = strlen(buf);
+      if (l < sizeof buf - 1 || buf[l - 1] == '\n') {
+        char *r = sp_str_alloc_raw(l + 1); memcpy(r, buf, l + 1); return r;
+      }
+      /* the line filled the buffer: read on to its newline or the end of
+         the file, so a long line comes back whole */
+      size_t n = l, cap = 2 * sizeof buf;
+      char *acc = (char *)malloc(cap);
+      if (!acc) sp_oom_die();
+      memcpy(acc, buf, l + 1);
+      while (fgets(buf, sizeof buf, sp_argf_obj.cur)) {
+        l = strlen(buf);
+        if (n + l + 1 > cap) {
+          while (n + l + 1 > cap) cap *= 2;
+          char *g = (char *)realloc(acc, cap);
+          if (!g) sp_oom_die();
+          acc = g;
+        }
+        memcpy(acc + n, buf, l + 1);
+        n += l;
+        if (l < sizeof buf - 1 || buf[l - 1] == '\n') break;
+      }
+      char *r = sp_str_alloc_raw(n + 1);
+      memcpy(r, acc, n + 1);
+      free(acc);
+      return r;
     }
     if (sp_argf_obj.cur && sp_argf_obj.cur != stdin) fclose(sp_argf_obj.cur);
     sp_argf_obj.cur = NULL;  /* EOF on this stream; advance on next ensure */
