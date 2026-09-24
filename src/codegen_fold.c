@@ -5788,16 +5788,22 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
      an instance-method default referencing self keeps the caller's g_self,
      correct for the common same-class implicit-self call. */
   const char *sv_self_dv = g_self, *sv_deref_dv = g_self_deref;
+  int sv_emcls_dv = g_emitting_class_id;
   char dv_self9[32];
   if (dv >= 0 && m->class_id >= 0 && m->is_cmethod) {
     snprintf(dv_self9, sizeof dv_self9, "((sp_Class){%d})", m->class_id);
     g_self = dv_self9;
   }
   /* A constructor's default runs on the object being built, which exists by
-     the time this is emitted (the ctor allocates first, then initializes). */
+     the time this is emitted (the ctor allocates first, then initializes).
+     Its receiverless calls are that class's methods too: emitted with the
+     caller's class, `N.new` from another class's method could not find the
+     helper a recursive default calls, and refused the call or raised
+     NoMethodError at run time. */
   else if (dv >= 0 && g_ctor_self && m->name && sp_streq(m->name, "initialize")) {
     g_self = g_ctor_self;
     g_self_deref = g_ctor_self_deref ? g_ctor_self_deref : "->";
+    g_emitting_class_id = m->class_id;
   }
   if (dv < 0) {
     /* A missing required arg pads the slot with a zero-ish compat value so
@@ -5870,6 +5876,7 @@ else if (dty && sp_streq(dty, "NilNode")) {
     }
   }
   g_self = sv_self_dv; g_self_deref = sv_deref_dv;
+  g_emitting_class_id = sv_emcls_dv;
 }
 
 /* Emit a comma-separated argument list filling defaults for omitted
