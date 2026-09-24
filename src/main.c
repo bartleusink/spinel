@@ -32,6 +32,7 @@
   #include <mach-o/dyld.h>
 #endif
 #include <sys/wait.h>
+#include <sys/stat.h>
 
 extern int g_no_root_elision;
 extern int g_no_root_frame;
@@ -251,6 +252,9 @@ static int write_text_file(const char *path, const char *text) {
    [src_at, src_end) in it, the compile flags before it and the link inputs
    after it. Returns 0 when the binary is built; anything else leaves the
    caller to run the single-unit command, whose diagnostics name the .rb. */
+/* the generated unit's size from which a build splits unasked */
+#define SPLIT_AUTO_BYTES (4L << 20)
+
 static int cc_split_build(const char *cmd, size_t src_at, size_t src_end,
                           const char *c_path, int jobs) {
   if (jobs > 64) jobs = 64;
@@ -357,6 +361,7 @@ static void usage(void) {
     "                 costs up to twice the C compile time\n"
     "  --cc=CMD    C compiler (default: cc)\n"
     "  --jobs=N    compile the generated C as N units in parallel\n"
+    "              (default: split only a unit of 4 MB or more; --jobs=1 never)\n"
     "  --target=wasm32-wasi  Build a WebAssembly module for a WASI host with the\n"
     "              wasi-sdk at $WASI_SDK (default /opt/wasi-sdk); Integer is 32-bit,\n"
     "              and Fiber, Thread, processes and sockets are not available there\n"
@@ -396,7 +401,7 @@ int main(int argc, char **argv) {
   const char *rbs_dir = NULL;
   int c_only = 0, stdout_mode = 0, run_mode = 0, dump_ast = 0;
   int print_build = 0;   /* --print-build: emit the build ingredients, run nothing */
-  int cc_jobs = 1;       /* --jobs=N: compile the C as N units in parallel (#4847) */
+  int cc_jobs = 0;       /* --jobs=N: compile the C as N units in parallel (#4847); 0 = auto */
   int emit_rbs = 0, emit_types = 0, emit_symbol_map = 0;
   int debug = 0, line_map = 1, want_g = 0, profile = 0, warn_widen = 0;
   /* Accumulated -e source and the program ARGV after the -E boundary. */
@@ -1185,6 +1190,18 @@ int main(int argc, char **argv) {
   }
   free(bi.p);
   int cc_rc = -1;
+  /* Unasked, only a large unit is split: a part cannot inline what another
+     part defines, which cost optcarrot's 0.6 MB unit ~10% of its speed, and
+     run time comes before build time. A unit this large is where cc's one
+     core is the build (campfire's 10 MB: 77 s whole, 36 s split). */
+  if (cc_jobs == 0) {
+    struct stat cst;
+    cc_jobs = 1;
+    if (stat(c_path, &cst) == 0 && cst.st_size >= SPLIT_AUTO_BYTES) {
+      long nc = sysconf(_SC_NPROCESSORS_ONLN);
+      cc_jobs = nc > 16 ? 16 : nc > 1 ? (int)nc : 1;
+    }
+  }
   if (cc_jobs > 1 && !target_wasi)
     cc_rc = cc_split_build(cmd.p, cc_src_at, cc_src_end, c_path, cc_jobs);
   /* SPINEL_SPLIT_STRICT: a split that fails is the failure (for tests of the
