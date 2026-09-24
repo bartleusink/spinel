@@ -5878,14 +5878,41 @@ static int pd_hoist(Compiler *c, Buf *b, size_t from, int tr, TyKind rct,
   return 1;
 }
 
+/* The positional layout CRuby binds by: `lead` required parameters, then the
+   optionals and the rest, then `ntail` required ones from `tail_from` on. The
+   tail is the rest's posts, or without a rest the required parameters after
+   the last optional (`def f(a = 1, b)`): CRuby funds the required ones first,
+   so those read from the END of the arguments, and an optional only gets a
+   value when the count leaves one over. */
+static void poly_splat_layout(Compiler *c, Scope *ms, int *lead, int *ntail, int *tail_from) {
+  int r = ms->rest_idx, lo = -1, first = -1;
+  *lead = 0;
+  for (int i = 0; i < ms->nparams; i++) {
+    const char *pn = ms->pnames ? ms->pnames[i] : NULL;
+    if (!pn || callee_param_is_declared_kwarg(c, ms, pn)) continue;
+    int opt = i == r || (ms->pdefault && ms->pdefault[i] >= 0);
+    if (opt) { lo = i; if (first < 0) first = i; }
+    else if (first < 0) (*lead)++;
+  }
+  if (r >= 0) { *ntail = ms->npost_rest; *tail_from = r + 1; return; }
+  *ntail = 0; *tail_from = lo + 1;
+  for (int i = lo + 1; lo >= 0 && i < ms->nparams; i++) {
+    const char *pn = ms->pnames ? ms->pnames[i] : NULL;
+    if (pn && !callee_param_is_declared_kwarg(c, ms, pn)) (*ntail)++;
+  }
+}
+
 /* The count check of a poly-dispatch arm whose call ends in a splat: the
    `sa` arguments ahead of it plus whatever the array temp `st` holds, judged
    against this arm's positional parameters, as CRuby judges it. Refuses what
    the arm cannot spread: a **kwrest, a required keyword, a synthesized
-   parameter, and parameters after a rest that the leading arguments may fund. */
+   parameter, and a required tail when the leading arguments reach past the
+   leading required parameters, so which of them the tail takes depends on
+   the array's length. */
 static void emit_poly_splat_arity(Compiler *c, int id, Scope *ms, int sa, int st, Buf *b) {
-  if (ms->cs_synth || ms->kwrest_idx >= 0 ||
-      (ms->rest_idx >= 0 && ms->npost_rest > 0 && sa > ms->rest_idx))
+  int lead, ntail, tail_from;
+  poly_splat_layout(c, ms, &lead, &ntail, &tail_from);
+  if (ms->cs_synth || ms->kwrest_idx >= 0 || (ntail > 0 && sa > lead))
     unsupported(c, id, "a splat into this parameter list, on a value of more than one type");
   int req = 0, tot = 0;
   for (int i = 0; i < ms->nparams; i++) {
@@ -5911,9 +5938,10 @@ static void emit_poly_splat_arity(Compiler *c, int id, Scope *ms, int sa, int st
 }
 
 /* Parameter `a` of that arm: a leading argument's temp, an element of the
-   array, the rest packed from both, or a parameter after the rest from the
+   array, the rest packed from both, or a required tail parameter from the
    array's end. The count was judged by the arm first, so every read below is
-   in range; an optional parameter past the array keeps its default. */
+   in range; an optional parameter the count does not reach keeps its
+   default. */
 static void emit_poly_splat_param(Compiler *c, Scope *ms, int a, int sa, const int *atmp,
                                   const TyKind *atmp_ty, const char *selfp, Buf *pa) {
   int st = atmp[sa];
@@ -5921,7 +5949,8 @@ static void emit_poly_splat_param(Compiler *c, Scope *ms, int a, int sa, const i
   LocalVar *pv = scope_local(ms, pnm);
   TyKind pt = pv ? pv->type : TY_POLY;
   if (pt == TY_UNKNOWN) pt = TY_POLY;
-  int r = ms->rest_idx, npost = r >= 0 ? ms->npost_rest : 0;
+  int r = ms->rest_idx, lead, npost, tail_from;
+  poly_splat_layout(c, ms, &lead, &npost, &tail_from);
   const char *saved_self = g_self;
   if (callee_param_is_declared_kwarg(c, ms, pnm)) {
     g_self = selfp; emit_arg_or_default(c, ms, a, -1, pa); g_self = saved_self;
@@ -5950,13 +5979,14 @@ static void emit_poly_splat_param(Compiler *c, Scope *ms, int a, int sa, const i
     return;
   }
   char el[96];
-  if (r >= 0 && a > r)
-    snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, _t%d->len - %d)", st, st, npost - (a - r - 1));
+  int is_tail = npost > 0 && a >= tail_from;
+  if (is_tail)
+    snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, _t%d->len - %d)", st, st, npost - (a - tail_from));
   else
     snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, %d)", st, a - sa);
   Buf eb; memset(&eb, 0, sizeof eb);
   emit_unbox_text(c, pt, el, &eb);
-  if (ms->pdefault && ms->pdefault[a] >= 0) {
+  if (!is_tail && ms->pdefault && ms->pdefault[a] >= 0) {
     Buf db; memset(&db, 0, sizeof db);
     g_self = selfp; emit_arg_or_default(c, ms, a, -1, &db); g_self = saved_self;
     buf_printf(pa, "(%d < _t%d->len - %d ? %s : %s)", a - sa, st, npost,
