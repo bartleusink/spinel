@@ -5935,6 +5935,20 @@ else {
           unsupported_feature(c, id, "Hash#value? of a user object defining == in a typed Hash");
           return 0;
         }
+        /* a boxed argument against a typed hash: compared boxed, pair by
+           pair, so a value of another kind is simply not found; passed raw,
+           the sp_RbVal reached a const char * parameter (#4939) */
+        if (!poly && comp_ntype(c, argv[0]) == TY_POLY) {
+          int th = ++g_tmp, ta = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          buf_printf(b, "({ sp_RbVal _t%d = ", th); emit_boxed(c, recv, b);
+          buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", th, ta); emit_expr(c, argv[0], b);
+          buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_bool _t%d = 0;", ta, tr);
+          buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_poly_length(_t%d); _t%d++) {"
+                        " sp_RbVal _k, _v; sp_poly_hash_pair(_t%d, _t%d, &_k, &_v);"
+                        " if (sp_poly_eq(_v, _t%d)) { _t%d = 1; break; } } _t%d; })",
+                     ti, ti, th, ti, th, ti, ta, tr, tr);
+          return 1;
+        }
         if (!poly && value_kind_misses(c, argv[0], ty_hash_val(rt))) {
           buf_puts(b, "({ (void)("); emit_expr(c, recv, b); buf_puts(b, "); (void)("); emit_expr(c, argv[0], b); buf_puts(b, "); 0; })");
           return 1;
