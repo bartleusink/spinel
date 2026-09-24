@@ -5986,6 +5986,14 @@ static int poly_arm_count(Compiler *c, Scope *m, int kwh, int pos_argc, int spla
   return pos_argc + fills + named >= need ? 1 : 0;
 }
 
+/* A zero-argument call that method `mi` refuses by count: its poly-dispatch
+   arm raises ArgumentError (`exp` holds the "given .., expected .." part) where the arm
+   used to be dropped for a nonzero nrequired, which answered NoMethodError.
+   nrequired is an index, not a count: `def h(a = {}, c)` has 2. */
+static int poly_arm_refuses_none(Compiler *c, int mi, char *exp, size_t n) {
+  return mi >= 0 && poly_arm_count(c, &c->scopes[mi], -1, 0, -1, exp, n) < 0;
+}
+
 /* Parameter `a` of that arm: a leading argument's temp, an element of the
    array, the rest packed from both, or a required tail parameter from the
    array's end. The count was judged by the arm first, so every read below is
@@ -6524,7 +6532,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       emit_poly_callable_prearm(c, name, 0, NULL, NULL, tv, tr, ret, b);
       int cls0_d = -1, cls0_rd = -1;
       int cls0_mi = c->nclasses > 0 ? comp_method_in_chain(c, 0, name, &cls0_d) : -1;
+      char cls0_exp[48];
       int cls0_cand = ((cls0_mi >= 0 && c->scopes[cls0_mi].nrequired == 0) ||
+                       /* an arm refusing no arguments raises, and is a `case 0:` all the same */
+                       poly_arm_refuses_none(c, cls0_mi, cls0_exp, sizeof cls0_exp) ||
                        (c->nclasses > 0 && comp_reader_in_chain(c, 0, name, &cls0_rd))) &&
                       c->nclasses > 0 &&
                       (c->classes[0].instantiated || class_is_prim_reopen(c, 0));
@@ -6536,7 +6547,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       for (int k = 0; k < c->nclasses && !prim_cand0; k++) {
         if (!class_is_prim_reopen(c, k)) continue;
         int pmi = comp_method_in_chain(c, k, name, NULL);
-        if (pmi >= 0 && c->scopes[pmi].nrequired == 0 &&
+        char pexp[48];
+        if (pmi >= 0 && (c->scopes[pmi].nrequired == 0 || poly_arm_refuses_none(c, pmi, pexp, sizeof pexp)) &&
             (scope_has_callable_symbol(c, pmi) || scope_needs_proc_form(c, pmi)))
           prim_cand0 = 1;
       }
@@ -6584,6 +6596,13 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            class can never be the receiver of this poly value anyway. */
         /* A yielding candidate has a proc form emitted for exactly this
            dispatch (#3399); it is as callable as any other symbol here. */
+        { char zexp[48]; int rdc0 = -1;
+          if (poly_arm_refuses_none(c, mi, zexp, sizeof zexp) &&
+              !comp_reader_in_chain(c, k, name, &rdc0)) {
+            buf_printf(b, " case %d: sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
+                          " (%s)\"); break;", k, zexp);
+            continue;
+          } }
         if (mi >= 0 && c->scopes[mi].nrequired == 0 &&
             (scope_has_callable_symbol(c, mi) || scope_needs_proc_form(c, mi))) {
           nd_callee(c, id, mi, defcls, 1);   /* one switch arm (#4557) */
@@ -6851,6 +6870,13 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             buf_puts(b, "; break;");
             obj_default_done = 1;
           }
+          /* ... and one that needs arguments refuses them for any receiver */
+          else { char oexp[48];
+            if (obj_def == obj_cls && poly_arm_refuses_none(c, obj_mi, oexp, sizeof oexp)) {
+              buf_printf(b, " default: sp_raise_cls(\"ArgumentError\", \"wrong number of arguments"
+                            " (%s)\"); break;", oexp);
+              obj_default_done = 1;
+            } }
         } }
       /* to_s / inspect are universal: a poly value that is a builtin scalar
          (int, float, string, ...) rather than one of the enumerated user
