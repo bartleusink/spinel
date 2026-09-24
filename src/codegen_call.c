@@ -194,7 +194,10 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
      sp_X *. The inlined body reaches its ivars through g_self + g_self_deref, so
      match the deref to the storage: "." for a value-type local, "->" for a
      pointer. */
-  buf_printf(b, "sp_%s %s_t%d = sp_%s_new(", c->classes[ci].c_name, is_val ? "" : "*", st, c->classes[ci].c_name);
+  /* the body is spliced below, so only the allocation: sp_X_new would run
+     it a second time through the clone */
+  buf_printf(b, "sp_%s %s_t%d = sp_%s_new%s(", c->classes[ci].c_name, is_val ? "" : "*", st,
+             c->classes[ci].c_name, ctor_init_proc_form(c, ci) >= 0 ? "_noinit" : "");
   emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", b);
   buf_puts(b, ");\n");
   /* The constructor rooted the fresh object for its own extent only: it
