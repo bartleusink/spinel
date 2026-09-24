@@ -3844,7 +3844,16 @@ static int rd_subtree_calls(const NodeTable *nt, int id, const char *want, int *
       const char *nm = nt_str(nt, id, "name");
       if (nm && (sp_streq(nm, "block_given?") || sp_streq(nm, "__method__") ||
                  sp_streq(nm, "binding"))) *bad = 1;
-      if (want && rd_call_name_is(nm, want)) hit = 1;
+      /* only a call that can reach this method: receiverless or on self, or
+         `new` on a constant for an initialize. Another receiver's method of
+         the same name (`@cpu.update` in APU#update's default) is not this
+         one, and rewriting its default widened the program's types */
+      int rv = nt_ref(nt, id, "receiver");
+      const char *rvt = rv >= 0 ? nt_type(nt, rv) : NULL;
+      int reach = rv < 0 || (rvt && sp_streq(rvt, "SelfNode")) ||
+                  (nm && sp_streq(nm, "new") && rvt &&
+                   (sp_streq(rvt, "ConstantReadNode") || sp_streq(rvt, "ConstantPathNode")));
+      if (want && reach && rd_call_name_is(nm, want)) hit = 1;
     }
   }
   const SpNode *nd = &nt->nodes[id];
