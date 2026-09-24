@@ -3784,7 +3784,11 @@ int desugar_builtin_scalar_calls(Compiler *c) {
    The call site then inlines only the call to the helper, and the recursion
    happens at run time inside the helper's body, as it does in CRuby. Only
    defaults on such a cycle are rewritten. */
-typedef struct { int def; int param; int val; int bad; } RdDefault;
+typedef struct {
+  int def, param, val, bad;
+  const char *cls;   /* the enclosing class or module's name, NULL at top level */
+  int singleton;     /* `def self.m`, or a def inside `class << self` */
+} RdDefault;
 
 /* `alias` / `alias_method` pairs, new name then old, collected once per run */
 static const char **rd_alias = NULL;
@@ -3818,7 +3822,6 @@ static void rd_collect_aliases(const NodeTable *nt) {
 
 static int rd_call_name_is(const char *nm, const char *want) {
   if (!nm || !want) return 0;
-  if (sp_streq(nm, "new")) return sp_streq(want, "initialize");
   for (int hop = 0; nm && hop < 8; hop++) {
     if (sp_streq(nm, want)) return 1;
     const char *old = NULL;
@@ -3829,10 +3832,60 @@ static int rd_call_name_is(const char *nm, const char *want) {
   return 0;
 }
 
-/* Does the subtree at `id` call a method named `want`? `*bad` is set when it
-   holds something that would mean another thing inside a method of its own:
-   the caller's block, `super`, the method's name. */
-static int rd_subtree_calls(const NodeTable *nt, int id, const char *want, int *bad) {
+/* Does `X.new` run the initialize of class `cls`: X is cls, or a subclass
+   that inherits cls's initialize without defining its own? Classes are
+   matched by their last name segment, before any scope exists. */
+static int rd_new_reaches(const NodeTable *nt, const char *x, const char *cls, int depth) {
+  if (!x || !cls || depth > 16) return 0;
+  if (sp_streq(x, cls)) return 1;
+  for (int id = 0; id < nt->count; id++) {
+    if (!fwd_node_is(nt, id, "ClassNode")) continue;
+    const char *cn = nt_str(nt, nt_ref(nt, id, "constant_path"), "name");
+    if (!cn || !sp_streq(cn, x)) continue;
+    int bn = 0; const int *bv = nt_arr(nt, nt_ref(nt, id, "body"), "body", &bn);
+    for (int k = 0; k < bn; k++)
+      if (fwd_node_is(nt, bv[k], "DefNode") && nt_ref(nt, bv[k], "receiver") < 0 &&
+          nt_str(nt, bv[k], "name") && sp_streq(nt_str(nt, bv[k], "name"), "initialize"))
+        return 0;
+    const char *sup = nt_str(nt, nt_ref(nt, id, "superclass"), "name");
+    if (sup && rd_new_reaches(nt, sup, cls, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+/* Can `call`, in the default `from`, reach the method default `want`
+   belongs to? Only calls that name their target without a value to type
+   count: receiverless or on self by name, `Const.new` for the initialize
+   Const runs, `Const.m` for a singleton method of the class Const, and a
+   bare `new` in a singleton method for its own class's initialize. Another
+   receiver's method of the same name (`@cpu.update` in APU#update's
+   default) is not this one, and neither is `Array.new` for a user class's
+   initialize: rewriting those widened types, or made a helper whose call
+   could not be emitted. A cycle through a call not followed here is
+   refused at emit time instead. */
+static int rd_call_reaches(const NodeTable *nt, int call, const RdDefault *from,
+                           const RdDefault *want) {
+  const char *nm = nt_str(nt, call, "name");
+  const char *wn = nt_str(nt, want->def, "name");
+  if (!nm || !wn) return 0;
+  int init = sp_streq(wn, "initialize") && !want->singleton;
+  int r = nt_ref(nt, call, "receiver");
+  if (r < 0 || fwd_node_is(nt, r, "SelfNode")) {
+    if (sp_streq(nm, "new"))
+      return init && from->singleton && from->cls && want->cls && sp_streq(from->cls, want->cls);
+    return rd_call_name_is(nm, wn);
+  }
+  if (!fwd_node_is(nt, r, "ConstantReadNode") && !fwd_node_is(nt, r, "ConstantPathNode")) return 0;
+  const char *cn = nt_str(nt, r, "name");
+  if (sp_streq(nm, "new")) return init && rd_new_reaches(nt, cn, want->cls, 0);
+  return want->singleton && cn && want->cls && sp_streq(cn, want->cls) && rd_call_name_is(nm, wn);
+}
+
+/* Does the subtree at `id` call the method default `want` belongs to? `*bad`
+   is set when it holds something that would mean another thing inside a
+   method of its own: the caller's block, `super`, the method's name. */
+static int rd_subtree_calls(const NodeTable *nt, int id, const RdDefault *from,
+                            const RdDefault *want, int *bad) {
   if (id < 0 || id >= nt->count) return 0;
   const char *ty = nt_type(nt, id);
   int hit = 0;
@@ -3844,22 +3897,14 @@ static int rd_subtree_calls(const NodeTable *nt, int id, const char *want, int *
       const char *nm = nt_str(nt, id, "name");
       if (nm && (sp_streq(nm, "block_given?") || sp_streq(nm, "__method__") ||
                  sp_streq(nm, "binding"))) *bad = 1;
-      /* only a call that can reach this method: receiverless or on self, or
-         `new` on a constant for an initialize. Another receiver's method of
-         the same name (`@cpu.update` in APU#update's default) is not this
-         one, and rewriting its default widened the program's types */
-      int rv = nt_ref(nt, id, "receiver");
-      const char *rvt = rv >= 0 ? nt_type(nt, rv) : NULL;
-      int reach = rv < 0 || (rvt && sp_streq(rvt, "SelfNode")) ||
-                  (nm && sp_streq(nm, "new") && rvt &&
-                   (sp_streq(rvt, "ConstantReadNode") || sp_streq(rvt, "ConstantPathNode")));
-      if (want && reach && rd_call_name_is(nm, want)) hit = 1;
+      if (want && rd_call_reaches(nt, id, from, want)) hit = 1;
     }
   }
   const SpNode *nd = &nt->nodes[id];
-  for (int j = 0; j < nd->nr; j++) hit |= rd_subtree_calls(nt, nd->r[j].ref, want, bad);
+  for (int j = 0; j < nd->nr; j++) hit |= rd_subtree_calls(nt, nd->r[j].ref, from, want, bad);
   for (int j = 0; j < nd->na; j++)
-    for (int k = 0; k < nd->a[j].n; k++) hit |= rd_subtree_calls(nt, nd->a[j].ids[k], want, bad);
+    for (int k = 0; k < nd->a[j].n; k++)
+      hit |= rd_subtree_calls(nt, nd->a[j].ids[k], from, want, bad);
   return hit;
 }
 
@@ -3934,24 +3979,41 @@ int desugar_recursive_param_defaults(Compiler *c) {
         ds = g;
       }
       ds[nd].def = def; ds[nd].param = ps[i]; ds[nd].val = v; ds[nd].bad = 0;
-      rd_subtree_calls(nt, v, NULL, &ds[nd].bad);
+      rd_subtree_calls(nt, v, NULL, NULL, &ds[nd].bad);
       nd++;
     }
   }
   if (nd == 0) { free(ds); return 0; }
+  int *parent = malloc(sizeof(int) * (size_t)n0);
+  if (!parent) { free(ds); return 0; }
+  for (int k = 0; k < n0; k++) parent[k] = -1;
+  rd_mark_parents(nt, parent, n0);
+  for (int i = 0; i < nd; i++) {
+    ds[i].cls = NULL;
+    ds[i].singleton = fwd_node_is(nt, nt_ref(nt, ds[i].def, "receiver"), "SelfNode");
+    for (int p = parent[ds[i].def]; p >= 0; p = parent[p]) {
+      if (fwd_node_is(nt, p, "SingletonClassNode")) ds[i].singleton = 1;
+      if (fwd_node_is(nt, p, "ClassNode") || fwd_node_is(nt, p, "ModuleNode")) {
+        ds[i].cls = nt_str(nt, nt_ref(nt, p, "constant_path"), "name");
+        break;
+      }
+    }
+  }
   rd_collect_aliases(nt);
   /* edge i -> j: default i calls the method default j belongs to */
   unsigned char *edge = calloc((size_t)nd * (size_t)nd, 1);
   int *stack = malloc(sizeof(int) * (size_t)nd);
   unsigned char *seen = malloc((size_t)nd);
-  if (!edge || !stack || !seen) { free(edge); free(stack); free(seen); free(ds); return 0; }
+  if (!edge || !stack || !seen) {
+    free(edge); free(stack); free(seen); free(ds); free(parent);
+    return 0;
+  }
   for (int i = 0; i < nd; i++)
     for (int j = 0; j < nd; j++) {
       int bad = 0;
       edge[(size_t)i * nd + j] =
-        (unsigned char)rd_subtree_calls(nt, ds[i].val, nt_str(nt, ds[j].def, "name"), &bad);
+        (unsigned char)rd_subtree_calls(nt, ds[i].val, &ds[i], &ds[j], &bad);
     }
-  int *parent = NULL;
   int changed = 0;
   for (int i = 0; i < nd; i++) {
     /* is default i reachable from itself? */
@@ -3979,12 +4041,6 @@ int desugar_recursive_param_defaults(Compiler *c) {
       if (before) args[na++] = an; else later_read = 1;
     }
     if (later_read) continue;
-    if (!parent) {
-      parent = malloc(sizeof(int) * (size_t)n0);
-      if (!parent) break;
-      for (int k = 0; k < n0; k++) parent[k] = -1;
-      rd_mark_parents(nt, parent, n0);
-    }
     int stmt = def, stmts = parent[def];
     while (stmts >= 0 && !fwd_node_is(nt, stmts, "StatementsNode")) { stmt = stmts; stmts = parent[stmts]; }
     if (stmts < 0) continue;
