@@ -1024,6 +1024,25 @@ void mark_proc_captures(Compiler *c) {
   }
   free(pdepth);
 
+  /* The two walks per captured name below read only two kinds of node: the
+     writes, and the procs and block calls that may bind the name. Listed
+     once, in node order, they were whole-table walks per name per proc. */
+  int *wl = malloc(sizeof(int) * (size_t)(nt->count + 1));
+  int *ql = malloc(sizeof(int) * (size_t)(nt->count + 1));
+  char *qproc = calloc((size_t)nt->count + 1, 1);
+  int nwl = 0, nql = 0;
+  if (wl && ql && qproc)
+    for (int q = 0; q < nt->count; q++) {
+      if (a_is_write_node(nt_type(nt, q))) wl[nwl++] = q;
+      int qp = is_proc_create(c, q);
+      int qb = 0;
+      if (!qp && nt_kind(nt, q) == NK_CallNode) {
+        int qblk = nt_ref(nt, q, "block");
+        qb = qblk >= 0 && nt_kind(nt, qblk) == NK_BlockNode;
+      }
+      if (qp || qb) { qproc[q] = (char)qp; ql[nql++] = q; }
+    }
+
   for (int id = 0; id < nt->count; id++) {
     if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_into_poly(c, id)) continue;
     /* A fiber/generator only needs a cell for a *value-type* capture, where a
@@ -1105,9 +1124,9 @@ void mark_proc_captures(Compiler *c) {
       if (!lv) continue;                              /* not an enclosing local */
       int owned = lv->is_param;
       int myframe = procof ? procof[id] : -1;
-      for (int w = 0; w < nt->count && !owned; w++) {
+      for (int wi = 0; wi < nwl && !owned; wi++) {
+        int w = wl[wi];
         if (c->nscope[w] != encl) continue;
-        if (!a_is_write_node(nt_type(nt, w))) continue;
         const char *wn = nt_str(nt, w, "name");
         if (!wn || !sp_streq(wn, nm)) continue;
         if (!procof) { if (!inproc[w]) owned = 1; continue; }
@@ -1138,7 +1157,8 @@ void mark_proc_captures(Compiler *c) {
       int shadow = 0;
       {
         int owned_q = 0;
-        for (int q = 0; q < nt->count && !owned_q; q++) {
+        for (int qi = 0; qi < nql && !owned_q; qi++) {
+          int q = ql[qi];
           if (q == id) continue;
           /* An INLINED iteration block binds its params in the loop, where the
              emitters write the plain C slot -- so celling one needs the slot
@@ -1146,14 +1166,8 @@ void mark_proc_captures(Compiler *c) {
              top of the body. Refusing instead left a proc lifted out of a
              nested block with nowhere to read the enclosing loop variable, and
              the emitter had to reject the whole program. */
-          int q_is_proc = is_proc_create(c, q);
-          int q_is_block = 0;
-          if (!q_is_proc) {
-            const char *qty = nt_type(nt, q);
-            int qblk = qty && sp_streq(qty, "CallNode") ? nt_ref(nt, q, "block") : -1;
-            const char *qbt = qblk >= 0 ? nt_type(nt, qblk) : NULL;
-            q_is_block = qbt && sp_streq(qbt, "BlockNode");
-          }
+          int q_is_proc = qproc[q];
+          int q_is_block = !q_is_proc;   /* listed: a proc or a block call */
           /* One shared cell per loop, not one per iteration: only a proc the
              call CONSUMES while the iteration runs may read it. A `proc {}` /
              lambda / Fiber / Thread body outlives its iteration -- Ruby gives
@@ -1199,7 +1213,7 @@ void mark_proc_captures(Compiler *c) {
     free(params.v); free(used.v);
   }
   free(procof);
-  free(inproc);
+  free(inproc); free(wl); free(ql); free(qproc);
 }
 
 /* ---- bigint loop-variable detection ---- */
@@ -14012,6 +14026,7 @@ static int bam_wrapper_binds_receiver(Compiler *c, Scope *sc) {
   const char *rty = nt_type(nt, recv), *rnm = nt_str(nt, recv, "name");
   return rty && sp_streq(rty, "LocalVariableReadNode") && rnm && sp_streq(rnm, "__bam_r");
 }
+
 
 void analyze_program(Compiler *c) {
   comp_poly_candidates_reset();
