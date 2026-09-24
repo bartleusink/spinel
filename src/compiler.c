@@ -209,7 +209,32 @@ void comp_add_gvar_alias(Compiler *c, const char *from, const char *to) {
   c->gvar_alias_to[c->ngvar_aliases]   = strdup(to);
   c->ngvar_aliases++;
 }
-LocalVar *comp_const(Compiler *c, const char *name) { return lv_find(c->consts, c->nconsts, name); }
+/* Constants are looked up by name on every read the analysis types, and a
+   large program has thousands: a hash over the names, rebuilt when the table
+   grows or moves (its names are unique, interned by comp_const_intern). */
+static int *cst_idx; static int cst_cap, cst_n = -1; static const LocalVar *cst_base;
+static unsigned cst_hash(const char *s) { unsigned h = 2166136261u; for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u; return h; }
+LocalVar *comp_const(Compiler *c, const char *name) {
+  if (!name) return NULL;
+  if (c->nconsts < 16) return lv_find(c->consts, c->nconsts, name);
+  if (cst_n != c->nconsts || cst_base != c->consts) {
+    int cap = 64;
+    while (cap < c->nconsts * 2) cap *= 2;
+    free(cst_idx);
+    cst_idx = malloc(sizeof(int) * (size_t)cap);
+    for (int i = 0; i < cap; i++) cst_idx[i] = -1;
+    for (int i = 0; i < c->nconsts; i++) {
+      unsigned j = cst_hash(c->consts[i].name) & (unsigned)(cap - 1);
+      while (cst_idx[j] >= 0) j = (j + 1) & (unsigned)(cap - 1);
+      cst_idx[j] = i;
+    }
+    cst_cap = cap; cst_n = c->nconsts; cst_base = c->consts;
+  }
+  unsigned j = cst_hash(name) & (unsigned)(cst_cap - 1);
+  for (; cst_idx[j] >= 0; j = (j + 1) & (unsigned)(cst_cap - 1))
+    if (sp_streq(c->consts[cst_idx[j]].name, name)) return &c->consts[cst_idx[j]];
+  return NULL;
+}
 LocalVar *comp_const_intern(Compiler *c, const char *name) { return lv_intern(&c->consts, &c->nconsts, &c->cconsts, name); }
 
 /* Intern a symbol name of a known BYTE length. A symbol's name may hold a NUL
