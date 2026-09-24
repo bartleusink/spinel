@@ -12189,9 +12189,12 @@ static int brk_block_direct_only(const NodeTable *nt, int node, int depth) {
   return 1;
 }
 /* The wrapper below can skip its sp_brk_push + setjmp when the iterator
-   splices the block as a C loop and every break in it is the goto: a typed
+   splices the block as a C loop and every break in it is the goto: a
    container or Integer receiver's builtin iterator, or an inlined yielding
-   user method. Anything else (a boxed receiver dispatching to a user each
+   user method. The container includes an Array of boxed values and an
+   object array, whose walks are the same C loop: the Ruby-written any?,
+   all?, none? and find break out of `__self.each` over exactly those, once
+   per call. Anything else (a boxed receiver dispatching to a user each
    that lifts the block, an Enumerator driven by the runtime) keeps the
    serial-addressed scope. */
 int brk_wrapper_light(Compiler *c, int id) {
@@ -12209,7 +12212,7 @@ int brk_wrapper_light(Compiler *c, int id) {
   }
   if (recv < 0) return 0;
   TyKind rt = comp_ntype(c, recv);
-  return (ty_is_array(rt) && rt != TY_POLY_ARRAY) || ty_is_hash(rt) ||
+  return ty_is_array(rt) || ty_is_obj_array(rt) || ty_is_hash(rt) ||
          rt == TY_RANGE || rt == TY_INT || rt == TY_STRING;
 }
 /* The volatile analysis's question (scope_has_begin): will this wrapper
