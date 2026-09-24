@@ -2064,9 +2064,7 @@ int method_recv_node(Compiler *c, int recv) {
   if (rty && sp_streq(rty, "LocalVariableReadNode")) {
     const char *vn = nt_str(nt, recv, "name");
     Scope *sc = comp_scope_of(c, recv);
-    for (int w = 0; w < nt->count; w++) {
-      const char *wty = nt_type(nt, w);
-      if (!wty || !sp_streq(wty, "LocalVariableWriteNode")) continue;
+    NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
       if (comp_scope_of(c, w) != sc) continue;
       const char *wn = nt_str(nt, w, "name");
       if (!wn || !vn || !sp_streq(wn, vn)) continue;
@@ -2092,15 +2090,14 @@ int proc_to_proc_method_node(Compiler *c, int recv) {
     const char *vn = nt_str(nt, recv, "name");
     Scope *sc = comp_scope_of(c, recv);
     cand = -1;
-    for (int w = 0; w < nt->count; w++) {
-      const char *wty = nt_type(nt, w);
-      if (!wty || !sp_streq(wty, "LocalVariableWriteNode")) continue;
+    /* the writes only, through the kind index (the first one that is a call) */
+    NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+      if (cand >= 0) continue;
       if (comp_scope_of(c, w) != sc) continue;
       const char *wn = nt_str(nt, w, "name");
       if (!wn || !vn || !sp_streq(wn, vn)) continue;
       int val = nt_ref(nt, w, "value");
-      const char *vty = val >= 0 ? nt_type(nt, val) : NULL;
-      if (vty && sp_streq(vty, "CallNode")) { cand = val; break; }
+      if (val >= 0 && nt_kind(nt, val) == NK_CallNode) cand = val;
     }
   }
   if (cand < 0) return -1;
