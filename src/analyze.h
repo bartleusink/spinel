@@ -174,5 +174,12 @@ int class_is_blank_slate(Compiler *c, int ci);        /* explicit `< BasicObject
 int proc_to_proc_method_node(Compiler *c, int recv); /* the method(:sym) node behind <method>.to_proc */
 int method_call_param_shift(Compiler *c, int mn, int mi); /* 1 when self carries param[0] (__bam wrapper) */
 
+/* Can a call ever arrive at an instance method of class/module `ci`? Only
+   through a value that is one, so a class nobody instantiates -- and that no
+   instantiated class inherits from or includes -- cannot be reached. Unsure
+   (out-of-range ci) answers 1. Shared by the by-reference name group
+   (analyze.c) and codegen's user_defines_or_reads. */
+int an_class_can_be_reached(Compiler *c, int ci);
+
 int a_block_is_lifted(Compiler *c, int id);
 #endif

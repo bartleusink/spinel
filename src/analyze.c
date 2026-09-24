@@ -10919,7 +10919,7 @@ int comp_byref_param(Compiler *c, Scope *m, int idx) {
    from a used one (#4390). Unsure answers 1: giving the group one member too
    many costs an optimisation, and one too few would hand a poly dispatch two
    arms with different C signatures. */
-static int an_class_can_be_reached(Compiler *c, int ci) {
+int an_class_can_be_reached(Compiler *c, int ci) {
   if (ci < 0 || ci >= c->nclasses) return 1;
   if (c->classes[ci].instantiated) return 1;
   for (int j = 0; j < c->nclasses; j++) {
