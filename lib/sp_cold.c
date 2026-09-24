@@ -3103,6 +3103,17 @@ sp_int sp_int_pow(sp_int base, sp_int exp) {
 #include "sp_argf.h"
 
 sp_StrArray *sp_argv_array_cache = NULL;
+
+void *sp_main_obj = NULL;
+sp_RbVal sp_main_self(void) {
+  void *m = __atomic_load_n(&sp_main_obj, __ATOMIC_ACQUIRE);
+  if (!m) {
+    void *fresh = sp_gc_alloc(1, NULL, NULL);   /* sizeof(sp_Object) */
+    if (__atomic_compare_exchange_n(&sp_main_obj, &m, fresh, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      m = fresh;   /* else another thread won; m holds its object */
+  }
+  return sp_box_obj(m, SP_BUILTIN_OBJECT);
+}
 sp_StrArray *sp_get_ARGV(void) {
   if (!sp_argv_array_cache) {
     sp_argv_array_cache = sp_StrArray_new();

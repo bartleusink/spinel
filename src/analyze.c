@@ -1569,6 +1569,13 @@ int ie_class_of(Compiler *c, int node) {
            ? g_ie_node_class[node] : -1;
 }
 
+/* Whether `self` at node is top-level self, the main object (#4926): no
+   enclosing class and no instance_eval/exec receiver rebinding it. */
+int self_is_main(Compiler *c, int node) {
+  Scope *s = comp_scope_of(c, node);
+  return s && s->class_id < 0 && an_ie_class_id < 0 && ie_class_of(c, node) < 0;
+}
+
 /* Register an ivar first assigned inside an instance_exec/instance_eval block on
    the block's receiver class. register_locals only interns ivar writes whose
    enclosing scope is a class body or method; an ivar written solely inside a

@@ -712,6 +712,12 @@ static void __attribute__((noinline, cold)) sp_raise_frozen_array_v(sp_RbVal v) 
   sp_raise_frozen_array_rv(v);
 }
 
+/* Top-level self, the main object (#4926): a bare Object allocated on first
+   use, whose to_s / inspect answer "main". sp_main_obj is its pointer, a GC
+   root marked with the runtime globals; lib/sp_cold.c. */
+extern void *sp_main_obj;
+sp_RbVal sp_main_self(void);
+
 /* sp_PolyArray: a growable array of boxed values. The first
    SP_POLYARR_INLINE elements live in the object itself: an array that never
    outgrows them has no payload, so no finalizer, so the sweep never touches

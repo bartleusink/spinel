@@ -2128,7 +2128,11 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     }
     return;
   }
-  if (sp_streq(ty, "SelfNode")) { buf_puts(b, g_self); return; }  /* self is the object reference (pointer) */
+  if (sp_streq(ty, "SelfNode")) {
+    /* top-level self is main, which no C scope holds (#4926) */
+    if (self_is_main(c, id)) { buf_puts(b, "sp_main_self()"); return; }
+    buf_puts(b, g_self); return;   /* self is the object reference (pointer) */
+  }
   if (sp_streq(ty, "InstanceVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");  /* "@x" */
     Scope *cs = comp_scope_of(c, id);

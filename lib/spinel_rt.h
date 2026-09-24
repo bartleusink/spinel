@@ -1382,6 +1382,7 @@ static void sp_re_mark_globals(void) {
   SP_GLB_PHASE("globals:argv");
   for (sp_int i = 0; i < sp_argv.len; i++) sp_mark_string(sp_argv.data[i]);
   if (sp_argv_array_cache) sp_gc_mark(sp_argv_array_cache);
+  if (sp_main_obj) sp_gc_mark(sp_main_obj);   /* top-level self */
   sp_mark_string(sp_argf_obj.fname);   /* the file ARGF took off ARGV */
   SP_GLB_PHASE("globals:exceptions");
   sp_mark_in_flight_exceptions();
@@ -1938,6 +1939,7 @@ static inline const char *sp_poly_to_s(sp_RbVal v) {
               const char *us = sp_obj_to_s_fn(v.cls_id, v.v.p);
               if (us) return us;
             }
+            if (v.v.p == sp_main_obj) return SPL("main");
             return sp_sprintf("#<%s:0x%016llx>", sp_poly_class_name(v),
                               (unsigned long long)(uintptr_t)v.v.p);
           }
@@ -6348,6 +6350,7 @@ static inline const char *sp_poly_inspect(sp_RbVal v) {
              #<Name:0x... @a=..., ...> like CRuby's default inspect */
           if (v.cls_id >= 0 && sp_obj_inspect_fn && v.v.p)
             return sp_obj_inspect_fn(v.cls_id, v.v.p);
+          if (v.cls_id == SP_BUILTIN_OBJECT && v.v.p && v.v.p == sp_main_obj) return SPL("main");
           if ((v.cls_id >= 0 || v.cls_id == SP_BUILTIN_OBJECT) && v.v.p)
             return sp_sprintf("#<%s:0x%016llx>", sp_poly_class_name(v),
                               (unsigned long long)(uintptr_t)v.v.p);

@@ -911,6 +911,7 @@ int        comp_is_reader(ClassInfo *ci, const char *name);
 int        comp_is_writer(ClassInfo *ci, const char *name);
 int        name_is_plain_setter(const char *name);
 int        call_is_setter_assign(const NodeTable *nt, int id);
+int        self_is_main(Compiler *c, int node);
 int        setter_base_name(const char *name, char *out, size_t cap);
 void       comp_add_undef(ClassInfo *ci, const char *name);
 int        comp_is_undeffed_in_chain(Compiler *c, int class_id, const char *name);
