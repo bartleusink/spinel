@@ -2606,11 +2606,15 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         int lo = nt_ref(nt, rn, "left"), hi = nt_ref(nt, rn, "right");
         Buf rb; char tys[32]; snprintf(tys, sizeof tys, "sp_%sArray *", k);
         int ch = hold_recv_open(c, recv, 0, tys, "SP_GC_ROOT", b, &rb);
-        buf_printf(b, "sp_%sArray_slice_range(%s, ", k, rb.p); free(rb.p);
+        buf_printf(b, "sp_%sArray_slice_range(%s, ", k, rb.p);
+        /* a nil end is the endless Range: the length, so an exclusive `...`
+           keeps the last element too (-1 would stop one short) */
+        char none_hi[64]; snprintf(none_hi, sizeof none_hi, "sp_%sArray_length(%s)", k, rb.p);
+        free(rb.p);
         /* a poly bound (a destructured tuple element, #2923) unboxes here */
         if (lo >= 0) emit_int_expr_bound(c, lo, "0", b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (hi >= 0) emit_int_expr_bound(c, hi, "-1", b); else buf_puts(b, "-1");
+        if (hi >= 0) emit_int_expr_bound(c, hi, none_hi, b); else buf_puts(b, "-1");
         buf_printf(b, ", %d)", hi >= 0 ? excl : 0);
         if (ch) buf_puts(b, "; })");
         return 1;
@@ -4305,10 +4309,13 @@ else {
         int excl = (int)(nt_int(nt, rn, "flags", 0) & 4) ? 1 : 0;
         int lo = nt_ref(nt, rn, "left"), hi = nt_ref(nt, rn, "right");
         Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
-        buf_printf(b, "sp_PolyArray_slice_range(%s, ", rb.p); free(rb.p);
+        buf_printf(b, "sp_PolyArray_slice_range(%s, ", rb.p);
+        char none_hi[64]; snprintf(none_hi, sizeof none_hi, "sp_PolyArray_length(%s)", rb.p);
+        free(rb.p);
         if (lo >= 0) emit_int_expr_bound(c, lo, "0", b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (hi >= 0) emit_int_expr_bound(c, hi, "-1", b); else buf_puts(b, "-1");
+        /* a nil end reaches the length, as above */
+        if (hi >= 0) emit_int_expr_bound(c, hi, none_hi, b); else buf_puts(b, "-1");
         buf_printf(b, ", %d)", hi >= 0 ? excl : 0);
         if (ch) buf_puts(b, "; })");
         return 1;
@@ -7634,13 +7641,18 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
         int rn = argv[0];
         int excl = (int)(nt_int(c->nt, rn, "flags", 0) & 4) ? 1 : 0;
         int lo = nt_ref(c->nt, rn, "left"), hi = nt_ref(c->nt, rn, "right");
-        char none_hi[256];
-        snprintf(none_hi, sizeof none_hi, "(sp_int)sp_str_length(%s)", r);
-        buf_printf(b, "sp_str_sub_range_r(%s, ", r);
+        /* the end may read the receiver's length (an endless Range, or a nil
+           end), so the receiver is bound once: evaluated twice, a receiver
+           with a side effect ran twice */
+        int trs = ++g_tmp;
+        char none_hi[64];
+        snprintf(none_hi, sizeof none_hi, "(sp_int)sp_str_length(_t%d)", trs);
+        buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT_STR(_t%d); sp_str_sub_range_r(_t%d, ",
+                   trs, r, trs, trs);
         if (lo >= 0) emit_int_expr_bound(c, lo, "0", b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (hi >= 0) { emit_int_expr_bound(c, hi, none_hi, b); buf_printf(b, ", %d)", excl); }
-        else buf_printf(b, "(sp_int)sp_str_length(%s), 0)", r);  /* endless: to the end */
+        if (hi >= 0) { emit_int_expr_bound(c, hi, none_hi, b); buf_printf(b, ", %d); })", excl); }
+        else buf_printf(b, "%s, 0); })", none_hi);  /* endless: to the end */
       }
       else if ((sp_streq(name, "[]") || sp_streq(name, "slice")) && argc == 2) {
         /* s[start, len] */

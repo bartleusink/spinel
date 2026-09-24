@@ -50,6 +50,8 @@ t("str[ix..ix]")    { str[ix..ix] }
 t("str[nil..]")     { str[nil..] }
 t("a[ix..]")        { a[ix..] }
 t("a[0..ix]")       { a[0..ix] }
+t("a[0...ix]")      { a[0...ix] }
+t("m[0...ix]")      { [1, "m", 3][0...ix] }
 t("a[nil..2]")      { a[nil..2] }
 
 # the sentinel still reads as nil, and a value that arrives keeps working
@@ -60,3 +62,9 @@ p a[jx]
 n = 0
 n += 1 while n < 3   # a counter from a literal stays the bare index it was
 p a[n - 1]
+
+# a receiver with a side effect is evaluated once, though a nil or omitted
+# end reads its length
+$calls = 0
+def recv_str = ($calls += 1; "Crystal")
+p recv_str[1..ix], recv_str[2..], $calls
