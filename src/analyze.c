@@ -9964,6 +9964,199 @@ static int mark_empty_hash_key_ctx(Compiler *c) {
   free(tp_recv);
   return changed;
 }
+/* A container that holds one hash is written with keys of more than one class
+   across its sites: `@c = {1 => 2}` in initialize and `@c["x"] = "y"` in
+   another method, or `@c = {}` with `put(1, 2)` storing through a parameter
+   and `@c[:k] = 2` elsewhere. Each literal took its variant from its own keys
+   or from the first key site the key context reached, so the other class's
+   store went into a hash that cannot hold it: dropped, stored under a
+   mistyped key, or refused at run time. mark_mixed_key_hash_locals answers
+   this for locals whose keys are literals, before the fixpoint; this pass
+   reads the keys' inferred types, so it runs inside it, and covers ivars,
+   class variables and globals too. More than one key class, counting the
+   literal's own keys, takes the poly-keyed variant, the only one that holds
+   them all. So does a literal typed by its values (`{"a" => "b"}` is
+   String-valued) that another site stores a value of another class into.
+   The mark only ever widens. */
+typedef struct { int kind; int cls; const Scope *sc; const char *nm; unsigned kbits, vbits; } HashKeySlot;
+static unsigned hash_key_class_bit(TyKind kt) {
+  if (kt == TY_UNKNOWN || kt == TY_VOID) return 0;
+  if (kt == TY_STRING || kt == TY_STRBUF) return 1u;
+  if (kt == TY_SYMBOL) return 2u;
+  if (kt == TY_INT) return 4u;
+  return 8u;
+}
+/* A boxed value is exempt: the typed setter converts it at run time (#651). */
+static unsigned hash_value_class_bit(TyKind vt) {
+  if (vt == TY_UNKNOWN || vt == TY_VOID || vt == TY_POLY) return 0;
+  if (vt == TY_STRING || vt == TY_STRBUF) return 1u;
+  if (vt == TY_INT) return 4u;
+  return 8u;
+}
+/* The container a receiver or write node names: 0 ivar, 1 class variable
+   (both by class), 2 global, 3 local (by scope). -1 for anything else. */
+static int hash_key_slot_of(Compiler *c, int id, HashKeySlot *out) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, id);
+  int kind = -1;
+  switch (k) {
+    case NK_InstanceVariableReadNode: case NK_InstanceVariableWriteNode:
+    case NK_InstanceVariableOrWriteNode: kind = 0; break;
+    case NK_ClassVariableReadNode: case NK_ClassVariableWriteNode:
+    case NK_ClassVariableOrWriteNode: kind = 1; break;
+    case NK_GlobalVariableReadNode: case NK_GlobalVariableWriteNode:
+    case NK_GlobalVariableOrWriteNode: kind = 2; break;
+    case NK_LocalVariableReadNode: case NK_LocalVariableWriteNode:
+    case NK_LocalVariableOrWriteNode: kind = 3; break;
+    default: return -1;
+  }
+  const char *nm = nt_str(nt, id, "name");
+  Scope *s = comp_scope_of(c, id);
+  if (!nm || !s) return -1;
+  out->kind = kind; out->nm = nm; out->kbits = out->vbits = 0; out->cls = -1; out->sc = NULL;
+  if (kind == 3) out->sc = s;
+  else if (kind == 0) {
+    out->cls = s->class_id >= 0 ? s->class_id : comp_class_index(c, "Toplevel");
+    if (out->cls < 0) return -1;
+    if (class_ivar_pinned(&c->classes[out->cls], nm)) return -1;   /* --rbs seed */
+  }
+  else if (kind == 1) {
+    /* A class body's `@@c = {...}` sits in scope 0, outside its class: its
+       owner is the class whose body states it, as infer_cvar_types reads it. */
+    out->cls = s->class_id;
+    for (int ci = 0; out->cls < 0 && ci < c->nclasses; ci++) {
+      int body = nt_ref(nt, c->classes[ci].def_node, "body");
+      int n = 0; const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+      for (int q = 0; q < n; q++) if (stmts[q] == id) { out->cls = ci; break; }
+    }
+    if (out->cls < 0) return -1;
+  }
+  return kind;
+}
+static int hash_key_class_under(Compiler *c, int sub, int sup) {
+  for (int d = 0; sub >= 0 && d < 64; d++, sub = c->classes[sub].parent)
+    if (sub == sup) return 1;
+  return 0;
+}
+/* The same container; an ivar or class variable is also the one a subclass's
+   methods write (`@c = {}` in the parent's initialize, `@c[k] = v` in the
+   child). */
+static int hash_key_slot_same(Compiler *c, const HashKeySlot *a, const HashKeySlot *b, int related) {
+  if (a->kind != b->kind || a->sc != b->sc || !sp_streq(a->nm, b->nm)) return 0;
+  if (a->cls == b->cls) return 1;
+  return related && (hash_key_class_under(c, a->cls, b->cls) || hash_key_class_under(c, b->cls, a->cls));
+}
+static int widen_mixed_key_hash_slots(Compiler *c) {
+  if (!c->hash_want) return 0;
+  const NodeTable *nt = c->nt;
+  HashKeySlot *slots = NULL; int ns = 0, cap = 0;
+  static const NodeKind wkinds[] = {
+    NK_CallNode, NK_IndexOrWriteNode, NK_IndexAndWriteNode, NK_IndexOperatorWriteNode };
+  for (size_t wk = 0; wk < sizeof(wkinds) / sizeof(wkinds[0]); wk++) {
+    NT_FOREACH_KIND(nt, wkinds[wk], id) {
+      int is_call = wkinds[wk] == NK_CallNode;
+      if (is_call) {
+        const char *nm = nt_str(nt, id, "name");
+        if (!nm || (!sp_streq(nm, "[]=") && !sp_streq(nm, "store"))) continue;
+      }
+      int recv = nt_ref(nt, id, "receiver");
+      int anode = nt_ref(nt, id, "arguments");
+      int an = 0; const int *av = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+      if (recv < 0 || !av || an != (is_call ? 2 : 1)) continue;
+      HashKeySlot hs;
+      if (hash_key_slot_of(c, recv, &hs) < 0) continue;
+      unsigned kb = hash_key_class_bit(infer_type(c, av[0]));
+      if (!kb) continue;
+      /* `h[k] op= v` stores the operator's result, which the key's own reads
+         decide; only a plain store and `||=` / `&&=` name the value. */
+      int vnode = is_call ? av[1] : wkinds[wk] == NK_IndexOperatorWriteNode ? -1 : nt_ref(nt, id, "value");
+      unsigned vb = vnode >= 0 ? hash_value_class_bit(infer_type(c, vnode)) : 0;
+      int f = -1;
+      for (int q = 0; q < ns; q++) if (hash_key_slot_same(c, &slots[q], &hs, 0)) { f = q; break; }
+      if (f < 0) {
+        if (ns >= cap) {
+          cap = cap ? cap * 2 : 16;
+          slots = realloc(slots, sizeof(*slots) * (size_t)cap);
+          if (!slots) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+        }
+        f = ns++;
+        slots[f] = hs;
+      }
+      slots[f].kbits |= kb;
+      slots[f].vbits |= vb;
+    }
+  }
+  int changed = 0;
+  static const NodeKind vkinds[] = {
+    NK_InstanceVariableWriteNode, NK_InstanceVariableOrWriteNode,
+    NK_ClassVariableWriteNode, NK_ClassVariableOrWriteNode,
+    NK_GlobalVariableWriteNode, NK_GlobalVariableOrWriteNode,
+    NK_LocalVariableWriteNode, NK_LocalVariableOrWriteNode };
+  for (size_t vk = 0; ns > 0 && vk < sizeof(vkinds) / sizeof(vkinds[0]); vk++) {
+    NT_FOREACH_KIND(nt, vkinds[vk], id) {
+      int val = nt_ref(nt, id, "value");
+      if (val < 0 || val >= c->node_cap || c->hash_want[val] == TY_POLY_POLY_HASH) continue;
+      NodeKind vkd = nt_kind(nt, val);
+      if (vkd == NK_CallNode) {
+        const char *cn = nt_str(nt, val, "name");
+        int hr = nt_ref(nt, val, "receiver");
+        if (!cn || !sp_streq(cn, "new") || hr < 0 || nt_kind(nt, hr) != NK_ConstantReadNode ||
+            !nt_str(nt, hr, "name") || !sp_streq(nt_str(nt, hr, "name"), "Hash")) continue;
+      }
+      else if (vkd != NK_HashNode) continue;
+      HashKeySlot hs;
+      if (hash_key_slot_of(c, id, &hs) < 0) continue;
+      unsigned kmask = 0, vmask = 0;
+      for (int q = 0; q < ns; q++)
+        if (hash_key_slot_same(c, &slots[q], &hs, 1)) { kmask |= slots[q].kbits; vmask |= slots[q].vbits; }
+      if (!kmask) continue;
+      int en = 0; const int *els = vkd == NK_HashNode ? nt_arr(nt, val, "elements", &en) : NULL;
+      for (int e = 0; e < en && kmask; e++) {
+        if (nt_kind(nt, els[e]) != NK_AssocNode) { kmask = 0; break; }
+        unsigned b = hash_key_class_bit(infer_type(c, nt_ref(nt, els[e], "key")));
+        if (!b) { kmask = 0; break; }
+        kmask |= b;
+      }
+      if (!kmask) continue;
+      int widen = (kmask & (kmask - 1)) != 0;
+      /* A non-empty literal's value class is its own; an empty one's variant
+         already reads every store's value (aset_value_type_ex), and a local
+         converts to the String-keyed poly variant its stores unify to. */
+      if (!widen && en > 0 && hs.kind != 3) {
+        TyKind lt = infer_type(c, val);
+        if (lt == TY_INT_INT_HASH || lt == TY_STR_INT_HASH)
+          widen = (vmask & ~4u) != 0;
+        else if (lt == TY_INT_STR_HASH || lt == TY_STR_STR_HASH)
+          widen = (vmask & ~1u) != 0;
+      }
+      if (!widen) continue;
+      c->hash_want[val] = TY_POLY_POLY_HASH;
+      changed = 1;
+      /* The slot may already hold the literal's old variant, and two hash
+         variants unify to a plain boxed value: move a typed-hash slot along
+         with its literal. A local is re-typed every round. */
+      TyKind *slot = NULL;
+      if (hs.kind == 0) {
+        ClassInfo *ci = &c->classes[hs.cls];
+        int iv = comp_ivar_index(ci, hs.nm);
+        if (iv >= 0) slot = &ci->ivar_types[iv];
+      }
+      else if (hs.kind == 1) {
+        ClassInfo *ci = &c->classes[hs.cls];
+        int cv = comp_cvar_index(ci, hs.nm);
+        if (cv >= 0) slot = &ci->cvar_types[cv];
+      }
+      else if (hs.kind == 2) {
+        const char *rn = comp_resolve_gvar(c, hs.nm + 1);
+        LocalVar *gv = rn ? comp_gvar(c, rn) : NULL;
+        if (gv) slot = &gv->type;
+      }
+      if (slot && ty_is_hash(*slot)) *slot = TY_POLY_POLY_HASH;
+    }
+  }
+  free(slots);
+  return changed;
+}
 /* `TBL = {}` followed by `TBL[k] = v` elsewhere: an empty literal bound to a
    constant has no type of its own, so the constant got no runtime slot at all
    and every read raised "uninitialized constant". Derive the variant from the
@@ -14686,7 +14879,8 @@ void analyze_program(Compiler *c) {
        the StrPolyHash default and handed an Integer key to a const char *
        (#3353). The mark is monotone, so repeating it only ever fills in. */
     ch |= mark_empty_hash_key_ctx(c);
-    ch |= desugar_lazy_stateful_stage(c);      /* arr.lazy.uniq -> arr.uniq (finite source) */
+    ch |= widen_mixed_key_hash_slots(c);
+    ch |= desugar_lazy_stateful_stage(c);     /* arr.lazy.uniq -> arr.uniq (finite source) */
     ch |= desugar_lazy_method_call(c);         /* lz.first where `def lz; ...lazy...; end` */
     ch |= desugar_str_range_methods(c);        /* ("a".."e").map -> .to_a.map */
     ch |= desugar_sym_to_proc_call(c);         /* :m.to_proc.call(r, a) -> r.m(a) */
