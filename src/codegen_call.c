@@ -17211,7 +17211,57 @@ void emit_call(Compiler *c, int id, Buf *b) {
     TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_VOID;
     nd_stamp(id, (rt == TY_POLY || rt == TY_UNKNOWN) ? ND_BOXED : ND_DIRECT); }
 }
+/* Ruby reads a call's receiver before it evaluates the arguments. The arms
+   below emit the receiver inline and the arguments' preludes ahead of the
+   statement, so a receiver slot an argument reassigns -- `$a + [f]` where f
+   sets $a -- was read after the argument ran. When the receiver is a global,
+   ivar or class variable and an argument can run code, read the slot into a
+   temp first and let the arms read the temp. Only for methods that leave the
+   receiver slot alone: a mutator's arm may write the slot back through the
+   same node, which would then write the temp. */
+static int recv_read_before_args(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0 || nt_ref(nt, id, "block") >= 0 || g_n_argov >= MAX_ARG_OVERRIDE) return -1;
+  NodeKind rk = nt_kind(nt, recv);
+  if (rk != NK_GlobalVariableReadNode && rk != NK_InstanceVariableReadNode &&
+      rk != NK_ClassVariableReadNode) return -1;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == recv) return -1;
+  TyKind rt = comp_ntype(c, recv);
+  if (rt == TY_UNKNOWN || rt == TY_VOID || ty_is_object(rt) || !c_type_name(rt)) return -1;
+  static const char *const pure[] = {
+    "+", "-", "*", "/", "%", "**", "|", "&", "^", "==", "!=", "<", ">", "<=", ">=",
+    "<=>", "union", "difference", "intersection", "intersect?", "include?",
+    "member?", "eql?", NULL };
+  const char *nm = nt_str(nt, id, "name");
+  int ok = 0;
+  for (int i = 0; nm && pure[i] && !ok; i++) ok = sp_streq(nm, pure[i]);
+  if (!ok) return -1;
+  int an = 0; int args = nt_ref(nt, id, "arguments");
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  int effect = 0;
+  for (int a = 0; a < an && !effect; a++) effect = subtree_has_side_effect(c, av[a]);
+  return effect ? recv : -1;
+}
+
 static void emit_call_held(Compiler *c, int id, Buf *b) {
+  int rrecv = recv_read_before_args(c, id);
+  if (rrecv >= 0) {
+    TyKind rt = comp_ntype(c, rrecv);
+    Buf rb = expr_buf(c, rrecv);
+    int t = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    emit_ctype(c, rt, g_pre);
+    buf_printf(g_pre, " _t%d = %s;\n", t, rb.p ? rb.p : "");
+    free(rb.p);
+    emit_pre_root(c, rt, t);
+    int slot = g_n_argov++;
+    g_argov_node[slot] = rrecv;
+    snprintf(g_argov_text[slot], sizeof g_argov_text[0], "_t%d", t);
+    emit_call_held(c, id, b);
+    g_n_argov--;
+    return;
+  }
   ConvHold hold; memset(&hold, 0, sizeof hold);
   ConvHold *saved = g_conv_hold;
   size_t pre_mark = g_pre ? g_pre->len : 0;
