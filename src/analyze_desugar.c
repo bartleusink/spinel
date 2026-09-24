@@ -2872,6 +2872,69 @@ int desugar_builtins(Compiler *c) {
   return 1;
 }
 
+/* Whether any assignment in scope `s` writes the local `vn`. */
+static int scope_writes_local(Compiler *c, Scope *s, const char *vn) {
+  const NodeTable *nt = c->nt;
+  static const NodeKind kinds[] = {
+    NK_LocalVariableWriteNode, NK_LocalVariableOperatorWriteNode,
+    NK_LocalVariableOrWriteNode, NK_LocalVariableAndWriteNode, NK_LocalVariableTargetNode,
+  };
+  for (size_t k = 0; k < sizeof kinds / sizeof kinds[0]; k++) {
+    NT_FOREACH_KIND(nt, kinds[k], id) {
+      const char *wn = nt_str(nt, id, "name");
+      if (wn && sp_streq(wn, vn) && comp_scope_of(c, id) == s) return 1;
+    }
+  }
+  return 0;
+}
+
+/* Keep the arm `ans` of the IfNode/UnlessNode `id` whose predicate is
+   `pred`, blank the other, and forget the scope's local types (see below).
+   Answers 0 when a node could not be made. */
+static int fold_if_arm(Compiler *c, int id, int pred, int ans, Scope *s, const unsigned char *is_elsif) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  NodeKind k = nt_kind(nt, id);
+  int then_s = nt_ref(nt, id, "statements");
+  int els = nt_ref(nt, id, k == NK_IfNode ? "subsequent" : "else_clause");
+  int keep = ans ? then_s : els;
+  int drop = ans ? els : then_s;
+  if (keep >= 0 && nt_kind(nt, keep) == NK_ElseNode) keep = nt_ref(nt, keep, "statements");
+  if (keep >= 0 && nt_kind(nt, keep) != NK_StatementsNode) {
+    /* an `elsif` chain: the surviving arm is the next IfNode itself */
+    int st = nt_new_node(nt, "StatementsNode");
+    if (st < 0) return 0;
+    nt_node_set_arr(nt, st, "body", &keep, 1);
+    keep = st;
+  }
+  bi_subtree_blank(nt, pred);
+  if (drop >= 0) bi_subtree_blank(nt, drop);
+  nt_node_set_ref(nt, id, "predicate", -1);
+  nt_node_set_ref(nt, id, "statements", -1);
+  nt_node_set_ref(nt, id, k == NK_IfNode ? "subsequent" : "else_clause", -1);
+  if (is_elsif && is_elsif[id]) {
+    if (keep < 0) { keep = nt_new_node(nt, "StatementsNode"); if (keep < 0) return 0; }
+    nt_node_set_type(nt, id, "ElseNode");
+    nt_node_set_ref(nt, id, "statements", keep);
+  }
+  else if (keep >= 0) {
+    nt_node_set_type(nt, id, "BeginNode");
+    nt_node_set_ref(nt, id, "statements", keep);
+  }
+  else nt_node_set_type(nt, id, "NilNode");
+  /* The locals of this scope were typed with the dropped arm's evidence
+     in, and an empty-literal write carries a local's previous type from
+     round to round (infer_write_types), so the type would never move:
+     `out = []` beside `out << v` stayed a boxed array after `out.concat(v)`
+     became its only fill. Forget them; the next round re-derives each from
+     the evidence that is left. */
+  for (int i = 0; i < s->nlocals; i++) {
+    LocalVar *l = &s->locals[i];
+    if (l->is_param || l->is_block_param || l->rbs_seeded) continue;
+    l->type = TY_UNKNOWN; l->gc_root = (int)TY_UNKNOWN;
+  }
+  return 1;
+}
+
 /* `if v.is_a?(Array)` / `kind_of?` on a local whose type has settled is
    decided here: a typed array is one, a scalar, a hash, an object or a
    range is not, and the arm not taken leaves the program (blanked, so the
@@ -2896,10 +2959,47 @@ int fold_static_is_a(Compiler *c) {
     int sub = nt_ref(nt, id, "subsequent");
     if (sub >= 0 && sub < n0 && nt_kind(nt, sub) == NK_IfNode) is_elsif[sub] = 1;
   }
+  /* the call site of each builtin clone (`enum_copy`), for the omitted-
+     parameter test below */
+  int *copy_site = (int *)malloc(sizeof(int) * (size_t)(n0 ? n0 : 1));
+  for (int id = 0; copy_site && id < n0; id++) copy_site[id] = -1;
+  NT_FOREACH_KIND(nt, NK_CallNode, cid) {
+    int cp = (int)nt_int(nt, cid, "enum_copy", -1);
+    if (copy_site && cp >= 0 && cp < n0) copy_site[cp] = cid;
+  }
   for (int id = 0; id < n0; id++) {
     NodeKind k = nt_kind(nt, id);
     if (k != NK_IfNode && k != NK_UnlessNode) continue;
     int pred = nt_ref(nt, id, "predicate");
+    /* `if n` on an optional parameter of a builtin clone whose one call site
+       leaves it out: the parameter is its nil default, so the arm is
+       decided. `min_by(n = nil)` and `tally(hash = nil)` otherwise kept both
+       arms, and the answer came back boxed. */
+    if (pred >= 0 && nt_kind(nt, pred) == NK_LocalVariableReadNode && copy_site) {
+      int ans = -1;
+      const char *vn = nt_str(nt, pred, "name");
+      Scope *ps = vn ? comp_scope_of(c, pred) : NULL;
+      if (ps && ps->def_node >= 0 && ps->def_node < n0 && copy_site[ps->def_node] >= 0 && ps->pdefault) {
+        int call = copy_site[ps->def_node];
+        int ca = nt_ref(nt, call, "arguments");
+        int cn = 0; const int *cv = ca >= 0 ? nt_arr(nt, ca, "arguments", &cn) : NULL;
+        int plain = 1;
+        for (int j = 0; j < cn; j++) {
+          NodeKind ak = nt_kind(nt, cv[j]);
+          if (ak == NK_SplatNode || ak == NK_KeywordHashNode || ak == NK_BlockArgumentNode) plain = 0;
+        }
+        for (int pi = 0; plain && pi < ps->nparams; pi++) {
+          if (!ps->pnames || !ps->pnames[pi] || !sp_streq(ps->pnames[pi], vn)) continue;
+          int dv = ps->pdefault[pi];
+          if (pi >= cn && dv >= 0 && nt_kind(nt, dv) == NK_NilNode && !scope_writes_local(c, ps, vn)) ans = 0;
+          break;
+        }
+      }
+      if (ans < 0) continue;
+      if (k == NK_UnlessNode) ans = !ans;
+      changed |= fold_if_arm(c, id, pred, ans, ps, is_elsif);
+      continue;
+    }
     if (pred < 0 || nt_kind(nt, pred) != NK_CallNode || nt_ref(nt, pred, "block") >= 0) continue;
     const char *nm = nt_str(nt, pred, "name");
     if (!nm || (!sp_streq(nm, "is_a?") && !sp_streq(nm, "kind_of?"))) continue;
@@ -2918,47 +3018,11 @@ int fold_static_is_a(Compiler *c) {
     if (t == TY_UNKNOWN || t == TY_POLY || t == TY_POLY_ARRAY || t == TY_NIL || t == TY_VOID) continue;
     int ans = ty_is_array(t) || ty_is_obj_array(t);
     if (k == NK_UnlessNode) ans = !ans;
-    int then_s = nt_ref(nt, id, "statements");
-    int els = nt_ref(nt, id, k == NK_IfNode ? "subsequent" : "else_clause");
-    int keep = ans ? then_s : els;
-    int drop = ans ? els : then_s;
-    if (keep >= 0 && nt_kind(nt, keep) == NK_ElseNode) keep = nt_ref(nt, keep, "statements");
-    if (keep >= 0 && nt_kind(nt, keep) != NK_StatementsNode) {
-      /* an `elsif` chain: the surviving arm is the next IfNode itself */
-      int st = nt_new_node(nt, "StatementsNode");
-      if (st < 0) break;
-      nt_node_set_arr(nt, st, "body", &keep, 1);
-      keep = st;
-    }
-    bi_subtree_blank(nt, pred);
-    if (drop >= 0) bi_subtree_blank(nt, drop);
-    nt_node_set_ref(nt, id, "predicate", -1);
-    nt_node_set_ref(nt, id, "statements", -1);
-    nt_node_set_ref(nt, id, k == NK_IfNode ? "subsequent" : "else_clause", -1);
-    if (is_elsif && is_elsif[id]) {
-      if (keep < 0) { keep = nt_new_node(nt, "StatementsNode"); if (keep < 0) break; }
-      nt_node_set_type(nt, id, "ElseNode");
-      nt_node_set_ref(nt, id, "statements", keep);
-    }
-    else if (keep >= 0) {
-      nt_node_set_type(nt, id, "BeginNode");
-      nt_node_set_ref(nt, id, "statements", keep);
-    }
-    else nt_node_set_type(nt, id, "NilNode");
-    /* The locals of this scope were typed with the dropped arm's evidence
-       in, and an empty-literal write carries a local's previous type from
-       round to round (infer_write_types), so the type would never move:
-       `out = []` beside `out << v` stayed a boxed array after `out.concat(v)`
-       became its only fill. Forget them; the next round re-derives each from
-       the evidence that is left. */
-    for (int i = 0; i < s->nlocals; i++) {
-      LocalVar *l = &s->locals[i];
-      if (l->is_param || l->is_block_param || l->rbs_seeded) continue;
-      l->type = TY_UNKNOWN; l->gc_root = (int)TY_UNKNOWN;
-    }
+    if (!fold_if_arm(c, id, pred, ans, s, is_elsif)) break;
     changed = 1;
   }
   free(is_elsif);
+  free(copy_site);
   if (changed) comp_grow_node_arrays(c);
   return changed;
 }
