@@ -6147,6 +6147,14 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
         buf_printf(b, " { sp_PolyArray *_sa = %s; SP_GC_ROOT(_sa); for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }", el.p ? el.p : "NULL", t);
         free(el.p);
       }
+      else if (at == TY_NIL && inner >= 0) {
+        /* `*nil` spreads to nothing: CRuby's `r(*nil)` passes no argument,
+           where it went in as one nil. The operand still runs. */
+        Buf el; memset(&el, 0, sizeof el);
+        emit_expr(c, inner, &el);
+        buf_printf(b, " (void)(%s);", el.p ? el.p : "0");
+        free(el.p);
+      }
       else { /* scalar splat: single element */
         Buf el; memset(&el, 0, sizeof el);
         emit_boxed(c, inner, &el);
@@ -6213,12 +6221,22 @@ void emit_rest_from_splat_and_argv(int tmp, TyKind at, int from_idx,
     if (jty && sp_streq(jty, "SplatNode")) {
       int inner2 = nt_ref(c->nt, argv[j], "expression");
       TyKind at2 = inner2 >= 0 ? comp_ntype(c, inner2) : TY_UNKNOWN;
-      Buf arr2; memset(&arr2, 0, sizeof arr2); emit_expr(c, inner2, &arr2);
+      /* rendered only for the arms that read it: a render writes the
+         operand's setup into the prelude, where a discarded one still runs */
+      Buf arr2; memset(&arr2, 0, sizeof arr2);
+      if (at2 == TY_INT_ARRAY || at2 == TY_POLY_ARRAY) emit_expr(c, inner2, &arr2);
       const char *ap2 = arr2.p ? arr2.p : "NULL";
       if (at2 == TY_INT_ARRAY)
         buf_printf(b, " { sp_IntArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_int(_sa->data[_sa->start+_si])); }", ap2, t);
       else if (at2 == TY_POLY_ARRAY)
         buf_printf(b, " { sp_PolyArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }", ap2, t);
+      /* a boxed operand is an array only at run time, and nil spreads to
+         nothing: both go through the splat's own lowering */
+      else if (inner2 >= 0 && (at2 == TY_POLY || at2 == TY_UNKNOWN || at2 == TY_NIL)) {
+        Buf el2; memset(&el2, 0, sizeof el2); emit_expr(c, argv[j], &el2);
+        buf_printf(b, " { sp_PolyArray *_sa = %s; SP_GC_ROOT(_sa); for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }", el2.p ? el2.p : "NULL", t);
+        free(el2.p);
+      }
       else { Buf el2; memset(&el2, 0, sizeof el2); emit_boxed(c, inner2, &el2); buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, el2.p ? el2.p : "sp_box_nil()"); free(el2.p); }
       free(arr2.p);
     }
@@ -7757,8 +7775,11 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
       Buf anon; memset(&anon, 0, sizeof anon);
       int is_anon = inner < 0 && emit_anon_rest_ref(c, argv[k], &anon);
       if (is_anon) splat_at_d = TY_POLY_ARRAY;
-      /* a boxed operand is normalized by the splat's own lowering, as above */
-      int boxed = !is_anon && inner >= 0 && (splat_at_d == TY_POLY || splat_at_d == TY_UNKNOWN);
+      /* a boxed operand is normalized by the splat's own lowering, as above,
+         and so is a statically nil or scalar one: `O.new.m(*7)` bound the
+         whole [7] to the first parameter */
+      int boxed = !is_anon && inner >= 0 && (splat_at_d == TY_POLY || splat_at_d == TY_UNKNOWN ||
+                                             splat_operand_is_scalar(splat_at_d));
       if (boxed) splat_at_d = TY_POLY_ARRAY;
       if (is_anon || boxed || ty_is_array(splat_at_d) || splat_at_d == TY_POLY_ARRAY) {
         splat_idx_d = k;
