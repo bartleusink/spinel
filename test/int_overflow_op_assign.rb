@@ -50,3 +50,29 @@ begin
 rescue RangeError => e
   puts "ivar RangeError: #{e.message}"
 end
+
+# a global and a class variable take it too: their raw C `+=` wrapped onto
+# the nil sentinel, and `$g **= 64` did not compile (#4886)
+$g = 2**62
+try { $g += 2**62 }
+try { $g -= -(2**62) }
+try { $g *= 4 }
+try { $g **= 64 }
+try { $g <<= 64 }
+try { puts($g += 2**62) }
+puts $g
+class Cv
+  @@n = -(2**62)
+  def self.blow
+    yield
+  rescue RangeError => e
+    puts "cvar RangeError: #{e.message}"
+  end
+  def self.go
+    blow { @@n -= 2**62 + 1 }
+    blow { @@n *= 3 }
+    blow { puts(@@n **= 63) }
+    puts @@n
+  end
+end
+Cv.go
