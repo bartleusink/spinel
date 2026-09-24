@@ -197,7 +197,7 @@ sp_RbVal sp_raise_nomethod(const char *msg);
    nil, not an Integer: arithmetic on it raises the way CRuby's nil does
    (NoMethodError for nil on the left, the coercion TypeError on the right)
    instead of computing on INTPTR_MIN. */
-SP_NORETURN void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op);
+SP_NORETURN SP_COLD void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op);
 #define SP_INT_NIL_CK(a, b, op) \
   if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_int_op((a), (b), op)
 /* The same sentinel reaching a STRICT Integer argument slot -- an index, a
@@ -209,7 +209,10 @@ SP_NORETURN void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op);
    that use it (Random.srand, Dir.mkdir's mode). Emitted only where the #3505
    marking says the argument can carry the sentinel, so a literal index or a
    loop counter stays the bare value it was (#4896). */
-SP_NORETURN void sp_raise_nil_to_int(int of_wording);
+/* SP_COLD on these nil raisers: without it the compiler treats the check's
+   raise path as warm, and a check in a hot function (optcarrot's CPU#fetch
+   and PPU#render_pixel) cost 40% of the frame rate */
+SP_NORETURN SP_COLD void sp_raise_nil_to_int(int of_wording);
 #define SP_INT_NIL_ARG_CK(a) \
   if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(0)
 #define SP_INT_NIL_ARG_CK_OF(a) \
@@ -218,7 +221,7 @@ SP_NORETURN void sp_raise_nil_to_int(int of_wording);
    left nil is NoMethodError, the right the Comparable ArgumentError. Emitted
    only for an operand that can carry the sentinel; a literal or an
    arithmetic result never does. */
-SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls);
+SP_NORETURN SP_COLD void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls);
 #define SP_INT_NIL_CMP_CK(a, b, op) \
   if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_cmp((a) == SP_INT_NIL, op, "Integer")
 #define SP_FLOAT_NIL_CMP_CK(a, b, op) \
@@ -227,7 +230,7 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
    payload the hardware carries through every arithmetic operator, so
    `nil + 1.0` computed a NaN that read back as nil instead of raising.
    Emitted only for an operand the #3505 marking says can be the sentinel. */
-SP_NORETURN void sp_raise_nil_float_op(int left_nil, const char *op);
+SP_NORETURN SP_COLD void sp_raise_nil_float_op(int left_nil, const char *op);
 #define SP_FLOAT_NIL_CK(a, b, op) \
   if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_float_op(sp_float_is_nil(a), op)
 
