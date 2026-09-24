@@ -10092,6 +10092,29 @@ static int widen_mixed_key_hash_slots(Compiler *c) {
     NK_ClassVariableWriteNode, NK_ClassVariableOrWriteNode,
     NK_GlobalVariableWriteNode, NK_GlobalVariableOrWriteNode,
     NK_LocalVariableWriteNode, NK_LocalVariableOrWriteNode };
+  /* A slot's keys include those of every literal assigned to it: with
+     `@c = {1 => 2}`, `@c = {}` and `@c["x"] = 3`, the empty literal has to
+     widen too, or the two literals' variants unify to a plain boxed value
+     rather than the poly-keyed hash. */
+  for (size_t vk = 0; ns > 0 && vk < sizeof(vkinds) / sizeof(vkinds[0]); vk++) {
+    NT_FOREACH_KIND(nt, vkinds[vk], id) {
+      int val = nt_ref(nt, id, "value");
+      if (val < 0 || nt_kind(nt, val) != NK_HashNode) continue;
+      int en = 0; const int *els = nt_arr(nt, val, "elements", &en);
+      unsigned lb = 0;
+      for (int e = 0; e < en; e++) {
+        if (nt_kind(nt, els[e]) != NK_AssocNode) { lb = 0; break; }
+        unsigned b = hash_key_class_bit(infer_type(c, nt_ref(nt, els[e], "key")));
+        if (!b) { lb = 0; break; }
+        lb |= b;
+      }
+      if (!lb) continue;
+      HashKeySlot hs;
+      if (hash_key_slot_of(c, id, &hs) < 0) continue;
+      for (int q = 0; q < ns; q++)
+        if (hash_key_slot_same(c, &slots[q], &hs, 1)) slots[q].kbits |= lb;
+    }
+  }
   for (size_t vk = 0; ns > 0 && vk < sizeof(vkinds) / sizeof(vkinds[0]); vk++) {
     NT_FOREACH_KIND(nt, vkinds[vk], id) {
       int val = nt_ref(nt, id, "value");

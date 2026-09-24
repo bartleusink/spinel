@@ -147,3 +147,17 @@ w = W.new
 %w[a b a c a].each { |x| w.see(x) }
 w.name(1, "one")
 p w.counts, w.names
+
+# every literal assigned to the slot counts: an empty one beside a keyed one
+class TwoLiterals
+  def initialize = @c = {}
+  def reset = @c = {1 => 2}
+  def put = @c["x"] = 3
+  def c = @c
+end
+tl = TwoLiterals.new
+tl.put
+p tl.c
+tl.reset
+tl.put
+p tl.c, tl.c[1], tl.c["x"]
