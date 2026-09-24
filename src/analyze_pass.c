@@ -5021,30 +5021,65 @@ const char *block_param_multi_leaf(Compiler *c, int block, int idx, int leaf_idx
 }
 
 /* First YieldNode belonging to scope `si`, or -1. */
-int first_yield(Compiler *c, int si) {
-  for (int id = 0; id < c->nt->count; id++) {
-    const char *ty = nt_type(c->nt, id);
-    if (ty && sp_streq(ty, "YieldNode") && c->nscope[id] == si) return id;
+/* Per scope, the program's first `yield`, first `<&blk>.call(...)` and first
+   receiverless `instance_exec(args, &<blk>)`: one walk of the node table
+   answers every scope, and the answers hold until the table or the scopes
+   change. Each was a whole-table walk per question, asked per block call per
+   fixpoint round, which on a large program was the block-parameter pass's
+   time. */
+static int *fyi_yield, *fyi_bcall, *fyi_ie;
+static int fyi_ns = -1, fyi_nn = -1;
+static void first_yield_index(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  if (fyi_yield && fyi_ns == c->nscopes && fyi_nn == nt->count) return;
+  free(fyi_yield); free(fyi_bcall); free(fyi_ie);
+  int ns = c->nscopes > 0 ? c->nscopes : 1;
+  fyi_yield = malloc(sizeof(int) * (size_t)ns);
+  fyi_bcall = malloc(sizeof(int) * (size_t)ns);
+  fyi_ie = malloc(sizeof(int) * (size_t)ns);
+  for (int k = 0; k < ns; k++) fyi_yield[k] = fyi_bcall[k] = fyi_ie[k] = -1;
+  fyi_ns = c->nscopes; fyi_nn = nt->count;
+  for (int id = 0; id < nt->count; id++) {
+    int si = c->nscope[id];
+    if (si < 0 || si >= c->nscopes) continue;
+    NodeKind k = nt_kind(nt, id);
+    if (k == NK_YieldNode) { if (fyi_yield[si] < 0) fyi_yield[si] = id; continue; }
+    if (k != NK_CallNode) continue;
+    const char *bp = c->scopes[si].blk_param;
+    if (!bp || !bp[0]) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (fyi_bcall[si] < 0 && sp_streq(nm, "call") && recv >= 0 &&
+        nt_kind(nt, recv) == NK_LocalVariableReadNode) {
+      const char *rn = nt_str(nt, recv, "name");
+      if (rn && sp_streq(rn, bp)) fyi_bcall[si] = nt_ref(nt, id, "arguments");
+    }
+    if (fyi_ie[si] < 0 && recv < 0 && sp_streq(nm, "instance_exec")) {
+      int blk = nt_ref(nt, id, "block");
+      int expr = blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode ? nt_ref(nt, blk, "expression") : -1;
+      if (expr >= 0 && nt_kind(nt, expr) == NK_LocalVariableReadNode) {
+        const char *en = nt_str(nt, expr, "name");
+        if (en && sp_streq(en, bp)) fyi_ie[si] = nt_ref(nt, id, "arguments");
+      }
+    }
   }
-  return -1;
+}
+
+int first_yield(Compiler *c, int si) {
+  if (si < 0 || si >= c->nscopes) return -1;
+  first_yield_index(c);
+  return fyi_yield[si];
 }
 
 /* Arguments node of the first `<&block-param>.call(...)` in scope `si`, or
    -1. Lets block-param inference treat block.call like a yield. */
 int first_block_call_args(Compiler *c, int si) {
+  if (si < 0 || si >= c->nscopes) return -1;
   Scope *m = &c->scopes[si];
   if (!m->blk_param || !m->blk_param[0]) return -1;
-  for (int id = 0; id < c->nt->count; id++) {
-    const char *ty = nt_type(c->nt, id);
-    if (!ty || !sp_streq(ty, "CallNode") || c->nscope[id] != si) continue;
-    const char *nm = nt_str(c->nt, id, "name");
-    if (!nm || !sp_streq(nm, "call")) continue;
-    int recv = nt_ref(c->nt, id, "receiver");
-    if (recv < 0 || !nt_type(c->nt, recv) || !sp_streq(nt_type(c->nt, recv), "LocalVariableReadNode")) continue;
-    const char *rn = nt_str(c->nt, recv, "name");
-    if (rn && sp_streq(rn, m->blk_param)) return nt_ref(c->nt, id, "arguments");
-  }
-  return -1;
+  first_yield_index(c);
+  return fyi_bcall[si];
 }
 
 /* Arguments node of the first receiverless `instance_exec(args, &<blk>)` in
@@ -5052,22 +5087,11 @@ int first_block_call_args(Compiler *c, int si) {
    instance_exec invokes the block with `args` (self is unchanged by the
    rebind), so it types the block exactly like a yield of `args`. */
 int first_ie_exec_args(Compiler *c, int si) {
+  if (si < 0 || si >= c->nscopes) return -1;
   Scope *m = &c->scopes[si];
   if (!m->blk_param || !m->blk_param[0]) return -1;
-  for (int id = 0; id < c->nt->count; id++) {
-    if (c->nscope[id] != si) continue;
-    const char *ty = nt_type(c->nt, id);
-    if (!ty || !sp_streq(ty, "CallNode") || nt_ref(c->nt, id, "receiver") >= 0) continue;
-    const char *nm = nt_str(c->nt, id, "name");
-    if (!nm || !sp_streq(nm, "instance_exec")) continue;
-    int blk = nt_ref(c->nt, id, "block");
-    if (blk < 0 || !nt_type(c->nt, blk) || !sp_streq(nt_type(c->nt, blk), "BlockArgumentNode")) continue;
-    int expr = nt_ref(c->nt, blk, "expression");
-    if (expr < 0 || !nt_type(c->nt, expr) || !sp_streq(nt_type(c->nt, expr), "LocalVariableReadNode")) continue;
-    const char *en = nt_str(c->nt, expr, "name");
-    if (en && sp_streq(en, m->blk_param)) return nt_ref(c->nt, id, "arguments");
-  }
-  return -1;
+  first_yield_index(c);
+  return fyi_ie[si];
 }
 
 int a_proc_params_node(Compiler *c, int create); /* forward decl */
