@@ -425,8 +425,13 @@ still works.
   still widens to untyped: the nullable Integer and Float slots that exist
   (an ivar written nil, an `Integer?` seed) carry a sentinel, and a
   comparison on one raises as CRuby does (`nil > 0` is NoMethodError,
-  `1 > nil` the Comparable ArgumentError, `nil <=> 1` nil), but bool and
-  Symbol have no spare value at all.
+  `1 > nil` the Comparable ArgumentError, `nil <=> 1` nil), as does one
+  reaching a strict Integer argument -- an index, a count, a width --
+  where `s[s.index("z")]` is the same `no implicit conversion from nil to
+  integer` CRuby raises rather than a read off the front of the string.
+  A Range endpoint is the exception it is in CRuby: `s[ix..]` on a missed
+  `index` is the beginless Range, not an error. But bool and Symbol have
+  no spare value at all.
 - **Comparable is keyed on `<=>` presence** -- the Comparable operator methods
   (`<`, `<=`, `>`, `>=`, `between?`, `clamp`) work on any class that defines
   `<=>`; CRuby additionally requires `include Comparable` (a `NoMethodError`
@@ -507,22 +512,27 @@ generated C is rejected. Two links are fine -- the parent is specialized per
 call site there. Give the ancestor its own parameter, or make the block values
 agree, if a chain that deep needs both.
 
-#### Comparisons and predicates on a `nil` read out of an Integer container
+#### A `nil` read out of an Integer container
 
 A missing key on an Integer-valued Hash, or an out-of-range index on an
 Integer array, answers `nil`. Spinel represents that `nil` as a sentinel
 value inside the int slot, so the value is `nil` for `nil?`, `inspect`,
-`class` and `||`, and every arithmetic operator on it raises the way CRuby's
-`nil` does: `+`, `-`, `*`, `/`, `%` and `abs` raise `NoMethodError` (or the
-coercion `TypeError` when the `nil` is the right operand).
+`class` and `||`, and every consumer that can see it raises the way CRuby's
+`nil` does: arithmetic (`+`, `-`, `*`, `/`, `%`, `abs`) is `NoMethodError`
+or the coercion `TypeError`, comparisons and the numeric predicates
+(`<`, `>`, `<=>`, `zero?`, `positive?`, ...) are `NoMethodError` or the
+Comparable `ArgumentError` (#4567), and a strict Integer argument -- an
+index, a count, a width -- is `no implicit conversion from nil to integer`
+(#4896). The test is emitted only where the analysis says the value can
+carry the sentinel, so a loop counting from a literal keeps its bare
+compare and its bare index.
 
-Comparisons (`<`, `>`, `<=>`) and the numeric predicates (`zero?`,
-`positive?`, ...) still answer from the sentinel rather than raising, because
-checking them would put a branch on every integer comparison in the program,
-including the loop conditions in the hottest code Spinel generates. A
-comparison against a missing key therefore reports a result instead of
-raising. Guard the read (`h[k]&.positive?`, `h.fetch(k, 0)`, or a `nil?`
-test) when the key may be absent.
+What is left is the sentinel reaching a slot through a shape the analysis
+does not mark: a `Range` VALUE built from one (`r = (h[k]..); s[r]`) still
+slices from the raw sentinel rather than reading as the beginless Range a
+literal `s[h[k]..]` does. A genuine `-9223372036854775808` stored in such a
+slot is indistinguishable from nil, which is the price of the
+representation.
 
 #### `Integer#**` with a negative exponent
 

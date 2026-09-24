@@ -620,6 +620,23 @@ static void emit_int_expr_ex(Compiler *c, int node, int strict, Buf *b) {
   }
   if (emit_nilbool_conv_raise_w(c, node, TY_INT, strict == 0, strict == 2, b)) return;
   if (emit_obj_conv(c, node, "to_int", TY_INT, "Integer", b)) return;
+  /* A strict Integer slot fed from a nullable int (a `String#index` miss, an
+     ivar written nil, an `Integer?` seed) receives SP_INT_NIL as a plain
+     sp_int: the arm folded it as a number instead of refusing it the way the
+     compile-time `s[nil]` is refused above. Test for it here, at the one
+     funnel every strict slot passes through, rather than in each arm -- the
+     leak was never the index arms alone (#4896). The nilable slots
+     (emit_int_expr_nilable, strict == 0) keep their looseness, and a Range
+     endpoint is a nilable slot for exactly this reason: `s[ix..]` with a nil
+     ix is a beginless Range in CRuby, not an error. */
+  if (strict && comp_ntype(c, node) == TY_INT && nullable_int_value(c, node)) {
+    int tn = ++g_tmp;
+    buf_printf(b, "({ sp_int _t%d = ", tn);
+    emit_scalar_operand(c, node, "0", b);
+    buf_printf(b, "; SP_INT_NIL_ARG_CK%s(_t%d); _t%d; })",
+               strict == 2 ? "_OF" : "", tn, tn);
+    return;
+  }
   emit_scalar_operand(c, node, "0", b);
 }
 
@@ -630,6 +647,27 @@ void emit_int_expr(Compiler *c, int node, Buf *b) {
 /* The slot accepts nil in CRuby: keep the historical looseness. */
 void emit_int_expr_nilable(Compiler *c, int node, Buf *b) {
   emit_int_expr_ex(c, node, 0, b);
+}
+
+/* A Range endpoint in an index: the one Integer slot where nil is not the
+   TypeError the strict arms raise but an absent bound -- `s[nil..]` and
+   `s[ix..]` on a missed `index` are both the beginless Range covering the
+   whole receiver. `none` is the bound the arm already uses for the endpoint
+   the literal omits (0 for a begin, -1 or the length for an end), so the
+   written-out `s[nil..]` and the omitted `s[..]` take the same path (#4896). */
+void emit_int_expr_bound(Compiler *c, int node, const char *none, Buf *b) {
+  if (comp_ntype(c, node) == TY_NIL) {   /* the literal, and anything typed nil */
+    buf_puts(b, "((void)("); emit_expr(c, node, b); buf_printf(b, "), (sp_int)(%s))", none);
+    return;
+  }
+  if (comp_ntype(c, node) == TY_INT && nullable_int_value(c, node)) {
+    int tn = ++g_tmp;
+    buf_printf(b, "({ sp_int _t%d = ", tn);
+    emit_int_expr_ex(c, node, 0, b);
+    buf_printf(b, "; _t%d == SP_INT_NIL ? (sp_int)(%s) : _t%d; })", tn, none, tn);
+    return;
+  }
+  emit_int_expr_ex(c, node, 1, b);
 }
 
 /* Strict, but with CRuby's rb_convert_type wording ("of nil into Integer"):

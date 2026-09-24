@@ -394,7 +394,11 @@ static void emit_re_opts_flags(Compiler *c, int argc, const int *argv, Buf *out)
   if (argc < 2) { buf_puts(out, "0"); return; }
   TyKind ot = comp_ntype(c, argv[1]);
   if (ot == TY_INT) {
-    buf_puts(out, "sp_re_opts_to_flags("); emit_int_expr(c, argv[1], out); buf_puts(out, ")");
+    /* a NILABLE Integer slot: `Regexp.new(s, h[:missing])` is CRuby's nil
+       options, i.e. none. The sentinel is INTPTR_MIN, whose low three bits
+       are clear, so sp_re_opts_to_flags already translates it to no flags --
+       it must reach that arm rather than be refused as a conversion (#4896). */
+    buf_puts(out, "sp_re_opts_to_flags("); emit_int_expr_nilable(c, argv[1], out); buf_puts(out, ")");
   }
   else if (ot == TY_BOOL) {
     /* internal RE_FLAG_IGNORECASE == 1 */
@@ -3380,7 +3384,10 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "({ sp_Proc *_t%d = ", tcn); emit_expr(c, recv, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); sp_curry_new_%s(_t%d, ", tcn,
                    cty == TY_INT ? "n" : "v", tcn);
-        if (cty == TY_INT) emit_int_expr(c, argv[0], b);
+        /* the count is a NILABLE Integer slot: sp_curry_new_n reads the
+           sentinel as CRuby's nil count (no count at all), which is what
+           `curry(h[:missing])` means, so it must not be refused (#4896) */
+        if (cty == TY_INT) emit_int_expr_nilable(c, argv[0], b);
         else emit_boxed(c, argv[0], b);
         buf_printf(b, ", %d); })", curry_count_max(c, recv));
         return 1;
@@ -32734,10 +32741,12 @@ else {
       int lo = nt_ref(c->nt, rn, "left"), hi = nt_ref(c->nt, rn, "right");
       int t = ++g_tmp;
       buf_printf(b, "({ const char *_t%d = sp_sym_to_s(", t); emit_expr(c, recv, b);
+      char none_hi[64];
+      snprintf(none_hi, sizeof none_hi, "(sp_int)sp_str_length(_t%d)", t);
       buf_printf(b, "); sp_str_sub_range_r(_t%d, ", t);
-      if (lo >= 0) emit_int_expr(c, lo, b); else buf_puts(b, "0");
+      if (lo >= 0) emit_int_expr_bound(c, lo, "0", b); else buf_puts(b, "0");
       buf_puts(b, ", ");
-      if (hi >= 0) { emit_int_expr(c, hi, b); buf_printf(b, ", %d); })", excl); }
+      if (hi >= 0) { emit_int_expr_bound(c, hi, none_hi, b); buf_printf(b, ", %d); })", excl); }
       else buf_printf(b, "(sp_int)sp_str_length(_t%d), 0); })", t);
       return;
     }

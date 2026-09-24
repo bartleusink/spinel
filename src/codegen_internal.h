@@ -1031,6 +1031,7 @@ void conv_hold_end(int tmp);
 /* nil-accepting slots ("x".split(nil), StringIO#read(nil)): no strict
    nil/true/false TypeError arm -- see emit_nilbool_conv_raise in codegen.c */
 void emit_int_expr_nilable(Compiler *c, int node, Buf *b);
+void emit_int_expr_bound(Compiler *c, int node, const char *none, Buf *b);
 void emit_str_expr_nilable(Compiler *c, int node, Buf *b);
 /* strict with CRuby's rb_convert_type wording ("of nil into Integer") */
 void emit_int_expr_conv(Compiler *c, int node, Buf *b);
