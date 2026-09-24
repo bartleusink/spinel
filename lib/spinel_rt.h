@@ -4366,6 +4366,33 @@ static const char *sp_poly_elem_s(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL) return NULL;
   sp_raise_typed_elem(v, "String");
 }
+/* A boxed array of any kind, re-laid as a typed array one element at a time
+   under the rules above: the source of a typed-array splice whose RHS is only
+   known at run time to be an array (a poly array from `poly.first(n)`). */
+static sp_IntArray *sp_IntArray_from_elems(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);
+  sp_PolyArray *p = sp_poly_to_poly_array(v); SP_GC_ROOT(p);
+  sp_IntArray *r = sp_IntArray_new(); SP_GC_ROOT(r);
+  if (!p) { sp_IntArray_push(r, sp_poly_elem_i(sp_box_nil())); return r; }
+  for (sp_int i = 0; i < p->len; i++) sp_IntArray_push(r, sp_poly_elem_i(p->data[i]));
+  return r;
+}
+static sp_FloatArray *sp_FloatArray_from_elems(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);
+  sp_PolyArray *p = sp_poly_to_poly_array(v); SP_GC_ROOT(p);
+  sp_FloatArray *r = sp_FloatArray_new(); SP_GC_ROOT(r);
+  if (!p) { sp_FloatArray_push(r, sp_poly_elem_f(sp_box_nil())); return r; }
+  for (sp_int i = 0; i < p->len; i++) sp_FloatArray_push(r, sp_poly_elem_f(p->data[i]));
+  return r;
+}
+static sp_StrArray *sp_StrArray_from_elems(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);
+  sp_PolyArray *p = sp_poly_to_poly_array(v); SP_GC_ROOT(p);
+  sp_StrArray *r = sp_StrArray_new(); SP_GC_ROOT(r);
+  if (!p) { sp_StrArray_push(r, sp_poly_elem_s(sp_box_nil())); return r; }
+  for (sp_int i = 0; i < p->len; i++) sp_StrArray_push(r, sp_poly_elem_s(p->data[i]));
+  return r;
+}
 static const char *sp_PtrArray_inspect_k(sp_PtrArray *a) {
   if (!a) return SPL("nil");
   if (a->elem_kind == SP_PTR_ELEM_UNKNOWN) return sp_PtrArray_inspect(a);   /* opaque, as the erased id always was */

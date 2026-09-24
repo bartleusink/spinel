@@ -11675,7 +11675,23 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
     /* source array must share the receiver's element type; a poly/mismatched
        source would mix types into a flat typed array (reject loudly). */
     TyKind rhs_elem = ty_array_elem(rhs_ty);
-    if (rhs_ty == TY_POLY_ARRAY || rhs_elem != elem) {
+    if (rhs_ty == TY_POLY_ARRAY) {
+      /* a poly array is re-laid element by element into _ca (a value of
+         another kind is refused at run time); the array itself is the
+         yielded value */
+      buf_printf(b, "sp_PolyArray *_t%d = ", ts); emit_expr(c, rhs_node, b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); ", ts);
+      buf_printf(b, "sp_%sArray *_ca%d = sp_%sArray_from_elems(sp_box_poly_array(_t%d)); SP_GC_ROOT(_ca%d); _src%d = ",
+                 k, ta, k, ts, ta, ta);
+      if (elem == TY_INT) buf_printf(b, "_ca%d->data + _ca%d->start", ta, ta);
+      else buf_printf(b, "_ca%d->data", ta);
+      buf_printf(b, "; _srcn%d = _ca%d->len; ", ta, ta);
+      emit_splice_bounds(c, ta, tg, start_node, len_node, range_node, b);
+      buf_printf(b, "sp_%sArray_splice(_t%d, _s%d, _l%d, _src%d, _srcn%d); _t%d; })",
+                 k, ta, ta, ta, ta, ta, ts);
+      return;
+    }
+    if (rhs_elem != elem) {
       unsupported(c, id, "array splice with a mismatched-element-type source");
       return;
     }
@@ -11712,20 +11728,32 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
     const char *bcon = elem == TY_INT   ? "SP_BUILTIN_INT_ARRAY"
                      : elem == TY_STRING ? "SP_BUILTIN_STR_ARRAY"
                      :                     "SP_BUILTIN_FLT_ARRAY";
-    const char *conv = elem == TY_INT   ? "sp_poly_to_i"
-                     : elem == TY_STRING ? "sp_poly_to_s"
-                     :                     "sp_poly_to_f";
+    /* A scalar goes through the typed-element rules (#4481): nil is the
+       kind's nil, a value of another kind is refused rather than coerced. */
+    const char *conv = elem == TY_INT   ? "sp_poly_elem_i"
+                     : elem == TY_STRING ? "sp_poly_elem_s"
+                     :                     "sp_poly_elem_f";
     buf_printf(b, "sp_RbVal _t%d = ", ts); emit_boxed(c, rhs_node, b);
     /* root the boxed RHS: when it holds a same-kind array, _src aliases into
        _sa->data, which the splice's pushes can collect out from under us */
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ts);
     emit_ctype(c, elem, b); buf_printf(b, " _v%d; ", ta);
+    /* An array of another kind (a poly array from `poly.first(n)`) is
+       re-laid element by element into _ca, rooted at this scope since _src
+       points into it. */
+    buf_printf(b, "sp_%sArray *_ca%d = NULL; SP_GC_ROOT(_ca%d); ", k, ta, ta);
     buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == %s) { sp_%sArray *_sa%d = (sp_%sArray *)_t%d.v.p; _src%d = ",
                ts, ts, bcon, k, ta, k, ts, ta);
     if (elem == TY_INT) buf_printf(b, "_sa%d->data + _sa%d->start", ta, ta);
     else buf_printf(b, "_sa%d->data", ta);
-    buf_printf(b, "; _srcn%d = _sa%d->len; }\nelse { _v%d = %s(_t%d); _src%d = &_v%d; _srcn%d = 1; } ",
-               ta, ta, ta, conv, ts, ta, ta, ta);
+    buf_printf(b, "; _srcn%d = _sa%d->len; }\n", ta, ta);
+    buf_printf(b, "else if (_t%d.tag == SP_TAG_OBJ && sp_poly_is_array_kind(_t%d.cls_id)) { _ca%d = sp_%sArray_from_elems(_t%d); _src%d = ",
+               ts, ts, ta, k, ts, ta);
+    if (elem == TY_INT) buf_printf(b, "_ca%d->data + _ca%d->start", ta, ta);
+    else buf_printf(b, "_ca%d->data", ta);
+    buf_printf(b, "; _srcn%d = _ca%d->len; }\n", ta, ta);
+    buf_printf(b, "else { _v%d = %s(_t%d); _src%d = &_v%d; _srcn%d = 1; } ",
+               ta, conv, ts, ta, ta, ta);
   }
   else {
     /* scalar RHS: replace the slice with a single element */
