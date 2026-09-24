@@ -59,6 +59,7 @@ These are provided by Spinel but, like CRuby, only after their `require`:
 | `require "pathname"` | `Pathname` | uninitialized constant |
 | `require "io/console"` | `IO#winsize` | `NoMethodError` |
 | `require "time"` | `Time#iso8601` | `NoMethodError` |
+| `require "bigdecimal"` | `BigDecimal`, `BigDecimal()` (a minimal subset: see `packages/bigdecimal/bigdecimal.rb`) | `NoMethodError` (`BigDecimal()`) |
 
 `socket` is the strictest of these: its `require` is mandatory even with the
 gate **off**, because CRuby itself only defines `TCPServer` / `TCPSocket` after
