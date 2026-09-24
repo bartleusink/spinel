@@ -4333,6 +4333,42 @@ static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int
   return 0;
 }
 
+/* `when <cond>` against the subject in _t<t>: the subject class's own ===
+   or == when cond has its type, else a native === or the pointer compare. */
+static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
+  if (ty_is_object(pt) && comp_ntype(c, cond) == pt &&
+      (comp_method_in_chain(c, ty_object_class(pt), "===", NULL) >= 0 ||
+       comp_method_in_chain(c, ty_object_class(pt), "==", NULL) >= 0)) {
+    /* `case obj when other`: Ruby asks `other === obj`, which for a class
+       defining #== is that method. Comparing the C structs instead did
+       not compile for a value-type object and compared addresses for a
+       heap one (#3820). */
+    int ecid = ty_object_class(pt);
+    int emi = comp_method_in_chain(c, ecid, "===", NULL);
+    if (emi < 0) emi = comp_method_in_chain(c, ecid, "==", NULL);
+    Scope *ems = &c->scopes[emi];
+    LocalVar *eplv = ems->nparams > 0 ? scope_local(ems, ems->pnames[0]) : NULL;
+    TyKind pty = eplv ? eplv->type : TY_POLY;
+    buf_puts(b, "(");
+    emit_method_cname(c, ems, b);
+    buf_puts(b, "(");
+    emit_expr(c, cond, b);
+    buf_puts(b, ", ");
+    { char sref[32]; snprintf(sref, sizeof sref, "_t%d", t);
+      if (pty != pt && pt != TY_UNKNOWN) emit_boxed_text(c, pt, sref, b);
+      else buf_puts(b, sref); }
+    buf_puts(b, "))");
+  }
+  else {
+    char sref2[32]; snprintf(sref2, sizeof sref2, "_t%d", t);
+    /* a native handle or value kind answers `cond === subj` the way
+       an explicit === does (emit_native_object_protocol) */
+    if (!emit_native_case_eq(c, cond, pt, sref2, b)) {
+      buf_printf(b, "(_t%d == ", t); emit_expr(c, cond, b); buf_puts(b, ")");
+    }
+  }
+}
+
 void emit_case(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
@@ -4681,37 +4717,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
                 else buf_puts(b, sref); }
               buf_puts(b, ")");
             }
-            else if (ty_is_object(pt) && comp_ntype(c, conds[j]) == pt &&
-                 (comp_method_in_chain(c, ty_object_class(pt), "===", NULL) >= 0 ||
-                  comp_method_in_chain(c, ty_object_class(pt), "==", NULL) >= 0)) {
-          /* `case obj when other`: Ruby asks `other === obj`, which for a class
-             defining #== is that method. Comparing the C structs instead did
-             not compile for a value-type object and compared addresses for a
-             heap one (#3820). */
-          int ecid = ty_object_class(pt);
-          int emi = comp_method_in_chain(c, ecid, "===", NULL);
-          if (emi < 0) emi = comp_method_in_chain(c, ecid, "==", NULL);
-          Scope *ems = &c->scopes[emi];
-          LocalVar *eplv = ems->nparams > 0 ? scope_local(ems, ems->pnames[0]) : NULL;
-          TyKind pty = eplv ? eplv->type : TY_POLY;
-          buf_puts(b, "(");
-          emit_method_cname(c, ems, b);
-          buf_puts(b, "(");
-          emit_expr(c, conds[j], b);
-          buf_puts(b, ", ");
-          { char sref[32]; snprintf(sref, sizeof sref, "_t%d", t);
-            if (pty != pt && pt != TY_UNKNOWN) emit_boxed_text(c, pt, sref, b);
-            else buf_puts(b, sref); }
-          buf_puts(b, "))");
-        }
-        else {
-          char sref2[32]; snprintf(sref2, sizeof sref2, "_t%d", t);
-          /* a native handle or value kind answers `cond === subj` the way
-             an explicit === does (emit_native_object_protocol) */
-          if (!emit_native_case_eq(c, conds[j], pt, sref2, b)) {
-            buf_printf(b, "(_t%d == ", t); emit_expr(c, conds[j], b); buf_puts(b, ")");
-          }
-        }
+            else emit_case_obj_eq(c, conds[j], t, pt, b);
           }
           } /* close non-ConstantReadNode else */
           } /* close else { int reidx... } */
@@ -5065,37 +5071,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
           }
         }
         else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
-        else if (ty_is_object(pt) && comp_ntype(c, conds[j]) == pt &&
-                 (comp_method_in_chain(c, ty_object_class(pt), "===", NULL) >= 0 ||
-                  comp_method_in_chain(c, ty_object_class(pt), "==", NULL) >= 0)) {
-          /* `case obj when other`: Ruby asks `other === obj`, which for a class
-             defining #== is that method. Comparing the C structs instead did
-             not compile for a value-type object and compared addresses for a
-             heap one (#3820). */
-          int ecid = ty_object_class(pt);
-          int emi = comp_method_in_chain(c, ecid, "===", NULL);
-          if (emi < 0) emi = comp_method_in_chain(c, ecid, "==", NULL);
-          Scope *ems = &c->scopes[emi];
-          LocalVar *eplv = ems->nparams > 0 ? scope_local(ems, ems->pnames[0]) : NULL;
-          TyKind pty = eplv ? eplv->type : TY_POLY;
-          buf_puts(b, "(");
-          emit_method_cname(c, ems, b);
-          buf_puts(b, "(");
-          emit_expr(c, conds[j], b);
-          buf_puts(b, ", ");
-          { char sref[32]; snprintf(sref, sizeof sref, "_t%d", t);
-            if (pty != pt && pt != TY_UNKNOWN) emit_boxed_text(c, pt, sref, b);
-            else buf_puts(b, sref); }
-          buf_puts(b, "))");
-        }
-        else {
-          char sref2[32]; snprintf(sref2, sizeof sref2, "_t%d", t);
-          /* a native handle or value kind answers `cond === subj` the way
-             an explicit === does (emit_native_object_protocol) */
-          if (!emit_native_case_eq(c, conds[j], pt, sref2, b)) {
-            buf_printf(b, "(_t%d == ", t); emit_expr(c, conds[j], b); buf_puts(b, ")");
-          }
-        }
+        else emit_case_obj_eq(c, conds[j], t, pt, b);
         } /* close non-ConstantReadNode else */
       }
       else { buf_puts(b, "("); emit_expr(c, conds[j], b); buf_puts(b, ")"); }
