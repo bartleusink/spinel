@@ -6096,6 +6096,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                       is_poly_to_h;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
       if (root_recv) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
+      emit_poly_vis_precheck(c, id, tv, b);
       size_t pd_from = b->len;   /* the region pd_hoist may move out of line */
       emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
       buf_printf(b, " _t%d = %s; ", tr, is_scalar_ret(ret) ? default_value(ret) : "0");
@@ -7278,6 +7279,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
          receiver out from under itself (#3476). */
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
       buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
+      emit_poly_vis_precheck(c, id, tv, b);
       for (int a = 0; a < pos_argc; a++) {
         atmp[a] = ++g_tmp;
         if (a == splat_a) {
@@ -15962,6 +15964,39 @@ int emit_vis_refusal(Compiler *c, int id, Buf *b) {
              vis == SP_VIS_PRIVATE ? "private" : "protected", vnm, vrn,
              default_value(comp_ntype(c, id)));
   return 1;
+}
+
+/* The same refusal for a boxed receiver, at run time: each class that
+   declares the name private (or protected, where the caller is not an
+   instance of the declaring class) refuses the call before the dispatch
+   switch runs. The switch's arms call the method whatever its visibility, so
+   `[obj].any? { |x| x.hid? }`, whose block parameter is boxed, ran a private
+   method (#4920). Emits nothing when no class refuses. */
+void emit_poly_vis_precheck(Compiler *c, int id, int tv, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int vrecv = nt_ref(nt, id, "receiver");
+  const char *vrty = vrecv >= 0 ? nt_type(nt, vrecv) : NULL;
+  int stamped = nt_str(nt, id, "vis_enforce") != NULL;
+  int plain = !stamped && vrecv >= 0 && !nt_str(nt, id, "send_blind") &&
+              !nt_int(nt, id, "dyn_arm", 0) && !(vrty && sp_streq(vrty, "SelfNode"));
+  if (!stamped && !plain) return;
+  const char *vnm = nt_str(nt, id, "name");
+  if (!vnm) return;
+  Scope *cs = comp_scope_of(c, id);
+  int caller = (cs && !cs->is_cmethod) ? cs->class_id : -1;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!c->classes[k].instantiated || c->classes[k].is_native_class) continue;
+    if (comp_method_in_chain(c, k, vnm, NULL) < 0) continue;
+    int owner = -1;
+    int vis = comp_method_vis_declared(c, k, vnm, &owner);
+    if (vis == SP_VIS_PROTECTED && plain && caller >= 0 && owner >= 0 &&
+        is_descendant(c, caller, owner)) vis = SP_VIS_PUBLIC;
+    if (vis == SP_VIS_PUBLIC) continue;
+    const char *vrn = class_ruby_name(c, k) ? class_ruby_name(c, k) : c->classes[k].name;
+    buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == %d) { sp_exc_stage_recv(_t%d); "
+                  "sp_raise_cls(\"NoMethodError\", (&(\"\\xff\" \"%s method '%s' called for an instance of %s\")[1])); } ",
+               tv, tv, k, tv, vis == SP_VIS_PRIVATE ? "private" : "protected", vnm, vrn);
+  }
 }
 
 int emit_unresolved_call(Compiler *c, int id, Buf *b) {
