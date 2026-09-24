@@ -16859,7 +16859,13 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   int saved_tmp = g_tmp;
   Buf opb[8];
   int rendered = 0, ok = 1;
-  for (; rendered < nb && ok; rendered++) {
+  /* A lone observable operand is kept only when the call converts, which the
+     call's own emission tells; render the operand after that, so a declined
+     rewrite has not rendered it. Rendered first, a decline re-rendered it with
+     the whole call, once per nesting level: 2^depth copies of a receiver
+     chain (#4925). */
+  int operands_last = observable < 2;
+  for (; !operands_last && rendered < nb && ok; rendered++) {
     memset(&opb[rendered], 0, sizeof opb[0]);
     emit_expr(c, node[rendered], &opb[rendered]);
     if (text_is_raise_token(opb[rendered].p)) ok = 0;
@@ -16890,6 +16896,11 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
       if (!text_uses_tmp(ob.p, tmp[i])) ok = 0;
       else if (g_pre->p && g_pre->len > pre_mark &&
                text_uses_tmp(g_pre->p + pre_mark, tmp[i])) ok = 0;
+    }
+    for (; operands_last && rendered < nb && ok; rendered++) {
+      memset(&opb[rendered], 0, sizeof opb[0]);
+      emit_expr(c, node[rendered], &opb[rendered]);
+      if (text_is_raise_token(opb[rendered].p)) ok = 0;
     }
   }
   if (!ok) {
