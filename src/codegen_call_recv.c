@@ -286,6 +286,53 @@ static int sb_iv_expr_shim(Compiler *c, int id, int recvS, Buf *b,
   return 1;
 }
 
+/* find_index { |x| cond } / index { |x| cond } / rindex { |x| cond } on an
+   array of kind `k` ("Int", ..., "Poly") - the index or nil (rindex scans
+   from the end). Returns 0 when the block has no body. */
+static int emit_array_block_index(Compiler *c, int id, int recv, TyKind rt, const char *k,
+                                  const char *name, int block, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *bp = block_param_name(c, block, 0); if (bp) bp = rename_local(bp);
+  int body = nt_ref(nt, block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn >= 1) {
+    int trecv = ++g_tmp, ti = ++g_tmp, tres = ++g_tmp;
+    Buf rfi = expr_buf(c, recv);
+    emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+    buf_printf(g_pre, " _t%d = %s; ", trecv, rfi.p ? rfi.p : "NULL"); free(rfi.p);
+    /* rooted, as the poly-array find_index above already roots its own
+       hoist. rindex takes its bound once and then counts down, so a
+       collection mid-walk shows up in the elements rather than in the
+       turn count. */
+    emit_gc_root_tmp(c, rt, trecv, g_pre); buf_puts(g_pre, "\n");
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = SP_INT_NIL;\n", tres);
+    emit_indent(g_pre, g_indent);
+    if (sp_streq(name, "rindex"))
+      buf_printf(g_pre, "for (sp_int _t%d = sp_%sArray_length(_t%d) - 1; _t%d >= 0; _t%d--) {\n",
+                 ti, k, trecv, ti, ti);
+    else
+      buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
+                 ti, ti, k, trecv, ti);
+    if (bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", bp, k, trecv, ti); }
+    Buf cb; memset(&cb, 0, sizeof cb);
+    if (!emit_block_cond_next(c, block, g_indent + 1, &cb)) {
+      for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
+      int sv = g_indent; g_indent++;
+      cb = expr_buf(c, bb[bn - 1]); g_indent = sv;
+    }
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "if (%s) { _t%d = _t%d; break; }\n", cb.p ? cb.p : "0", tres, ti);
+    free(cb.p);
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+    /* an Integer slot carries nil as its sentinel; any other answers boxed */
+    if (comp_ntype(c, id) == TY_INT) buf_printf(b, "_t%d", tres);
+    else buf_printf(b, "(_t%d == SP_INT_NIL ? sp_box_nil() : sp_box_int(_t%d))", tres, tres);
+    return 1;
+  }
+  return 0;
+}
+
+
 int emit_array_call(Compiler *c, int id, Buf *b) {
   /* The variadic Array mutators accept zero elements and return the receiver
      unchanged; every arm below is written for argc >= 1, so a no-argument call
@@ -2400,6 +2447,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         return 1;
       }
     }
+    /* rindex { |x| cond } on a poly array: the typed arrays' walk over the
+       boxed elements (index / find_index with a block reach Enumerable's) */
+    if (rt == TY_POLY_ARRAY && sp_streq(name, "rindex") && argc == 0 &&
+        nt_ref(nt, id, "block") >= 0 &&
+        emit_array_block_index(c, id, recv, rt, "Poly", name, nt_ref(nt, id, "block"), b))
+      return 1;
     /* index(v) / find_index(v) on a poly array (no block) -> the first
        position whose element == v (sp_poly_eq), or nil (SP_INT_NIL),
        mirroring the count(v)/any?(v) idiom (doom: @map.sectors.index(sector)). */
@@ -3494,46 +3547,10 @@ else {
         return 1;
       }
       int block = nt_ref(nt, id, "block");
-      /* find_index { |x| cond } / index { |x| cond } / rindex { |x| cond } on
-         typed arrays - returns the index or nil (rindex scans from the end). */
       if ((sp_streq(name, "find_index") || sp_streq(name, "index") ||
-           sp_streq(name, "rindex")) && block >= 0) {
-        const char *bp = block_param_name(c, block, 0); if (bp) bp = rename_local(bp);
-        int body = nt_ref(nt, block, "body");
-        int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-        if (bn >= 1) {
-          int trecv = ++g_tmp, ti = ++g_tmp, tres = ++g_tmp;
-          Buf rfi = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s; ", trecv, rfi.p ? rfi.p : "NULL"); free(rfi.p);
-          /* rooted, as the poly-array find_index above already roots its own
-             hoist. rindex takes its bound once and then counts down, so a
-             collection mid-walk shows up in the elements rather than in the
-             turn count. */
-          emit_gc_root_tmp(c, rt, trecv, g_pre); buf_puts(g_pre, "\n");
-          emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = SP_INT_NIL;\n", tres);
-          emit_indent(g_pre, g_indent);
-          if (sp_streq(name, "rindex"))
-            buf_printf(g_pre, "for (sp_int _t%d = sp_%sArray_length(_t%d) - 1; _t%d >= 0; _t%d--) {\n",
-                       ti, k, trecv, ti, ti);
-          else
-            buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
-                       ti, ti, k, trecv, ti);
-          if (bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", bp, k, trecv, ti); }
-          Buf cb; memset(&cb, 0, sizeof cb);
-          if (!emit_block_cond_next(c, block, g_indent + 1, &cb)) {
-            for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
-            int sv = g_indent; g_indent++;
-            cb = expr_buf(c, bb[bn - 1]); g_indent = sv;
-          }
-          emit_indent(g_pre, g_indent + 1);
-          buf_printf(g_pre, "if (%s) { _t%d = _t%d; break; }\n", cb.p ? cb.p : "0", tres, ti);
-          free(cb.p);
-          emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-          buf_printf(b, "(_t%d == SP_INT_NIL ? sp_box_nil() : sp_box_int(_t%d))", tres, tres);
-          return 1;
-        }
-      }
+           sp_streq(name, "rindex")) && block >= 0 &&
+          emit_array_block_index(c, id, recv, rt, k, name, block, b))
+        return 1;
       /* find(ifnone) { |x| cond } on a typed array: the element (boxed) or
          the ifnone proc's value on no-match; the result rides poly since the
          proc can return anything. A non-proc ifnone stays a loud reject. */
