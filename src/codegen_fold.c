@@ -6812,7 +6812,62 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
      we can index into it per fixed param. */
   int splat_idx = -1;  /* index into argv[] of the SplatNode */
   int splat_tmp = -1;  TyKind splat_at = TY_UNKNOWN;
-  for (int k = 0; k < pos_argc; k++) {
+  /* A splat with positionals after it (`f(*a, 3)`) binds by a count only the
+     run time knows: which parameter the 3 fills depends on a's length. The
+     layout below assumed the splat filled exactly the gap, so `f(*[1, 2], 3)`
+     on `def f(a, b)` bound b = 3 and raised nothing, and `g(*[], 1, 2, 3)`
+     bound nils. For a plain positional list (no rest, keyword or leading
+     optional), gather every positional into one array, as CRuby does, then
+     check the count and bind from it. */
+  int splat_all = 0;
+  {
+    int nspl = 0, sk = -1;
+    for (int k = 0; k < pos_argc; k++)
+      if (argv && nt_kind(nt, argv[k]) == NK_SplatNode) { nspl++; sk = k; }
+    int plain = nspl == 1 && sk < pos_argc - 1 && kwh < 0 && m->rest_idx < 0 &&
+                m->kwrest_idx < 0 && !m->cs_synth && !opt_before_required(m);
+    for (int i = 0; i < m->nparams && plain; i++)
+      if (!m->pnames[i] || (m->pnames[i][0] == '_' && m->pnames[i][1] == '_') ||
+          callee_has_kwarg(c, m, m->pnames[i])) plain = 0;
+    if (plain) {
+      int ct = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", ct, ct);
+      for (int k = 0; k < pos_argc; k++) {
+        Buf ab; memset(&ab, 0, sizeof ab);
+        if (nt_kind(nt, argv[k]) == NK_SplatNode) {
+          int inner = nt_ref(nt, argv[k], "expression");
+          if (inner < 0) {
+            if (!emit_anon_rest_ref(c, argv[k], &ab)) buf_puts(&ab, "sp_PolyArray_new()");
+          }
+          else {
+            buf_puts(&ab, "sp_poly_to_poly_array(sp_splat_to_array(");
+            emit_boxed(c, inner, &ab);
+            buf_puts(&ab, "))");
+          }
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "sp_PolyArray_append_all(_t%d, %s);\n", ct, ab.p ? ab.p : "NULL");
+        }
+        else {
+          emit_boxed(c, argv[k], &ab);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", ct, ab.p ? ab.p : "sp_box_nil()");
+        }
+        free(ab.p);
+      }
+      int pos_required = 0, pos_params = 0;
+      positional_arity(c, m, &pos_required, &pos_params);
+      char expbuf[48];
+      if (pos_required == pos_params) snprintf(expbuf, sizeof expbuf, "expected %d", pos_params);
+      else snprintf(expbuf, sizeof expbuf, "expected %d..%d", pos_required, pos_params);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre,
+                 "if (_t%d->len < %d || _t%d->len > %d) sp_raise_cls(\"ArgumentError\", sp_sprintf(\"wrong number of arguments (given %%lld, %s)\", (long long)_t%d->len));\n",
+                 ct, pos_required, ct, pos_params, expbuf, ct);
+      splat_all = 1; splat_idx = 0; splat_tmp = ct; splat_at = TY_POLY_ARRAY;
+    }
+  }
+  for (int k = 0; k < pos_argc && !splat_all; k++) {
     if (argv && nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) {
       int need_expand = (m->rest_idx >= 0 && k < m->rest_idx) ||
                         (m->rest_idx < 0 && k < m->nparams);
@@ -7059,7 +7114,7 @@ else if (m->rest_idx >= 0 && m->npost_rest > 0 && i > m->rest_idx) {
 else if (splat_tmp >= 0 && i >= splat_idx &&
          !(m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i])) &&
          i != m->kwrest_idx &&
-         ({ int _nt = pos_argc - splat_idx - 1; int _end = m->nparams - _nt;
+         ({ int _nt = splat_all ? 0 : pos_argc - splat_idx - 1; int _end = m->nparams - _nt;
             !(_nt > 0 && i >= _end && _end > splat_idx); })) {
       /* this param comes from the splatted array at offset (i - splat_idx) */
       int off = i - splat_idx;
@@ -7073,6 +7128,12 @@ else if (splat_tmp >= 0 && i >= splat_idx &&
         emit_boxed_text(c, set, raw.p ? raw.p : "0", &eb); free(raw.p);
       }
       else emit_array_elem_at(splat_at, splat_tmp, off, &eb);
+      /* the gathered positionals are boxed: a typed parameter unboxes */
+      if (splat_all && sp && sp->type != TY_POLY && sp->type != TY_UNKNOWN) {
+        Buf ub; memset(&ub, 0, sizeof ub);
+        emit_unbox_text(c, sp->type, eb.p ? eb.p : "sp_box_nil()", &ub);
+        free(eb.p); eb = ub;
+      }
       /* An optional param may fall past the end of a (runtime-sized) splat
          array; the arity check guarantees the required params are present, so
          guard only the optionals and fall back to their default. */
@@ -7100,7 +7161,7 @@ else if (splat_tmp >= 0 && i >= splat_idx &&
     }
 else if (splat_tmp >= 0 && i > splat_idx && i != m->kwrest_idx &&
          !(m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i])) &&
-         ({ int _nt = pos_argc - splat_idx - 1; int _end = m->nparams - _nt;
+         ({ int _nt = splat_all ? 0 : pos_argc - splat_idx - 1; int _end = m->nparams - _nt;
             _nt > 0 && i >= _end && _end > splat_idx; })) {
       /* Trailing positional after a mid-list call-site splat (`g(1, *m, 4)`):
          the splat fills the middle, so this tail param comes from the call
