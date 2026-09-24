@@ -2367,6 +2367,12 @@ static void fi_build(Compiler *c) {
     if (!ok) continue;
     if (fi_body_unforceable(c, m->body, 0)) continue;
     if (fi_body_has_loop(c, m->body, 0)) continue;
+    /* A default moved into a method of its own (#4900) calls back into the
+       method whose default it is, and that call emits the default -- a call
+       to the helper -- in place: the helper calls itself in C through a
+       route the call graph here does not follow. gcc refuses always_inline
+       on it where clang drops the attribute quietly. */
+    if (m->def_node >= 0 && nt_int(nt, m->def_node, "default_helper", 0)) continue;
     cand[si] = 1; ncand++;
   }
   /* A whole-program cycle search is O(candidates * edges); on a program with
@@ -10066,6 +10072,7 @@ typedef struct {
   int c_ret_void, in_proc_body, result_poly, proc_body_kind, proc_toplevel_return;
   int indent, nren, block_nren, block_id, c_loop_depth, ensure_depth;
   int emitting_class_id, inline_recv_class, ie_class_id, dm_subst_node, exc_frame_depth;
+  int open_defaults;
 } EmitUnitState;
 
 static void emit_unit_state_save(EmitUnitState *s) {
@@ -10076,6 +10083,7 @@ static void emit_unit_state_save(EmitUnitState *s) {
   s->c_loop_depth = g_c_loop_depth; s->ensure_depth = g_ensure_depth;
   s->emitting_class_id = g_emitting_class_id; s->inline_recv_class = g_inline_recv_class;
   s->ie_class_id = g_ie_class_id; s->dm_subst_node = g_dm_subst_node; s->exc_frame_depth = g_exc_frame_depth;
+  s->open_defaults = g_open_defaults;
   s->pre = g_pre;
   s->yield_self_fallback = g_yield_self_fallback;
   s->yield_self_fallback2 = g_yield_self_fallback2; s->yield_self_deref_fallback2 = g_yield_self_deref_fallback2; s->yield_emitting_class_fallback2 = g_yield_emitting_class_fallback2;
@@ -10122,6 +10130,7 @@ static void emit_unit_state_restore(const EmitUnitState *s) {
   g_c_loop_depth = s->c_loop_depth; g_ensure_depth = s->ensure_depth;
   g_emitting_class_id = s->emitting_class_id; g_inline_recv_class = s->inline_recv_class;
   g_ie_class_id = s->ie_class_id; g_dm_subst_node = s->dm_subst_node; g_exc_frame_depth = s->exc_frame_depth;
+  g_open_defaults = s->open_defaults;
   g_pre = s->pre;
   g_yield_self_fallback = s->yield_self_fallback;
   g_yield_self_fallback2 = s->yield_self_fallback2; g_yield_self_deref_fallback2 = s->yield_self_deref_fallback2; g_yield_emitting_class_fallback2 = s->yield_emitting_class_fallback2;

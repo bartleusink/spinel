@@ -631,6 +631,7 @@ extern int g_ndiags;
 extern jmp_buf g_unsup_recover;    /* per-unit recovery point, armed by the driver */
 extern int g_unsup_armed;          /* nonzero while a recovery point is live */
 extern int g_unsup_probe;          /* silent emittability probe (drop a dynamic-send arm) */
+extern int g_open_defaults;        /* parameter defaults being emitted, innermost last */
 /* The compiled conversion method a statically-typed user object reaches at a
    typed slot (CRuby's implicit conversion protocol), or -1: `conv` is "to_str"
    or "to_int" and `want` the slot's type, which the method's declared return

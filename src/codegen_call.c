@@ -818,12 +818,22 @@ static int emit_poly_cls_value_prearm(Compiler *c, const char *name, int argc,
    reflection (respond_to?, instance_methods): they are implementation detail
    with no CRuby counterpart. Matched by exact name so a user-defined `__foo`
    stays visible. */
-static int name_is_synth_method(const char *m) {
+static int name_is_synth_method(Compiler *c, const char *m) {
   if (!m) return 0;
   if (sp_streq(m, "__enum_to_a")) return 1;
   /* `__inc <n> <name>`: the shadow copy of an included module's method, kept
      so an override can reach it through super (#3738) */
   if (strncmp(m, "__inc ", 6) == 0) return 1;
+  /* a parameter default moved into a method of its own
+     (desugar_recursive_param_defaults, #4900): known by the mark on its
+     DefNode rather than its name, which the desugar picks so that no method
+     the program defines has it */
+  if (strncmp(m, "__sp_default_", 13) != 0) return 0;
+  for (int si = 0; si < c->nscopes; si++) {
+    Scope *s = &c->scopes[si];
+    if (s->def_node >= 0 && s->name && sp_streq(s->name, m) &&
+        nt_int(c->nt, s->def_node, "default_helper", 0)) return 1;
+  }
   return 0;
 }
 
@@ -2474,10 +2484,12 @@ static int emit_dynamic_send(Compiler *c, int id, Buf *b) {
     g_pre = &pre;
     int sv_probe = g_unsup_probe; g_unsup_probe = 1;
     ConvHold *sv_hold = g_conv_hold;
+    int sv_open_defaults = g_open_defaults;
     volatile int ok;
     if (setjmp(g_unsup_recover) == 0) { emit_expr(c, arm, &body); ok = 1; }
     else ok = 0;
     g_conv_hold = sv_hold;  /* a dropped arm may have unwound through emit_call */
+    g_open_defaults = sv_open_defaults;
     g_unsup_probe = sv_probe;
     g_pre = sv_pre;
     if (ok) {
@@ -25847,7 +25859,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             if (!s->name || !s->name[0]) continue;
             /* skip shadow methods and compiler-synthesized helpers */
             if (strncmp(s->name, "__prep_", 7) == 0) continue;
-            if (name_is_synth_method(s->name)) continue;
+            if (name_is_synth_method(c, s->name)) continue;
             int v = comp_method_vis(ci3, s->name);
             if (!((v == SP_VIS_PUBLIC && im_pub) || (v == SP_VIS_PROTECTED && im_prot) ||
                   (v == SP_VIS_PRIVATE && im_priv))) continue;
@@ -30557,7 +30569,7 @@ else {
       int yes = 0, resolved = 0;
       /* a compiler-synthesized helper (__enum_to_a) is not a real method: CRuby
          answers false, so never let the class-chain lookup below report it */
-      if (name_is_synth_method(qm)) { resolved = 1; yes = 0; }
+      if (name_is_synth_method(c, qm)) { resolved = 1; yes = 0; }
       /* every object inherits a PRIVATE Object#initialize_copy, so it answers
          only when private methods are included (#3753) */
       if (!resolved && sp_streq(qm, "initialize_copy") && foldable) {
@@ -30811,7 +30823,7 @@ else {
         buf_printf(b, "%d", md_priv ? 1 : 0);
         return;
       }
-      if (name_is_synth_method(qm)) { buf_puts(b, "FALSE"); return; }
+      if (name_is_synth_method(c, qm)) { buf_puts(b, "FALSE"); return; }
       int parent = c->classes[ci].parent;
       int mc = -1;
       int mi = comp_method_in_chain(c, ci, qm, &mc);

@@ -5407,7 +5407,47 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
   g_emitting_class_id = sv_emcls;
 }
 
+static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provided, Buf *out);
+
+/* A default is emitted in place at the call site, so one whose expression
+   omits the same argument of the same method again has no finite emission.
+   desugar_recursive_param_defaults moves such a default into a method of its
+   own; one it has to leave (it reads the caller's block, or `super`) is
+   refused here rather than recursing until the compiler's stack runs out.
+   The same default may be entered twice legitimately: the by-reference path
+   re-enters for the plain value. A silent probe that unwinds past an open
+   default restores g_open_defaults along with its other state. */
+enum { OPEN_DEFAULTS_MAX = 256 };
+static struct { Scope *m; int idx; } g_open_default[OPEN_DEFAULTS_MAX];
+int g_open_defaults = 0;
+
 static void emit_arg_or_default_at(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
+  if (provided >= 0 || !m->pdefault || m->pdefault[idx] < 0) {
+    emit_arg_or_default_fill(c, m, idx, provided, out);
+    return;
+  }
+  if (g_open_defaults >= OPEN_DEFAULTS_MAX)
+    unsupported(c, m->pdefault[idx], "parameter defaults nested more than 256 deep at one call site");
+  int seen = 0;
+  for (int i = 0; i < g_open_defaults; i++)
+    if (g_open_default[i].m == m && g_open_default[i].idx == idx) seen++;
+  if (seen >= 2) {
+    char msg[320];
+    snprintf(msg, sizeof msg,
+             "default of `%s`'s parameter `%s` that calls `%s` again with that argument omitted "
+             "(one reading the caller's block or `super` cannot be moved into a method of its own)",
+             m->name ? m->name : "?", m->pnames[idx] ? m->pnames[idx] : "?",
+             m->name ? m->name : "?");
+    unsupported(c, m->pdefault[idx], msg);
+  }
+  g_open_default[g_open_defaults].m = m;
+  g_open_default[g_open_defaults].idx = idx;
+  g_open_defaults++;
+  emit_arg_or_default_fill(c, m, idx, provided, out);
+  g_open_defaults--;
+}
+
+static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_INT;
   /* A hash argument of a different KIND than the parameter's slot: the two are

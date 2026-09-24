@@ -3766,3 +3766,302 @@ int desugar_builtin_scalar_calls(Compiler *c) {
   }
   return changed;
 }
+
+/* ---- a parameter default that calls back into its own method ----
+   A default is filled at the call site: the omitted argument's expression is
+   emitted in place of the argument. A default that calls its own method with
+   that argument omitted again (`def m(x, y = (x > 0 ? m(x - 1)[0] : 0))`), or
+   calls another method whose default comes back around, has no finite
+   inlining, and codegen recursed until the compiler's stack ran out.
+
+   Ruby evaluates the default in the callee, once per call. The same happens
+   when the default becomes a method of its own, defined where the original
+   is and on the same receiver, taking the earlier parameters it reads:
+
+     def m(x, y = D)        ->  def __sp_default_m_y_N(x) = D
+                                def m(x, y = __sp_default_m_y_N(x))
+
+   The call site then inlines only the call to the helper, and the recursion
+   happens at run time inside the helper's body, as it does in CRuby. Only
+   defaults on such a cycle are rewritten. */
+typedef struct { int def; int param; int val; int bad; } RdDefault;
+
+/* `alias` / `alias_method` pairs, new name then old, collected once per run */
+static const char **rd_alias = NULL;
+static int rd_nalias = 0;
+
+static void rd_collect_aliases(const NodeTable *nt) {
+  rd_nalias = 0;
+  int cap = 0;
+  for (int id = 0; id < nt->count; id++) {
+    const char *nn = NULL, *on = NULL;
+    if (fwd_node_is(nt, id, "AliasMethodNode")) {
+      nn = nt_str(nt, nt_ref(nt, id, "new_name"), "value");
+      on = nt_str(nt, nt_ref(nt, id, "old_name"), "value");
+    } else if (fwd_node_is(nt, id, "CallNode") && nt_str(nt, id, "name") &&
+               sp_streq(nt_str(nt, id, "name"), "alias_method")) {
+      int an = 0; const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an);
+      if (an == 2) { nn = nt_str(nt, av[0], "value"); on = nt_str(nt, av[1], "value"); }
+    }
+    if (!nn || !on) continue;
+    if (2 * rd_nalias + 2 > cap) {
+      cap = cap ? cap * 2 : 16;
+      const char **g = realloc(rd_alias, sizeof *rd_alias * (size_t)cap);
+      if (!g) return;
+      rd_alias = g;
+    }
+    rd_alias[2 * rd_nalias] = nn;
+    rd_alias[2 * rd_nalias + 1] = on;
+    rd_nalias++;
+  }
+}
+
+static int rd_call_name_is(const char *nm, const char *want) {
+  if (!nm || !want) return 0;
+  if (sp_streq(nm, "new")) return sp_streq(want, "initialize");
+  for (int hop = 0; nm && hop < 8; hop++) {
+    if (sp_streq(nm, want)) return 1;
+    const char *old = NULL;
+    for (int k = 0; k < rd_nalias && !old; k++)
+      if (sp_streq(rd_alias[2 * k], nm)) old = rd_alias[2 * k + 1];
+    nm = old;
+  }
+  return 0;
+}
+
+/* Does the subtree at `id` call a method named `want`? `*bad` is set when it
+   holds something that would mean another thing inside a method of its own:
+   the caller's block, `super`, the method's name. */
+static int rd_subtree_calls(const NodeTable *nt, int id, const char *want, int *bad) {
+  if (id < 0 || id >= nt->count) return 0;
+  const char *ty = nt_type(nt, id);
+  int hit = 0;
+  if (ty) {
+    if (sp_streq(ty, "YieldNode") || sp_streq(ty, "SuperNode") ||
+        sp_streq(ty, "ForwardingSuperNode") || sp_streq(ty, "DefNode") ||
+        sp_streq(ty, "ForwardingArgumentsNode")) *bad = 1;
+    if (sp_streq(ty, "CallNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      if (nm && (sp_streq(nm, "block_given?") || sp_streq(nm, "__method__") ||
+                 sp_streq(nm, "binding"))) *bad = 1;
+      if (want && rd_call_name_is(nm, want)) hit = 1;
+    }
+  }
+  const SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++) hit |= rd_subtree_calls(nt, nd->r[j].ref, want, bad);
+  for (int j = 0; j < nd->na; j++)
+    for (int k = 0; k < nd->a[j].n; k++) hit |= rd_subtree_calls(nt, nd->a[j].ids[k], want, bad);
+  return hit;
+}
+
+static int rd_subtree_reads(const NodeTable *nt, int id, const char *name) {
+  if (id < 0 || id >= nt->count) return 0;
+  if (fwd_node_is(nt, id, "LocalVariableReadNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    if (nm && sp_streq(nm, name)) return 1;
+  }
+  const SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++) if (rd_subtree_reads(nt, nd->r[j].ref, name)) return 1;
+  for (int j = 0; j < nd->na; j++)
+    for (int k = 0; k < nd->a[j].n; k++) if (rd_subtree_reads(nt, nd->a[j].ids[k], name)) return 1;
+  return 0;
+}
+
+/* The parameter nodes of `def`, in the order Ruby binds them. */
+static int rd_params(const NodeTable *nt, int def, int *out, int cap) {
+  int pn = nt_ref(nt, def, "parameters");
+  if (pn < 0) return 0;
+  int n = 0;
+  static const char *const arrs[] = { "requireds", "optionals" };
+  for (int a = 0; a < 2; a++) {
+    int k = 0; const int *ids = nt_arr(nt, pn, arrs[a], &k);
+    for (int i = 0; i < k && n < cap; i++) out[n++] = ids[i];
+  }
+  int r = nt_ref(nt, pn, "rest");
+  if (r >= 0 && n < cap) out[n++] = r;
+  { int k = 0; const int *ids = nt_arr(nt, pn, "posts", &k);
+    for (int i = 0; i < k && n < cap; i++) out[n++] = ids[i]; }
+  { int k = 0; const int *ids = nt_arr(nt, pn, "keywords", &k);
+    for (int i = 0; i < k && n < cap; i++) out[n++] = ids[i]; }
+  int kr = nt_ref(nt, pn, "keyword_rest");
+  if (kr >= 0 && n < cap) out[n++] = kr;
+  int b = nt_ref(nt, pn, "block");
+  if (b >= 0 && n < cap) out[n++] = b;
+  return n;
+}
+
+static void rd_mark_parents(const NodeTable *nt, int *parent, int n0) {
+  for (int id = 0; id < n0; id++) {
+    const SpNode *nd = &nt->nodes[id];
+    for (int j = 0; j < nd->nr; j++) {
+      int ch = nd->r[j].ref;
+      if (ch >= 0 && ch < n0) parent[ch] = id;
+    }
+    for (int j = 0; j < nd->na; j++)
+      for (int k = 0; k < nd->a[j].n; k++) {
+        int ch = nd->a[j].ids[k];
+        if (ch >= 0 && ch < n0) parent[ch] = id;
+      }
+  }
+}
+
+int desugar_recursive_param_defaults(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  int nd = 0, cap = 0;
+  RdDefault *ds = NULL;
+  for (int def = 0; def < n0; def++) {
+    if (!fwd_node_is(nt, def, "DefNode") || !nt_str(nt, def, "name")) continue;
+    int ps[256]; int np = rd_params(nt, def, ps, 256);
+    for (int i = 0; i < np; i++) {
+      if (!fwd_node_is(nt, ps[i], "OptionalParameterNode") &&
+          !fwd_node_is(nt, ps[i], "OptionalKeywordParameterNode")) continue;
+      int v = nt_ref(nt, ps[i], "value");
+      if (v < 0) continue;
+      if (nd >= cap) {
+        cap = cap ? cap * 2 : 16;
+        RdDefault *g = realloc(ds, sizeof *ds * (size_t)cap);
+        if (!g) { free(ds); return 0; }
+        ds = g;
+      }
+      ds[nd].def = def; ds[nd].param = ps[i]; ds[nd].val = v; ds[nd].bad = 0;
+      rd_subtree_calls(nt, v, NULL, &ds[nd].bad);
+      nd++;
+    }
+  }
+  if (nd == 0) { free(ds); return 0; }
+  rd_collect_aliases(nt);
+  /* edge i -> j: default i calls the method default j belongs to */
+  unsigned char *edge = calloc((size_t)nd * (size_t)nd, 1);
+  int *stack = malloc(sizeof(int) * (size_t)nd);
+  unsigned char *seen = malloc((size_t)nd);
+  if (!edge || !stack || !seen) { free(edge); free(stack); free(seen); free(ds); return 0; }
+  for (int i = 0; i < nd; i++)
+    for (int j = 0; j < nd; j++) {
+      int bad = 0;
+      edge[(size_t)i * nd + j] =
+        (unsigned char)rd_subtree_calls(nt, ds[i].val, nt_str(nt, ds[j].def, "name"), &bad);
+    }
+  int *parent = NULL;
+  int changed = 0;
+  for (int i = 0; i < nd; i++) {
+    /* is default i reachable from itself? */
+    memset(seen, 0, (size_t)nd);
+    int sp = 0, cyc = 0;
+    for (int j = 0; j < nd; j++)
+      if (edge[(size_t)i * nd + j] && !seen[j]) { seen[j] = 1; stack[sp++] = j; }
+    while (sp > 0 && !cyc) {
+      int k = stack[--sp];
+      if (k == i) { cyc = 1; break; }
+      for (int j = 0; j < nd; j++)
+        if (edge[(size_t)k * nd + j] && !seen[j]) { seen[j] = 1; stack[sp++] = j; }
+    }
+    if (!cyc || ds[i].bad) continue;
+    int def = ds[i].def;
+    const char *pname = nt_str(nt, ds[i].param, "name");
+    if (!pname) continue;
+    /* the earlier parameters the default reads become the helper's */
+    int ps[256]; int np = rd_params(nt, def, ps, 256);
+    const char *args[256]; int na = 0, later_read = 0, before = 1;
+    for (int k = 0; k < np; k++) {
+      if (ps[k] == ds[i].param) { before = 0; continue; }
+      const char *an = nt_str(nt, ps[k], "name");
+      if (!an || !rd_subtree_reads(nt, ds[i].val, an)) continue;
+      if (before) args[na++] = an; else later_read = 1;
+    }
+    if (later_read) continue;
+    if (!parent) {
+      parent = malloc(sizeof(int) * (size_t)n0);
+      if (!parent) break;
+      for (int k = 0; k < n0; k++) parent[k] = -1;
+      rd_mark_parents(nt, parent, n0);
+    }
+    int stmt = def, stmts = parent[def];
+    while (stmts >= 0 && !fwd_node_is(nt, stmts, "StatementsNode")) { stmt = stmts; stmts = parent[stmts]; }
+    if (stmts < 0) continue;
+
+    char hname[256];
+    { const char *dn = nt_str(nt, def, "name");
+      int o = snprintf(hname, sizeof hname, "__sp_default_");
+      for (const char *q = dn; *q && o < 120; q++)
+        hname[o++] = ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
+                      (*q >= '0' && *q <= '9') || *q == '_') ? *q : '_';
+      /* a name the program does not define itself, so no user method is
+         shadowed or taken for the helper */
+      for (int n = i; ; n++) {
+        snprintf(hname + o, sizeof hname - (size_t)o, "_%s_%d", pname, n);
+        int taken = 0;
+        for (int id = 0; id < nt->count && !taken; id++)
+          taken = fwd_node_is(nt, id, "DefNode") && nt_str(nt, id, "name") &&
+                  sp_streq(nt_str(nt, id, "name"), hname);
+        if (!taken) break;
+      } }
+
+    /* built in pre-order, so the helper's subtree is one id range */
+    int hd = fwd_new_node_like(nt, def, "DefNode");
+    if (hd < 0) break;
+    nt_node_set_str(nt, hd, "name", hname);
+    nt_node_set_int(nt, hd, "default_helper", 1);
+    int hp = fwd_new_node_like(nt, def, "ParametersNode");
+    int hreq[256];
+    for (int k = 0; k < na; k++) {
+      hreq[k] = fwd_new_node_like(nt, def, "RequiredParameterNode");
+      nt_node_set_str(nt, hreq[k], "name", args[k]);
+    }
+    nt_node_set_arr(nt, hp, "requireds", hreq, na);
+    nt_node_set_arr(nt, hp, "optionals", NULL, 0);
+    nt_node_set_arr(nt, hp, "posts", NULL, 0);
+    nt_node_set_arr(nt, hp, "keywords", NULL, 0);
+    nt_node_set_ref(nt, hp, "rest", -1);
+    nt_node_set_ref(nt, hp, "keyword_rest", -1);
+    nt_node_set_ref(nt, hp, "block", -1);
+    int orecv = nt_ref(nt, def, "receiver");
+    int hrecv = orecv >= 0 ? nt_clone_subtree(nt, orecv) : -1;
+    int hs = fwd_new_node_like(nt, ds[i].val, "StatementsNode");
+    int body = nt_clone_subtree(nt, ds[i].val);
+    nt_node_set_arr(nt, hs, "body", &body, 1);
+    nt_node_set_ref(nt, hd, "parameters", hp);
+    nt_node_set_ref(nt, hd, "body", hs);
+    nt_node_set_ref(nt, hd, "receiver", hrecv);
+
+    /* the default's own node becomes the call to the helper */
+    int v = ds[i].val;
+    long long vl = nt_int(nt, v, "node_line", 0), vf = nt_int(nt, v, "node_file", 0),
+              vc = nt_int(nt, v, "node_col", 0);
+    bi_subtree_blank(nt, v);
+    nt_node_reset(nt, v, "CallNode");
+    nt_node_set_int(nt, v, "node_line", vl);
+    nt_node_set_int(nt, v, "node_file", vf);
+    nt_node_set_int(nt, v, "node_col", vc);
+    nt_node_set_str(nt, v, "name", hname);
+    nt_node_set_ref(nt, v, "receiver", -1);
+    nt_node_set_ref(nt, v, "block", -1);
+    nt_node_set_str(nt, v, "call_operator", ".");
+    if (na > 0) {
+      int an = fwd_new_node_like(nt, v, "ArgumentsNode");
+      int av[256];
+      for (int k = 0; k < na; k++) {
+        av[k] = fwd_new_node_like(nt, v, "LocalVariableReadNode");
+        nt_node_set_str(nt, av[k], "name", args[k]);
+      }
+      nt_node_set_arr(nt, an, "arguments", av, na);
+      nt_node_set_ref(nt, v, "arguments", an);
+    } else nt_node_set_ref(nt, v, "arguments", -1);
+
+    /* the helper is defined just ahead of the method */
+    int bn = 0; const int *bv = nt_arr(nt, stmts, "body", &bn);
+    int *nb = malloc(sizeof(int) * (size_t)(bn + 1)); int nn = 0;
+    if (!nb) break;
+    for (int k = 0; k < bn; k++) {
+      if (bv[k] == stmt) nb[nn++] = hd;
+      nb[nn++] = bv[k];
+    }
+    nt_node_set_arr(nt, stmts, "body", nb, nn);
+    free(nb);
+    changed = 1;
+  }
+  if (changed) comp_grow_node_arrays(c);
+  free(parent); free(stack); free(seen); free(edge); free(ds);
+  free(rd_alias); rd_alias = NULL; rd_nalias = 0;
+  return changed;
+}

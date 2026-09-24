@@ -12336,6 +12336,7 @@ static int face_probe_arm(Compiler *c, int id, unsigned kind, unsigned flags, in
   int sv_probe = g_unsup_probe;
   ConvHold *sv_hold = g_conv_hold;
   int sv_argov = g_n_argov;
+  int sv_open_defaults = g_open_defaults;
   TyKind sv_ty = c->ntype[recv];
   int sv_face = an_face_node(); TyKind sv_fk = an_face_kind();
   jmp_buf sv_jb; memcpy(sv_jb, g_unsup_recover, sizeof(jmp_buf));
@@ -12347,6 +12348,7 @@ static int face_probe_arm(Compiler *c, int id, unsigned kind, unsigned flags, in
   an_set_face_node(sv_face, sv_fk);
   c->ntype[recv] = sv_ty;
   g_n_argov = sv_argov;
+  g_open_defaults = sv_open_defaults;
   g_conv_hold = sv_hold;
   g_unsup_probe = sv_probe;
   g_pre = sv_pre;
