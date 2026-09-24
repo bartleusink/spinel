@@ -7265,10 +7265,23 @@ static int narrow_int_table_ivars(Compiler *c) {
     }
   }
   const NodeTable *nt = c->nt;
+  /* The ivar reads and writes, in node order, listed once: each candidate
+     slot below walked the whole table for them. */
+  int *ivl = NULL, nivl = 0;
   for (int ci = 0; ci < c->nclasses; ci++) {
     ClassInfo *cl = &c->classes[ci];
     for (int iv = 0; iv < cl->nivars; iv++) {
       if (cl->ivar_int_table[iv]) continue;   /* already narrowed and pinned */
+      if (!ivl) {
+        ivl = malloc(sizeof(int) * (size_t)(nt->count + 1));
+        if (!ivl) return narrowed;
+        for (int id = 0; id < nt->count; id++) {
+          NodeKind k = nt_kind(nt, id);
+          if (k == NK_InstanceVariableReadNode || k == NK_InstanceVariableWriteNode ||
+              k == NK_InstanceVariableOperatorWriteNode || k == NK_InstanceVariableOrWriteNode ||
+              k == NK_InstanceVariableAndWriteNode) ivl[nivl++] = id;
+        }
+      }
       if (cl->ivar_types[iv] != TY_POLY_ARRAY) continue;
       const char *ivn = cl->ivars[iv];
       if (!ivn || !ivn[0]) continue;
@@ -7282,7 +7295,8 @@ static int narrow_int_table_ivars(Compiler *c) {
       if (comp_is_reader(cl, bare) || comp_is_writer(cl, bare)) continue;
       if (comp_is_sg_reader(cl, bare) || comp_is_sg_writer(cl, bare)) continue;
       int ok = 1, saw_table = 0;
-      for (int id = 0; id < nt->count && ok; id++) {
+      for (int li = 0; li < nivl && ok; li++) {
+        int id = ivl[li];
         const char *ty = nt_type(nt, id);
         if (!ty) continue;
         int is_read  = sp_streq(ty, "InstanceVariableReadNode");
@@ -7358,6 +7372,7 @@ static int narrow_int_table_ivars(Compiler *c) {
       }
     }
   }
+  free(ivl);
   return narrowed;
 }
 
