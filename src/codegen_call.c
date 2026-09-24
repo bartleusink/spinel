@@ -9575,6 +9575,12 @@ static int init_takes_keywords(Compiler *c, int initm) {
 
 static void emit_ctor_block_slot(Compiler *c, int initm, const char *lead, Buf *b);
 
+/* A plain Struct's generated constructor takes up to one argument per
+   member, nil-filling the rest; Data and a keyword_init Struct do not. */
+static int struct_nil_fills(const ClassInfo *k) {
+  return k->is_struct && !k->is_data && k->kw_init <= 0;
+}
+
 static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Buf *b) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
@@ -27761,8 +27767,13 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
          finds nothing and the class was skipped entirely -- the switch came out
          empty and `instance.class.new(...)` answered the nil seed (#3945). */
       int kw_ctor = 0;
-      if (c->classes[ci].is_struct) {
-        if (initm >= 0) continue;               /* a custom initialize: the test above rules */
+      /* A Struct with its own initialize constructs through it, like any
+         class: its sp_<S>_new takes that initialize's parameters. Skipping it
+         here left `k.new(v)` on such a class to the NoMethodError default,
+         while the splat form (emit_class_value_new_kw) built it. A yielding
+         one is spliced at static sites only and has no constructor to call. */
+      if (c->classes[ci].is_struct && initm >= 0 && c->scopes[initm].yields) continue;
+      if (c->classes[ci].is_struct && initm < 0) {
         np = nreq = c->classes[ci].nreaders;
         /* `klass.new(a: 1, b: 2)`: one keyword hash standing for every member,
            which is how a Data value is normally built. */
@@ -27784,8 +27795,16 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
          it keeps the exact test, and a default that reads self cannot be
          evaluated at a call site. Both of those now decline into the raise
          below rather than into nil. */
-      if (!kw_ctor) {
-        if (initm < 0 || c->classes[ci].is_struct) {
+      /* A plain Struct takes fewer members than it has (the rest are nil)
+         and refuses more, as the static `S.new(...)` does; the exact test
+         turned both into NoMethodError. Data and keyword_init keep it. */
+      int nil_fill = initm < 0 && struct_nil_fills(&c->classes[ci]);
+      if (nil_fill && argc > np) {
+        buf_printf(b, "case %d: sp_raise_cls(\"ArgumentError\", \"struct size differs\"); break;", ci);
+        continue;
+      }
+      if (!kw_ctor && !nil_fill) {
+        if (initm < 0) {
           if (argc != np || nreq != np) continue;
         }
         else {
@@ -27841,6 +27860,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           continue;
         }
         if (j >= argc && is2) { emit_arg_or_default(c, is2, j, -1, b); continue; }
+        if (j >= argc) { buf_puts(b, default_value(pt)); continue; }   /* a nil-filled member */
         snprintf(tn, sizeof tn, "_t%d", atmp[j]);
         if (pt == TY_POLY) buf_puts(b, tn);
         else emit_unbox_text(c, pt, tn, b);
@@ -27953,7 +27973,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     }
     buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
     for (int ci = 0; ci < c->nclasses; ci++) {
-      if (is_builtin_reopen(c->classes[ci].name) || c->classes[ci].is_struct ||
+      if (is_builtin_reopen(c->classes[ci].name) ||
           c->classes[ci].is_native_class || !c->classes[ci].instantiated) continue;
       { int mdn = c->classes[ci].def_node;   /* a module has no `new` (#3965) */
         const char *mdt = mdn >= 0 ? nt_type(nt, mdn) : NULL;
@@ -27961,6 +27981,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       int initm = comp_method_in_chain(c, ci, "initialize", NULL);
       int np = initm >= 0 ? c->scopes[initm].nparams : 0;
       int nreq = initm >= 0 ? c->scopes[initm].nrequired : 0;
+      /* A Struct or Data class had no arm here at all, so `{0 => S}.fetch(0)
+         .new(5)` raised NoMethodError. Its generated constructor takes the
+         members positionally, with the exact test the class-value emitter
+         above gives it; one with its own initialize constructs through that
+         like any class, and a yielding one has no constructor to call. */
+      int gen_ctor = c->classes[ci].is_struct && initm < 0;
+      if (c->classes[ci].is_struct && initm >= 0 && c->scopes[initm].yields) continue;
+      if (gen_ctor) np = nreq = c->classes[ci].nreaders;
       /* A zero-arg construction also reaches a constructor whose params are all
          optional: the arm fills each with its default, exactly as the
          statically-known `Klass.new` does. */
@@ -27988,8 +28016,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         continue;
       }
       /* Same rule as the class-value emitter above: optional parameters are
-         filled from their defaults rather than making the class unreachable. */
-      if (initm < 0) { if (argc != np || nreq != np) continue; }
+         filled from their defaults rather than making the class unreachable,
+         and a plain Struct nil-fills its missing members. */
+      int nil_fill = gen_ctor && struct_nil_fills(&c->classes[ci]);
+      if (nil_fill && argc > np) {
+        buf_printf(b, "case %d: sp_raise_cls(\"ArgumentError\", \"struct size differs\"); break;", ci);
+        continue;
+      }
+      if (initm < 0) { if (!nil_fill && (argc != np || nreq != np)) continue; }
       else {
         if (argc < nreq || argc > np) continue;
         if (argc < np && ctor_needs_self_defaults(c, initm, argc)) continue;
@@ -28020,7 +28054,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         if (j) buf_puts(b, ", ");
         LocalVar *pp = is ? scope_local(is, is->pnames[j]) : NULL;
         TyKind pt = (pp && pp->type != TY_UNKNOWN) ? pp->type : TY_POLY;
+        /* a generated member constructor takes the member's own slot type */
+        if (gen_ctor) {
+          char mvn[300]; snprintf(mvn, sizeof mvn, "@%s", c->classes[ci].readers[j]);
+          int mvi = comp_ivar_index(&c->classes[ci], mvn);
+          if (mvi >= 0 && c->classes[ci].ivar_types[mvi] != TY_UNKNOWN)
+            pt = c->classes[ci].ivar_types[mvi];
+        }
         if (j >= argc && is) { emit_arg_or_default(c, is, j, -1, b); continue; }
+        if (j >= argc) { buf_puts(b, default_value(pt)); continue; }   /* a nil-filled member */
         char tn[24]; snprintf(tn, sizeof tn, "_t%d", atmp[j]);
         Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, pt, tn, &ub);
         buf_puts(b, ub.p ? ub.p : tn); free(ub.p);
