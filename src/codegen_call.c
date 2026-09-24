@@ -18216,6 +18216,16 @@ static int poly_binop_recv_temp(Compiler *c, int recv, int arg, Buf *b, int *stm
 static int g_hv_read_node = -1;
 
 static void emit_call_body(Compiler *c, int id, Buf *b) {
+  /* the class's own method in a builtin's receiver test (`__r.is_a?(K) ?
+     __r.m { } : __enum_m(__r) { }`): the test has decided the receiver is
+     an instance of a class defining m, so this is that class's method, not
+     the builtin surface a boxed receiver otherwise reaches first. The
+     Array fold took `__r.any? { }` and wrote its count into the boxed
+     answer (#4937). */
+  if (nt_int(c->nt, id, "enum_own", 0) && emit_poly_method_dispatch(c, id, b)) {
+    nd_stamp(id, ND_SWITCH);
+    return;
+  }
   /* A value read of a boxed-value hash whose values are all one class
      (hv_value_class): inference typed it as that class, and `values` as an
      array of it, but the storage is boxed. Emit the read as it always was,

@@ -3364,6 +3364,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
         }
         nt_node_set_str(nt, own, "name", name);
         nt_node_set_ref(nt, own, "receiver", ownr);
+        nt_node_set_int(nt, own, "enum_own", 1);   /* the class's method: a user arm */
         if (args >= 0) nt_node_set_ref(nt, own, "arguments", args);
         if (blk >= 0) nt_node_set_ref(nt, own, "block", blk);
         nt_node_set_arr(nt, cts, "body", &own, 1);
@@ -3379,6 +3380,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
       else {
         nt_node_set_str(nt, own, "name", name);
         nt_node_set_ref(nt, own, "receiver", ownr);
+        nt_node_set_int(nt, own, "enum_own", 1);   /* the class's method: a user arm */
         if (args >= 0) nt_node_set_ref(nt, own, "arguments", args);
         if (blk >= 0) nt_node_set_ref(nt, own, "block", blk);
         nt_node_set_arr(nt, ts, "body", &own, 1);
