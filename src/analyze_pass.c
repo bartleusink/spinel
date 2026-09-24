@@ -1442,6 +1442,361 @@ static int widen_aliased_array_ivars(Compiler *c, int node, int cls_id) {
   return changed;
 }
 
+/* Folds one piece of container evidence into `slot` (see the usage fold in
+   infer_write_types). Returns 0 where the evidence does not apply to the
+   slot, leaving it untouched. */
+static int fold_container_evidence(TyKind *slot, int is_push, int is_splice,
+                                   TyKind kt, TyKind vt) {
+  if (is_push) {
+    /* explicit push/append: definitely array.  A PolyArray stays PolyArray
+       regardless of the pushed value type; mixing typed arrays widens to
+       PolyArray (ty_unify would return TY_POLY scalar, so use array-aware
+       widening instead). */
+    if (vt == TY_UNKNOWN) return 0;
+    /* If a [] read already promoted this slot to a hash type, the push
+       wins: a variable that is pushed to is an array, not a hash.
+       Reset the slot so the array promotion below can fire. */
+    if (ty_is_hash(*slot)) *slot = TY_UNKNOWN;
+    if (*slot != TY_UNKNOWN && !ty_is_array(*slot)) return 0;
+    if (*slot == TY_POLY_ARRAY) return 0;  /* already widest array type */
+    TyKind want = ty_array_of(vt);
+    if (*slot != TY_UNKNOWN && want != *slot) want = TY_POLY_ARRAY;
+    *slot = want;
+  }
+  else if (is_splice) {
+    /* arr[s,l] = rhs / arr[range] = rhs: a source whose elements the typed
+       receiver CONCRETELY cannot hold widens the slot to a poly array
+       (mirrors push, monotonic and fixpoint-stable). A TY_POLY value is
+       exempt -- statically unknown but usually the matching kind at
+       runtime; the emitters keep their runtime dispatch/conversion for it.
+       A 3-arg []= is unambiguous array evidence for an UNKNOWN slot; a
+       range key alone is not (h[1..2] = v is a legal hash write). */
+    if (vt == TY_UNKNOWN || vt == TY_POLY) { /* no evidence / exempt */ }
+    else if (ty_is_array(*slot)) {
+      if (*slot != TY_POLY_ARRAY && vt != ty_array_elem(*slot)) *slot = TY_POLY_ARRAY;
+    }
+    else if (*slot == TY_UNKNOWN && kt != TY_RANGE) *slot = ty_array_of(vt);
+  }
+  else if (*slot == TY_POLY_POLY_HASH) {
+    /* already widest hash type; no further promotion needed */
+  }
+  else if ((kt == TY_INT || kt == TY_POLY) && *slot != TY_UNKNOWN && ty_is_array(*slot)) {
+    /* int-key element write into a typed array: a value its element type
+       CONCRETELY cannot hold widens the slot to a poly array, mirroring
+       `a << x` -- the poly emitters then store the value exactly as CRuby
+       does (the former bail left e.g. `a[0] = "s"` on an int array to emit
+       invalid C through the typed setter). A TY_POLY value is exempt: the
+       typed setter's runtime conversion (sp_poly_to_i etc.) is the
+       long-standing intended path for it. A poly KEY into an array slot is
+       an index all the same -- Array#[]= takes an Integer or raises -- so it
+       is the same evidence; without it an object stored at an unpacked
+       index was handed to the int setter (#4832). */
+    if (vt != TY_UNKNOWN && vt != TY_POLY &&
+        *slot != TY_POLY_ARRAY && vt != ty_array_elem(*slot))
+      *slot = TY_POLY_ARRAY;
+  }
+  else if (kt == TY_INT) {
+    /* int key []= on a non-array slot: infer an int-keyed hash */
+    if (vt == TY_UNKNOWN) return 0;
+    if (*slot != TY_UNKNOWN && !ty_is_hash(*slot)) return 0;
+    TyKind hv = ty_hash_of(TY_INT, vt);
+    if (hv == TY_UNKNOWN) hv = TY_POLY_POLY_HASH;  /* int key + unknown val type */
+    if (*slot != TY_UNKNOWN && *slot != hv) {
+      /* widen to poly-poly if mismatch */
+      if (ty_is_hash(*slot)) { *slot = TY_POLY_POLY_HASH; }
+      return 0;
+    }
+    *slot = hv;
+  }
+  else if (kt == TY_STRING) {
+    if (vt == TY_UNKNOWN) return 0;
+    TyKind hv = ty_hash_of(TY_STRING, vt);
+    if (hv == TY_UNKNOWN) hv = TY_STR_POLY_HASH;  /* mixed values */
+    if (*slot != TY_UNKNOWN && !ty_is_hash(*slot)) return 0;
+    /* a str-keyed hash that has seen >1 value type widens to StrPoly */
+    if (*slot != TY_UNKNOWN && *slot != hv &&
+        (*slot == TY_STR_INT_HASH || *slot == TY_STR_STR_HASH || *slot == TY_STR_POLY_HASH))
+      hv = TY_STR_POLY_HASH;
+    *slot = hv;
+  }
+  else if (kt == TY_SYMBOL) {
+    /* symbol key -> SymPolyHash (boxed values) */
+    if (vt == TY_UNKNOWN) return 0;
+    if (*slot != TY_UNKNOWN && *slot != TY_SYM_POLY_HASH) return 0;
+    *slot = TY_SYM_POLY_HASH;
+  }
+  else if (kt != TY_UNKNOWN) {
+    /* non-standard key type (array, object, etc.): heterogeneous hash */
+    if (vt == TY_UNKNOWN) return 0;
+    if (*slot != TY_UNKNOWN && !ty_is_hash(*slot)) return 0;
+    *slot = TY_POLY_POLY_HASH;
+  }
+  return 1;
+}
+
+/* The ivar slot `inm` of class `ivar_cls_id` that container evidence folds
+   into, or NULL where the ivar takes none: the guards of the usage fold in
+   infer_write_types for a receiver that is the ivar. May widen *vt. */
+static TyKind *ivar_evidence_slot(Compiler *c, const LWIndex *ivw, int ivar_cls_id,
+                                  const char *inm, int is_push, TyKind *vt) {
+  const NodeTable *nt = c->nt;
+  ClassInfo *ci = &c->classes[ivar_cls_id];
+  int iv = inm ? comp_ivar_index(ci, inm) : -1;
+  if (iv < 0) return NULL;
+  if (class_ivar_pinned(ci, inm)) return NULL;  /* --rbs seed pins are authoritative */
+  /* A narrowed int table is pinned: its own write still reads
+     TY_POLY_ARRAY, and re-deriving from that would unify two array kinds
+     into the plain poly scalar -- strictly worse than what it replaced. */
+  if (ci->ivar_int_table[iv]) return NULL;
+  /* An UNKNOWN slot here is a fixpoint ORDERING gap, not absent evidence:
+     a push whose value type is already settled (a literal) runs before
+     the ivar's own writes have merged, and seeding the slot with the
+     pushed element's array kind made the later merge unify two typed
+     kinds into the scalar poly box, for good (#4210) -- while a push on
+     a NON-array attribute (`@q = Queue.new; @q.push(x)`) seeded an array
+     the merge then destroyed the Queue with (#4211). Consult the ivar's
+     own direct writes first: a settled non-array write means this push
+     is no array evidence at all, and an array write of another element
+     kind means the slot is the poly array from the start. */
+  if (is_push && ci->ivar_types[iv] == TY_UNKNOWN && inm) {
+    int nonarray_write = 0, other_kind_write = 0;
+    TyKind want0 = ty_array_of(*vt);
+    for (int _r = ivw_index_first(ivw, inm); _r >= 0; _r = ivw->next[_r]) {
+      int _wi = ivw->node[_r];
+      if (nt_kind(nt, _wi) != NK_InstanceVariableWriteNode) continue;
+      const char *_wnm = nt_str(nt, _wi, "name");
+      if (!_wnm || !sp_streq(_wnm, inm)) continue;
+      Scope *_ws = comp_scope_of(c, _wi);
+      int _wcls = _ws ? _ws->class_id : -1;
+      if (_wcls < 0) _wcls = comp_class_index(c, "Toplevel");
+      if (_wcls != ivar_cls_id) continue;
+      int _wv = nt_ref(nt, _wi, "value");
+      if (_wv < 0) continue;
+      TyKind _wt = infer_type(c, _wv);
+      if (_wt == TY_UNKNOWN || _wt == TY_NIL) continue;
+      if (!ty_is_array(_wt)) { nonarray_write = 1; break; }
+      if (_wt != want0 && _wt != TY_POLY_ARRAY) other_kind_write = 1;
+    }
+    if (nonarray_write) return NULL;
+    if (other_kind_write) *vt = TY_POLY;   /* ty_array_of => the poly array */
+  }
+  TyKind *slot = &ci->ivar_types[iv];
+  /* If the slot is TY_UNKNOWN but has a direct InstanceVariableWriteNode
+     that assigns a typed value OR an empty array/hash literal (e.g.
+     @buf = [nil]*7 or @free = []), skip usage-driven hash promotion
+     (but allow push-driven array promotion through). Without this guard,
+     @free[0] read promotes @free to poly_poly_hash before @free = []
+     has been processed as an array. */
+  /* A typed (non-nil) construction write -- `@a = [x]*n`, `@a = arr.map{}`,
+     or an `@a = []` literal -- means this ivar is an array filled by index,
+     not a hash. Skip usage-driven hash promotion for both plain reads and
+     `@a[k]=v` index-writes. A genuine hash (`@h = {}`) infers UNKNOWN from
+     its empty literal and is unaffected. */
+  if (!is_push && *slot == TY_UNKNOWN && inm) {
+    int has_typed_write = 0;
+    for (int _r = ivw_index_first(ivw, inm); _r >= 0 && !has_typed_write; _r = ivw->next[_r]) {
+      int _wi = ivw->node[_r];
+      if (nt_kind(nt, _wi) != NK_InstanceVariableWriteNode) continue;
+      const char *_wnm = nt_str(nt, _wi, "name");
+      if (!_wnm || !sp_streq(_wnm, inm)) continue;
+      Scope *_ws = comp_scope_of(c, _wi);
+      int _ws_cls = _ws ? _ws->class_id : -1;
+      if (_ws_cls < 0) _ws_cls = comp_class_index(c, "Toplevel");
+      if (_ws_cls != ivar_cls_id) continue;
+      int _wval = nt_ref(nt, _wi, "value");
+      if (_wval < 0) continue;
+      TyKind _wt = infer_type(c, _wval);
+      if (_wt != TY_UNKNOWN && _wt != TY_NIL) { has_typed_write = 1; break; }
+      /* @ivar = [] literal: this slot is an array, not subject to
+         hash-promotion from [] read or [0]= write. Empty {} does NOT
+         block promotion -- the hash type is determined by key/value usage. */
+      const char *_wvty = nt_type(nt, _wval);
+      if (_wvty && sp_streq(_wvty, "ArrayNode"))
+        has_typed_write = 1;
+    }
+    if (has_typed_write) return NULL;
+  }
+  /* `@s << x` on an ivar with a STRING write anywhere is a string
+     append, not an array push: without this the push promoted the
+     still-UNKNOWN slot to str_array before the write merge saw the
+     string, and the union settled poly (#3227 P4). */
+  if (is_push && (*slot == TY_UNKNOWN || *slot == TY_STRING ||
+                  *slot == TY_STRBUF) && inm) {
+    int has_string_write = 0;
+    for (int _r = ivw_index_first(ivw, inm); _r >= 0 && !has_string_write; _r = ivw->next[_r]) {
+      int _wi = ivw->node[_r];
+      if (nt_kind(nt, _wi) != NK_InstanceVariableWriteNode) continue;
+      const char *_wnm = nt_str(nt, _wi, "name");
+      if (!_wnm || !sp_streq(_wnm, inm)) continue;
+      Scope *_ws = comp_scope_of(c, _wi);
+      int _ws_cls = _ws ? _ws->class_id : -1;
+      if (_ws_cls < 0) _ws_cls = comp_class_index(c, "Toplevel");
+      if (_ws_cls != ivar_cls_id) continue;
+      int _wval = nt_ref(nt, _wi, "value");
+      if (_wval < 0) continue;
+      TyKind _wt = infer_type(c, _wval);
+      if (_wt == TY_STRING || _wt == TY_STRBUF) { has_string_write = 1; break; }
+    }
+    if (has_string_write) return NULL;
+  }
+  return slot;
+}
+
+/* The ivar a getter's exit expression hands back, or NULL: a read of it,
+   `@x ||= v`, `@x = v`, or one of those parenthesized or returned. */
+static const char *exit_ivar_name(const NodeTable *nt, int e) {
+  for (int depth = 0; e >= 0 && depth < 8; depth++) {
+    switch (nt_kind(nt, e)) {
+    case NK_InstanceVariableReadNode:
+    case NK_InstanceVariableOrWriteNode:
+    case NK_InstanceVariableWriteNode:
+      return nt_str(nt, e, "name");
+    case NK_ParenthesesNode:
+      e = stmts_tail(nt, nt_ref(nt, e, "body"));
+      break;
+    case NK_StatementsNode:
+      e = stmts_tail(nt, e);
+      break;
+    case NK_ReturnNode: {
+      int a = nt_ref(nt, e, "arguments");
+      int n = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &n) : NULL;
+      if (!av || n != 1) return NULL;
+      e = av[0];
+      break;
+    }
+    default:
+      return NULL;
+    }
+  }
+  return NULL;
+}
+
+/* Every `return` under `node` (not crossing a nested def, class or lambda)
+   hands back an ivar: adds each name to names[]. 0 when one does not. */
+static int returns_are_ivars(const NodeTable *nt, int node, const char **names, int *n, int max) {
+  if (node < 0) return 1;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode ||
+      k == NK_SingletonClassNode || k == NK_LambdaNode) return 1;
+  if (k == NK_ReturnNode) {
+    const char *nm = exit_ivar_name(nt, node);
+    if (!nm) return 0;
+    for (int i = 0; i < *n; i++) if (sp_streq(names[i], nm)) return 1;
+    if (*n >= max) return 0;
+    names[(*n)++] = nm;
+    return 1;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++)
+    if (!returns_are_ivars(nt, nt_ref_at(nt, node, i), names, n, max)) return 0;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0;
+    const int *ids = nt_arr_at(nt, node, i, &cnt);
+    for (int j = 0; j < cnt; j++)
+      if (!returns_are_ivars(nt, ids[j], names, n, max)) return 0;
+  }
+  return 1;
+}
+
+/* The ivars a zero-argument getter can return: its tail and every `return`
+   must be one. Returns the count, 0 when some exit is anything else. */
+static int getter_exit_ivars(Compiler *c, int mi, const char **names, int max) {
+  const NodeTable *nt = c->nt;
+  int body = c->scopes[mi].body;
+  const char *tail = exit_ivar_name(nt, stmts_tail(nt, body));
+  if (!tail || max < 1) return 0;
+  int n = 0;
+  names[n++] = tail;
+  if (!returns_are_ivars(nt, body, names, &n, max)) return 0;
+  return n;
+}
+
+/* The (class, ivar) pairs an index write or push through the zero-argument
+   call `mname` can reach: for `cid` and each descendant, the method the call
+   dispatches to there (class side when `cside`), taken when it is an
+   attr_reader or a getter whose every exit is an ivar. The ivar is the
+   defining class's, as a direct `@x` in that method reads it. Returns the
+   count, or -1 when there are more than `max`. */
+static int getter_ivar_targets(Compiler *c, int cid, int cside, const char *mname,
+                               int *tcls, const char **tiv, int max) {
+  int n = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (k != cid && !is_descendant(c, k, cid)) continue;
+    const char *ivs[8];
+    int niv = 0, defcls = -1;
+    char rbuf[300];
+    if (cside) {
+      int mi = comp_cmethod_in_chain(c, k, mname, &defcls);
+      if (mi < 0) continue;
+      niv = getter_exit_ivars(c, mi, ivs, 8);
+    }
+    else {
+      int mdef = -1, rdef = -1;
+      int mi = comp_method_in_chain(c, k, mname, &mdef);
+      int rd = comp_reader_in_chain(c, k, mname, &rdef);
+      if (mi >= 0 && (!rd || (mdef != rdef && is_descendant(c, mdef, rdef)))) {
+        defcls = mdef;
+        niv = getter_exit_ivars(c, mi, ivs, 8);
+      }
+      else if (rd && (mi < 0 || (mdef != rdef && is_descendant(c, rdef, mdef)))) {
+        snprintf(rbuf, sizeof rbuf, "@%s", comp_resolve_alias(c, k, mname));
+        defcls = rdef;
+        ivs[0] = rbuf;
+        niv = 1;
+      }
+    }
+    if (defcls < 0) continue;
+    ClassInfo *dci = &c->classes[defcls];
+    for (int i = 0; i < niv; i++) {
+      int ivx = comp_ivar_index(dci, ivs[i]);
+      if (ivx < 0) continue;
+      int seen = 0;
+      for (int j = 0; j < n; j++)
+        if (tcls[j] == defcls && sp_streq(tiv[j], ivs[i])) seen = 1;
+      if (seen) continue;
+      if (n >= max) return -1;
+      tcls[n] = defcls;
+      tiv[n] = dci->ivars[ivx];
+      n++;
+    }
+  }
+  return n;
+}
+
+/* Does class `cls` write `inm` with an array (literal or typed)? */
+static int ivar_has_array_write(Compiler *c, const LWIndex *ivw, int cls, const char *inm) {
+  const NodeTable *nt = c->nt;
+  for (int r = ivw_index_first(ivw, inm); r >= 0; r = ivw->next[r]) {
+    int wi = ivw->node[r];
+    const char *wnm = nt_str(nt, wi, "name");
+    if (!wnm || !sp_streq(wnm, inm)) continue;
+    Scope *ws = comp_scope_of(c, wi);
+    if (!ws || ws->class_id != cls) continue;
+    int wv = nt_ref(nt, wi, "value");
+    if (wv >= 0 && (nt_kind(nt, wv) == NK_ArrayNode || ty_is_array(infer_type(c, wv)))) return 1;
+  }
+  return 0;
+}
+
+/* Marks every hash literal class `cls` assigns to `inm` (`@c = {}`,
+   `@c ||= {}`) the poly-keyed variant. */
+static void widen_ivar_hash_literals(Compiler *c, const LWIndex *ivw, int cls, const char *inm) {
+  const NodeTable *nt = c->nt;
+  if (!c->hash_want) return;
+  for (int r = ivw_index_first(ivw, inm); r >= 0; r = ivw->next[r]) {
+    int wi = ivw->node[r];
+    const char *wnm = nt_str(nt, wi, "name");
+    if (!wnm || !sp_streq(wnm, inm)) continue;
+    Scope *ws = comp_scope_of(c, wi);
+    if (!ws || ws->class_id != cls) continue;
+    int wv = nt_ref(nt, wi, "value");
+    if (wv >= 0 && wv < c->node_cap && nt_kind(nt, wv) == NK_HashNode)
+      c->hash_want[wv] = TY_POLY_POLY_HASH;
+  }
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -2465,110 +2820,17 @@ int infer_write_types(Compiler *c) {
       int ivar_cls_id = s->class_id;
       if (ivar_cls_id < 0) ivar_cls_id = comp_class_index(c, "Toplevel");
       if (ivar_cls_id < 0) continue;
-      ClassInfo *ci = &c->classes[ivar_cls_id];
-      int iv = inm ? comp_ivar_index(ci, inm) : -1;
-      if (iv < 0) continue;
-      if (class_ivar_pinned(ci, inm)) continue;  /* --rbs seed pins are authoritative */
-      /* A narrowed int table is pinned: its own write still reads
-         TY_POLY_ARRAY, and re-deriving from that would unify two array kinds
-         into the plain poly scalar -- strictly worse than what it replaced. */
-      if (ci->ivar_int_table[iv]) continue;
-      /* An UNKNOWN slot here is a fixpoint ORDERING gap, not absent evidence:
-         a push whose value type is already settled (a literal) runs before
-         the ivar's own writes have merged, and seeding the slot with the
-         pushed element's array kind made the later merge unify two typed
-         kinds into the scalar poly box, for good (#4210) -- while a push on
-         a NON-array attribute (`@q = Queue.new; @q.push(x)`) seeded an array
-         the merge then destroyed the Queue with (#4211). Consult the ivar's
-         own direct writes first: a settled non-array write means this push
-         is no array evidence at all, and an array write of another element
-         kind means the slot is the poly array from the start. */
-      if (is_push && ci->ivar_types[iv] == TY_UNKNOWN && inm) {
-        int nonarray_write = 0, other_kind_write = 0;
-        TyKind want0 = ty_array_of(vt);
-        for (int _r = ivw_index_first(&ivw_ix, inm); _r >= 0; _r = ivw_ix.next[_r]) {
-          int _wi = ivw_ix.node[_r];
-          if (nt_kind(nt, _wi) != NK_InstanceVariableWriteNode) continue;
-          const char *_wnm = nt_str(nt, _wi, "name");
-          if (!_wnm || !sp_streq(_wnm, inm)) continue;
-          Scope *_ws = comp_scope_of(c, _wi);
-          int _wcls = _ws ? _ws->class_id : -1;
-          if (_wcls < 0) _wcls = comp_class_index(c, "Toplevel");
-          if (_wcls != ivar_cls_id) continue;
-          int _wv = nt_ref(nt, _wi, "value");
-          if (_wv < 0) continue;
-          TyKind _wt = infer_type(c, _wv);
-          if (_wt == TY_UNKNOWN || _wt == TY_NIL) continue;
-          if (!ty_is_array(_wt)) { nonarray_write = 1; break; }
-          if (_wt != want0 && _wt != TY_POLY_ARRAY) other_kind_write = 1;
-        }
-        if (nonarray_write) continue;
-        if (other_kind_write) vt = TY_POLY;   /* ty_array_of => the poly array */
-      }
-      slot = &ci->ivar_types[iv];
+      TyKind ivt = (TyKind)vt;
+      slot = ivar_evidence_slot(c, &ivw_ix, ivar_cls_id, inm, is_push, &ivt);
+      if (!slot) continue;
+      vt = ivt;
       watch_nm = inm;
-      /* If the slot is TY_UNKNOWN but has a direct InstanceVariableWriteNode
-         that assigns a typed value OR an empty array/hash literal (e.g.
-         @buf = [nil]*7 or @free = []), skip usage-driven hash promotion
-         (but allow push-driven array promotion through). Without this guard,
-         @free[0] read promotes @free to poly_poly_hash before @free = []
-         has been processed as an array. */
-      /* A typed (non-nil) construction write -- `@a = [x]*n`, `@a = arr.map{}`,
-         or an `@a = []` literal -- means this ivar is an array filled by index,
-         not a hash. Skip usage-driven hash promotion for both plain reads and
-         `@a[k]=v` index-writes. A genuine hash (`@h = {}`) infers UNKNOWN from
-         its empty literal and is unaffected. */
-      if (!is_push && *slot == TY_UNKNOWN && inm) {
-        int has_typed_write = 0;
-        for (int _r = ivw_index_first(&ivw_ix, inm); _r >= 0 && !has_typed_write; _r = ivw_ix.next[_r]) {
-          int _wi = ivw_ix.node[_r];
-          if (nt_kind(nt, _wi) != NK_InstanceVariableWriteNode) continue;
-          const char *_wnm = nt_str(nt, _wi, "name");
-          if (!_wnm || !sp_streq(_wnm, inm)) continue;
-          Scope *_ws = comp_scope_of(c, _wi);
-          int _ws_cls = _ws ? _ws->class_id : -1;
-          if (_ws_cls < 0) _ws_cls = comp_class_index(c, "Toplevel");
-          if (_ws_cls != ivar_cls_id) continue;
-          int _wval = nt_ref(nt, _wi, "value");
-          if (_wval < 0) continue;
-          TyKind _wt = infer_type(c, _wval);
-          if (_wt != TY_UNKNOWN && _wt != TY_NIL) { has_typed_write = 1; break; }
-          /* @ivar = [] literal: this slot is an array, not subject to
-             hash-promotion from [] read or [0]= write. Empty {} does NOT
-             block promotion -- the hash type is determined by key/value usage. */
-          const char *_wvty = nt_type(nt, _wval);
-          if (_wvty && sp_streq(_wvty, "ArrayNode"))
-            has_typed_write = 1;
-        }
-        if (has_typed_write) continue;
-      }
-      /* `@s << x` on an ivar with a STRING write anywhere is a string
-         append, not an array push: without this the push promoted the
-         still-UNKNOWN slot to str_array before the write merge saw the
-         string, and the union settled poly (#3227 P4). */
-      if (is_push && (*slot == TY_UNKNOWN || *slot == TY_STRING ||
-                      *slot == TY_STRBUF) && inm) {
-        int has_string_write = 0;
-        for (int _r = ivw_index_first(&ivw_ix, inm); _r >= 0 && !has_string_write; _r = ivw_ix.next[_r]) {
-          int _wi = ivw_ix.node[_r];
-          if (nt_kind(nt, _wi) != NK_InstanceVariableWriteNode) continue;
-          const char *_wnm = nt_str(nt, _wi, "name");
-          if (!_wnm || !sp_streq(_wnm, inm)) continue;
-          Scope *_ws = comp_scope_of(c, _wi);
-          int _ws_cls = _ws ? _ws->class_id : -1;
-          if (_ws_cls < 0) _ws_cls = comp_class_index(c, "Toplevel");
-          if (_ws_cls != ivar_cls_id) continue;
-          int _wval = nt_ref(nt, _wi, "value");
-          if (_wval < 0) continue;
-          TyKind _wt = infer_type(c, _wval);
-          if (_wt == TY_STRING || _wt == TY_STRBUF) { has_string_write = 1; break; }
-        }
-        if (has_string_write) continue;
-      }
     }
-    else if (is_push && rty && sp_streq(rty, "CallNode")) {
-      /* `getter_method << x` where getter returns @ivar: trace through
-         to that ivar so cross-class lazy-init getters get widened. */
+    else if ((is_push || is_idx_write) && rty && sp_streq(rty, "CallNode") &&
+             nt_ref(nt, recv, "block") < 0) {
+      /* `getter_method << x` / `getter_method[k] = v` where the getter
+         returns @ivar: trace through to that ivar so the container it holds
+         takes the evidence, as `@ivar << x` / `@ivar[k] = v` would. */
       int recv_args = nt_ref(nt, recv, "arguments");
       int recv_argc = 0;
       if (recv_args >= 0) nt_arr(nt, recv_args, "arguments", &recv_argc);
@@ -2580,11 +2842,19 @@ int infer_write_types(Compiler *c) {
          the implicit-self form (`list << msg`). Without the receiver case an
          ivar array filled only from outside kept its empty literal's default
          and every element read back as an Integer (#3781). */
-      int gcid = -1;
+      int gcid = -1, cside = 0;
       int grecv = nt_ref(nt, recv, "receiver");
-      if (grecv >= 0 && !(nt_type(nt, grecv) && sp_streq(nt_type(nt, grecv), "SelfNode"))) {
+      if (grecv >= 0 && nt_kind(nt, grecv) == NK_ConstantReadNode) {
+        /* `Tbl.cache[k] = v`: the class-side getter */
+        const char *cnm = nt_str(nt, grecv, "name");
+        gcid = cnm ? comp_class_index(c, cnm) : -1;
+        if (gcid < 0) continue;
+        cside = 1;
+      }
+      else if (grecv >= 0 && !(nt_type(nt, grecv) && sp_streq(nt_type(nt, grecv), "SelfNode"))) {
         TyKind grt = infer_type(c, grecv);
         gcid = ty_is_object(grt) ? ty_object_class(grt) : -1;
+        if (gcid < 0 && !is_push) continue;
         /* The receiver's own type may still be settling (a block parameter over
            an array whose element type is what this evidence decides). Fall back
            to the class that owns this getter when exactly one does -- with no
@@ -2639,54 +2909,61 @@ int infer_write_types(Compiler *c) {
         Scope *caller = comp_scope_of(c, recv);
         if (!caller || caller->class_id < 0) continue;
         gcid = caller->class_id;
+        cside = caller->is_cmethod;
       }
       if (gcid < 0 || gcid >= c->nclasses) continue;
-      int defcls2 = gcid;
-      int getter_mi = comp_method_in_chain(c, gcid, mname, &defcls2);
-      const char *inm2 = NULL;
-      char reader_iv[300];
-      if (getter_mi < 0) {
-        /* no hand-written getter: an attr_reader pushes into its backing
-           ivar @<name> the same way `@<name> << x` does (#3139) */
-        int rdefcls = gcid;
-        if (!comp_reader_in_chain(c, gcid, mname, &rdefcls)) continue;
-        snprintf(reader_iv, sizeof reader_iv, "@%s", mname);
-        inm2 = reader_iv;
-        defcls2 = rdefcls;
-      }
-      else {
-        int last2 = scope_body_last(c, getter_mi);
-        if (last2 < 0 || !nt_type(nt, last2) ||
-            !sp_streq(nt_type(nt, last2), "InstanceVariableReadNode")) continue;
-        inm2 = nt_str(nt, last2, "name");
-      }
-      if (!inm2) continue;
-      ClassInfo *ci2 = &c->classes[defcls2];
-      int iv2 = comp_ivar_index(ci2, inm2);
-      if (iv2 < 0) continue;
-      if (class_ivar_pinned(ci2, inm2)) continue;  /* --rbs seed pins are authoritative */
+      /* The write lands in whichever ivar the getter returns, and a subclass
+         override can return another one: credit the ivar of every class the
+         call can dispatch to, the same evidence `@c[k] = v` in that getter's
+         class would be. A class whose getter is not a plain ivar read (or
+         `||=`) keeps its container to itself and takes none. */
+      int tcls[16]; const char *tiv[16];
+      int ntg = getter_ivar_targets(c, gcid, cside, mname, tcls, tiv, 16);
+      if (ntg <= 0) continue;
       /* a shared-mutable string spends its handle at a typed array's boundary,
          so the element slot stays a plain string (#3227) */
-      if (vt == TY_STRBUF) vt = TY_STRING;
-      /* Only an ARRAY slot takes element evidence from a push: `q.push(1)` on
-         a Queue attribute is not an array fill. The slot must say it is one --
-         already typed as an array, or written with one -- since a slot that is
-         still settling (`@q = nil` before `@q = Queue.new`) reads UNKNOWN. */
-      if (grecv >= 0 && !ty_is_array(ci2->ivar_types[iv2])) {
-        int arr_written = 0;
-        for (int wi = 0; wi < nt->count && !arr_written; wi++) {
-          if (nt_kind(nt, wi) != NK_InstanceVariableWriteNode) continue;
-          const char *wnm2 = nt_str(nt, wi, "name");
-          if (!wnm2 || !sp_streq(wnm2, inm2)) continue;
-          Scope *ws2 = comp_scope_of(c, wi);
-          if (!ws2 || ws2->class_id != defcls2) continue;
-          int wv2 = nt_ref(nt, wi, "value");
-          if (wv2 >= 0 && (nt_kind(nt, wv2) == NK_ArrayNode || ty_is_array(infer_type(c, wv2))))
-            arr_written = 1;
+      if (is_push && vt == TY_STRBUF) vt = TY_STRING;
+      for (int ti = 0; ti < ntg; ti++) {
+        ClassInfo *ci2 = &c->classes[tcls[ti]];
+        int iv2 = comp_ivar_index(ci2, tiv[ti]);
+        if (iv2 < 0) continue;
+        TyKind tvt = (TyKind)vt;
+        if (is_push) {
+          /* Only an ARRAY slot takes element evidence from a push: `q.push(1)`
+             on a Queue attribute is not an array fill. The slot must say it is
+             one -- already typed as an array, or written with one -- since a
+             slot that is still settling (`@q = nil` before `@q = Queue.new`)
+             reads UNKNOWN. */
+          if (grecv >= 0 && !ty_is_array(ci2->ivar_types[iv2]) &&
+              !ivar_has_array_write(c, &ivw_ix, tcls[ti], tiv[ti])) continue;
         }
-        if (!arr_written) continue;
+        /* An index write only reshapes a container the slot already is: the
+           ivar's own writes decide what it holds, and a typeless slot keeps
+           whatever they decide. */
+        else if (!ty_is_hash(ci2->ivar_types[iv2]) && !ty_is_array(ci2->ivar_types[iv2])) continue;
+        TyKind *tslot = ivar_evidence_slot(c, &ivw_ix, tcls[ti], tiv[ti], is_push, &tvt);
+        if (!tslot) continue;
+        TyKind tbefore = *tslot;
+        /* A boxed value is exempt, as it is for an array element: the typed
+           setter converts it at run time (#651). */
+        if (!is_push && tvt == TY_POLY && ty_is_hash(tbefore)) tvt = ty_hash_val(tbefore);
+        int fits = fold_container_evidence(tslot, is_push, is_splice, (TyKind)kt, tvt);
+        /* A hash the evidence does not fit widens to the poly-keyed variant,
+           and so do the hash literals the ivar is assigned: they take their
+           variant from the ivar's own `@c[k] = v` sites, which never see this
+           write, and a literal narrower than its slot unifies with it to a
+           plain boxed value that drops the foreign key. The fold refusing a
+           settled key and value is a misfit too: it leaves an Integer-keyed
+           slot as it is for a Symbol key. */
+        if (!is_push && ty_is_hash(tbefore) &&
+            (*tslot != tbefore || (!fits && kt != TY_UNKNOWN && tvt != TY_UNKNOWN))) {
+          *tslot = TY_POLY_POLY_HASH;
+          widen_ivar_hash_literals(c, &ivw_ix, tcls[ti], tiv[ti]);
+        }
+        sp_ivwatch(tiv[ti], is_push ? "getter_push" : "getter_idxwrite", tbefore, *tslot);
+        if (*tslot != tbefore) changed = 1;
       }
-      slot = &ci2->ivar_types[iv2];
+      continue;
     }
     else continue;
 
@@ -2702,90 +2979,7 @@ int infer_write_types(Compiler *c) {
       if (dn >= 0) vt = ty_unify(vt, hash_default_value_ty(c, dn));
     }
     TyKind before = *slot;
-    if (is_push) {
-      /* explicit push/append: definitely array.  A PolyArray stays PolyArray
-         regardless of the pushed value type; mixing typed arrays widens to
-         PolyArray (ty_unify would return TY_POLY scalar, so use array-aware
-         widening instead). */
-      if (vt == TY_UNKNOWN) continue;
-      /* If a [] read already promoted this slot to a hash type, the push
-         wins: a variable that is pushed to is an array, not a hash.
-         Reset the slot so the array promotion below can fire. */
-      if (ty_is_hash(*slot)) *slot = TY_UNKNOWN;
-      if (*slot != TY_UNKNOWN && !ty_is_array(*slot)) continue;
-      if (*slot == TY_POLY_ARRAY) continue;  /* already widest array type */
-      TyKind want = ty_array_of(vt);
-      if (*slot != TY_UNKNOWN && want != *slot) want = TY_POLY_ARRAY;
-      *slot = want;
-    }
-    else if (is_splice) {
-      /* arr[s,l] = rhs / arr[range] = rhs: a source whose elements the typed
-         receiver CONCRETELY cannot hold widens the slot to a poly array
-         (mirrors push, monotonic and fixpoint-stable). A TY_POLY value is
-         exempt -- statically unknown but usually the matching kind at
-         runtime; the emitters keep their runtime dispatch/conversion for it.
-         A 3-arg []= is unambiguous array evidence for an UNKNOWN slot; a
-         range key alone is not (h[1..2] = v is a legal hash write). */
-      if (vt == TY_UNKNOWN || vt == TY_POLY) { /* no evidence / exempt */ }
-      else if (ty_is_array(*slot)) {
-        if (*slot != TY_POLY_ARRAY && vt != ty_array_elem(*slot)) *slot = TY_POLY_ARRAY;
-      }
-      else if (*slot == TY_UNKNOWN && kt != TY_RANGE) *slot = ty_array_of(vt);
-    }
-    else if (*slot == TY_POLY_POLY_HASH) {
-      /* already widest hash type; no further promotion needed */
-    }
-    else if ((kt == TY_INT || kt == TY_POLY) && *slot != TY_UNKNOWN && ty_is_array(*slot)) {
-      /* int-key element write into a typed array: a value its element type
-         CONCRETELY cannot hold widens the slot to a poly array, mirroring
-         `a << x` -- the poly emitters then store the value exactly as CRuby
-         does (the former bail left e.g. `a[0] = "s"` on an int array to emit
-         invalid C through the typed setter). A TY_POLY value is exempt: the
-         typed setter's runtime conversion (sp_poly_to_i etc.) is the
-         long-standing intended path for it. A poly KEY into an array slot is
-         an index all the same -- Array#[]= takes an Integer or raises -- so it
-         is the same evidence; without it an object stored at an unpacked
-         index was handed to the int setter (#4832). */
-      if (vt != TY_UNKNOWN && vt != TY_POLY &&
-          *slot != TY_POLY_ARRAY && vt != ty_array_elem(*slot))
-        *slot = TY_POLY_ARRAY;
-    }
-    else if (kt == TY_INT) {
-      /* int key []= on a non-array slot: infer an int-keyed hash */
-      if (vt == TY_UNKNOWN) continue;
-      if (*slot != TY_UNKNOWN && !ty_is_hash(*slot)) continue;
-      TyKind hv = ty_hash_of(TY_INT, vt);
-      if (hv == TY_UNKNOWN) hv = TY_POLY_POLY_HASH;  /* int key + unknown val type */
-      if (*slot != TY_UNKNOWN && *slot != hv) {
-        /* widen to poly-poly if mismatch */
-        if (ty_is_hash(*slot)) { *slot = TY_POLY_POLY_HASH; }
-        continue;
-      }
-      *slot = hv;
-    }
-    else if (kt == TY_STRING) {
-      if (vt == TY_UNKNOWN) continue;
-      TyKind hv = ty_hash_of(TY_STRING, vt);
-      if (hv == TY_UNKNOWN) hv = TY_STR_POLY_HASH;  /* mixed values */
-      if (*slot != TY_UNKNOWN && !ty_is_hash(*slot)) continue;
-      /* a str-keyed hash that has seen >1 value type widens to StrPoly */
-      if (*slot != TY_UNKNOWN && *slot != hv &&
-          (*slot == TY_STR_INT_HASH || *slot == TY_STR_STR_HASH || *slot == TY_STR_POLY_HASH))
-        hv = TY_STR_POLY_HASH;
-      *slot = hv;
-    }
-    else if (kt == TY_SYMBOL) {
-      /* symbol key -> SymPolyHash (boxed values) */
-      if (vt == TY_UNKNOWN) continue;
-      if (*slot != TY_UNKNOWN && *slot != TY_SYM_POLY_HASH) continue;
-      *slot = TY_SYM_POLY_HASH;
-    }
-    else if (kt != TY_UNKNOWN) {
-      /* non-standard key type (array, object, etc.): heterogeneous hash */
-      if (vt == TY_UNKNOWN) continue;
-      if (*slot != TY_UNKNOWN && !ty_is_hash(*slot)) continue;
-      *slot = TY_POLY_POLY_HASH;
-    }
+    if (!fold_container_evidence(slot, is_push, is_splice, kt, vt)) continue;
     sp_ivwatch(watch_nm, is_push ? "usage_push" : (is_idx_write ? "usage_idxwrite" : "usage_read"), before, *slot);
     if (*slot != before && !slot_reset) changed = 1;
     /* A LOCAL that widened to the poly array under a push and whose writes
