@@ -107,71 +107,80 @@ double sp_str_to_f_cruby(const char *s) {
   return d;
 }
 
+/* Digit value of `c` in bases up to 36, or -1. */
+static int sp_digit36(int c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+  return -1;
+}
+
+/* Skips leading whitespace and sign, resolves base 0 from the prefix
+   (0x -> 16, 0b -> 2, 0/0o -> 8, 0d -> 10, otherwise 10), and skips a
+   prefix matching the base. Per CRuby, only base 0 enables prefix-based
+   dispatch -- explicit bases just *accept* the matching prefix. */
+static const char *sp_int_head(const char *p, sp_int *base, int *neg) {
+  while (isspace((unsigned char)*p)) p++;
+  *neg = 0;
+  if (*p == '+') p++;
+  else if (*p == '-') { *neg = 1; p++; }
+  if (*base == 0) {
+    *base = 10;
+    if (*p == '0') {
+      char n = p[1];
+      if (n == 'x' || n == 'X') *base = 16;
+      else if (n == 'b' || n == 'B') *base = 2;
+      else if (n == 'o' || n == 'O') *base = 8;
+      else if (n >= '0' && n <= '7') *base = 8;
+    }
+  }
+  if (*p == '0' && p[1] != 0) {
+    char n = p[1];
+    if ((*base == 16) && (n == 'x' || n == 'X')) p += 2;
+    else if ((*base == 2) && (n == 'b' || n == 'B')) p += 2;
+    else if ((*base == 8) && (n == 'o' || n == 'O')) p += 2;
+    /* base 10 accepts the explicit decimal prefix too (#3719) */
+    else if ((*base == 10) && (n == 'd' || n == 'D')) p += 2;
+  }
+  return p;
+}
+
+/* Accumulates digits of `base` into *v, consuming `_` only between
+   digits; *any is set once a digit is read. Returns the stop position,
+   or NULL on sp_int overflow. */
+static const char *sp_int_scan(const char *p, sp_int base, sp_int *v, int *any) {
+  *v = 0;
+  *any = 0;
+  for (;; p++) {
+    int d = sp_digit36((unsigned char)*p);
+    if (d < 0 || d >= (int)base) {
+      if (*p == '_' && *any) {
+        int n = sp_digit36((unsigned char)p[1]);
+        if (n >= 0 && n < (int)base) continue;
+      }
+      return p;
+    }
+    sp_int t;
+    if (__builtin_mul_overflow(*v, base, &t) ||
+        __builtin_add_overflow(t, (sp_int)d, v)) return NULL;
+    *any = 1;
+  }
+}
+
 /* `String#to_i(base)` with a non-decimal base. Accepts bases 2..36
    like MRI; `_` is allowed between digits the same way as base 10.
    Stops at the first invalid digit and returns what's parsed so
-   far. Issue #883. */
+   far. Base 0 auto-detects from the prefix. Issue #883. */
 sp_int sp_str_to_i_base(const char *s, sp_int base) {SP_GC_ROOT_STR(s);
   if (!s) return 0;
-  /* base 0 = auto-detect from prefix (0x -> 16, 0b -> 2, 0/0o -> 8,
-     otherwise 10). Per CRuby, only base 0 enables prefix-based
-     dispatch -- explicit bases just *accept* the matching prefix. */
   /* CRuby rejects a radix outside 2..36 rather than falling back to 10 */
   if (base != 0 && (base < 2 || base > 36))
     sp_raise_cls("ArgumentError", sp_sprintf("invalid radix %lld", (long long)base));
-  const char *p = s;
-  while (isspace((unsigned char)*p)) p++;
-  int neg = 0;
-  if (*p == '+') p++;
-  else if (*p == '-') { neg = 1; p++; }
-  if (base == 0) {
-    if (*p == '0') {
-      if (p[1] == 'x' || p[1] == 'X') { base = 16; p += 2; }
-      else if (p[1] == 'b' || p[1] == 'B') { base = 2; p += 2; }
-      else if (p[1] == 'o' || p[1] == 'O') { base = 8; p += 2; }
-      else if (p[1] == 'd' || p[1] == 'D') { base = 10; p += 2; }
-      else if (p[1] >= '0' && p[1] <= '7') { base = 8; p++; }
-      else { base = 10; }
-    }
-else {
-      base = 10;
-    }
-  }
-else if (*p == '0' && p[1] != 0) {
-    /* Explicit base accepts the matching prefix. */
-    if ((base == 16) && (p[1] == 'x' || p[1] == 'X')) p += 2;
-    else if ((base == 2) && (p[1] == 'b' || p[1] == 'B')) p += 2;
-    else if ((base == 8) && (p[1] == 'o' || p[1] == 'O')) p += 2;
-    /* base 10 accepts the explicit decimal prefix too (#3719) */
-    else if ((base == 10) && (p[1] == 'd' || p[1] == 'D')) p += 2;
-  }
-  sp_int v = 0;
-  int any = 0;
-  while (*p) {
-    int d = -1;
-    if (*p >= '0' && *p <= '9') d = *p - '0';
-    else if (*p >= 'a' && *p <= 'z') d = *p - 'a' + 10;
-    else if (*p >= 'A' && *p <= 'Z') d = *p - 'A' + 10;
-    if (d < 0 || d >= (int)base) {
-      if (*p == '_' && any) {
-        /* Lookahead: only consume `_` between digits. */
-        int n = -1;
-        char c = p[1];
-        if (c >= '0' && c <= '9') n = c - '0';
-        else if (c >= 'a' && c <= 'z') n = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'Z') n = c - 'A' + 10;
-        if (n >= 0 && n < (int)base) { p++; continue; }
-      }
-      break;
-    }
-    sp_int t;
-    if (__builtin_mul_overflow(v, base, &t) ||
-        __builtin_add_overflow(t, (sp_int)d, &v)) {
-      sp_raise_cls("RangeError", sp_sprintf("integer overflow parsing \"%s\"", s));
-    }
-    any = 1;
-    p++;
-  }
+  int neg, any;
+  sp_int v;
+  const char *p = sp_int_head(s, &base, &neg);
+  if (!sp_int_scan(p, base, &v, &any))
+    sp_raise_cls("RangeError", sp_sprintf("integer overflow parsing \"%s\"", s));
   if (!any) return 0;
   return neg ? -v : v;
 }
@@ -207,64 +216,13 @@ static sp_int sp_str_to_i_base_impl(const char *s, sp_int base, int lenient) {SP
      rejects it, a C-string scan would silently parse the prefix. */
   if (strlen(s) != sp_str_byte_len(s))
     SP_INT_REJECT("ArgumentError", sp_sprintf("invalid value for Integer(): \"%s\"", s));
-  if (base == 0) {
-    /* auto-detect the base from the literal's prefix */
-    const char *q = s;
-    while (isspace((unsigned char)*q)) q++;
-    if (*q == '+' || *q == '-') q++;
-    if (*q == '0') {
-      char n = q[1];
-      if (n == 'x' || n == 'X') base = 16;
-      else if (n == 'b' || n == 'B') base = 2;
-      else if (n == 'o' || n == 'O') base = 8;
-      /* `0d19` is CRuby's explicit decimal prefix (#3719) */
-      else if (n == 'd' || n == 'D') base = 10;
-      else if (n >= '0' && n <= '7') base = 8;
-      else base = 10;
-    }
-    else base = 10;
-  }
+  int neg, any;
+  sp_int v;
+  const char *p = sp_int_head(s, &base, &neg);
   if (base < 2 || base > 36) SP_INT_REJECT("ArgumentError", sp_sprintf("invalid radix %lld", (long long)base));
-  const char *p = s;
-  while (isspace((unsigned char)*p)) p++;
-  int neg = 0;
-  if (*p == '+') p++;
-  else if (*p == '-') { neg = 1; p++; }
-  if (*p == '0' && p[1] != 0) {
-    if ((base == 16) && (p[1] == 'x' || p[1] == 'X')) p += 2;
-    else if ((base == 2) && (p[1] == 'b' || p[1] == 'B')) p += 2;
-    else if ((base == 8) && (p[1] == 'o' || p[1] == 'O')) p += 2;
-    else if ((base == 10) && (p[1] == 'd' || p[1] == 'D')) p += 2;
-  }
   if (*p == '\0') SP_INT_REJECT("ArgumentError", sp_sprintf("invalid value for Integer(): \"%s\"", s));
-  sp_int v = 0;
-  int any = 0;
-  while (*p) {
-    int d = -1;
-    if (*p >= '0' && *p <= '9') d = *p - '0';
-    else if (*p >= 'a' && *p <= 'z') d = *p - 'a' + 10;
-    else if (*p >= 'A' && *p <= 'Z') d = *p - 'A' + 10;
-    if (d < 0 || d >= (int)base) {
-      if (*p == '_' && any) {
-        int n = -1;
-        char c = p[1];
-        if (c >= '0' && c <= '9') n = c - '0';
-        else if (c >= 'a' && c <= 'z') n = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'Z') n = c - 'A' + 10;
-        if (n >= 0 && n < (int)base) { p++; continue; }
-      }
-      break;
-    }
-    {
-      sp_int t;
-      if (__builtin_mul_overflow(v, base, &t) ||
-          __builtin_add_overflow(t, (sp_int)d, &v)) {
-        SP_INT_REJECT("RangeError", sp_sprintf("integer overflow parsing \"%s\"", s));
-      }
-    }
-    any = 1;
-    p++;
-  }
+  p = sp_int_scan(p, base, &v, &any);
+  if (!p) SP_INT_REJECT("RangeError", sp_sprintf("integer overflow parsing \"%s\"", s));
   if (!any) SP_INT_REJECT("ArgumentError", sp_sprintf("invalid value for Integer(): \"%s\"", s));
   while (isspace((unsigned char)*p)) p++;
   if (*p != '\0') SP_INT_REJECT("ArgumentError", sp_sprintf("invalid value for Integer(): \"%s\"", s));
