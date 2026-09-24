@@ -2774,10 +2774,14 @@ int infer_write_types(Compiler *c) {
        and so does a write through a getter whose value is that or-write.
        Without this the write was no evidence, the empty literal left @h
        boxed, and the boxed receiver's `[]=` bound its arguments to every
-       user-defined `[]=` in the program. */
+       user-defined `[]=` in the program. Once a getter's ivar is a hash, the
+       getter branch below takes the write instead: it widens a hash the write
+       does not fit, and the literals the ivar is assigned, where folding it
+       here left an Integer-keyed hash that dropped a String key (#4902). */
     {
       int orw = recv_hash_or_write(c, recv);
-      if (orw >= 0) {
+      if (orw >= 0 && !(nt_kind(nt, unwrap_parens(c, recv)) == NK_CallNode &&
+                        ty_is_hash(infer_type(c, orw)))) {
         recv = orw;
         rty = nt_kind(nt, orw) == NK_InstanceVariableOrWriteNode ? "InstanceVariableReadNode"
                                                                  : "LocalVariableReadNode";
