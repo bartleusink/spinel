@@ -2284,6 +2284,23 @@ static int fi_reaches(Compiler *c, int from, int target, unsigned char *seen,
     int cal[32]; int n2 = 0;
     fi_callees(c, calls[i], cal, &n2, 32);
     for (int j = 0; j < n2; j++) {
+      /* a callee's parameter defaults are emitted at this call site, so the
+         calls inside them are this body's calls too */
+      Scope *cs = &c->scopes[cal[j]];
+      for (int p = 0; cs->pdefault && p < cs->nparams; p++) {
+        if (cs->pdefault[p] < 0) continue;
+        int dcalls[64]; int nd = 0;
+        fi_collect_calls(c, cs->pdefault[p], dcalls, &nd, 64, 0);
+        for (int d = 0; d < nd; d++) {
+          int dcal[32]; int n3 = 0;
+          fi_callees(c, dcalls[d], dcal, &n3, 32);
+          for (int k = 0; k < n3; k++) {
+            if (!cand[dcal[k]]) continue;
+            if (dcal[k] == target) return 1;
+            if (fi_reaches(c, dcal[k], target, seen, cand, depth + 1)) return 1;
+          }
+        }
+      }
       if (!cand[cal[j]]) continue;               /* not forced: no cycle through it */
       if (cal[j] == target) return 1;
       if (fi_reaches(c, cal[j], target, seen, cand, depth + 1)) return 1;
