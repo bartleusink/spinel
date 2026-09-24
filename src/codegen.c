@@ -2274,6 +2274,47 @@ static void fi_collect_calls(Compiler *c, int id, int *out, int *n, int max, int
 }
 
 static int fi_reaches(Compiler *c, int from, int target, unsigned char *seen,
+                      unsigned char *cand, int depth);
+
+/* The methods whose defaults one search has walked (see fi_defaults_reach) */
+static unsigned char *g_fi_dseen;
+
+/* The calls a call to `callee` puts at its own site through the parameter
+   defaults it fills in, and in turn those of the methods such a default
+   calls, which omit arguments of their own (`def f(a = k)`, `def k(b = g)`):
+   every one of them is emitted in the calling body. A method reached so
+   counts as that body's callee: its body is followed when it is forced
+   inline. A default whose call list was cut short is assumed to reach. */
+static int fi_defaults_reach(Compiler *c, int callee, int target, unsigned char *seen,
+                             unsigned char *cand, int depth) {
+  if (depth > 64) return 1;
+  if (!g_fi_dseen || g_fi_dseen[callee]) return 0;
+  g_fi_dseen[callee] = 1;
+  Scope *cs = &c->scopes[callee];
+  for (int p = 0; cs->pdefault && p < cs->nparams; p++) {
+    if (cs->pdefault[p] < 0) continue;
+    int dcalls[64]; int nd = 0;
+    int sv_trunc = g_fi_trunc;
+    g_fi_trunc = 0;
+    fi_collect_calls(c, cs->pdefault[p], dcalls, &nd, 64, 0);
+    int cut = g_fi_trunc;
+    g_fi_trunc = sv_trunc;
+    if (cut) return 1;
+    for (int d = 0; d < nd; d++) {
+      int dcal[32]; int n3 = 0;
+      fi_callees(c, dcalls[d], dcal, &n3, 32);
+      for (int k = 0; k < n3; k++) {
+        if (fi_defaults_reach(c, dcal[k], target, seen, cand, depth + 1)) return 1;
+        if (!cand[dcal[k]]) continue;
+        if (dcal[k] == target) return 1;
+        if (fi_reaches(c, dcal[k], target, seen, cand, depth + 1)) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static int fi_reaches(Compiler *c, int from, int target, unsigned char *seen,
                       unsigned char *cand, int depth) {
   if (depth > 64) return 1;                      /* too deep: assume it does */
   if (seen[from]) return 0;
@@ -2286,21 +2327,7 @@ static int fi_reaches(Compiler *c, int from, int target, unsigned char *seen,
     for (int j = 0; j < n2; j++) {
       /* a callee's parameter defaults are emitted at this call site, so the
          calls inside them are this body's calls too */
-      Scope *cs = &c->scopes[cal[j]];
-      for (int p = 0; cs->pdefault && p < cs->nparams; p++) {
-        if (cs->pdefault[p] < 0) continue;
-        int dcalls[64]; int nd = 0;
-        fi_collect_calls(c, cs->pdefault[p], dcalls, &nd, 64, 0);
-        for (int d = 0; d < nd; d++) {
-          int dcal[32]; int n3 = 0;
-          fi_callees(c, dcalls[d], dcal, &n3, 32);
-          for (int k = 0; k < n3; k++) {
-            if (!cand[dcal[k]]) continue;
-            if (dcal[k] == target) return 1;
-            if (fi_reaches(c, dcal[k], target, seen, cand, depth + 1)) return 1;
-          }
-        }
-      }
+      if (fi_defaults_reach(c, cal[j], target, seen, cand, depth + 1)) return 1;
       if (!cand[cal[j]]) continue;               /* not forced: no cycle through it */
       if (cal[j] == target) return 1;
       if (fi_reaches(c, cal[j], target, seen, cand, depth + 1)) return 1;
@@ -2421,12 +2448,15 @@ static void fi_build(Compiler *c) {
      hint alone still applies. */
   if (ncand > 0 && ncand <= 2048) {
     unsigned char *seen = (unsigned char *)malloc((size_t)c->nscopes);
-    for (int si = 0; si < c->nscopes && seen; si++) {
+    g_fi_dseen = (unsigned char *)malloc((size_t)c->nscopes);
+    for (int si = 0; si < c->nscopes && seen && g_fi_dseen; si++) {
       if (!cand[si]) continue;
       memset(seen, 0, (size_t)c->nscopes);
+      memset(g_fi_dseen, 0, (size_t)c->nscopes);
       if (fi_reaches(c, si, si, seen, cand, 0)) cand[si] = 0;   /* on a cycle */
     }
     free(seen);
+    free(g_fi_dseen); g_fi_dseen = NULL;
   }
   else {
     for (int si = 0; si < c->nscopes; si++) cand[si] = 0;
