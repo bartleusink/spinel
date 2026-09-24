@@ -2262,7 +2262,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     int aidx = comp_cvar_index(&c->classes[cid], nm);
     if (aidx >= 0 && c->classes[cid].cvar_types[aidx] == TY_POLY) {
       buf_printf(b, "(sp_poly_truthy(%s) ? (%s = ", ref, ref);
-      emit_boxed(c, v, b); buf_puts(b, ") : sp_box_nil())");
+      emit_boxed(c, v, b); buf_printf(b, ") : %s)", ref);
     }
     else { buf_printf(b, "(%s ? (%s = ", ref, ref); emit_expr(c, v, b); buf_puts(b, ") : 0)"); }
     return;
