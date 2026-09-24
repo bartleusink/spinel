@@ -4715,6 +4715,11 @@ static int desugar_lazy_stateful_stage(Compiler *c) {
 }
 
 static int desugar_symbol_string_methods(Compiler *c) {
+  /* the rewrite cannot be taken back, so it waits for types that have
+     settled: a local that looked like a Symbol in an optimistic round and
+     widened after (`key = yield x` over nil and Symbols) was compared as a
+     String against a Symbol and answered nil */
+  if (g_infer_optimistic) return 0;
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
