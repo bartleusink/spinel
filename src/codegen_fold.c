@@ -6319,6 +6319,19 @@ int callee_param_is_declared_kwarg(Compiler *c, Scope *m, const char *name) {
   return 0;
 }
 
+/* True when the callee declares a keyword parameter (`k:` / `k: 1`). Ruby
+   then takes a braceless `f(a, j: 2)` as keywords whatever its keys, so the
+   hash is never one more positional argument and a key no parameter names is
+   an unknown keyword -- not the options hash it is for a callee without
+   keywords. */
+int callee_declares_kwargs(Compiler *c, Scope *m) {
+  if (!m || m->def_node < 0) return 0;
+  int pn = nt_ref(c->nt, m->def_node, "parameters");
+  if (pn < 0) return 0;
+  int kn = 0; nt_arr(c->nt, pn, "keywords", &kn);
+  return kn > 0;
+}
+
 /* Materialize the first `**hash` source inside `kwh` (a KeywordHashNode) into
    a typed temp so per-param extraction / kwrest collection can read it.
    Returns the temp id, or -1 when kwh carries no double-splat (or its source
@@ -6615,8 +6628,8 @@ static void args_raise(const char *fmt, ...) {
    are data rather than keywords. */
 int emit_unknown_kwarg_raise(Compiler *c, Scope *m, int kwh) {
   const NodeTable *nt = c->nt;
-  if (!m || kwh < 0) return 0;
-  int kw_matches = 0;
+  if (!m || kwh < 0 || m->kwrest_idx >= 0) return 0;
+  int kw_matches = callee_declares_kwargs(c, m);
   for (int i = 0; i < m->nparams && !kw_matches; i++)
     if (m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]) &&
         kwh_lookup(nt, kwh, m->pnames[i]) >= 0) kw_matches = 1;
@@ -6696,6 +6709,121 @@ int splat_operand_is_scalar(TyKind t) {
          t == TY_STRBUF || t == TY_SYMBOL || t == TY_BOOL;
 }
 
+/* Arity / keyword validation, in CRuby's words, raised at RUNTIME just
+   before the call would run (dead code stays silent, matching CRuby;
+   the argument slots keep their compat pads). Only fully static shapes
+   are checked: any splat, a double-splat into a target without `**kw`, a
+   synthesized scope, or synthesized (__-prefixed, e.g. forwarding) params
+   skip; a rest target has only its shortfall judged, a `**kw` target only
+   its positional count. For a callee declaring no keyword parameter, a
+   keyword hash none of whose keys names a parameter collapses into one
+   positional hash argument (the Ruby options-hash idiom) and is counted
+   as such rather than keyword-checked.
+   One rule for the direct call (emit_args_filled) and the instance dispatch
+   (emit_dispatch): the dispatch kept its own count, which took keyword
+   parameters for positional slots and skipped every keyword hash, so
+   `obj.m(3, 4)` against `def m(x, k: 1)` bound silently where `m(3, 4)`
+   raised. `judge_rest` is off for the dispatch, which measures a rest
+   target's shortfall itself. */
+static void emit_call_arity_check(Compiler *c, Scope *m, int argc, const int *argv, int judge_rest) {
+  const NodeTable *nt = c->nt;
+  int kwh = -1;
+  int pos_argc = argc;
+  if (argc > 0 && argv && nt_type(nt, argv[argc - 1]) &&
+      sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
+    kwh = argv[argc - 1];
+    pos_argc = argc - 1;
+  }
+  int has_splat = 0, has_ds = 0;
+  for (int k = 0; k < pos_argc; k++)
+    if (argv && nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) { has_splat = 1; break; }
+  if (kwh >= 0) {
+    int en2 = 0; const int *el2 = nt_arr(nt, kwh, "elements", &en2);
+    for (int e = 0; e < en2; e++)
+      if (el2 && nt_type(nt, el2[e]) && sp_streq(nt_type(nt, el2[e]), "AssocSplatNode")) { has_ds = 1; break; }
+  }
+  int synth = 0, nfixed = 0, nreq = 0;
+  for (int i = 0; i < m->nparams; i++) {
+    /* A __bam_ wrapper's parameters are REAL call arguments here: a
+       receiverless Kernel wrapper (`method(:String)`) has one, and only it
+       reaches this function -- a receiver-bound wrapper's Method call goes
+       through the object-bound path, whose self slot carries param[0].
+       Counting a receiverless wrapper's parameter as compiler plumbing
+       skipped the arity check, so `method(:String).call` invoked it with a
+       filled-in 0 instead of raising ArgumentError (and `method(:String)`
+       .call(123) still binds its argument normally). Every other
+       __-prefixed parameter is compiler plumbing, as before. */
+    if (m->pnames[i] && m->pnames[i][0] == '_' && m->pnames[i][1] == '_' &&
+        strncmp(m->pnames[i], "__bam_", 6) != 0) { synth = 1; break; }
+    /* Keyword parameters share pnames[] with the positional ones but are
+       no positional slot: counting them let `def m(x, k: 1)` take `m(3, 4)`
+       and bind the 4 nowhere. */
+    if (i == m->kwrest_idx || callee_param_is_declared_kwarg(c, m, m->pnames[i])) continue;
+    nfixed++;
+    if (!m->pdefault || m->pdefault[i] < 0) nreq++;
+  }
+  /* A target with a rest parameter has no upper bound, so only its shortfall
+     is judged: `def f(a, *r)` called bare ran the body with a padded a. */
+  int rest_req = rest_shortfall_required(c, m);
+  if (!has_splat && !has_ds && rest_req >= 0) {
+    if (judge_rest) {
+      int eff_pos = pos_argc + (kwh >= 0 ? 1 : 0);
+      if (eff_pos < rest_req)
+        args_raise("wrong number of arguments (given %d, expected %d+)", eff_pos, rest_req);
+    }
+  }
+  /* A `**kw` takes every keyword, so only the positional count is judged:
+     `def f(x, **kw)` called `f(3, 4)` dropped the 4. The keyword hash is
+     never a positional argument here (kwh_positional_slot). */
+  else if (!has_splat && !synth && m->rest_idx < 0 && m->kwrest_idx >= 0 && !m->cs_synth) {
+    if (pos_argc > nfixed || pos_argc < nreq) {
+      if (nreq == nfixed)
+        args_raise("wrong number of arguments (given %d, expected %d)", pos_argc, nfixed);
+      else
+        args_raise("wrong number of arguments (given %d, expected %d..%d)", pos_argc, nreq, nfixed);
+    }
+  }
+  else if (!has_splat && !has_ds && !synth &&
+      m->rest_idx < 0 && m->kwrest_idx < 0 && !m->cs_synth) {
+    int kw_matches = kwh >= 0 && callee_declares_kwargs(c, m);
+    if (kwh >= 0 && !kw_matches)
+      for (int i = 0; i < m->nparams; i++)
+        /* A key binds by name only to a parameter that IS a keyword. A
+           positional parameter merely SHARING the name takes the whole hash
+           positionally, the way any other unconsumed keyword hash does --
+           `def f(attrs); f(attrs: 1)` answers `{attrs: 1}` in Ruby and
+           answered 0 here, because the name match made the call look like it
+           supplied no positional argument at all. */
+        if (m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]) &&
+            kwh_lookup(nt, kwh, m->pnames[i]) >= 0) { kw_matches = 1; break; }
+    int eff_pos = pos_argc + ((kwh >= 0 && !kw_matches) ? 1 : 0);
+    char expbuf2[32];
+    if (nreq == nfixed) snprintf(expbuf2, sizeof expbuf2, "%d", nfixed);
+    else snprintf(expbuf2, sizeof expbuf2, "%d..%d", nreq, nfixed);
+    int raised = 0;
+    if (eff_pos > nfixed && !bam_variadic_kernel(nt, m)) {
+      args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
+      raised = 1;
+    }
+    if (!raised && emit_unknown_kwarg_raise(c, m, kwh)) raised = 1;
+    for (int i = 0; i < m->nparams && !raised; i++) {
+      /* With a leading optional the shortfall is a count, not a position:
+         this parameter may be undefaulted and still funded, because the
+         required ones are covered first. */
+      int lead_opt = opt_before_required(m);
+      if (lead_opt && arg_slot_for_param(c, m, i, eff_pos) >= 0) continue;
+      if (i < eff_pos && !lead_opt) continue;
+      if (m->pdefault && m->pdefault[i] >= 0) continue;
+      if (kw_matches && kwh_lookup(nt, kwh, m->pnames[i]) >= 0) continue;
+      if ((kwh >= 0 && kw_matches) || callee_param_is_declared_kwarg(c, m, m->pnames[i]))
+        args_raise("missing keyword: :%s", m->pnames[i] ? m->pnames[i] : "?");
+      else
+        args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
+      raised = 1;
+    }
+  }
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   Scope *m = &c->scopes[callee_idx];
   const NodeTable *nt = c->nt;
@@ -6755,87 +6883,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
      `h(1, k: 9)` gives `a` the 1 and `c` the hash. So parameters are mapped
      over this count; the hash itself is argv[pos_argc]. */
   int bind_argc = pos_argc + (kwh_positional_slot(c, m, kwh, pos_argc) >= 0 ? 1 : 0);
-  /* Arity / keyword validation, in CRuby's words, raised at RUNTIME just
-     before the call would run (dead code stays silent, matching CRuby;
-     the argument slots keep their compat pads). Only fully static shapes
-     are checked: any splat, double-splat, rest/kwrest param, synthesized
-     scope, or synthesized (__-prefixed, e.g. forwarding) params skip. A
-     keyword hash none of whose keys names a parameter collapses into one
-     positional hash argument (the Ruby options-hash idiom) and is counted
-     as such rather than keyword-checked. */
-  {
-    int has_splat = 0, has_ds = 0;
-    for (int k = 0; k < pos_argc; k++)
-      if (argv && nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) { has_splat = 1; break; }
-    if (kwh >= 0) {
-      int en2 = 0; const int *el2 = nt_arr(nt, kwh, "elements", &en2);
-      for (int e = 0; e < en2; e++)
-        if (el2 && nt_type(nt, el2[e]) && sp_streq(nt_type(nt, el2[e]), "AssocSplatNode")) { has_ds = 1; break; }
-    }
-    int synth = 0, nfixed = 0, nreq = 0;
-    for (int i = 0; i < m->nparams; i++) {
-      /* A __bam_ wrapper's parameters are REAL call arguments here: a
-         receiverless Kernel wrapper (`method(:String)`) has one, and only it
-         reaches this function -- a receiver-bound wrapper's Method call goes
-         through the object-bound path, whose self slot carries param[0].
-         Counting a receiverless wrapper's parameter as compiler plumbing
-         skipped the arity check, so `method(:String).call` invoked it with a
-         filled-in 0 instead of raising ArgumentError (and `method(:String)`
-         .call(123) still binds its argument normally). Every other
-         __-prefixed parameter is compiler plumbing, as before. */
-      if (m->pnames[i] && m->pnames[i][0] == '_' && m->pnames[i][1] == '_' &&
-          strncmp(m->pnames[i], "__bam_", 6) != 0) { synth = 1; break; }
-      nfixed++;
-      if (!m->pdefault || m->pdefault[i] < 0) nreq++;
-    }
-    /* A target with a rest parameter has no upper bound, so only its shortfall
-       is judged: `def f(a, *r)` called bare ran the body with a padded a. */
-    int rest_req = rest_shortfall_required(c, m);
-    if (!has_splat && !has_ds && rest_req >= 0) {
-      int eff_pos = pos_argc + (kwh >= 0 ? 1 : 0);
-      if (eff_pos < rest_req)
-        args_raise("wrong number of arguments (given %d, expected %d+)", eff_pos, rest_req);
-    }
-    else if (!has_splat && !has_ds && !synth &&
-        m->rest_idx < 0 && m->kwrest_idx < 0 && !m->cs_synth) {
-      int kw_matches = 0;
-      if (kwh >= 0)
-        for (int i = 0; i < m->nparams; i++)
-          /* A key binds by name only to a parameter that IS a keyword. A
-             positional parameter merely SHARING the name takes the whole hash
-             positionally, the way any other unconsumed keyword hash does --
-             `def f(attrs); f(attrs: 1)` answers `{attrs: 1}` in Ruby and
-             answered 0 here, because the name match made the call look like it
-             supplied no positional argument at all. */
-          if (m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]) &&
-              kwh_lookup(nt, kwh, m->pnames[i]) >= 0) { kw_matches = 1; break; }
-      int eff_pos = pos_argc + ((kwh >= 0 && !kw_matches) ? 1 : 0);
-      char expbuf2[32];
-      if (nreq == nfixed) snprintf(expbuf2, sizeof expbuf2, "%d", nfixed);
-      else snprintf(expbuf2, sizeof expbuf2, "%d..%d", nreq, nfixed);
-      int raised = 0;
-      if (eff_pos > nfixed && !bam_variadic_kernel(nt, m)) {
-        args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
-        raised = 1;
-      }
-      if (!raised && emit_unknown_kwarg_raise(c, m, kwh)) raised = 1;
-      for (int i = 0; i < m->nparams && !raised; i++) {
-        /* With a leading optional the shortfall is a count, not a position:
-           this parameter may be undefaulted and still funded, because the
-           required ones are covered first. */
-        int lead_opt = opt_before_required(m);
-        if (lead_opt && arg_slot_for_param(c, m, i, eff_pos) >= 0) continue;
-        if (i < eff_pos && !lead_opt) continue;
-        if (m->pdefault && m->pdefault[i] >= 0) continue;
-        if (kw_matches && kwh_lookup(nt, kwh, m->pnames[i]) >= 0) continue;
-        if (kwh >= 0 && kw_matches)
-          args_raise("missing keyword: :%s", m->pnames[i] ? m->pnames[i] : "?");
-        else
-          args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
-        raised = 1;
-      }
-    }
-  }
+  emit_call_arity_check(c, m, argc, argv, 1);
 
   /* Detect double-splat (**hash) inside kwh: AssocSplatNode wrapping a hash expr.
      Pre-evaluate the hash to a temp so we can do per-param lookups. */
@@ -7534,33 +7582,21 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
     return;
   }
 
-  /* Arity check, the same one the free-function path already made: an over- or
-     under-supplied instance call went through with the extra arguments simply
-     dropped (#3677). Static shapes only -- any splat, keyword hash, rest or
-     kwrest parameter, or synthesized parameter, skips. */
-  if (m && m->rest_idx < 0 && m->kwrest_idx < 0 && (argv || argc == 0)) {
+  /* Arity check, the free-function path's own: an over- or under-supplied
+     instance call went through with the extra arguments simply dropped
+     (#3677). A rest target's shortfall is measured below, with the splat. */
+  if (m && (argv || argc == 0)) {
     int skip = 0;
     for (int k = 0; k < argc && argv && !skip; k++) {
       const char *at = nt_type(nt, argv[k]);
-      if (at && (sp_streq(at, "SplatNode") || sp_streq(at, "KeywordHashNode") ||
-                 sp_streq(at, "ForwardingArgumentsNode") || sp_streq(at, "BlockArgumentNode")))
+      if (at && (sp_streq(at, "ForwardingArgumentsNode") || sp_streq(at, "BlockArgumentNode")))
         skip = 1;
     }
+    /* every __-prefixed parameter, a __bam_ wrapper's too: a receiver-bound
+       wrapper's first one is its receiver, not an argument */
     for (int i = 0; i < m->nparams && !skip; i++)
       if (m->pnames[i] && m->pnames[i][0] == '_' && m->pnames[i][1] == '_') skip = 1;
-    /* count the undefaulted parameters rather than trusting a position: with a
-       leading optional (`def m(x = 1, y)`) the required ones are funded first */
-    int nreq_d = 0;
-    for (int i = 0; i < m->nparams; i++)
-      if (!(m->pdefault && m->pdefault[i] >= 0)) nreq_d++;
-    if (!skip && m->nparams >= 0 && (argc > m->nparams || argc < nreq_d)) {
-      char expb[48];
-      if (nreq_d == m->nparams) snprintf(expb, sizeof expb, "expected %d", m->nparams);
-      else snprintf(expb, sizeof expb, "expected %d..%d", nreq_d, m->nparams);
-      emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments (given %d, %s)\");\n",
-                 argc, expb);
-    }
+    if (!skip) emit_call_arity_check(c, m, argc, argv, 0);
   }
   /* `callee(...)`: forward the enclosing `def foo(...)` method's synthesized
      __fwd_* params positionally (#1288), same as the emit_args_filled path. */
