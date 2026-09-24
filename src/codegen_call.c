@@ -7719,6 +7719,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           int ac = at0 != TY_POLY && at0 != TY_UNKNOWN && at0 != TY_NIL && at0 != TY_VOID;
           if (pc && ac && pt0 != at0 &&
               (pt0 == TY_STRING || at0 == TY_STRING ||
+               /* a heap pointer against a scalar, whatever the kinds: a mutable
+                  String (sp_String *) reaching an Integer-seeded `[]=` value
+                  slot was passed raw (#4929) */
+               needs_root(pt0) != needs_root(at0) ||
                /* pointer/scalar C-representation mismatch: e.g. an int-typed
                   param (bound by an unrelated poly==int) receiving a typed
                   object arg -- the raw pass would be a C int-conversion
