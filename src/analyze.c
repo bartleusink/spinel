@@ -5499,7 +5499,12 @@ int desugar_enum_method_recv(Compiler *c) {
       int sa = nt_ref(nt, id, "arguments");
       int sac = 0;
       if (sa >= 0) nt_arr(nt, sa, "arguments", &sac);
-      if (srecv >= 0 && sac == 0 && infer_type(c, srecv) == TY_POLY_ARRAY) {
+      /* a block that breaks out of the sum answers the break value: the
+         mapped copy would break out of the map and sum what it gave (#4918) */
+      int sblk = nt_ref(nt, id, "block");
+      int sbreaks = sblk >= 0 && nt_kind(nt, sblk) == NK_BlockNode &&
+                    block_has_top_break(c, nt_ref(nt, sblk, "body"));
+      if (srecv >= 0 && sac == 0 && !sbreaks && infer_type(c, srecv) == TY_POLY_ARRAY) {
         int mapc = nt_new_node(nt, "CallNode");
         nt_node_set_str(nt, mapc, "name", "map");
         nt_node_set_ref(nt, mapc, "receiver", srecv);
