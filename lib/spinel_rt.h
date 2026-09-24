@@ -8651,6 +8651,7 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
   }
   return sp_poly_to_i(sp_poly_arr_get_hash(a, i));
 }
+static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val);   /* fwd: hash []= from widen_and_set */
 static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
   if (v.tag != SP_TAG_OBJ) return val;
@@ -8672,7 +8673,8 @@ static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
     }
     case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_set((sp_PolyPolyHash*)v.v.p, sp_box_int(idx), val); break;
     case SP_BUILTIN_PTR_ARRAY: { sp_PtrArray *_pa = (sp_PtrArray*)v.v.p; sp_PtrArray_set_grow(_pa, idx, sp_PtrArray_elem_unbox(_pa, val)); break; }
-    default: break;
+    /* an Integer key into a typed hash: stored, or refused by its variant */
+    default: if (sp_poly_is_hash_kind(v.cls_id)) sp_poly_set_poly(v, sp_box_int(idx), val); break;
   }
   return val;
 }
@@ -8685,15 +8687,10 @@ static sp_RbVal sp_poly_set_str(sp_RbVal v, const char *key, sp_RbVal val) {
      used to absorb the assignment instead (#3925). */
   if (sp_poly_is_array_kind(v.cls_id))
     sp_raise_cls("TypeError", SPL("no implicit conversion of String into Integer"));
-  switch (v.cls_id) {
-    case SP_BUILTIN_STR_POLY_HASH: sp_StrPolyHash_set((sp_StrPolyHash*)v.v.p, key, val); break;
-    case SP_BUILTIN_STR_STR_HASH:
-      if (val.tag == SP_TAG_STR) { sp_StrStrHash_set((sp_StrStrHash*)v.v.p, key, val.v.s); } break;
-    case SP_BUILTIN_STR_INT_HASH:
-      if (val.tag == SP_TAG_INT) { sp_StrIntHash_set((sp_StrIntHash*)v.v.p, key, val.v.i); } break;
-    case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_set((sp_PolyPolyHash*)v.v.p, sp_box_str(key), val); break;
-    default: break;
-  }
+  if (v.cls_id == SP_BUILTIN_STR_POLY_HASH) { sp_StrPolyHash_set((sp_StrPolyHash*)v.v.p, key, val); return val; }
+  /* Every other hash stores it or says it cannot: a typed hash of another key
+     or value class dropped the entry here without a word. */
+  if (sp_poly_is_hash_kind(v.cls_id)) return sp_poly_set_poly(v, sp_box_str(key), val);
   return val;
 }
 /* Merge every pair of one boxed hash into another, whatever variants the two
@@ -8744,6 +8741,10 @@ static sp_RbVal sp_poly_set_sym(sp_RbVal v, sp_sym key, sp_RbVal val) {
   switch (v.cls_id) {
     case SP_BUILTIN_SYM_POLY_HASH:  sp_SymPolyHash_set((sp_SymPolyHash*)v.v.p, key, val); break;
     case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_set((sp_PolyPolyHash*)v.v.p, sp_box_sym(key), val); break;
+    /* a String- or Integer-keyed hash cannot hold it: say so, as sp_poly_set_str does */
+    case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_STR_STR_HASH: case SP_BUILTIN_STR_INT_HASH:
+    case SP_BUILTIN_INT_INT_HASH: case SP_BUILTIN_INT_STR_HASH:
+      sp_poly_set_poly(v, sp_box_sym(key), val); break;
     /* OpenStruct#[]= (`os[:name] = v`) routes to the member table, matching the
        sp_OpenStruct_get reader (without this the poly-dispatch write was dropped
        and the reader kept the old value) (#3201). */
@@ -8765,11 +8766,11 @@ static sp_RbVal sp_poly_arr_set(sp_RbVal v, sp_int idx, sp_RbVal val) {
                                                  sp_poly_elem_s(val)); break;
     case SP_BUILTIN_POLY_ARRAY: sp_PolyArray_set((sp_PolyArray*)v.v.p, idx, val); break;
     case SP_BUILTIN_PTR_ARRAY: { sp_PtrArray *_pa = (sp_PtrArray*)v.v.p; sp_PtrArray_set_grow(_pa, idx, sp_PtrArray_elem_unbox(_pa, val)); break; }
-    default: break;
+    /* an Integer key into a boxed hash: stored, or refused by its variant */
+    default: if (sp_poly_is_hash_kind(v.cls_id)) sp_poly_set_poly(v, sp_box_int(idx), val); break;
   }
   return val;
 }
-static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val);   /* fwd: hash []= from widen_and_set */
 /* A key or value of a kind a typed hash cannot hold: the compiler settled
    the hash's variant from what it saw and did not widen it for this store.
    Loud, not a dropped entry (#4540). */
@@ -8849,6 +8850,7 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
   switch (v.cls_id) {
     case SP_BUILTIN_STR_POLY_HASH:
       if (key.tag == SP_TAG_STR) sp_StrPolyHash_set((sp_StrPolyHash*)v.v.p, key.v.s, val);
+      else sp_poly_typed_hash_store_miss(key, val, "String", NULL);
       break;
     /* A typed hash holds one key kind and one value kind. A store of another
        kind used to fall through these arms silently: the analyzer had not
