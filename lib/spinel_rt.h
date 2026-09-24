@@ -200,6 +200,20 @@ sp_RbVal sp_raise_nomethod(const char *msg);
 SP_NORETURN void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op);
 #define SP_INT_NIL_CK(a, b, op) \
   if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_int_op((a), (b), op)
+/* The same sentinel reaching a STRICT Integer argument slot -- an index, a
+   count, a width. A compile-time nil is refused at the emitter (`s[nil]` is
+   the TypeError), but the nil that arrives through an `Integer?` slot is an
+   sp_int the arm folded as a number: `s[s.index('z')]` walked off the front
+   and answered nil, and the bounds-checking arms printed INT64_MIN at the
+   user. `of_wording` picks CRuby's rb_convert_type phrasing for the slots
+   that use it (Random.srand, Dir.mkdir's mode). Emitted only where the #3505
+   marking says the argument can carry the sentinel, so a literal index or a
+   loop counter stays the bare value it was (#4896). */
+SP_NORETURN void sp_raise_nil_to_int(int of_wording);
+#define SP_INT_NIL_ARG_CK(a) \
+  if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(0)
+#define SP_INT_NIL_ARG_CK_OF(a) \
+  if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(1)
 /* The same sentinel test ahead of a comparison (see sp_raise_nil_cmp): the
    left nil is NoMethodError, the right the Comparable ArgumentError. Emitted
    only for an operand that can carry the sentinel; a literal or an

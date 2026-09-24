@@ -2608,9 +2608,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         int ch = hold_recv_open(c, recv, 0, tys, "SP_GC_ROOT", b, &rb);
         buf_printf(b, "sp_%sArray_slice_range(%s, ", k, rb.p); free(rb.p);
         /* a poly bound (a destructured tuple element, #2923) unboxes here */
-        if (lo >= 0) emit_int_expr(c, lo, b); else buf_puts(b, "0");
+        if (lo >= 0) emit_int_expr_bound(c, lo, "0", b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (hi >= 0) emit_int_expr(c, hi, b); else buf_puts(b, "-1");
+        if (hi >= 0) emit_int_expr_bound(c, hi, "-1", b); else buf_puts(b, "-1");
         buf_printf(b, ", %d)", hi >= 0 ? excl : 0);
         if (ch) buf_puts(b, "; })");
         return 1;
@@ -4306,9 +4306,9 @@ else {
         int lo = nt_ref(nt, rn, "left"), hi = nt_ref(nt, rn, "right");
         Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
         buf_printf(b, "sp_PolyArray_slice_range(%s, ", rb.p); free(rb.p);
-        if (lo >= 0) emit_int_expr(c, lo, b); else buf_puts(b, "0");
+        if (lo >= 0) emit_int_expr_bound(c, lo, "0", b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (hi >= 0) emit_int_expr(c, hi, b); else buf_puts(b, "-1");
+        if (hi >= 0) emit_int_expr_bound(c, hi, "-1", b); else buf_puts(b, "-1");
         buf_printf(b, ", %d)", hi >= 0 ? excl : 0);
         if (ch) buf_puts(b, "; })");
         return 1;
@@ -7634,10 +7634,12 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
         int rn = argv[0];
         int excl = (int)(nt_int(c->nt, rn, "flags", 0) & 4) ? 1 : 0;
         int lo = nt_ref(c->nt, rn, "left"), hi = nt_ref(c->nt, rn, "right");
+        char none_hi[256];
+        snprintf(none_hi, sizeof none_hi, "(sp_int)sp_str_length(%s)", r);
         buf_printf(b, "sp_str_sub_range_r(%s, ", r);
-        if (lo >= 0) emit_int_expr(c, lo, b); else buf_puts(b, "0");
+        if (lo >= 0) emit_int_expr_bound(c, lo, "0", b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (hi >= 0) { emit_int_expr(c, hi, b); buf_printf(b, ", %d)", excl); }
+        if (hi >= 0) { emit_int_expr_bound(c, hi, none_hi, b); buf_printf(b, ", %d)", excl); }
         else buf_printf(b, "(sp_int)sp_str_length(%s), 0)", r);  /* endless: to the end */
       }
       else if ((sp_streq(name, "[]") || sp_streq(name, "slice")) && argc == 2) {

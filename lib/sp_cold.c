@@ -4193,6 +4193,14 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
   sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with nil failed", cls));
 }
 
+/* A nil that reached a strict Integer argument slot through an `Integer?`
+   variable. The literal `s[nil]` already raised this from the emitter; the
+   slot's nil is the same nil, so it gets the same message (#4896). */
+SP_NORETURN void sp_raise_nil_to_int(int of_wording) {
+  sp_raise_cls("TypeError", of_wording ? "no implicit conversion of nil into Integer"
+                                       : "no implicit conversion from nil to integer");
+}
+
 SP_NORETURN void sp_raise_nil_float_op(int left_nil, const char *op) {SP_GC_ROOT_STR(op);
   if (left_nil)
     sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for nil", op));

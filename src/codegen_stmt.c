@@ -26,9 +26,11 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
   TyKind t = comp_ntype(c, arg);
   emit_indent(b, indent);
   if (t == TY_INT) {
-    /* a nullable int at the sentinel prints as nil (an empty line) */
+    /* a nullable int at the sentinel prints as nil (an empty line) -- a value
+       position that reads the sentinel itself, not a strict Integer slot that
+       refuses it (#4896), so the nilable emitter is the right one here. */
     int tv = ++g_tmp;
-    buf_printf(b, "{ sp_int _t%d = ", tv); emit_int_expr(c, arg, b);
+    buf_printf(b, "{ sp_int _t%d = ", tv); emit_int_expr_nilable(c, arg, b);
     buf_printf(b, "; if (_t%d == SP_INT_NIL) putchar('\\n'); else printf(\"%%lld\\n\", (long long)_t%d); }\n", tv, tv);
   }
   else if (t == TY_BIGINT) {
@@ -392,9 +394,11 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   emit_indent(b, indent);
   if (t == TY_INT) {
-    /* p of a nullable int at the sentinel prints "nil" */
+    /* p of a nullable int at the sentinel prints "nil" -- a value position
+       that reads the sentinel itself, not a strict Integer slot that refuses
+       it (#4896), so the nilable emitter is the right one here. */
     int tv = ++g_tmp;
-    buf_printf(b, "{ sp_int _t%d = ", tv); emit_int_expr(c, arg, b);
+    buf_printf(b, "{ sp_int _t%d = ", tv); emit_int_expr_nilable(c, arg, b);
     buf_printf(b, "; if (_t%d == SP_INT_NIL) fputs(\"nil\\n\", stdout); else printf(\"%%lld\\n\", (long long)_t%d); }\n", tv, tv);
   }
   else if (t == TY_FLOAT) {
