@@ -3381,6 +3381,22 @@ static int emit_md_deconstruct_keys(Buf *b, int indent, const char *md) {
   return dk;
 }
 
+/* `=> name` binding: lv_<lnm> = _t<t>, boxed when the local is poly. */
+static void emit_pattern_bind(Compiler *c, int id, const char *lnm, TyKind pt, int t, int indent, Buf *b) {
+  if (!lnm) return;
+  emit_indent(b, indent);
+  buf_printf(b, "lv_%s = ", lnm);
+  LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
+  if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) {
+    char ex[24]; snprintf(ex, sizeof ex, "_t%d", t);
+    Buf bx; memset(&bx, 0, sizeof bx);
+    emit_boxed_text(c, pt, ex, &bx);
+    buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
+  }
+  else buf_printf(b, "_t%d", t);
+  buf_puts(b, ";\n");
+}
+
 void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int value_cr) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
@@ -3793,8 +3809,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
 
     if (sp_streq(pty, "LocalVariableTargetNode")) {
       const char *lnm = nt_str(nt, pat, "name");
-      if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = ", lnm); LocalVar *plv = scope_local(comp_scope_of(c, id), lnm); if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) { char ex[24]; snprintf(ex, sizeof ex, "_t%d", t); Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, pt, ex, &bx); buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); }
-      else buf_printf(b, "_t%d", t); buf_puts(b, ";\n"); }
+      emit_pattern_bind(c, id, lnm, pt, t, body_indent, b);
     }
     else if (sp_streq(pty, "IfNode")) {
       guard = nt_ref(nt, pat, "predicate");
@@ -3806,8 +3821,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           const char *bty = nt_type(nt, body[k]);
           if (bty && sp_streq(bty, "LocalVariableTargetNode")) {
             const char *lnm = nt_str(nt, body[k], "name");
-            if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = ", lnm); LocalVar *plv = scope_local(comp_scope_of(c, id), lnm); if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) { char ex[24]; snprintf(ex, sizeof ex, "_t%d", t); Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, pt, ex, &bx); buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); }
-            else buf_printf(b, "_t%d", t); buf_puts(b, ";\n"); }
+            emit_pattern_bind(c, id, lnm, pt, t, body_indent, b);
           }
         }
       }
@@ -3817,8 +3831,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       if (tgt >= 0 && nt_type(nt, tgt) &&
           sp_streq(nt_type(nt, tgt), "LocalVariableTargetNode")) {
         const char *lnm = nt_str(nt, tgt, "name");
-        if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = ", lnm); LocalVar *plv = scope_local(comp_scope_of(c, id), lnm); if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) { char ex[24]; snprintf(ex, sizeof ex, "_t%d", t); Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, pt, ex, &bx); buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); }
-        else buf_printf(b, "_t%d", t); buf_puts(b, ";\n"); }
+        emit_pattern_bind(c, id, lnm, pt, t, body_indent, b);
       }
       int val = nt_ref(nt, pat, "value");
       if (val >= 0 && nt_type(nt, val) && sp_streq(nt_type(nt, val), "ArrayPatternNode"))
