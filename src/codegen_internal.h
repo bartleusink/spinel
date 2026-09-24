@@ -799,6 +799,9 @@ int emit_catch_tag(Compiler *c, int id, Buf *b);
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b);
 /* Strip ParenthesesNode wrappers to reach the inner expression. */
 int unwrap_parens(Compiler *c, int id);
+/* Collect a String `<<` chain's args outermost-first (max 64); *base gets
+   the node the chain bottoms out at. Returns the link count. */
+int str_append_chain(Compiler *c, int recv, int *chain, int *base);
 const char *int_arith_fn(const char *op);
 const char *bigint_arith_fn(const char *op);
 /* Mangle a Ruby method name into a C identifier: `?`->_p, `!`->_bang,

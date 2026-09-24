@@ -2287,6 +2287,35 @@ int unwrap_parens(Compiler *c, int id) {
   return id;
 }
 
+/* Walk a String `<<` chain (`(s << a) << b`) down to its base, peeling
+   parens. Fills chain[] outermost-first with each link's argument (at most
+   64) and stores the base node in *base. Returns the link count. */
+int str_append_chain(Compiler *c, int recv, int *chain, int *base) {
+  const NodeTable *nt = c->nt;
+  int nchain = 0; int cur = recv;
+  while (nchain < 64) {
+    while (nt_type(nt, cur) && sp_streq(nt_type(nt, cur), "ParenthesesNode")) {
+      int pb = nt_ref(nt, cur, "body");
+      if (pb < 0) break;
+      int bn = 0; const int *bb = nt_arr(nt, pb, "body", &bn);
+      if (bn != 1) break;
+      cur = bb[0];
+    }
+    const char *cty = nt_type(nt, cur);
+    if (!cty || !sp_streq(cty, "CallNode")) break;
+    const char *cnm = nt_str(nt, cur, "name");
+    int crecv = nt_ref(nt, cur, "receiver");
+    if (!cnm || !sp_streq(cnm, "<<") || crecv < 0 || comp_ntype(c, crecv) != TY_STRING) break;
+    int cargs = nt_ref(nt, cur, "arguments");
+    int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
+    if (cac != 1) break;
+    chain[nchain++] = cav[0];
+    cur = crecv;
+  }
+  *base = cur;
+  return nchain;
+}
+
 /* 1 when the receiver is a range whose begin endpoint is statically a Float
    -- directly a (possibly parenthesized) RangeNode or through a
    sole-assignment local. CRuby raises TypeError "can't iterate from Float"

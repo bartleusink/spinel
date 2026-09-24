@@ -916,26 +916,8 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
        append. Unroll the chain onto the base, one write-back per link, and
        yield the base (each `<<` returns its receiver). */
     if (sp_streq(name, "<<") && argc == 1) {
-      int chain[64]; int nchain = 0; int cur = recv;
-      while (nchain < 64) {
-        while (nt_type(nt, cur) && sp_streq(nt_type(nt, cur), "ParenthesesNode")) {
-          int pb = nt_ref(nt, cur, "body");
-          if (pb < 0) break;
-          int bn = 0; const int *bb = nt_arr(nt, pb, "body", &bn);
-          if (bn != 1) break;
-          cur = bb[0];
-        }
-        const char *cty = nt_type(nt, cur);
-        if (!cty || !sp_streq(cty, "CallNode")) break;
-        const char *cnm = nt_str(nt, cur, "name");
-        int crecv = nt_ref(nt, cur, "receiver");
-        if (!cnm || !sp_streq(cnm, "<<") || crecv < 0 || comp_ntype(c, crecv) != TY_STRING) break;
-        int cargs = nt_ref(nt, cur, "arguments");
-        int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
-        if (cac != 1) break;
-        chain[nchain++] = cav[0];
-        cur = crecv;
-      }
+      int chain[64]; int cur;
+      int nchain = str_append_chain(c, recv, chain, &cur);
       const char *bty = nt_type(nt, cur);
       LocalVar *blv = (bty && sp_streq(bty, "LocalVariableReadNode"))
                       ? scope_local(comp_scope_of(c, cur), nt_str(nt, cur, "name")) : NULL;

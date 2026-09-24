@@ -11521,28 +11521,8 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
      one reassignment per argument in left-to-right order. */
   if (rt == TY_STRING && sp_streq(name, "<<") && argc == 1) {
     /* walk down the receiver chain, collecting each `<<` argument */
-    int chain[64]; int nchain = 0;
-    int cur = id;
-    while (nchain < 64) {
-      /* unwrap ParenthesesNode wrappers (e.g. `(s << a) << b`) */
-      while (nt_type(nt, cur) && sp_streq(nt_type(nt, cur), "ParenthesesNode")) {
-        int pb = nt_ref(nt, cur, "body");
-        if (pb < 0) break;
-        int bn = 0; const int *bb = nt_arr(nt, pb, "body", &bn);
-        if (bn != 1) break;
-        cur = bb[0];
-      }
-      const char *cty = nt_type(nt, cur);
-      if (!cty || !sp_streq(cty, "CallNode")) break;
-      const char *cnm = nt_str(nt, cur, "name");
-      int crecv = nt_ref(nt, cur, "receiver");
-      if (!cnm || !sp_streq(cnm, "<<") || crecv < 0 || comp_ntype(c, crecv) != TY_STRING) break;
-      int cargs = nt_ref(nt, cur, "arguments");
-      int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
-      if (cac != 1) break;
-      chain[nchain++] = cav[0];
-      cur = crecv;
-    }
+    int chain[64]; int cur;
+    int nchain = str_append_chain(c, id, chain, &cur);
     const char *rty = nt_type(nt, cur);
     if (nchain > 0 && rty &&
         (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"))) {
