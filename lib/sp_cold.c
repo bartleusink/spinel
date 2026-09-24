@@ -3110,21 +3110,27 @@ sp_StrArray *sp_get_ARGV(void) {
   }
   return sp_argv_array_cache;
 }
-/* Ensure a current readable stream, or return 0 at total end of input. */
+/* Ensure a current readable stream, or return 0 at total end of input.
+   The files are the program's ARGV as it stands when ARGF needs the next
+   one, taken off its front as each is opened, as CRuby's ARGF does; a file
+   that does not open raises. With ARGV empty before any file, stdin. */
 int sp_argf_ensure(void) {
   if (sp_argf_obj.cur) return 1;
-  if (sp_argv.len == 0) {
+  sp_StrArray *av = sp_get_ARGV();
+  if (av->len == 0) {
     if (sp_argf_obj.started) return 0;
-    sp_argf_obj.started = 1; sp_argf_obj.cur = stdin; sp_argf_obj.fname = "-"; return 1;
+    sp_argf_obj.started = 1; sp_argf_obj.cur = stdin; sp_argf_obj.fname = &("\xff" "-")[1];
+    return 1;
   }
-  while (sp_argf_obj.idx < sp_argv.len) {
-    const char *fn = sp_argv.data[sp_argf_obj.idx++];
-    sp_argf_obj.started = 1;
-    if (fn && fn[0] == '-' && fn[1] == 0) { sp_argf_obj.cur = stdin; sp_argf_obj.fname = "-"; return 1; }
-    FILE *f = fn ? fopen(fn, "r") : NULL;
-    if (f) { sp_argf_obj.cur = f; sp_argf_obj.fname = fn; return 1; }
-  }
-  return 0;
+  const char *fn = sp_StrArray_shift(av);
+  sp_argf_obj.started = 1;
+  if (!fn) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+  sp_argf_obj.fname = fn;   /* marked with the ARGV globals */
+  if (fn[0] == '-' && fn[1] == 0) { sp_argf_obj.cur = stdin; return 1; }
+  FILE *f = fopen(fn, "r");
+  if (!f) sp_file_raise_errno("rb_sysopen", fn);
+  sp_argf_obj.cur = f;
+  return 1;
 }
 const char *sp_argf_gets(void) {
   for (;;) {
@@ -3149,9 +3155,10 @@ sp_StrArray *sp_argf_readlines(void) {
   while ((line = sp_argf_gets())) sp_StrArray_push(a, line);
   return a;
 }
+/* CRuby opens the next file to name it, so ARGV loses it here too */
 const char *sp_argf_filename(void) {
-  if (sp_argf_obj.fname) return sp_argf_obj.fname;
-  return sp_argv.len > 0 ? sp_argv.data[0] : "-";
+  sp_argf_ensure();
+  return sp_argf_obj.fname ? sp_argf_obj.fname : &("\xff" "-")[1];
 }
 sp_bool sp_argf_eof(void) { return !sp_argf_ensure(); }
 
