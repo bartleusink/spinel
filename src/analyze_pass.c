@@ -3688,6 +3688,28 @@ static int param_supplied_anywhere(Compiler *c, Scope *sc, int pi) {
    sp_PolyArray * meeting an sp_StrArray * (#4583). Decided once, BEFORE the
    fixpoint: the first round's parameter binding already reads the ivar the
    parameter feeds, so a rule inside the round came too late for it. */
+/* The fixpoint re-clears these parameters and so asks this every round, and
+   each ask walks every call in the program. The answer reads only the
+   program's shape (the calls, their names and argument lists), so it holds
+   until the node table or the scopes change. */
+static int *psa_memo;   /* per scope: [asked bits, supplied bits] */
+static int psa_ns = -1, psa_nn = -1;
+static int param_supplied_memo(Compiler *c, int s, int i) {
+  if (i >= 31) return param_supplied_anywhere(c, &c->scopes[s], i);
+  if (!psa_memo || psa_ns != c->nscopes || psa_nn != c->nt->count) {
+    free(psa_memo);
+    psa_memo = calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1) * 2, sizeof(int));
+    if (!psa_memo) return param_supplied_anywhere(c, &c->scopes[s], i);
+    psa_ns = c->nscopes; psa_nn = c->nt->count;
+  }
+  int *asked = &psa_memo[2 * s], *yes = &psa_memo[2 * s + 1];
+  if (!(*asked & (1 << i))) {
+    if (param_supplied_anywhere(c, &c->scopes[s], i)) *yes |= 1 << i;
+    *asked |= 1 << i;
+  }
+  return (*yes >> i) & 1;
+}
+
 void seed_unsupplied_nil_defaults(Compiler *c) {
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
@@ -3695,7 +3717,7 @@ void seed_unsupplied_nil_defaults(Compiler *c) {
       if (sc->pdefault[i] < 0 || nt_kind(c->nt, sc->pdefault[i]) != NK_NilNode) continue;
       LocalVar *p = scope_local(sc, sc->pnames[i]);
       if (!p || p->rbs_seeded || p->type != TY_UNKNOWN) continue;
-      if (param_supplied_anywhere(c, sc, i)) continue;
+      if (param_supplied_memo(c, s, i)) continue;
       slot_rule(c, p, TY_POLY, sc->pdefault[i], "a `= nil` default and no call site typing it: the parameter holds nil or a value, untyped");
     }
   }
