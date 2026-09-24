@@ -8911,6 +8911,8 @@ static int init_takes_keywords(Compiler *c, int initm) {
   return nkw > 0 || nt_ref(nt, pn, "keyword_rest") >= 0;
 }
 
+static void emit_ctor_block_slot(Compiler *c, int initm, const char *lead, Buf *b);
+
 static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Buf *b) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
@@ -8977,6 +8979,9 @@ static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Bu
       }
     }
     emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", &aval);
+    /* the constructor's &block slot, as in the positional arms: a `**`
+       forwarded here left it out (#4882) */
+    emit_ctor_block_slot(c, initm, aval.p && aval.p[0] ? ", " : "", &aval);
     g_pre = sv_pre;
     buf_printf(b, "case %d: { %s _t%d=", ci, apre.p ? apre.p : "", rt2);
     if (c->classes[ci].is_value_type)
