@@ -21,6 +21,7 @@
 #include "spinel_rev.h"
 #include "codegen.h"
 #include "analyze.h"
+#include "csplit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -244,6 +245,64 @@ static int write_text_file(const char *path, const char *text) {
    the warning an unknown -W is, so there is no spelling to pass blind. Asked
    once: the answer cannot change inside one run, and the question costs a
    process. */
+/* --jobs=N (#4847 C1): preprocess the generated unit, split it into N parts
+   (csplit.c), compile the parts in parallel and link them with the rest of
+   the command. `cmd` is the whole single-unit command; the source sits at
+   [src_at, src_end) in it, the compile flags before it and the link inputs
+   after it. Returns 0 when the binary is built; anything else leaves the
+   caller to run the single-unit command, whose diagnostics name the .rb. */
+static int cc_split_build(const char *cmd, size_t src_at, size_t src_end,
+                          const char *c_path, int jobs) {
+  if (jobs > 64) jobs = 64;
+  char dir[] = "/tmp/spinel_split_XXXXXX";
+  if (!mkdtemp(dir)) return -1;
+  char flags[16384];
+  if (src_at >= sizeof flags) return -1;
+  memcpy(flags, cmd, src_at); flags[src_at] = 0;
+  char pre[4200]; snprintf(pre, sizeof pre, "%s/pre.i", dir);
+  size_t cl = strlen(flags) + strlen(c_path) + strlen(pre) + 64;
+  char *c1 = malloc(cl);
+  snprintf(c1, cl, "%s -E -P '%s' -o '%s'", flags, c_path, pre);
+  int rc = system(c1);
+  free(c1);
+  char (*parts)[4096] = malloc(sizeof(*parts) * (size_t)jobs);
+  char hdr[4200];
+  if (rc == 0 && c_split(pre, dir, jobs, parts, hdr, sizeof hdr) != jobs) rc = -1;
+  pid_t *pids = calloc((size_t)jobs, sizeof(pid_t));
+  for (int k = 0; rc == 0 && k < jobs; k++) {
+    size_t ql = strlen(flags) + 2 * strlen(parts[k]) + 64;
+    char *q = malloc(ql);
+    snprintf(q, ql, "%s -c '%s' -o '%s.o'", flags, parts[k], parts[k]);
+    pid_t p = fork();
+    if (p == 0) { execl("/bin/sh", "sh", "-c", q, (char *)NULL); _exit(127); }
+    free(q);
+    if (p < 0) { rc = -1; break; }
+    pids[k] = p;
+  }
+  for (int k = 0; k < jobs; k++) {
+    if (pids[k] <= 0) continue;
+    int st = 0;
+    if (waitpid(pids[k], &st, 0) < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) rc = -1;
+  }
+  free(pids);
+  if (rc == 0) {
+    size_t ll = strlen(cmd) + (size_t)jobs * 4200 + 16;
+    char *lk = malloc(ll);
+    size_t w = 0;
+    memcpy(lk, cmd, src_at); w = src_at;
+    for (int k = 0; k < jobs; k++) w += (size_t)snprintf(lk + w, ll - w, "'%s.o' ", parts[k]);
+    snprintf(lk + w, ll - w, "%s", cmd + src_end);
+    rc = system(lk);
+    free(lk);
+  }
+  /* the pieces are scratch either way */
+  char rmq[4200]; snprintf(rmq, sizeof rmq, "rm -rf '%s'", dir);
+  if (!getenv("SPINEL_KEEP_SPLIT")) { int rr = system(rmq); (void)rr; }
+  else fprintf(stderr, "spinel: split kept at %s\n", dir);
+  free(parts);
+  return rc;
+}
+
 static int cc_is_clang(const char *cc_cmd) {
   static int answer = -1;
   if (answer >= 0) return answer;
@@ -297,6 +356,7 @@ static void usage(void) {
     "                 Forcing is worth a sixth of optcarrot's frame rate and\n"
     "                 costs up to twice the C compile time\n"
     "  --cc=CMD    C compiler (default: cc)\n"
+    "  --jobs=N    compile the generated C as N units in parallel\n"
     "  --target=wasm32-wasi  Build a WebAssembly module for a WASI host with the\n"
     "              wasi-sdk at $WASI_SDK (default /opt/wasi-sdk); Integer is 32-bit,\n"
     "              and Fiber, Thread, processes and sockets are not available there\n"
@@ -336,6 +396,7 @@ int main(int argc, char **argv) {
   const char *rbs_dir = NULL;
   int c_only = 0, stdout_mode = 0, run_mode = 0, dump_ast = 0;
   int print_build = 0;   /* --print-build: emit the build ingredients, run nothing */
+  int cc_jobs = 1;       /* --jobs=N: compile the C as N units in parallel (#4847) */
   int emit_rbs = 0, emit_types = 0, emit_symbol_map = 0;
   int debug = 0, line_map = 1, want_g = 0, profile = 0, warn_widen = 0;
   /* Accumulated -e source and the program ARGV after the -E boundary. */
@@ -349,6 +410,7 @@ int main(int argc, char **argv) {
     if (!strncmp(a, "--source=", 9))      { source = a + 9; i++; }
     else if (!strncmp(a, "--output=", 9)) { output = a + 9; i++; }
     else if (!strncmp(a, "--cc=", 5))     { cc_cmd = a + 5; i++; }
+    else if (!strncmp(a, "--jobs=", 7))   { cc_jobs = atoi(a + 7); i++; }
     else if (!strncmp(a, "--target=", 9)) {
       if (sp_streq(a + 9, "wasm32-wasi")) target_wasi = 1;
       else if (sp_streq(a + 9, "native")) target_wasi = 0;
@@ -950,7 +1012,9 @@ int main(int argc, char **argv) {
   }
   if (ffi_cflags.p) s_add(&cmd, ffi_cflags.p);
   bi_put_toks(&bi, "cflag", ffi_cflags.p);
+  size_t cc_src_at = cmd.p ? strlen(cmd.p) : 0;   /* the flags before the source */
   s_add_arg(&cmd, c_path);
+  size_t cc_src_end = cmd.p ? strlen(cmd.p) : 0;
   bi_put(&bi, "source", c_path);
   /* --link objects/archives sit between the generated TU and the runtime
      archive: they reference sp_ runtime symbols, and ld resolves left to
@@ -1120,7 +1184,13 @@ int main(int argc, char **argv) {
     return 0;
   }
   free(bi.p);
-  int cc_rc = system(cmd.p);
+  int cc_rc = -1;
+  if (cc_jobs > 1 && !target_wasi)
+    cc_rc = cc_split_build(cmd.p, cc_src_at, cc_src_end, c_path, cc_jobs);
+  /* SPINEL_SPLIT_STRICT: a split that fails is the failure (for tests of the
+     split itself); otherwise the single unit is the fallback */
+  if (cc_rc != 0 && !(cc_jobs > 1 && getenv("SPINEL_SPLIT_STRICT")))
+    cc_rc = system(cmd.p);   /* the single unit, or the fallback */
   free(cmd.p);
   if (cc_rc != 0) {
     /* Keep the generated C and say where: cc's diagnostic points into that
