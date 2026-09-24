@@ -5624,6 +5624,247 @@ static int emit_poly_aset_default(Compiler *c, const char *name, int argc, const
   return 1;
 }
 
+/* Out-of-line poly dispatch (#4847 B1). A boxed receiver's dispatch is a
+   cls_id switch written inline at every call site, and a large program
+   repeats the same switch -- the same arms calling the same methods -- at
+   thousands of sites: 40% of campfire's C was such switches. pd_hoist moves
+   the switch a site has just written into a static function taking the
+   receiver and the argument temps, and shares one function among every site
+   whose switch reads the same once its temps are numbered from the
+   function's own parameters.
+
+   The region is b[from..], starting at the result temp's declaration and
+   ending inside the switch, before its closing brace. It moves only when it
+   is self-contained: every temp it reads that it does not declare is one of
+   the parameters, and it names nothing of its enclosing function -- a local,
+   self, a frame slot, a label or a return. Anything else stays inline, as
+   before. A small switch stays inline too: the call would cost more than the
+   bytes it saves. */
+typedef struct { char *key; int fn; } PdEntry;
+static PdEntry *pd_tab; static int pd_cap, pd_count, pd_fns;
+static char **pd_proto, **pd_def; static int pd_def_cap;
+
+/* Mark every sp_pd_N the text calls. */
+static void pd_mark_refs(const char *t, char *used, int *stack, int *sp) {
+  for (const char *q = t ? strstr(t, "sp_pd_") : NULL; q; q = strstr(q + 6, "sp_pd_")) {
+    if (q > t && (q[-1] == '_' || (q[-1] >= 'a' && q[-1] <= 'z') || (q[-1] >= 'A' && q[-1] <= 'Z') || (q[-1] >= '0' && q[-1] <= '9'))) continue;
+    const char *d = q + 6;
+    if (*d < '0' || *d > '9') continue;
+    int n = atoi(d);
+    if (n < 0 || n >= pd_fns || used[n]) continue;
+    used[n] = 1; stack[(*sp)++] = n;
+  }
+}
+
+/* Write out the out-of-line dispatch functions the program calls: those the
+   texts name, and those their own bodies name in turn. */
+void pd_emit_used(const char *const *texts, int ntexts, Buf *protos, Buf *defs) {
+  if (pd_fns == 0) return;
+  char *used = calloc((size_t)pd_fns, 1);
+  int *stack = malloc(sizeof(int) * (size_t)pd_fns);
+  int sp = 0;
+  for (int i = 0; i < ntexts; i++) pd_mark_refs(texts[i], used, stack, &sp);
+  while (sp > 0) { int n = stack[--sp]; pd_mark_refs(pd_def[n], used, stack, &sp); }
+  for (int n = 0; n < pd_fns; n++) {
+    if (!used[n]) continue;
+    buf_puts(protos, pd_proto[n]);
+    buf_puts(defs, pd_def[n]);
+  }
+  free(used); free(stack);
+}
+
+/* SPINEL_NO_PD_HOIST keeps every switch inline (for comparing the two) */
+static int pd_disabled(void) {
+  static int v = -1;
+  if (v < 0) v = getenv("SPINEL_NO_PD_HOIST") ? 1 : 0;
+  return v;
+}
+
+static int pd_idch(char ch) { return ch == '_' || (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'); }
+
+static int pd_lookup_or_add(const char *key, int *is_new) {
+  if (pd_count * 2 >= pd_cap) {
+    int ncap = pd_cap ? pd_cap * 2 : 1024;
+    PdEntry *nt = calloc((size_t)ncap, sizeof *nt);
+    for (int i = 0; i < pd_cap; i++) {
+      if (!pd_tab[i].key) continue;
+      unsigned h = 2166136261u;
+      for (const char *q = pd_tab[i].key; *q; q++) h = (h ^ (unsigned char)*q) * 16777619u;
+      int j = (int)(h & (unsigned)(ncap - 1));
+      while (nt[j].key) j = (j + 1) & (ncap - 1);
+      nt[j] = pd_tab[i];
+    }
+    free(pd_tab); pd_tab = nt; pd_cap = ncap;
+  }
+  unsigned h = 2166136261u;
+  for (const char *q = key; *q; q++) h = (h ^ (unsigned char)*q) * 16777619u;
+  int j = (int)(h & (unsigned)(pd_cap - 1));
+  while (pd_tab[j].key) {
+    if (strcmp(pd_tab[j].key, key) == 0) { *is_new = 0; return pd_tab[j].fn; }
+    j = (j + 1) & (pd_cap - 1);
+  }
+  pd_tab[j].key = strdup(key); pd_tab[j].fn = pd_fns++; pd_count++;
+  *is_new = 1;
+  return pd_tab[j].fn;
+}
+
+static int pd_hoist(Compiler *c, Buf *b, size_t from, int tr, TyKind rct,
+                    const int *pid, const TyKind *pty, int np) {
+  if (pd_disabled() || !b->p || b->len <= from) return 0;
+  const char *r = b->p + from;
+  size_t rn = b->len - from;
+  if (rn < 320) return 0;
+  /* the temps the region names, in order of first appearance */
+  int cap = 64, nt = 0;
+  int *tnum = malloc(sizeof(int) * (size_t)cap);
+  char *tdecl = malloc((size_t)cap);
+  int ok = 1;
+  for (size_t i = 0; i < rn && ok; ) {
+    char ch = r[i];
+    if (ch == '"' || ch == '\'') {
+      char q = ch; i++;
+      while (i < rn && r[i] != q) { if (r[i] == '\\') i++; i++; }
+      i++;
+      continue;
+    }
+    if (ch == '#') { ok = 0; break; }
+    if (!pd_idch(ch) || (ch >= '0' && ch <= '9')) { i++; continue; }
+    size_t st = i;
+    while (i < rn && pd_idch(r[i])) i++;
+    size_t len = i - st;
+    const char *w = r + st;
+#define PD_IS(lit) (len == sizeof(lit) - 1 && memcmp(w, lit, len) == 0)
+    /* a member name (`->self`, `.v`) is not a variable of the enclosing scope */
+    if ((st >= 2 && r[st - 2] == '-' && r[st - 1] == '>') || (st >= 1 && r[st - 1] == '.')) continue;
+    if (PD_IS("self") || PD_IS("goto") || PD_IS("return") || PD_IS("continue") ||
+        PD_IS("setjmp") || PD_IS("__label__") || (len > 3 && memcmp(w, "lv_", 3) == 0)) { ok = 0; break; }
+    if (w[0] != '_') continue;
+    int is_t = len > 2 && w[1] == 't';
+    for (size_t k = 2; k < len && is_t; k++) if (w[k] < '0' || w[k] > '9') is_t = 0;
+    if (!is_t) {
+      int fzl = len > 5 && memcmp(w, "_fzl_", 5) == 0;
+      int spn = len > 4 && (memcmp(w, "_sp_", 4) == 0 || memcmp(w, "_SP_", 4) == 0);
+      if (!fzl && !spn) { ok = 0; break; }
+      continue;
+    }
+    int num = atoi(w + 2);
+    int seen = -1;
+    for (int k = 0; k < nt; k++) if (tnum[k] == num) { seen = k; break; }
+    /* a declaration: a type word (or `*`) before it, `=` or `;` after it */
+    int decl = 0;
+    if (seen < 0) {
+      size_t p = st;
+      while (p > 0 && r[p - 1] == ' ') p--;
+      if (p > 0 && r[p - 1] == '*') { p--; while (p > 0 && r[p - 1] == ' ') p--; }
+      size_t e = p;
+      while (p > 0 && pd_idch(r[p - 1])) p--;
+      if (e > p && !(r[p] >= '0' && r[p] <= '9')) {
+        size_t wl = e - p; const char *pw = r + p;
+        int kw = (wl == 4 && memcmp(pw, "else", 4) == 0) || (wl == 2 && memcmp(pw, "do", 2) == 0) ||
+                 (wl == 4 && memcmp(pw, "case", 4) == 0) || (wl == 6 && memcmp(pw, "return", 6) == 0);
+        size_t q = i;
+        while (q < rn && r[q] == ' ') q++;
+        if (!kw && q < rn && ((r[q] == '=' && (q + 1 >= rn || r[q + 1] != '=')) || r[q] == ';')) decl = 1;
+      }
+      if (nt == cap) { cap *= 2; tnum = realloc(tnum, sizeof(int) * (size_t)cap); tdecl = realloc(tdecl, (size_t)cap); }
+      tnum[nt] = num; tdecl[nt] = (char)decl; nt++;
+    }
+#undef PD_IS
+  }
+  /* every temp the region does not declare must be a parameter */
+  for (int k = 0; k < nt && ok; k++) {
+    if (tdecl[k]) continue;
+    int is_p = 0;
+    for (int a = 0; a < np; a++) if (pid[a] == tnum[k]) is_p = 1;
+    if (!is_p) ok = 0;
+  }
+  if (!ok) { free(tnum); free(tdecl); return 0; }
+  /* canonical numbering: the parameters first, then the region's own temps */
+  int *canon = malloc(sizeof(int) * (size_t)(nt > 0 ? nt : 1));
+  int next = np;
+  for (int k = 0; k < nt; k++) {
+    canon[k] = -1;
+    for (int a = 0; a < np; a++) if (pid[a] == tnum[k]) canon[k] = a;
+    if (canon[k] < 0) canon[k] = next++;
+  }
+  int tr_canon = -1;
+  for (int k = 0; k < nt; k++) if (tnum[k] == tr) tr_canon = canon[k];
+  if (tr_canon < 0) { free(tnum); free(tdecl); free(canon); return 0; }
+  Buf body; memset(&body, 0, sizeof body);
+  for (size_t i = 0; i < rn; ) {
+    char ch = r[i];
+    if (ch == '"' || ch == '\'') {
+      size_t st = i; char q = ch; i++;
+      while (i < rn && r[i] != q) { if (r[i] == '\\') i++; i++; }
+      i++;
+      buf_putn(&body, r + st, i - st);
+      continue;
+    }
+    if (pd_idch(ch) && !(ch >= '0' && ch <= '9')) {
+      size_t st = i;
+      while (i < rn && pd_idch(r[i])) i++;
+      size_t len = i - st;
+      int is_t = len > 2 && r[st] == '_' && r[st + 1] == 't';
+      for (size_t k = st + 2; k < i && is_t; k++) if (r[k] < '0' || r[k] > '9') is_t = 0;
+      if (is_t) {
+        int num = atoi(r + st + 2), cn = -1;
+        for (int k = 0; k < nt; k++) if (tnum[k] == num) { cn = canon[k]; break; }
+        buf_printf(&body, "_t%d", cn);
+      }
+      else buf_putn(&body, r + st, len);
+      continue;
+    }
+    if (ch >= '0' && ch <= '9') {   /* a number: copy it whole (not a temp) */
+      size_t st = i;
+      while (i < rn && pd_idch(r[i])) i++;
+      buf_putn(&body, r + st, i - st);
+      continue;
+    }
+    buf_putn(&body, r + i, 1); i++;
+  }
+  Buf sig; memset(&sig, 0, sizeof sig);
+  emit_ctype(c, rct, &sig);
+  buf_puts(&sig, " sp_pd_%d(");
+  for (int a = 0; a < np; a++) {
+    if (a) buf_puts(&sig, ", ");
+    emit_ctype(c, pty[a], &sig);
+    buf_printf(&sig, " _t%d", a);
+  }
+  buf_puts(&sig, ")");
+  Buf key; memset(&key, 0, sizeof key);
+  buf_puts(&key, sig.p); buf_puts(&key, "{"); buf_puts(&key, body.p ? body.p : "");
+  int is_new = 0;
+  int fn = pd_lookup_or_add(key.p, &is_new);
+  if (is_new) {
+    /* kept aside: a site can be written into a buffer the emitter then
+       throws away, so only the functions the finished program calls are
+       written out (pd_emit_used) */
+    if (fn >= pd_def_cap) {
+      int nc = pd_def_cap ? pd_def_cap * 2 : 1024;
+      while (nc <= fn) nc *= 2;
+      pd_proto = realloc(pd_proto, sizeof(char *) * (size_t)nc);
+      pd_def = realloc(pd_def, sizeof(char *) * (size_t)nc);
+      pd_def_cap = nc;
+    }
+    Buf pb; memset(&pb, 0, sizeof pb);
+    buf_puts(&pb, "static __attribute__((unused, noinline)) ");
+    buf_printf(&pb, sig.p, fn); buf_puts(&pb, ";\n");
+    Buf db; memset(&db, 0, sizeof db);
+    buf_puts(&db, "static ");
+    buf_printf(&db, sig.p, fn);
+    buf_printf(&db, " { %s } return _t%d; }\n", body.p ? body.p : "", tr_canon);
+    pd_proto[fn] = pb.p; pd_def[fn] = db.p;
+  }
+  /* the site: the result temp from the call */
+  b->len = from; b->p[from] = 0;
+  emit_ctype(c, rct, b);
+  buf_printf(b, " _t%d = sp_pd_%d(", tr, fn);
+  for (int a = 0; a < np; a++) buf_printf(b, "%s_t%d", a ? ", " : "", pid[a]);
+  buf_puts(b, ");");
+  free(tnum); free(tdecl); free(canon); free(body.p); free(sig.p); free(key.p);
+  return 1;
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -5754,6 +5995,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                       is_poly_to_h;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
       if (root_recv) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
+      size_t pd_from = b->len;   /* the region pd_hoist may move out of line */
       emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
       buf_printf(b, " _t%d = %s; ", tr, is_scalar_ret(ret) ? default_value(ret) : "0");
       /* When the dispatch result feeds a poly context, tr is sp_RbVal, so the
@@ -6649,7 +6891,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                                                      ret, tv, tr, 1, b);
       if (!obj_default_done)
         buf_printf(b, " default: sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
-      buf_printf(b, " } _t%d; })", tr);
+      { int pid0[2] = { tv, blk_tmp0 };
+        TyKind pty0[2] = { TY_POLY, TY_PROC };   /* the block's proc, when one was built */
+        if (pd_hoist(c, b, pd_from, tr, is_scalar_ret(ret) ? ret : TY_INT, pid0, pty0, blk_tmp0 >= 0 ? 2 : 1))
+          buf_printf(b, " _t%d; })", tr);
+        else buf_printf(b, " } _t%d; })", tr); }
       return 1;
     }
   }
@@ -6962,6 +7208,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
          supplied default, so a receiver whose runtime variant matches no switch
          arm (e.g. an empty `{}` that boxed as PolyPolyHash) still yields the
          default rather than a bare default_value() (an empty string). */
+      size_t pd_from = b->len;   /* the region pd_hoist may move out of line */
       if (!is_setter_val) {
         emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
         buf_printf(b, " _t%d = ", tr);
@@ -8423,7 +8670,24 @@ else {
       if (!is_setter_val && !strstr(b->p + sw_start, " default:"))
         emit_poly_builtin_default(c, id, recv, name, argc, argv, atmp, atmp_ty,
                                   ret, tv, tr, 1, b);
-      buf_printf(b, " } _t%d; })", is_setter_val ? atmp[0] : tr);
+      int pd_done = 0;
+      if (!is_setter_val) {
+        /* the parameters: the receiver, the positional temps (and the
+           keyword hash fetch holds in the next one), the keyword temps */
+        int npd = 2 + argc + kwn;
+        int *pid = malloc(sizeof(int) * (size_t)npd);
+        TyKind *pty = malloc(sizeof(TyKind) * (size_t)npd);
+        int n = 0;
+        pid[n] = tv; pty[n++] = TY_POLY;
+        for (int a = 0; a < pos_argc; a++) { pid[n] = atmp[a]; pty[n++] = atmp_ty[a]; }
+        if (kwh >= 0 && sp_streq(name, "fetch") && argc == 2) { pid[n] = atmp[pos_argc]; pty[n++] = atmp_ty[pos_argc]; }
+        for (int e = 0; e < kwn; e++) { pid[n] = kwtmp[e]; pty[n++] = kwty[e]; }
+        if (blk_tmp2 >= 0) { pid[n] = blk_tmp2; pty[n++] = TY_PROC; }   /* the block's proc */
+        pd_done = pd_hoist(c, b, pd_from, tr, is_scalar_ret(ret) ? ret : TY_INT, pid, pty, n);
+        free(pid); free(pty);
+      }
+      if (pd_done) buf_printf(b, " _t%d; })", tr);
+      else buf_printf(b, " } _t%d; })", is_setter_val ? atmp[0] : tr);
       free(atmp);
       free(atmp_ty);
       free(kwtmp);

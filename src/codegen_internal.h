@@ -349,6 +349,11 @@ void emit_cur_exc_restore(Buf *b, int pop_base);
    flushed ahead of the method/main bodies that reference them. */
 extern Buf g_procs;
 extern Buf g_proc_protos;
+/* Out-of-line poly dispatch functions (see pd_hoist in codegen_call.c):
+   their prototypes beside the procs', their bodies after the procs. */
+extern Buf g_pd_protos;
+extern Buf g_pd_defs;
+void pd_emit_used(const char *const *texts, int ntexts, Buf *protos, Buf *defs);
 extern int g_proc_counter;
 extern int g_needs_proc_poly_argslot; /* any proc takes a TY_POLY arg via _sp_proc_poly_args */
 /* Fiber body functions accumulate here (similar to g_procs but void(*)(sp_Fiber*)). */

@@ -12188,9 +12188,14 @@ char *codegen_program(const NodeTable *nt) {
   if (!g_no_root_frame) gc_frame_build(body, main_frame_ins);
 
   emit_regex_section(c, &b);
+  { const char *pdt[3] = { g_procs.p, body->p, b.p };
+    pd_emit_used(pdt, 3, &g_pd_protos, &g_pd_defs); }
   if (g_proc_protos.len) { buf_puts(&b, g_proc_protos.p); buf_puts(&b, "\n"); }
+  if (g_pd_protos.len) { buf_puts(&b, g_pd_protos.p); buf_puts(&b, "\n"); }
   if (g_procs.len) { buf_puts(&b, g_procs.p); buf_puts(&b, "\n"); }
   buf_puts(&b, body->p ? body->p : "");
+  /* last: an arm may call a helper the body defines (a value type's boxer) */
+  if (g_pd_defs.len) { buf_puts(&b, "\n"); buf_puts(&b, g_pd_defs.p); }
   free(body->p);
   free(body);
   /* Over the whole program, not per function: methods, procs, block bodies,
@@ -12198,6 +12203,8 @@ char *codegen_program(const NodeTable *nt) {
      at a time left a quarter of the stores bare. */
   gc_wb_insert(c, &b, 0);
   free(g_procs.p); free(g_proc_protos.p);
+  free(g_pd_protos.p); free(g_pd_defs.p);
+  memset(&g_pd_protos, 0, sizeof g_pd_protos); memset(&g_pd_defs, 0, sizeof g_pd_defs);
   memset(&g_procs, 0, sizeof g_procs);
   memset(&g_proc_protos, 0, sizeof g_proc_protos);
   g_needs_proc_poly_argslot = 0;

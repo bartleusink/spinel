@@ -621,6 +621,8 @@ int emit_frame_unwind(Buf *b, int pop_base, const char *guard) {
 }
 Buf g_procs;
 Buf g_proc_protos;
+Buf g_pd_protos;
+Buf g_pd_defs;
 int g_proc_counter = 0;
 int g_needs_proc_poly_argslot = 0; /* any proc takes a TY_POLY arg via _sp_proc_poly_args */
 /* Fiber body functions accumulate here (similar to g_procs but void(*)(sp_Fiber*)). */
