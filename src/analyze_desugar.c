@@ -2754,6 +2754,27 @@ static int program_defines_name(const NodeTable *nt, int n0, const char *name) {
   return 0;
 }
 
+/* `self` in nodes [lo, hi] reads the `__self` parameter, and the
+   receiverless calls there (Kernel's aside) take it as their receiver */
+static void bi_self_to_local(NodeTable *nt, int lo, int hi) {
+  for (int id = lo; id <= hi; id++) {
+    NodeKind kind = nt_kind(nt, id);
+    if (kind == NK_SelfNode) {
+      nt_node_set_type(nt, id, "LocalVariableReadNode");
+      nt_node_set_str(nt, id, "name", "__self");
+      nt_node_set_int(nt, id, "depth", 0);
+    }
+    else if (kind == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm || bi_kernel_call_name(nm)) continue;
+      int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) return;
+      nt_node_set_str(nt, rd, "name", "__self");
+      nt_node_set_int(nt, rd, "depth", 0);
+      nt_node_set_ref(nt, id, "receiver", rd);
+    }
+  }
+}
+
 int desugar_builtins(Compiler *c) {
   if (sp_builtin_enum_names_n == 0) return 0;
   NodeTable *nt = (NodeTable *)c->nt;
@@ -2800,22 +2821,7 @@ int desugar_builtins(Compiler *c) {
       /* `self` and the receiverless calls in the body */
       int dbody = nt_ref(nt, def, "body");
       int lo = dbody >= 0 ? dbody : def;
-      for (int id = lo; id <= hi; id++) {
-        NodeKind kind = nt_kind(nt, id);
-        if (kind == NK_SelfNode) {
-          nt_node_set_type(nt, id, "LocalVariableReadNode");
-          nt_node_set_str(nt, id, "name", "__self");
-          nt_node_set_int(nt, id, "depth", 0);
-        }
-        else if (kind == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
-          const char *nm = nt_str(nt, id, "name");
-          if (!nm || bi_kernel_call_name(nm)) continue;
-          int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) break;
-          nt_node_set_str(nt, rd, "name", "__self");
-          nt_node_set_int(nt, rd, "depth", 0);
-          nt_node_set_ref(nt, id, "receiver", rd);
-        }
-      }
+      bi_self_to_local(nt, lo, hi);
       /* the generic definition itself stays out of the program: the copies
          below are what the call sites use. It keeps a name of its own so
          that, orphaned in the node table, it cannot be mistaken for a
@@ -3560,22 +3566,7 @@ int desugar_builtin_scalar_defs(Compiler *c) {
           nt_node_set_arr(nt, pn, "requireds", nr, rn + 1); free(nr); }
         int dbody = nt_ref(nt, def, "body");
         int lo = dbody >= 0 ? dbody : def;
-        for (int id = lo; id <= hi; id++) {
-          NodeKind kind = nt_kind(nt, id);
-          if (kind == NK_SelfNode) {
-            nt_node_set_type(nt, id, "LocalVariableReadNode");
-            nt_node_set_str(nt, id, "name", "__self");
-            nt_node_set_int(nt, id, "depth", 0);
-          }
-          else if (kind == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
-            const char *nm = nt_str(nt, id, "name");
-            if (!nm || bi_kernel_call_name(nm)) continue;
-            int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) break;
-            nt_node_set_str(nt, rd, "name", "__self");
-            nt_node_set_int(nt, rd, "depth", 0);
-            nt_node_set_ref(nt, id, "receiver", rd);
-          }
-        }
+        bi_self_to_local(nt, lo, hi);
         { char gn[256]; snprintf(gn, sizeof gn, "%s%s", sp_bx_prefix[bx], name); nt_node_set_str(nt, def, "name", gn); }
         if (bi >= 0) gdef[bx][bi] = def;
       }
@@ -3635,22 +3626,7 @@ int desugar_builtin_scalar_defs(Compiler *c) {
         nt_node_set_arr(nt, pn, "requireds", nr, rn + 1); free(nr); }
       int dbody = nt_ref(nt, clone, "body");
       int lo = dbody >= 0 ? dbody : clone;
-      for (int id2 = lo; id2 <= hi; id2++) {
-        NodeKind kind = nt_kind(nt, id2);
-        if (kind == NK_SelfNode) {
-          nt_node_set_type(nt, id2, "LocalVariableReadNode");
-          nt_node_set_str(nt, id2, "name", "__self");
-          nt_node_set_int(nt, id2, "depth", 0);
-        }
-        else if (kind == NK_CallNode && nt_ref(nt, id2, "receiver") < 0) {
-          const char *nm = nt_str(nt, id2, "name");
-          if (!nm || bi_kernel_call_name(nm)) continue;
-          int rd = nt_new_node(nt, "LocalVariableReadNode"); if (rd < 0) break;
-          nt_node_set_str(nt, rd, "name", "__self");
-          nt_node_set_int(nt, rd, "depth", 0);
-          nt_node_set_ref(nt, id2, "receiver", rd);
-        }
-      }
+      bi_self_to_local(nt, lo, hi);
       { char gn[256]; snprintf(gn, sizeof gn, "%s%s", sp_bx_prefix[bx], name); nt_node_set_str(nt, clone, "name", gn); }
       int bi = sp_builtin_extra_name_index(bx, name);
       if (bi >= 0) {
