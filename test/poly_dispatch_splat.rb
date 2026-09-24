@@ -74,6 +74,50 @@ end
   p c.stmt([1])
 end
 
+# Required parameters after optionals, with and without a rest: CRuby funds
+# the required ones first, from the end, and an optional only takes what the
+# count leaves over.
+class OptTailA
+  def f(a = 1, b) = [:A, a, b]
+  def g(a = 1, *r, b) = [:A, a, r, b]
+  def h(a = 1, c = 2, b) = [:A, a, c, b]
+  def k(x, a = 1, c = 2, b, d) = [:A, x, a, c, b, d]
+end
+class OptTailB
+  def f(a = 3, b) = [:B, a, b]
+  def g(a = 3, *r, b) = [:B, a, r, b]
+  def h(a = 3, c = 4, b) = [:B, a, c, b]
+  def k(x, a = 3, c = 4, b, d) = [:B, x, a, c, b, d]
+end
+class OptTail
+  def initialize(o) = @o = o
+  def run(args)
+    %i[f g h k].each do |n|
+      r = case n
+          when :f then @o.f(*args)
+          when :g then @o.g(*args)
+          when :h then @o.h(*args)
+          else @o.k(*args)
+          end
+      p r
+    rescue ArgumentError => e
+      puts "#{n}: #{e.message}"
+    end
+  end
+  def lead(args)
+    p @o.k(0, *args)
+  rescue ArgumentError => e
+    puts "k: #{e.message}"
+  end
+end
+[OptTailA.new, OptTailB.new].each do |o|
+  t = OptTail.new(o)
+  [[], [9], [9, 8], [9, 8, 7], [9, 8, 7, 6], [9, 8, 7, 6, 5], [9, 8, 7, 6, 5, 4]].each do |args|
+    t.run(args)
+    t.lead(args)
+  end
+end
+
 # Operands: nil, a scalar, nested arrays, a boxed maybe-array, strings,
 # objects, and a block passed beside the splat.
 class Pt
