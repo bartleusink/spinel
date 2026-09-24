@@ -1480,12 +1480,26 @@ static const char *array_op_assign_src(Compiler *c, const char *lval, const char
   return op_assign_slot_src(c, lval, ct, 1, v, pre_mark, tn, tnsz);
 }
 
+/* The conversion that boxes a `vt` rhs into a PolyArray operand, as the binary
+   `poly_array OP typed_array` arms do, or NULL. A poly rhs is coerced at run
+   time for the set ops only (sp_poly_set_operand); the binary `+` has no such
+   arm either. Without it `m -= ["x"]` on a `[1, "x"]` slot was refused where
+   `m = m - ["x"]` built. */
+static const char *poly_array_rhs_conv(TyKind vt, int set_op) {
+  if (vt == TY_INT_ARRAY) return "sp_IntArray_to_poly";
+  if (vt == TY_STR_ARRAY) return "sp_StrArray_to_poly_fmt";
+  if (vt == TY_FLOAT_ARRAY) return "sp_FloatArray_to_poly";
+  if (vt == TY_POLY && set_op) return "sp_poly_set_operand";
+  return NULL;
+}
+
 /* Array op-assign on any slot -- a local, an ivar, a global, a class
    variable -- as `x = x OP v`, `lval` naming the slot and `t` its array type:
    `|=` `&=` `-=` through the same typed set-op helpers the binary `a | b`
    path uses, `+=` as a same-kind concat, and `*=` with an Integer as the
    repeat Array#* makes. The rhs of a set op or `+` must be the same array
-   kind (or an empty `[]` literal). Only the
+   kind (or an empty `[]` literal), except on a poly array, where a typed
+   rhs is boxed first, as the binary path boxes it. Only the
    local arm had it: an ivar, global or class variable fell to the raw C
    operator, `|` between two array pointers, which did not compile (#4833).
    The caller has emitted the indent. Answers 1 when it emitted the write. */
@@ -1496,11 +1510,13 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
   if (!k) return 0;
   TyKind vt = comp_ntype(c, v);
   if (sp_streq(op, "|") || sp_streq(op, "&") || sp_streq(op, "-")) {
-    if (vt != t && vt != TY_UNKNOWN) return 0;
+    const char *conv = (t == TY_POLY_ARRAY && vt != t) ? poly_array_rhs_conv(vt, 1) : NULL;
+    if (vt != t && vt != TY_UNKNOWN && !conv) return 0;
     const char *fn = sp_streq(op, "&") ? "intersect" : (sp_streq(op, "|") ? "union" : "difference");
     size_t pre_mark = g_pre ? g_pre->len : 0;
     Buf rb; memset(&rb, 0, sizeof rb);
     if (vt == TY_UNKNOWN) buf_puts(&rb, "NULL");
+    else if (conv) { buf_printf(&rb, "%s(", conv); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
     else emit_expr(c, v, &rb);
     char tn[32];
     const char *src = array_op_assign_src(c, lval, k, v, pre_mark, tn, sizeof tn);
@@ -1518,10 +1534,12 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
       int nel = 0; nt_arr(c->nt, v, "elements", &nel);
       rhs_empty = (nel == 0);
     }
-    if (vt != t && !rhs_empty) return 0;
+    const char *conv = (t == TY_POLY_ARRAY && vt != t && !rhs_empty) ? poly_array_rhs_conv(vt, 0) : NULL;
+    if (vt != t && !rhs_empty && !conv) return 0;
     size_t pre_mark = g_pre ? g_pre->len : 0;
     Buf rb; memset(&rb, 0, sizeof rb);
     if (rhs_empty) buf_puts(&rb, "NULL");
+    else if (conv) { buf_printf(&rb, "%s(", conv); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
     else emit_expr(c, v, &rb);
     char tn[32];
     const char *src = array_op_assign_src(c, lval, k, v, pre_mark, tn, sizeof tn);
