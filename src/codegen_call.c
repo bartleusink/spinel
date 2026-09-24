@@ -29715,23 +29715,17 @@ else {
         int is_str_ret  = sp_streq(ret_spec, "str");
         int is_binstr_ret = sp_streq(ret_spec, "binstr");
         int call_argc = c->ffi_funcs[fi].nargs;
-        /* A function taking an ffi_callback has its extern skipped (codegen.c):
-           the symbol is declared by a system header whose per-argument const
-           qualification we can't reproduce, so we call the header prototype
-           directly. That means pointer-data args carry our own (const) element
-           types; cast them to void* at the call site so the implicit conversion
-           to the header's real parameter type is warning-free under -Werror on
-           both clang and gcc. An explicit (void*) cast also legally drops the
-           const our array/string types carry. */
-        int hdr_call = 0;
+        /* A function taking an ffi_callback is called through its own extern
+           like any other (codegen.c); the callback may run Ruby, so it is
+           never a blocking call. */
+        int takes_cb = 0;
         for (int hi = 0; hi < call_argc; hi++)
-          if (ffi_find_callback(c, rcmod, c->ffi_funcs[fi].args[hi]) >= 0) { hdr_call = 1; break; }
+          if (ffi_find_callback(c, rcmod, c->ffi_funcs[fi].args[hi]) >= 0) { takes_cb = 1; break; }
         /* A trailing :varargs spec: the declared specs cover only the fixed
            leading args; every extra actual arg is passed through with C's
            default argument promotions. A variadic function with fixed args
            has its own `...` extern under the private name (codegen.c); one
-           with none, or one taking a callback, has no extern, and the call
-           casts the header-declared symbol to a variadic function pointer --
+           with none has no extern, and the call casts the header-declared symbol to a variadic function pointer --
            `((ret (*)(...))name)`. Neither carries a `format` attribute, so gcc
            does not format-check the call. */
         int is_vararg = call_argc > 0 && sp_streq(c->ffi_funcs[fi].args[call_argc - 1], "varargs");
@@ -29740,7 +29734,7 @@ else {
            may allocate, or run Ruby), then the worker leaves the world for
            the call itself and comes back for the return. A callback-taking
            or variadic function keeps the plain call. */
-        int blocking = c->ffi_funcs[fi].blocking && !hdr_call && !is_vararg;
+        int blocking = c->ffi_funcs[fi].blocking && !takes_cb && !is_vararg;
         /* An IO::Buffer in a pointer slot hands C its base address. The
            buffer is evaluated in argument order into a rooted temp, and its
            base is taken once every argument has run (a later one may resize
@@ -29772,7 +29766,7 @@ else {
         int tb = use_temps ? ++g_tmp : 0;
         /* Build the raw C call */
         Buf call_buf; memset(&call_buf, 0, sizeof call_buf);
-        if (is_vararg && (fixed_argc == 0 || hdr_call)) {
+        if (is_vararg && fixed_argc == 0) {
           buf_printf(&call_buf, "((%s (*)(", ffi_c_type(ret_spec));
           for (int ai = 0; ai < fixed_argc; ai++) {
             if (ai) buf_puts(&call_buf, ", ");
@@ -29781,7 +29775,6 @@ else {
           if (fixed_argc) buf_puts(&call_buf, ", ");
           buf_printf(&call_buf, "...))%s)", c->ffi_funcs[fi].csym ? c->ffi_funcs[fi].csym : c->ffi_funcs[fi].name);
         }
-        else if (hdr_call) buf_puts(&call_buf, c->ffi_funcs[fi].csym ? c->ffi_funcs[fi].csym : c->ffi_funcs[fi].name);
         else ffi_extern_name(c, fi, &call_buf);   /* the asm-labelled extern (codegen.c) */
         buf_puts(&call_buf, "(");
         for (int ai = 0; ai < fixed_argc && ai < argc; ai++) {
@@ -29824,12 +29817,6 @@ else {
             buf_printf(&call_buf, "_b%d_%d", tb, ai);
             continue;
           }
-          /* :ptr already emits a void*; str/int_array/float_array carry a const
-             element pointer that must be genericized for the header call. */
-          int voidp = hdr_call && (sp_streq(spec, "str") ||
-                                   sp_streq(spec, "int_array") ||
-                                   sp_streq(spec, "float_array"));
-          if (voidp) buf_puts(&call_buf, "(void *)(");
           if (sp_streq(spec, "str")) {
             if (at == TY_POLY) {
               buf_puts(&call_buf, "("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ").v.s");
@@ -29897,7 +29884,6 @@ else {
             }
             else { buf_puts(&call_buf, "(("); buf_puts(&call_buf, ffi_c_type(spec)); buf_puts(&call_buf, ")("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))"); }
           }
-          if (voidp) buf_puts(&call_buf, ")");
           if (use_temps) {
             /* move the converted argument out to a temp ahead of the call */
             buf_printf(&pre_buf, "%s _b%d_%d = %s; ", ffi_c_type(spec), tb, ai, call_buf.p + arg_at);
