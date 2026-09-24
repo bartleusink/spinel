@@ -1442,6 +1442,45 @@ static int widen_aliased_array_ivars(Compiler *c, int node, int cls_id) {
   return changed;
 }
 
+/* The `@h ||= {}` / `h ||= {}` a container write's receiver evaluates to:
+   the receiver itself, parenthesized or not, or the tail of a zero-argument
+   self-getter (`def tbl = (@h ||= {})`; `tbl[k] = v`). -1 otherwise. */
+static int recv_hash_or_write(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  int n = unwrap_parens(c, recv);
+  if (n >= 0 && nt_kind(nt, n) == NK_CallNode) {
+    int gr = nt_ref(nt, n, "receiver");
+    int ga = nt_ref(nt, n, "arguments");
+    const char *gm = nt_str(nt, n, "name");
+    Scope *s = comp_scope_of(c, n);
+    /* A class-method caller's self is the class, whose getter is not the
+       instance chain's: leave it boxed rather than credit the wrong slot. */
+    if (ga >= 0 || nt_ref(nt, n, "block") >= 0 || !gm || !s || s->class_id < 0 ||
+        s->is_cmethod || (gr >= 0 && nt_kind(nt, gr) != NK_SelfNode)) return -1;
+    int mi = comp_method_in_chain(c, s->class_id, gm, NULL);
+    if (mi < 0) return -1;
+    /* self may be a subclass whose override answers another slot, as in
+       multi_return_elem_types: only a getter no descendant replaces */
+    for (int cj = 0; cj < c->nclasses; cj++) {
+      int an = c->classes[cj].parent;
+      while (an >= 0 && an != s->class_id) an = c->classes[an].parent;
+      if (an == s->class_id && comp_method_in_chain(c, cj, gm, NULL) != mi) return -1;
+    }
+    /* only a getter whose sole exit is its tail: an earlier `return` could
+       hand back a different slot, as in multi_return_elem_types (#4889) */
+    int last = scope_body_last(c, mi);
+    int def = c->scopes[mi].def_node;
+    if (def >= 0 && subtree_has_return(nt, nt_ref(nt, def, "body"), last)) return -1;
+    n = unwrap_parens(c, last);
+  }
+  if (n < 0) return -1;
+  NodeKind k = nt_kind(nt, n);
+  if (k != NK_InstanceVariableOrWriteNode && k != NK_LocalVariableOrWriteNode) return -1;
+  int v = nt_ref(nt, n, "value");
+  if (v < 0 || (nt_kind(nt, v) != NK_HashNode && !ty_is_hash(infer_type(c, v)))) return -1;
+  return n;
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -2376,6 +2415,19 @@ int infer_write_types(Compiler *c) {
     }
     if (recv < 0) continue;
     const char *rty = nt_type(nt, recv);
+    /* `(@h ||= {})[k] = v` fills @h exactly as `@h ||= {}; @h[k] = v` does,
+       and so does a write through a getter whose value is that or-write.
+       Without this the write was no evidence, the empty literal left @h
+       boxed, and the boxed receiver's `[]=` bound its arguments to every
+       user-defined `[]=` in the program. */
+    {
+      int orw = recv_hash_or_write(c, recv);
+      if (orw >= 0) {
+        recv = orw;
+        rty = nt_kind(nt, orw) == NK_InstanceVariableOrWriteNode ? "InstanceVariableReadNode"
+                                                                 : "LocalVariableReadNode";
+      }
+    }
     /* fold into a local's type or an ivar's type (an empty `@buf=[]` filled by
        `@buf << x` infers its element type the same way a local does) */
     TyKind *slot = NULL;
