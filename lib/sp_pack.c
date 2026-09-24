@@ -186,6 +186,60 @@ static void pk_flt_directive(char spec, double v, char **buf, size_t *len, size_
     }
   }
 }
+/* Pack one integer element for the integer directives. Returns 0 when the
+   directive consumed no element (x emits a NUL without taking one). */
+static int pk_int_directive(char spec, int64_t v, int big, char **buf, size_t *len, size_t *cap) {
+  char tmp[8];
+  switch (spec) {
+    case 'C': case 'c':
+      tmp[0] = (char)(v & 0xff);
+      pk_append(buf, len, cap, tmp, 1);
+      break;
+    case 'n':
+      tmp[0] = (char)((v >> 8) & 0xff); tmp[1] = (char)(v & 0xff);
+      pk_append(buf, len, cap, tmp, 2);
+      break;
+    case 'N':
+      tmp[0] = (char)((v >> 24) & 0xff); tmp[1] = (char)((v >> 16) & 0xff);
+      tmp[2] = (char)((v >> 8) & 0xff);  tmp[3] = (char)(v & 0xff);
+      pk_append(buf, len, cap, tmp, 4);
+      break;
+    case 'v':
+      tmp[0] = (char)(v & 0xff); tmp[1] = (char)((v >> 8) & 0xff);
+      pk_append(buf, len, cap, tmp, 2);
+      break;
+    case 'V':
+      tmp[0] = (char)(v & 0xff);        tmp[1] = (char)((v >> 8) & 0xff);
+      tmp[2] = (char)((v >> 16) & 0xff); tmp[3] = (char)((v >> 24) & 0xff);
+      pk_append(buf, len, cap, tmp, 4);
+      break;
+    case 's': case 'S':
+      pk_put_int(tmp, v, 2, big);
+      pk_append(buf, len, cap, tmp, 2);
+      break;
+    case 'l': case 'L':
+      pk_put_int(tmp, v, 4, big);
+      pk_append(buf, len, cap, tmp, 4);
+      break;
+    case 'q': case 'Q':
+      pk_put_int(tmp, v, 8, big);
+      pk_append(buf, len, cap, tmp, 8);
+      break;
+    case 'x':
+      tmp[0] = 0;
+      pk_append(buf, len, cap, tmp, 1);
+      return 0;
+    case 'U': {
+      unsigned char ub[6];
+      int ulen = pk_utf8(ub, v);
+      pk_append(buf, len, cap, (const char *)ub, (size_t)ulen);
+      break;
+    }
+    default:
+      break;
+  }
+  return 1;
+}
 /* Decode one float/double element on unpack (4 bytes for f/F/e/g, 8 for
    d/D/E/G -- the caller sizes the read via fsize). */
 static double uk_get_flt(char spec, const unsigned char *u) {
@@ -472,56 +526,7 @@ const char *sp_IntArray_pack(sp_IntArray *arr, const char *fmt) {SP_GC_ROOT(arr)
     for (int64_t k = 0; k < count; k++) {
       int64_t v = (idx < arr->len) ? arr->data[arr->start + idx] : 0;
       idx++;
-      char tmp[8];
-      switch (spec) {
-        case 'C': case 'c':
-          tmp[0] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 1);
-          break;
-        case 'n':
-          tmp[0] = (char)((v >> 8) & 0xff); tmp[1] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'N':
-          tmp[0] = (char)((v >> 24) & 0xff); tmp[1] = (char)((v >> 16) & 0xff);
-          tmp[2] = (char)((v >> 8) & 0xff);  tmp[3] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 'v':
-          tmp[0] = (char)(v & 0xff); tmp[1] = (char)((v >> 8) & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'V':
-          tmp[0] = (char)(v & 0xff);        tmp[1] = (char)((v >> 8) & 0xff);
-          tmp[2] = (char)((v >> 16) & 0xff); tmp[3] = (char)((v >> 24) & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 's': case 'S':
-          pk_put_int(tmp, v, 2, big);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'l': case 'L':
-          pk_put_int(tmp, v, 4, big);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 'q': case 'Q':
-          pk_put_int(tmp, v, 8, big);
-          pk_append(&buf, &len, &cap, tmp, 8);
-          break;
-        case 'x':
-          tmp[0] = 0;
-          pk_append(&buf, &len, &cap, tmp, 1);
-          idx--;
-          break;
-        case 'U': {
-          unsigned char ub[6];
-          int ulen = pk_utf8(ub, v);
-          pk_append(&buf, &len, &cap, (const char *)ub, (size_t)ulen);
-          break;
-        }
-        default:
-          break;
-      }
+      if (!pk_int_directive(spec, v, big, &buf, &len, &cap)) idx--;
     }
   }
   /* Hand back via GC-tracked sp_str_alloc so the main file's GC
@@ -580,56 +585,7 @@ const char *sp_FloatArray_pack(sp_FloatArray *arr, const char *fmt) {
     for (int64_t k = 0; k < count; k++) {
       int64_t v = (idx < arr->len) ? pk_flt_to_int(arr->data[idx]) : 0;
       idx++;
-      char tmp[8];
-      switch (spec) {
-        case 'C': case 'c':
-          tmp[0] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 1);
-          break;
-        case 'n':
-          tmp[0] = (char)((v >> 8) & 0xff); tmp[1] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'N':
-          tmp[0] = (char)((v >> 24) & 0xff); tmp[1] = (char)((v >> 16) & 0xff);
-          tmp[2] = (char)((v >> 8) & 0xff);  tmp[3] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 'v':
-          tmp[0] = (char)(v & 0xff); tmp[1] = (char)((v >> 8) & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'V':
-          tmp[0] = (char)(v & 0xff);        tmp[1] = (char)((v >> 8) & 0xff);
-          tmp[2] = (char)((v >> 16) & 0xff); tmp[3] = (char)((v >> 24) & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 's': case 'S':
-          pk_put_int(tmp, v, 2, big);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'l': case 'L':
-          pk_put_int(tmp, v, 4, big);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 'q': case 'Q':
-          pk_put_int(tmp, v, 8, big);
-          pk_append(&buf, &len, &cap, tmp, 8);
-          break;
-        case 'x':
-          tmp[0] = 0;
-          pk_append(&buf, &len, &cap, tmp, 1);
-          idx--;
-          break;
-        case 'U': {
-          unsigned char ub[6];
-          int ulen = pk_utf8(ub, v);
-          pk_append(&buf, &len, &cap, (const char *)ub, (size_t)ulen);
-          break;
-        }
-        default:
-          break;
-      }
+      if (!pk_int_directive(spec, v, big, &buf, &len, &cap)) idx--;
     }
   }
   char *r = sp_str_alloc(len);
@@ -724,56 +680,7 @@ const char *sp_PolyArray_pack(sp_PolyArray *arr, const char *fmt) {SP_GC_ROOT(ar
     for (int64_t k = 0; k < count; k++) {
       int64_t v = (idx < arr->len) ? pk_poly_to_int(arr->data[idx]) : 0;
       idx++;
-      char tmp[8];
-      switch (spec) {
-        case 'C': case 'c':
-          tmp[0] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 1);
-          break;
-        case 'n':
-          tmp[0] = (char)((v >> 8) & 0xff); tmp[1] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'N':
-          tmp[0] = (char)((v >> 24) & 0xff); tmp[1] = (char)((v >> 16) & 0xff);
-          tmp[2] = (char)((v >> 8) & 0xff);  tmp[3] = (char)(v & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 'v':
-          tmp[0] = (char)(v & 0xff); tmp[1] = (char)((v >> 8) & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'V':
-          tmp[0] = (char)(v & 0xff);        tmp[1] = (char)((v >> 8) & 0xff);
-          tmp[2] = (char)((v >> 16) & 0xff); tmp[3] = (char)((v >> 24) & 0xff);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 's': case 'S':
-          pk_put_int(tmp, v, 2, big);
-          pk_append(&buf, &len, &cap, tmp, 2);
-          break;
-        case 'l': case 'L':
-          pk_put_int(tmp, v, 4, big);
-          pk_append(&buf, &len, &cap, tmp, 4);
-          break;
-        case 'q': case 'Q':
-          pk_put_int(tmp, v, 8, big);
-          pk_append(&buf, &len, &cap, tmp, 8);
-          break;
-        case 'x':
-          tmp[0] = 0;
-          pk_append(&buf, &len, &cap, tmp, 1);
-          idx--;
-          break;
-        case 'U': {
-          unsigned char ub[6];
-          int ulen = pk_utf8(ub, v);
-          pk_append(&buf, &len, &cap, (const char *)ub, (size_t)ulen);
-          break;
-        }
-        default:
-          break;
-      }
+      if (!pk_int_directive(spec, v, big, &buf, &len, &cap)) idx--;
     }
   }
   char *r = sp_str_alloc(len);

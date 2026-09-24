@@ -30,6 +30,10 @@ TyKind local_aset_key_type(Compiler *c, Scope *sc, const char *name, int *nwrite
 /* Run inference over the whole program: register locals, reach a fixpoint
    on their types, and fill the node type cache. */
 void analyze_program(Compiler *c);
+/* True if a regex source contains a capturing group: an unescaped '(' that
+   isn't the start of a non-capturing/extension group '(?...'. scan returns
+   nested arrays for capturing patterns, which the str_array path can't model. */
+int an_re_has_captures(const char *src);
 
 /* Infer (and cache) the type of node `id`. Used during analysis; codegen
    reads the cached results via comp_ntype. */

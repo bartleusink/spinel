@@ -4530,7 +4530,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     if (sc_argc != 1) return 0;
     int sc_re = re_lit_index(c, sc_argv[0]);
     if (sc_re < 0 && comp_ntype(c, sc_argv[0]) != TY_STRING) return 0;
-    if (sc_re >= 0 && re_has_captures(re_lit_src(c, sc_argv[0]))) return 0;
+    if (sc_re >= 0 && an_re_has_captures(re_lit_src(c, sc_argv[0]))) return 0;
     TyKind et = TY_STRING;
     Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
     LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
