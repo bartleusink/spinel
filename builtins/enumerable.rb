@@ -112,21 +112,25 @@ module Enumerable
         raise ArgumentError, "negative size (#{n})" if n < 0
         sort_by { |x| yield x }.first(n)
       else
-        best = first
-        best_key = yield best unless best.nil?
-        skip = true
+        # one walk: the first element's key is taken as it comes, so a
+        # receiver that yields once is not read twice, and a leading nil is
+        # an element like any other
+        best = nil
+        best_key = nil
+        found = false
         each do |x|
-          if skip
-            skip = false
-            best_key = yield x if best.nil?
-          else
-            key = yield x
+          key = yield x
+          if found
             c = key <=> best_key
             raise ArgumentError, "comparison of #{key.class} with #{(best_key.nil? || best_key == true || best_key == false || best_key.is_a?(Numeric) || best_key.is_a?(Symbol)) ? best_key.inspect : best_key.class} failed" if c.nil?
             if c < 0
               best = x
               best_key = key
             end
+          else
+            best = x
+            best_key = key
+            found = true
           end
         end
         best
@@ -144,21 +148,25 @@ module Enumerable
         # of the reversed elements, read backwards
         to_a.reverse.sort_by { |x| yield x }.reverse.first(n)
       else
-        best = first
-        best_key = yield best unless best.nil?
-        skip = true
+        # one walk: the first element's key is taken as it comes, so a
+        # receiver that yields once is not read twice, and a leading nil is
+        # an element like any other
+        best = nil
+        best_key = nil
+        found = false
         each do |x|
-          if skip
-            skip = false
-            best_key = yield x if best.nil?
-          else
-            key = yield x
+          key = yield x
+          if found
             c = key <=> best_key
             raise ArgumentError, "comparison of #{key.class} with #{(best_key.nil? || best_key == true || best_key == false || best_key.is_a?(Numeric) || best_key.is_a?(Symbol)) ? best_key.inspect : best_key.class} failed" if c.nil?
             if c > 0
               best = x
               best_key = key
             end
+          else
+            best = x
+            best_key = key
+            found = true
           end
         end
         best
@@ -170,20 +178,14 @@ module Enumerable
 
   def minmax_by
     if block_given?
-      min = first
-      max = min
-      min_key = yield min unless min.nil?
-      max_key = min_key
-      skip = true
+      min = nil
+      max = nil
+      min_key = nil
+      max_key = nil
+      found = false
       each do |x|
-        if skip
-          skip = false
-          if min.nil?
-            min_key = yield x
-            max_key = min_key
-          end
-        else
-          key = yield x
+        key = yield x
+        if found
           c = key <=> min_key
           raise ArgumentError, "comparison of #{key.class} with #{(min_key.nil? || min_key == true || min_key == false || min_key.is_a?(Numeric) || min_key.is_a?(Symbol)) ? min_key.inspect : min_key.class} failed" if c.nil?
           if c < 0
@@ -196,6 +198,12 @@ module Enumerable
             max = x
             max_key = key
           end
+        else
+          min = x
+          max = x
+          min_key = key
+          max_key = key
+          found = true
         end
       end
       [min, max]
