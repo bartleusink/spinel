@@ -1858,6 +1858,16 @@ void register_attrs_body(Compiler *c, ClassInfo *cls, int body) {
     if (!sty) continue;
     if (sp_streq(sty, "CallNode")) {
       register_attr_call(c, cls, s, 0);
+      /* `private attr_writer :x` declares the writer too: the visibility
+         call's argument is the attr call (#4922) */
+      const char *vn = nt_str(nt, s, "name");
+      if (vn && nt_ref(nt, s, "receiver") < 0 &&
+          (sp_streq(vn, "private") || sp_streq(vn, "protected") || sp_streq(vn, "public"))) {
+        int va = nt_ref(nt, s, "arguments");
+        int vc = 0; const int *vv = va >= 0 ? nt_arr(nt, va, "arguments", &vc) : NULL;
+        for (int q = 0; q < vc; q++)
+          if (nt_kind(nt, vv[q]) == NK_CallNode) register_attr_call(c, cls, vv[q], 0);
+      }
     }
     else if (sp_streq(sty, "SingletonClassNode")) {
       /* class << self; attr_accessor :x; end */
