@@ -2915,6 +2915,7 @@ static sp_RbVal sp_poly_io_truncate(sp_RbVal v, sp_int n) {
   if (n == SP_INT_NIL) sp_raise_cls("ArgumentError", "wrong number of arguments (given 0, expected 1)");
   return sp_box_int(sp_File_truncate((sp_File *)v.v.p, n));
 }
+sp_RbVal sp_Enumerator_size_p(void *e);   /* lib/sp_cold.c; sp_Enumerator is declared further down */
 static sp_int sp_poly_size(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_BOOL || v.tag == SP_TAG_FLT ||
       sp_poly_is_user_obj(v))
@@ -2929,6 +2930,13 @@ static sp_int sp_poly_size(sp_RbVal v) {
     sp_int bits = bg ? (sp_int)sp_bigint_bit_length(bg) : 0;
     sp_int bytes = (bits + 7) / 8;
     return bytes < (sp_int)sizeof(sp_int) ? (sp_int)sizeof(sp_int) : bytes;
+  }
+  /* an Enumerator's size is its own (#size), not a length: a boxed
+     each_slice(2) enumerator answered 0. A size that is not a count (nil, an
+     infinite one) reads as nil. */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR) {
+    sp_RbVal es = sp_Enumerator_size_p(v.v.p);
+    return es.tag == SP_TAG_INT ? es.v.i : SP_INT_NIL;
   }
   /* String#size is String#length: characters, not bytes (#4251) */
   if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_length(v.v.s) : 0;

@@ -2806,6 +2806,7 @@ sp_RbVal sp_Enumerator_size(sp_Enumerator *e) {SP_GC_ROOT(e);
   }
   return e->size;
 }
+sp_RbVal sp_Enumerator_size_p(void *e) { return sp_Enumerator_size((sp_Enumerator *)e); }
 
 /* ---- ENV core (StrStrHash-backed, #2832/#2842) + GC.stat + String#setbyte
    COW -- relocated from spinel_rt.h. All reach only lib-visible helpers
