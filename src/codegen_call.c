@@ -8856,11 +8856,59 @@ static int call_has_keyword_args(const NodeTable *nt, const int *argv, int argc)
   return 0;
 }
 
+/* Does the call spread an array into its positionals (`*args`)? */
+static int call_has_splat_arg(const NodeTable *nt, const int *argv, int argc) {
+  for (int a = 0; a < argc; a++)
+    if (argv && nt_kind(nt, argv[a]) == NK_SplatNode) return 1;
+  return 0;
+}
+
+/* A splat operand as a poly array: an Array kept, and anything else -- a
+   boxed operand that is an Array only at run time, nil, a scalar -- spread
+   by Ruby's rule (nil to [], any other value to [v]). */
+static int splat_operand_ok(Compiler *c, int node) {
+  TyKind t = comp_ntype(c, node);
+  return ty_is_array(t) || t == TY_POLY || splat_operand_is_scalar(t);
+}
+static void emit_splat_operand_array(Compiler *c, int node, Buf *b) {
+  int spread = !ty_is_array(comp_ntype(c, node));
+  buf_puts(b, spread ? "sp_poly_to_poly_array(sp_splat_to_array(" : "sp_poly_to_poly_array(");
+  emit_boxed(c, node, b);
+  buf_puts(b, spread ? "))" : ")");
+}
+
+/* `X.new(*arr)` on a Struct or Data class: the array spread across the
+   members at run time. Data requires an exact count; Struct nil-fills a short
+   array and rejects a long one (#2971); a keyword_init Struct takes no
+   positionals at all. */
+static void emit_struct_splat_new(Compiler *c, ClassInfo *cls, int psplat, int kw_init, Buf *b) {
+  int tsa = ++g_tmp, tln = ++g_tmp;
+  buf_printf(b, "({ sp_PolyArray *_t%d = ", tsa); emit_splat_operand_array(c, psplat, b);
+  buf_printf(b, "; SP_GC_ROOT(_t%d); sp_int _t%d = sp_PolyArray_length(_t%d);", tsa, tln, tsa);
+  if (kw_init)
+    buf_printf(b, " if (_t%d != 0) sp_raise_cls(\"ArgumentError\", sp_sprintf(\"wrong number of arguments (given %%lld, expected 0)\", (long long)_t%d));", tln, tln);
+  else if (cls->is_data)
+    buf_printf(b, " if (_t%d != %d) sp_raise_cls(\"ArgumentError\", (&(\"\\xff\" \"wrong number of arguments\")[1]));", tln, cls->nivars);
+  else
+    buf_printf(b, " if (_t%d > %d) sp_raise_cls(\"ArgumentError\", (&(\"\\xff\" \"struct size differs\")[1]));", tln, cls->nivars);
+  buf_printf(b, " sp_%s_new(", cls->c_name);
+  for (int a = 0; a < cls->nivars; a++) {
+    if (a) buf_puts(b, ", ");
+    char elem[96];
+    snprintf(elem, sizeof elem, "(%d < _t%d ? sp_PolyArray_get(_t%d, %d) : sp_box_nil())", a, tln, tsa, a);
+    if (cls->ivar_types[a] == TY_POLY) buf_puts(b, elem);
+    else emit_unbox_text(c, cls->ivar_types[a], elem, b);
+  }
+  buf_puts(b, "); })");
+}
+
 /* Can `initialize` (scope initm) take this call: the positional count within
    its required..required+optional range (or any, with a rest), every literal
    keyword one it names (or a **rest), and every required keyword supplied
    (or a **splat that might supply it)? Read off the def's own parameter
-   lists, which say which of pnames are keywords. */
+   lists, which say which of pnames are keywords. A `*splat` has a run-time
+   length: the positionals beside it only bound the count from above, and the
+   layout checks the rest when the call runs. */
 static int init_accepts_kw_call(Compiler *c, int initm, const int *argv, int argc) {
   const NodeTable *nt = c->nt;
   Scope *sc = &c->scopes[initm];
@@ -8876,15 +8924,15 @@ static int init_accepts_kw_call(Compiler *c, int initm, const int *argv, int arg
     has_rest = nt_ref(nt, pn, "rest") >= 0;
     has_kwrest = nt_ref(nt, pn, "keyword_rest") >= 0;
   }
-  int npos = 0, kwsplat = 0, kwh = -1;
+  int npos = 0, kwsplat = 0, kwh = -1, psplat = 0;
   for (int a = 0; a < argc; a++) {
     NodeKind k = nt_kind(nt, argv[a]);
     if (k == NK_KeywordHashNode) kwh = argv[a];
     else if (k == NK_BlockArgumentNode) continue;
-    else if (k == NK_SplatNode) return 0;   /* a runtime length: not judged here */
+    else if (k == NK_SplatNode) psplat = 1;
     else npos++;
   }
-  if (npos < nreq + npost) return 0;
+  if (!psplat && npos < nreq + npost) return 0;
   if (!has_rest && npos > nreq + npost + nopt) return 0;
   int ne = 0;
   const int *els = kwh >= 0 ? nt_arr(nt, kwh, "elements", &ne) : NULL;
@@ -8942,11 +8990,46 @@ static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Bu
   int kt = ++g_tmp, rt2 = ++g_tmp;
   buf_printf(b, "({ %s _t%d = ", boxed ? "sp_RbVal" : "sp_Class", kt); emit_expr(c, recv, b);
   buf_printf(b, "; sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
+  int sole_splat = argc == 1 && nt_kind(nt, argv[0]) == NK_SplatNode ? nt_ref(nt, argv[0], "expression") : -1;
   for (int ci = 0; ci < c->nclasses; ci++) {
-    if (is_builtin_reopen(c->classes[ci].name) || c->classes[ci].is_native_class ||
-        c->classes[ci].is_struct) continue;
+    if (is_builtin_reopen(c->classes[ci].name) || c->classes[ci].is_native_class) continue;
     int initm = comp_method_in_chain(c, ci, "initialize", NULL);
-    if (initm < 0) continue;
+    /* A Struct or Data class's generated constructor, reached with `*args`:
+       the members spread from the array, as a static `S.new(*args)` does. A
+       keyword_init Struct takes no positionals, so only an empty array
+       constructs it. One with its own initialize is laid out below; a
+       yielding one is spliced at static sites only, and gets no arm. */
+    if (c->classes[ci].is_struct && (initm < 0 || c->scopes[initm].yields)) {
+      if (initm >= 0 || sole_splat < 0 || !splat_operand_ok(c, sole_splat)) continue;
+      buf_printf(b, "case %d: _t%d=", ci, rt2);
+      if (c->classes[ci].is_value_type) buf_printf(b, "sp_box_vobj_%s(", c->classes[ci].c_name);
+      else buf_puts(b, "sp_box_obj(");
+      emit_struct_splat_new(c, &c->classes[ci], sole_splat,
+                            c->classes[ci].kw_init > 0 && !c->classes[ci].is_data, b);
+      if (c->classes[ci].is_value_type) buf_puts(b, "); break; ");
+      else buf_printf(b, ", %d); break; ", ci);
+      continue;
+    }
+    /* No initialize at all: `k.new(*[])` constructs, and any element is one
+       argument too many. */
+    if (initm < 0) {
+      int mdn = c->classes[ci].def_node;
+      const char *mdt = mdn >= 0 ? nt_type(nt, mdn) : NULL;
+      if (sole_splat < 0 || !splat_operand_ok(c, sole_splat) ||
+          (mdt && sp_streq(mdt, "ModuleNode")) || class_is_exc_subclass(c, ci) ||
+          comp_cmethod_in_chain(c, ci, "new", NULL) >= 0) continue;
+      int tsa = ++g_tmp;
+      buf_printf(b, "case %d: { sp_PolyArray *_t%d = ", ci, tsa);
+      emit_splat_operand_array(c, sole_splat, b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); if (sp_PolyArray_length(_t%d) != 0) sp_raise_cls(\"ArgumentError\", "
+                 "sp_sprintf(\"wrong number of arguments (given %%lld, expected 0)\", "
+                 "(long long)sp_PolyArray_length(_t%d))); _t%d=", tsa, tsa, tsa, rt2);
+      if (c->classes[ci].is_value_type)
+        buf_printf(b, "sp_box_vobj_%s(sp_%s_new()); } break; ", c->classes[ci].c_name, c->classes[ci].c_name);
+      else
+        buf_printf(b, "sp_box_obj(sp_%s_new(), %d); } break; ", c->classes[ci].c_name, ci);
+      continue;
+    }
     if (!init_accepts_kw_call(c, initm, argv, argc)) {
       /* the class exists and constructs, just not with these arguments:
          CRuby's ArgumentError, not the NoMethodError of the default */
@@ -9271,22 +9354,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
           int psplat = (kwh < 0 && argc == 1 && nt_type(nt, argv[0]) &&
                         sp_streq(nt_type(nt, argv[0]), "SplatNode")) ? nt_ref(nt, argv[0], "expression") : -1;
           if (psplat >= 0 && ty_is_array(comp_ntype(c, psplat))) {
-            int tsa = ++g_tmp, tln = ++g_tmp;
-            buf_printf(b, "({ sp_PolyArray *_t%d = sp_poly_to_poly_array(", tsa); emit_boxed(c, psplat, b);
-            buf_printf(b, "); SP_GC_ROOT(_t%d); sp_int _t%d = sp_PolyArray_length(_t%d);", tsa, tln, tsa);
-            if (cls->is_data)
-              buf_printf(b, " if (_t%d != %d) sp_raise_cls(\"ArgumentError\", (&(\"\\xff\" \"wrong number of arguments\")[1]));", tln, cls->nivars);
-            else
-              buf_printf(b, " if (_t%d > %d) sp_raise_cls(\"ArgumentError\", (&(\"\\xff\" \"struct size differs\")[1]));", tln, cls->nivars);
-            buf_printf(b, " sp_%s_new(", cls->c_name);
-            for (int a = 0; a < cls->nivars; a++) {
-              if (a) buf_puts(b, ", ");
-              char elem[96];
-              snprintf(elem, sizeof elem, "(%d < _t%d ? sp_PolyArray_get(_t%d, %d) : sp_box_nil())", a, tln, tsa, a);
-              if (cls->ivar_types[a] == TY_POLY) buf_puts(b, elem);
-              else emit_unbox_text(c, cls->ivar_types[a], elem, b);
-            }
-            buf_puts(b, "); })");
+            emit_struct_splat_new(c, cls, psplat, 0, b);
             return 1;
           }
         }
@@ -26962,8 +27030,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        whose initialize takes this call's shape gets an arm that lays the
        arguments out as a call to that initialize would, keywords by name and
        defaults filled -- the same emit_args_filled a static `K.new(...)`
-       uses. The arguments are evaluated inside the arm taken, once. */
-    if (call_has_keyword_args(nt, argv, argc)) {
+       uses. The arguments are evaluated inside the arm taken, once.
+       A `*splat` goes the same way: the arms below boxed the whole array as
+       one argument and bound it to the first parameter. */
+    if (call_has_keyword_args(nt, argv, argc) || call_has_splat_arg(nt, argv, argc)) {
       emit_class_value_new_kw(c, id, recv, 0, b);
       return;
     }
@@ -27162,8 +27232,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
   if (recv >= 0 && sp_streq(name, "new") && comp_ntype(c, recv) == TY_POLY &&
       nt_ref(nt, id, "block") < 0) {
     /* keyword arguments: laid out per class by name, as in the Class-valued
-       form above (#4845) -- positionally they bound `k: v` to a parameter */
-    if (call_has_keyword_args(nt, argv, argc)) {
+       form above (#4845) -- positionally they bound `k: v` to a parameter;
+       likewise a `*splat`, which bound the whole array */
+    if (call_has_keyword_args(nt, argv, argc) || call_has_splat_arg(nt, argv, argc)) {
       emit_class_value_new_kw(c, id, recv, 1, b);
       return;
     }

@@ -6628,6 +6628,11 @@ static int bam_variadic_kernel(const NodeTable *nt, const Scope *m) {
          sp_streq(nm, "pp") || sp_streq(nm, "Rational") || sp_streq(nm, "Complex");
 }
 
+int splat_operand_is_scalar(TyKind t) {
+  return t == TY_NIL || t == TY_INT || t == TY_BIGINT || t == TY_FLOAT || t == TY_STRING ||
+         t == TY_STRBUF || t == TY_SYMBOL || t == TY_BOOL;
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   Scope *m = &c->scopes[callee_idx];
   const NodeTable *nt = c->nt;
@@ -6816,8 +6821,12 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
         /* a boxed operand -- a block parameter, a value read out of a
            container -- is an array only at run time: the splat's own
            lowering normalizes it (nil to [], a scalar to [v], an array kept),
-           where it once fell through as one positional argument */
-        int boxed = !is_anon && inner >= 0 && (splat_at == TY_POLY || splat_at == TY_UNKNOWN);
+           where it once fell through as one positional argument. A
+           statically nil or scalar operand takes the same lowering: bound as
+           it was, `f(*nil)` passed [] and `f(*5)` passed [5] as the first
+           argument. */
+        int boxed = !is_anon && inner >= 0 && (splat_at == TY_POLY || splat_at == TY_UNKNOWN ||
+                                               splat_operand_is_scalar(splat_at));
         if (boxed) splat_at = TY_POLY_ARRAY;
         if (is_anon || boxed || ty_is_array(splat_at) || splat_at == TY_POLY_ARRAY) {
           splat_tmp = ++g_tmp;

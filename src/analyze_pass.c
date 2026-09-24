@@ -4282,6 +4282,48 @@ int infer_param_types(Compiler *c) {
       int static_cls = rty0 && (sp_streq(rty0, "ConstantReadNode") ||
                                 sp_streq(rty0, "ConstantPathNode"));
       if (!static_cls && class_var_static_ci(c, recv) >= 0) static_cls = 1;
+      int splat_new = 0;
+      /* `klass.new(*args)` on such a value: every initialize the dispatch
+         can land on takes the array's elements, which no other site may
+         pass it -- an optional typed from its default alone was handed an
+         element of any class. */
+      if (!static_cls && sp_streq(name, "new")) {
+        int nargs = 0, splat = 0;
+        int an = nt_ref(nt, id, "arguments");
+        const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &nargs) : NULL;
+        for (int k = 0; k < nargs; k++)
+          if (nt_kind(nt, av[k]) == NK_SplatNode) splat = 1;
+        TyKind rt0 = splat ? infer_type(c, recv) : TY_UNKNOWN;
+        if (rt0 == TY_CLASS || rt0 == TY_POLY) {
+          int first_splat = 0;
+          while (first_splat < nargs && nt_kind(nt, av[first_splat]) != NK_SplatNode) first_splat++;
+          for (int k = 0; k < c->nclasses; k++) {
+            int imi = comp_method_in_chain(c, k, "initialize", NULL);
+            if (imi >= 0) {
+              changed |= bind_call_params(c, id, imi);
+              /* which element lands in which parameter differs per class and
+                 per call, so each one the splat can reach holds any of them */
+              Scope *im = &c->scopes[imi];
+              for (int pk = first_splat; pk < im->nparams; pk++) {
+                if (pk == im->rest_idx || pk == im->kwrest_idx || !im->pnames[pk] ||
+                    callee_has_kwarg(c, im, im->pnames[pk])) continue;
+                LocalVar *p = scope_local(im, im->pnames[pk]);
+                if (p && !p->rbs_seeded) changed |= slot_take(c, p, TY_POLY, av[first_splat]);
+              }
+              continue;
+            }
+            /* a Struct's members, which a sole splat spreads into */
+            ClassInfo *sk = &c->classes[k];
+            if (!sk->is_struct || nargs != 1) continue;
+            for (int a = 0; a < sk->nivars; a++) {
+              if (class_ivar_pinned(sk, sk->ivars[a])) continue;
+              TyKind m = ty_unify(sk->ivar_types[a], TY_POLY);
+              if (m != sk->ivar_types[a]) { sk->ivar_types[a] = m; changed = 1; }
+            }
+          }
+          splat_new = 1;
+        }
+      }
       if (!static_cls && infer_type(c, recv) == TY_CLASS) {
         int bound_any = 0;
         for (int k = 0; k < c->nclasses; k++) {
@@ -4290,6 +4332,7 @@ int infer_param_types(Compiler *c) {
         }
         if (bound_any) continue;
       }
+      if (splat_new) continue;
     }
     /* Class.new -> initialize params; Class.cmethod -> cmethod params */
     {
