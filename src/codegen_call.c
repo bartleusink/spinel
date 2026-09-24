@@ -2248,8 +2248,10 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
     buf_printf(g_pre, "if (_t%d) { if (!sp_Fiber_alive(_t%d)) break; _t%d = sp_Fiber_resume(_t%d, sp_box_nil()); if (!sp_Fiber_alive(_t%d)) break; }\n",
                tf, tf, tv, tf, tf);
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "else { if (!_t%d || !_t%d->items || _t%d >= _t%d->items->len) break; _t%d = _t%d->items->data[_t%d++]; }\n",
-               te, te, tidx, te, tv, te, tidx);
+    /* an argless cycle's items are one round that starts over (endless) */
+    buf_printf(g_pre, "else { if (_t%d && _t%d->endless && _t%d->items && _t%d->items->len > 0 && _t%d >= _t%d->items->len) _t%d = 0;"
+                      " if (!_t%d || !_t%d->items || _t%d >= _t%d->items->len) break; _t%d = _t%d->items->data[_t%d++]; }\n",
+               te, te, te, te, tidx, te, tidx, te, te, tidx, te, tv, te, tidx);
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tv);
   }
@@ -15967,9 +15969,9 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && argc == 0 && nt_ref(nt, id, "block") < 0 &&
       ty_is_array(comp_ntype(c, recv)) && sp_streq(name, "cycle")) {
     int tcy = ++g_tmp;
-    buf_printf(b, "({ sp_Enumerator *_t%d = sp_Enumerator_new_cycle(", tcy);
+    buf_printf(b, "({ sp_Enumerator *_t%d = sp_Enumerator_new_cycle_endless(", tcy);
     emit_boxed(c, recv, b);
-    buf_printf(b, ", 1); _t%d->meth = SPL(\"cycle\"); _t%d; })", tcy, tcy);
+    buf_printf(b, "); _t%d->meth = SPL(\"cycle\"); _t%d; })", tcy, tcy);
     return 1;
   }
   /* arr.cycle(n) with no block -> a materialized Enumerator of the elements

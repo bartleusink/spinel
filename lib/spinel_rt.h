@@ -12233,6 +12233,18 @@ static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
    the consecutive non-overlapping slices of length n (the last may be short).
    `slice` is block-scoped, so its GC root pops each iteration; `out` keeps the
    pushed slices alive. */
+/* arr.cycle with no block and no count: one round of the elements, which
+   #next and #peek start over at their end (the endless flag). Materializing
+   one round and stopping there answered StopIteration on the third #next of
+   [1, 2].cycle. */
+static sp_Enumerator *sp_Enumerator_new_cycle_endless(sp_RbVal arr) {
+  SP_GC_ROOT_RBVAL(arr);
+  sp_PolyArray *items = sp_enum_items_from(arr); SP_GC_ROOT(items);
+  sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
+  sp_int len = items ? items->len : 0;
+  for (sp_int i = 0; i < len; i++) sp_PolyArray_push(out, items->data[i]);
+  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); e->source = arr; e->endless = TRUE; return e; }
+}
 /* arr.cycle(n) with no block: the elements repeated n whole times. */
 static sp_Enumerator *sp_Enumerator_new_cycle(sp_RbVal arr, sp_int n) {
   SP_GC_ROOT_RBVAL(arr);   /* published into the enumerator below, after several allocations */

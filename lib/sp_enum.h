@@ -34,6 +34,9 @@ typedef struct {
   sp_bool is_chain;                      /* built by Enumerable#chain / Enumerator#+: the items
                                              are the concatenated sources, and #class reports
                                              Enumerator::Chain (sp_gc_alloc zero-fills) */
+  sp_bool endless;                       /* an argless #cycle: the items are one round, and
+                                             #next / #peek start over at their end, so the
+                                             enumerator never stops (sp_gc_alloc zero-fills) */
 } sp_Enumerator;
 
 #endif

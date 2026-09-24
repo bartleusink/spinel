@@ -2672,6 +2672,7 @@ sp_RbVal sp_Enumerator_next(sp_Enumerator *e) {SP_GC_ROOT(e);
     if (e->peeked) { e->peeked = FALSE; return e->peek_val; }
     return sp_enum_gen_pull(e);
   }
+  if (e->endless && e->items && e->items->len > 0 && e->cursor >= e->items->len) e->cursor = 0;
   if (!e->items || e->cursor >= e->items->len) sp_raise_stop_iteration(e->source);
   return e->items->data[e->cursor++];
 }
@@ -2680,6 +2681,7 @@ sp_RbVal sp_Enumerator_peek(sp_Enumerator *e) {SP_GC_ROOT(e); sp_gc_wb((void*)e)
     if (!e->peeked) { e->peek_val = sp_enum_gen_pull(e); sp_gc_wb((void*)e); e->peeked = TRUE; }
     return e->peek_val;
   }
+  if (e->endless && e->items && e->items->len > 0 && e->cursor >= e->items->len) { sp_gc_wb((void*)e); e->cursor = 0; }
   if (!e->items || e->cursor >= e->items->len) sp_raise_stop_iteration(e->source);
   return e->items->data[e->cursor];
 }
@@ -2721,6 +2723,11 @@ sp_PolyArray *sp_Enumerator_take(sp_Enumerator *e, sp_int n) {SP_GC_ROOT(e);
     return r;
   }
   sp_int lim = e->items ? e->items->len : 0;
+  /* an argless cycle repeats its round as far as n reaches */
+  if (e->endless && lim > 0) {
+    for (sp_int i = 0; i < n; i++) sp_PolyArray_push(r, e->items->data[i % lim]);
+    return r;
+  }
   if (n < lim) lim = n;
   for (sp_int i = 0; i < lim; i++) sp_PolyArray_push(r, e->items->data[i]);
   return r;
@@ -2799,6 +2806,8 @@ sp_int sp_process_kill1(sp_RbVal sig, sp_int pid) {SP_GC_ROOT_RBVAL(sig);
 }
 sp_RbVal sp_Enumerator_size(sp_Enumerator *e) {SP_GC_ROOT(e);
   if (!e) return sp_box_nil();
+  /* an argless cycle is endless unless there is nothing to repeat */
+  if (e->endless) return (e->items && e->items->len > 0) ? sp_box_float(1.0 / 0.0) : sp_box_int(0);
   if (e->items) return sp_box_int(e->items->len);
   if (e->size.tag == SP_TAG_OBJ && e->size.cls_id == SP_BUILTIN_PROC) {
     (void)sp_proc_call((sp_Proc *)e->size.v.p, 0, NULL);
