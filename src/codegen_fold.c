@@ -5450,6 +5450,17 @@ static void emit_arg_or_default_at(Compiler *c, Scope *m, int idx, int provided,
 static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_INT;
+  /* A nil-typed argument (a void call, an always-nil method) into a pointer
+     parameter: evaluated for its effects, it passes the pointer's nil. Raw,
+     the void call or its sp_int 0 was a C type error (#4930). */
+  if (provided >= 0 && needs_root(pt) && pt != TY_POLY && !comp_ty_value_obj(c, pt) &&
+      nt_kind(c->nt, provided) != NK_NilNode && !(p && (p->byref_out || p->str_shared))) {
+    TyKind at = comp_ntype(c, provided);
+    if (at == TY_NIL || at == TY_VOID) {
+      buf_puts(out, "({ (void)("); emit_expr(c, provided, out); buf_puts(out, "); NULL; })");
+      return;
+    }
+  }
   /* A hash argument of a different KIND than the parameter's slot: the two are
      different C structs, so the assignment is not one C accepts. It is reachable
      through an RBS seed, which pins a parameter to `Hash[Symbol, untyped]` while

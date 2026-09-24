@@ -5065,6 +5065,18 @@ else {
           r = found ? ty_unify(r, rt2) : rt2; found = 1;
         }
       }
+      /* The dispatch also answers a receiver that is a Class through the class
+         methods of the name (the SP_TAG_CLASS arms), into the same result
+         slot: their returns join the union. Typed from the instance methods
+         alone, `URI::HTTP.build` returned an object into another class's nil
+         slot (#4930). */
+      if (found && !an_builtin_only) {
+        for (int k = 0; k < c->nclasses; k++) {
+          int cmi = comp_cmethod_in_chain(c, k, name, NULL);
+          if (cmi >= 0 && cmi < c->nscopes && c->scopes[cmi].ret != TY_UNKNOWN)
+            r = ty_unify(r, (TyKind)c->scopes[cmi].ret);
+        }
+      }
       /* The receiver is a union. When it provably carries a builtin Array or
          Hash (see infer_container_flow), a container read's value is the user
          return OR the builtin answer -- pinning it to the user return left the
