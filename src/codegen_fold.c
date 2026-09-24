@@ -7108,9 +7108,12 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
      call site, where the sibling's binding is absent, so a naive emit produces
      an undeclared `lv_<sibling>`. Bind each param to a uniquely-named call-site
      temp in order, registering a rename so a later default reads the earlier
-     temp, then pass the temps. Restricted to simple fixed-arity calls (no
-     splat / rest / kwrest / double-splat), which is where these defaults occur. */
-  if (splat_idx < 0 && ds_hash_tmp < 0 && m->rest_idx < 0 && m->kwrest_idx < 0 &&
+     temp, then pass the temps. Restricted to calls with no splat expanding
+     into fixed parameters and no double-splat. A *rest, its posts and a
+     **kwrest are hoisted the way the path below binds them: leaving them out
+     let `def m(n, *r, k: n + r.size)` and `def h(x, z = x * 2, **kw)` emit
+     the default against a parameter nothing at the call site declared. */
+  if (splat_idx < 0 && ds_hash_tmp < 0 &&
       m->nparams <= 64 && default_refs_earlier_param(c, m)) {
     int uid = ++g_tmp;
     int ren_base = g_nren;
@@ -7120,21 +7123,41 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       TyKind pt = plv ? plv->type : TY_POLY;
       int byref = plv && plv->byref_out;
       int provided = -1;
-      { int slot = arg_slot_for_param(c, m, i, bind_argc);
-        if (slot >= 0 && slot < pos_argc) provided = argv ? argv[slot] : -1; }
+      int is_rest = i == m->rest_idx, is_kwrest = i == m->kwrest_idx;
+      int is_post = m->rest_idx >= 0 && i > m->rest_idx && i <= m->rest_idx + m->npost_rest;
+      int is_declkw = m->pnames[i] && callee_param_is_declared_kwarg(c, m, m->pnames[i]);
+      if (is_post) {
+        int aidx = pos_argc - m->npost_rest + (i - m->rest_idx - 1);
+        if (argv && aidx >= 0 && aidx < pos_argc) provided = argv[aidx];
+      }
+      else if (!is_rest && !is_kwrest && !is_declkw) {
+        int slot = arg_slot_for_param(c, m, i, bind_argc);
+        /* ahead of a rest, only the arguments before the posts */
+        int lim = m->rest_idx >= 0 ? pos_argc - m->npost_rest : pos_argc;
+        if (slot >= 0 && slot < lim) provided = argv ? argv[slot] : -1;
+      }
       /* only a keyword parameter binds a key by name; a keyword hash no
          parameter takes is one more positional argument, and fills the
          first unfilled slot -- the rules the path below follows (#4869) */
       if (provided < 0 && kwh >= 0 && m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]))
         provided = kwh_lookup(nt, kwh, m->pnames[i]);
-      if (provided < 0 && kwh_positional_slot(c, m, kwh, pos_argc) == i) provided = kwh;
+      if (provided < 0 && !is_rest && !is_kwrest && kwh_positional_slot(c, m, kwh, pos_argc) == i)
+        provided = kwh;
       Buf vb; memset(&vb, 0, sizeof vb);
       /* A provided (caller) argument is emitted with the sibling-param renames
          OFF -- only a callee default expression should resolve param references
          to the hoisted temps. */
       int active_nren = g_nren;
-      if (provided >= 0) g_nren = ren_base;
-      emit_arg_or_default(c, m, i, provided, &vb);
+      if (provided >= 0 || is_rest || is_kwrest) g_nren = ren_base;
+      if (is_rest)
+        emit_rest_pack_kwh(c, i, pos_argc - m->npost_rest, argv,
+                           rest_kwh_tail(c, m, kwh, pos_argc), &vb);
+      else if (is_kwrest) {
+        int krhash = emit_kwrest_collect(c, m, kwh, ds_hash_tmp, ds_hash_type, argsNode);
+        if (pt == TY_POLY) buf_printf(&vb, "sp_box_obj(_t%d, SP_BUILTIN_SYM_POLY_HASH)", krhash);
+        else buf_printf(&vb, "_t%d", krhash);
+      }
+      else emit_arg_or_default(c, m, i, provided, &vb);
       g_nren = active_nren;
       char uniq[48];
       snprintf(uniq, sizeof uniq, "_pd%d_%d", uid, i);
@@ -7813,10 +7836,10 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
      per-parameter temps (_tN), so it aliases each one under the rename's
      spelling and registers the rename. Without it the default emitted the
      callee's `lv_u`, which nothing at the call site declared (#4431). Same
-     fixed-arity restriction as the other path. */
+     restriction as the other path: a *rest and a **kwrest are temps like the
+     rest, and are aliased too. */
   int pd_ren_base = g_nren, pd_uid = 0;
-  int pd_active = m && splat_tmp_d < 0 && ds_tmp_d < 0 && m->rest_idx < 0 &&
-                  m->kwrest_idx < 0 && default_refs_earlier_param(c, m);
+  int pd_active = m && splat_tmp_d < 0 && ds_tmp_d < 0 && default_refs_earlier_param(c, m);
   if (pd_active) pd_uid = ++g_tmp;
   for (int k = 0; k < np; k++) {
     atmp[k] = ++g_tmp;
@@ -7832,11 +7855,15 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
          them: it collected them too, and each post then read the argument one
          place to its left. */
       int rest_end_d = posts_dyn_d ? pos_argc_d : pos_argc_d - m->npost_rest;
+      /* the packed arguments are the caller's: no parameter renames */
+      int rest_nren_sv = g_nren;
+      g_nren = pd_ren_base;
       if (splat_tmp_d >= 0)
         emit_rest_from_splat_and_argv(splat_tmp_d, splat_at_d, k - splat_idx_d,
                                       c, splat_idx_d + 1, rest_end_d, argv, &ab);
       else
         emit_rest_pack_kwh(c, k, rest_end_d, argv, rest_kwh_tail(c, m, kwh_d, pos_argc_d), &ab);
+      g_nren = rest_nren_sv;
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyArray *_t%d = %s;\n", atmp[k], ab.p ? ab.p : "sp_PolyArray_new()");
       /* The packed rest is a fresh array in a plain C temporary: a splat's
@@ -7851,6 +7878,15 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
         buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]);
       }
       atmp_ty[k] = TY_POLY_ARRAY;
+      if (pd_active && m->pnames[k] && g_nren < MAX_RENAME) {
+        /* a later default reading the rest (`k: r.size`) reads this temp */
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_PolyArray *lv__pd%d_%d = _t%d; (void)lv__pd%d_%d;\n",
+                   pd_uid, k, atmp[k], pd_uid, k);
+        snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", m->pnames[k]);
+        snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_pd%d_%d", pd_uid, k);
+        g_nren++;
+      }
     }
     else if (fwd_encl && fwd_base_d + k < fwd_encl->nparams) {
       LocalVar *ep = scope_local(fwd_encl, fwd_encl->pnames[fwd_base_d + k]);
@@ -7909,8 +7945,12 @@ else {
       if (provided < 0 && kslot_d >= 0 && k == kslot_d && !is_kwp_d)
         provided = kwh_d;
       if (m && m->kwrest_idx >= 0 && k == m->kwrest_idx) {
-        /* `**kwrest` callee param: collect the call's unbound keywords. */
+        /* `**kwrest` callee param: collect the call's unbound keywords --
+           the caller's expressions, so with no parameter renames */
+        int kr_nren_sv = g_nren;
+        g_nren = pd_ren_base;
         int krhash = emit_kwrest_collect(c, m, kwh_d, ds_tmp_d, ds_type_d, argsNode);
+        g_nren = kr_nren_sv;
         buf_printf(&ab, "_t%d", krhash);
       }
       else if (kv < 0 && ds_tmp_d >= 0 && is_kwp_d) {

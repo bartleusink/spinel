@@ -7938,9 +7938,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            `lv_u` at the call site: undeclared, or worse a caller local of the
            same name (#4431). When such a default exists the arm binds each
            argument to a named local inside a statement expression first, the
-           way emit_args_filled does, and renames the parameter to it. */
-        int pd_arm = r_idx < 0 && ms->kwrest_idx < 0 &&
-                     default_refs_earlier_param(c, ms);
+           way emit_args_filled does, and renames the parameter to it. A
+           *rest and a **kwrest bind the same way, so a keyword default can
+           read them (`k: n + r.size`). */
+        int pd_arm = default_refs_earlier_param(c, ms);
         int pd_uid = pd_arm ? ++g_tmp : 0, pd_ren_base = g_nren;
         Buf pdpre; memset(&pdpre, 0, sizeof pdpre);
         for (int a = 0; a < mnp; a++) {
@@ -8072,10 +8073,17 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
              boxed: the proc form of Net::HTTP#request, whose `req` is a Post
              at one site and a Get at another, took a raw sp_Post * (#4499) */
           if (pt == TY_UNKNOWN) pt = TY_POLY;
-          /* post-*rest required params take from the tail of the call args */
-          int src = (r_idx >= 0 && npost > 0 && a > r_idx) ? rest_end + (a - r_idx - 1) : a;
+          /* post-*rest required params take from the tail of the call args,
+             the parameters ahead of the rest only what comes before those,
+             and a declared keyword nothing positional: with no keyword hash
+             `def m(n, *r, k: 0)` called `m(3, 1, 2)` bound k the 2 */
+          int src = (r_idx >= 0 && npost > 0 && a > r_idx && a <= r_idx + npost)
+                      ? rest_end + (a - r_idx - 1) : a;
           /* with a leading optional the required parameters are funded first */
           if (opt_before_required(ms)) { src = arg_slot_for_param(c, ms, a, pos_argc); if (src < 0) src = pos_argc; }
+          if ((r_idx >= 0 && a < r_idx && src >= rest_end) ||
+              (pnm && callee_param_is_declared_kwarg(c, ms, pnm)))
+            src = pos_argc;
           if (src < pos_argc) {
             TyKind at = atmp_ty[src];   /* the temp's actual type (poly for a nil/void arg) */
             char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[src]);
