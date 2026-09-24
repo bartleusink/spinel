@@ -1394,6 +1394,28 @@ static TyKind an_self_call_ret(Compiler *c, Scope *self, const char *name, int m
   return r;
 }
 TyKind infer_call(Compiler *c, int id) {
+  /* the class arm of a builtin's receiver test (`__r.is_a?(K) ? __r.m { }
+     : ...`, enum_own) answers what the classes' own methods answer, as the
+     emitter dispatches it: typed as the builtin (any? is a Boolean), a
+     truthy String from `def any? = @v` read as false (#4952) */
+  if (nt_int(c->nt, id, "enum_own", 0)) {
+    const char *on = nt_str(c->nt, id, "name");
+    TyKind r = TY_UNKNOWN; int pending = 0;
+    for (int k = 0; on && k < c->nclasses; k++) {
+      if (c->classes[k].is_native_class) continue;
+      int mi = comp_method_in_class(c, k, on);
+      if (mi < 0) continue;
+      if (c->scopes[mi].ret == TY_UNKNOWN) { pending = 1; continue; }
+      r = r == TY_UNKNOWN ? (TyKind)c->scopes[mi].ret : ty_unify(r, (TyKind)c->scopes[mi].ret);
+    }
+    if (pending) return TY_UNKNOWN;
+    if (r != TY_UNKNOWN) {
+      /* the arm shares its slot with the builtin's; a class answering what
+         the builtin would keeps that type, any other answer rides boxed */
+      TyKind bt = infer_call_inner(c, id);
+      return (bt == r || bt == TY_UNKNOWN) ? r : TY_POLY;
+    }
+  }
   TyKind t = infer_call_inner(c, id);
   if (t == TY_UNKNOWN && builtin_arity_violation(c, id)) return TY_NIL;
   return t;
