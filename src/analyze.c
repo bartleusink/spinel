@@ -8706,6 +8706,50 @@ static void narrow_rescue_arm_reads(Compiler *c) {
   }
 }
 
+/* `Cls.new(...)` / `Cls.exception(...)` of an exception class */
+static int value_is_new_exception(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode) return 0;
+  const char *m = nt_str(nt, v, "name");
+  if (!m || (!sp_streq(m, "new") && !sp_streq(m, "exception"))) return 0;
+  int r = nt_ref(nt, v, "receiver");
+  if (r < 0 || (nt_kind(nt, r) != NK_ConstantReadNode && nt_kind(nt, r) != NK_ConstantPathNode)) return 0;
+  const char *cn = nt_str(nt, r, "name");
+  if (!cn) return 0;
+  int cid = comp_class_index(c, cn);
+  return cid >= 0 ? class_is_exc_subclass(c, cid) : is_builtin_exception_name(cn);
+}
+
+/* Whether a local that a `rescue => name` arm binds is also written by an
+   ordinary assignment in the same scope; a target is ordinary unless it is a
+   rescue arm's own reference. */
+static int rescue_name_written_elsewhere(Compiler *c, Scope *vsc, const char *nm,
+                                         const int *rescues, int nrescues) {
+  const NodeTable *nt = c->nt;
+  static const NodeKind kinds[] = {
+    NK_LocalVariableWriteNode, NK_LocalVariableOperatorWriteNode,
+    NK_LocalVariableOrWriteNode, NK_LocalVariableAndWriteNode,
+    NK_LocalVariableTargetNode,
+  };
+  for (size_t k = 0; k < sizeof kinds / sizeof kinds[0]; k++) {
+    NT_FOREACH_KIND(nt, kinds[k], id) {
+      const char *wn = nt_str(nt, id, "name");
+      if (!wn || !sp_streq(wn, nm) || comp_scope_of(c, id) != vsc) continue;
+      if (kinds[k] == NK_LocalVariableTargetNode) {
+        int own = 0;
+        for (int r = 0; r < nrescues && !own; r++) own = nt_ref(nt, rescues[r], "reference") == id;
+        if (own) continue;
+      }
+      /* an exception built in place (`e = MyErr.new(...)`) is what the
+         exception slot holds anyway */
+      if (kinds[k] == NK_LocalVariableWriteNode && value_is_new_exception(c, nt_ref(nt, id, "value")))
+        continue;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* ---- `return <expr> if p.nil?` guard narrowing (#1661) --------------------
    A method whose call sites pass `T | nil` types its parameter poly (T has no
    first-class nullable slot: String, Time, ...). When the body OPENS with
@@ -14203,6 +14247,8 @@ void analyze_program(Compiler *c) {
       if (arms[rn].spec < 0) arms[rn].spec = bare_rescue_spec_cid(c, id);
       rn++;
     }
+    int *rescue_ids = malloc(sizeof(int) * (size_t)(rn ? rn : 1));
+    for (int i = 0; i < rn; i++) rescue_ids[i] = arms[i].id;
     for (int i = 0; i < rn; i++) {
       /* unanimity across every same-name rescue arm in the same scope */
       int unanimous = arms[i].spec;
@@ -14212,8 +14258,13 @@ void analyze_program(Compiler *c) {
       }
       LocalVar *lv = scope_local_intern(arms[i].vsc, arms[i].nm);
       lv->type = unanimous >= 0 ? ty_object(unanimous) : TY_EXCEPTION;
+      /* the name also holds what an ordinary write put there (`e = Foo.new`
+         before `rescue => e`): the pin would retype those reads as the
+         exception, so the slot holds either, boxed (#4923) */
+      if (rescue_name_written_elsewhere(c, arms[i].vsc, arms[i].nm, rescue_ids, rn)) lv->type = TY_POLY;
       lv->is_block_param = 1;  /* set externally; don't reset in the fixpoint */
     }
+    free(rescue_ids);
     free(arms);
   }
 

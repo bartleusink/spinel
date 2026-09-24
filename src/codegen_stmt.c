@@ -6335,7 +6335,18 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
     /* rename_local: inside a yield-inlined method body the binding local was
        declared under its per-inline name (lv__yN_e); the bare name here left
        the assignment referencing an undeclared lv_e. */
-    if (spec_cid >= 0)
+    Scope *bvs = comp_scope_of(c, ref);
+    LocalVar *blv = bvs ? scope_local(bvs, nt_str(nt, ref, "name")) : NULL;
+    if (blv && blv->type == TY_POLY) {
+      /* the name also holds other values (#4923): box the exception */
+      char ce[64];
+      if (spec_cid >= 0) snprintf(ce, sizeof ce, "(sp_%s *)_ce_%d", c->classes[spec_cid].c_name, rc);
+      else snprintf(ce, sizeof ce, "_ce_%d", rc);
+      buf_printf(b, "lv_%s = ", rename_local(nt_str(nt, ref, "name")));
+      emit_boxed_text(c, spec_cid >= 0 ? ty_object(spec_cid) : TY_EXCEPTION, ce, b);
+      buf_puts(b, ";\n");
+    }
+    else if (spec_cid >= 0)
       buf_printf(b, "lv_%s = (sp_%s *)_ce_%d;\n", rename_local(nt_str(nt, ref, "name")), c->classes[spec_cid].c_name, rc);
     else
       /* bind the materialized object (which already prefers the CARRIED object
