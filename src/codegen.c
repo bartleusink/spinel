@@ -10091,6 +10091,15 @@ static void scan_prologue_features(Compiler *c) {
           sp_streq(nm, "private_instance_methods") || sp_streq(nm, "protected_instance_methods") ||
           sp_streq(nm, "methods") || sp_streq(nm, "instance_variables") ||
           sp_streq(nm, "class_variables")) g_uses_symbols = 1;
+      /* a bare `gets` reads ARGF, which walks the ARGV files. The argument
+         count is what the arm in codegen_call.c sees: an expanded `*[]`
+         leaves an arguments node with none. */
+      if (sp_streq(nm, "gets") && nt_ref(nt, i, "receiver") < 0 &&
+          comp_bare_gets_is_argf(c)) {
+        int gac = 0, gargs = nt_ref(nt, i, "arguments");
+        if (gargs >= 0) nt_arr(nt, gargs, "arguments", &gac);
+        if (gac == 0) g_uses_argv = 1;
+      }
     }
   }
   /* Generic object reflection: when a native package declared it consumes
