@@ -2900,6 +2900,8 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   char nx_acc[24]; snprintf(nx_acc, sizeof nx_acc, "_t%d", tacc);
   const char *sv_nxv = g_ie_next_var; int sv_nxp = g_ie_res_poly;
   int sv_cld = g_c_loop_depth;
+  int sv_lexcf = g_loop_exc_base, sv_lensf = g_loop_ensure_base;
+  g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
   g_ie_next_var = nx_acc; g_ie_res_poly = (acc_ty == TY_POLY);
   g_c_loop_depth++;
   for (int j = 0; j < bn - 1; j++) {
@@ -2941,6 +2943,7 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     free(tail.p);
   }
   g_c_loop_depth = sv_cld;
+  g_loop_exc_base = sv_lexcf; g_loop_ensure_base = sv_lensf;
   g_ie_next_var = sv_nxv; g_ie_res_poly = sv_nxp;
   /* the expression must carry the INFERRED type: a poly-typed reduce
      (e.g. a dyn-send body) boxes its scalar accumulator */
@@ -3851,6 +3854,7 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
     /* an Integer or Float slot: a `next nil` spells the slot's sentinel */
     else if (dt == TY_INT || dt == TY_FLOAT) g_ie_next_ty = dt;
   }
+  int sv_lensd = g_loop_ensure_base; g_loop_ensure_base = g_ensure_depth;
   g_c_loop_depth++;   /* the do{}while(0) wrapper makes `continue` valid */
   int sd = g_indent;
   /* Wrap the body in do{}while(0): an interior or tail `next <v>` assigns
@@ -3891,6 +3895,7 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
   emit_indent(g_pre, indent); buf_puts(g_pre, "} while (0);\n");
   g_c_loop_depth--;
   g_ie_next_var = sv_nx; g_ie_res_poly = sv_poly; g_loop_exc_base = sv_lexc;
+  g_loop_ensure_base = sv_lensd;
   g_ie_next_ty = sv_nty;
 }
 

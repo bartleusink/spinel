@@ -2276,6 +2276,8 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
        same wrapper, no destination. */
     const char *sv_nxv = g_ie_next_var;
     g_ie_next_var = NULL;
+    int sv_lexcw = g_loop_exc_base, sv_lensw = g_loop_ensure_base;
+    g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
     g_c_loop_depth++;
     emit_indent(g_pre, din); buf_puts(g_pre, "do {\n");
     int bi = din + 1; g_indent = bi;
@@ -2283,6 +2285,7 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
     g_indent = din;
     emit_indent(g_pre, din); buf_puts(g_pre, "} while (0);\n");
     g_c_loop_depth--;
+    g_loop_exc_base = sv_lexcw; g_loop_ensure_base = sv_lensw;
     g_ie_next_var = sv_nxv;
   }
   g_indent = sv;

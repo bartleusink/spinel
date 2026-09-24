@@ -6426,6 +6426,10 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
                       (ty_is_object(g_ret_type) || c_type_name(g_ret_type) != NULL));
     emit_indent(b, indent); buf_printf(b, "int _retf%d = 0;\n", eid);
     emit_indent(b, indent); buf_printf(b, "int _nxtf%d = 0; (void)_nxtf%d;\n", eid, eid);
+    /* only a region opened inside a C loop can be left by a loop's break */
+    if (g_c_loop_depth > 0) {
+      emit_indent(b, indent); buf_printf(b, "int _brkf%d = 0; (void)_brkf%d;\n", eid, eid);
+    }
     /* _excf/_excmsg/_exccls track an unhandled exception (no rescue) so
        that ensure can re-raise it after running.  Saved immediately after
        sp_exc_top-- while the index is still valid. */
@@ -6566,6 +6570,25 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     else if (g_c_loop_depth > 0) {
       emit_indent(b, indent);
       buf_printf(b, "if (_nxtf%d) continue;\n", eid);
+    }
+    /* a deferred `break`, the same way, popping the frames it leaves: down
+       to the enclosing ensure's, or down to the loop's for the C break, which
+       also pops the rescue handlers the flag carries (1 + their count). Only
+       a region opened inside a C loop has the flag. */
+    if (g_c_loop_depth > 0 && g_ensure_depth > g_loop_ensure_base) {
+      EnsureCtx *outer3 = &g_ensure_stack[g_ensure_depth - 1];
+      int fp3 = g_exc_frame_depth - outer3->exc_base;
+      emit_indent(b, indent);
+      buf_printf(b, "if (_brkf%d) { _brkf%d = _brkf%d; ", eid, outer3->lid, eid);
+      if (fp3 > 0) buf_printf(b, "sp_exc_top -= %d; ", fp3);
+      buf_printf(b, "goto _ensure%d; }\n", outer3->lid);
+    }
+    else if (g_c_loop_depth > 0) {
+      int fpl = g_exc_frame_depth - g_loop_exc_base;
+      emit_indent(b, indent);
+      buf_printf(b, "if (_brkf%d) { ", eid);
+      if (fpl > 0) buf_printf(b, "sp_exc_top -= %d; ", fpl);
+      buf_printf(b, "sp_rescue_sp -= _brkf%d - 1; break; }\n", eid);
     }
     emit_indent(b, indent);
     if (g_ensure_depth > 0) {
@@ -10408,6 +10431,24 @@ else {
         emit_boxed(c, bvargs[k], b);
         buf_puts(b, ");\n");
       }
+    }
+    /* `break` crossing begin..ensure regions opened inside this loop runs
+       their ensure bodies first, as `next` does below: defer through the
+       innermost ensure label with the break flag. */
+    if (g_ensure_depth > g_loop_ensure_base) {
+      EnsureCtx *bctx = &g_ensure_stack[g_ensure_depth - 1];
+      int bpops = g_exc_frame_depth - bctx->exc_base;
+      if (bpops < 0) bpops = 0;
+      /* the rescue handlers between here and the innermost ensure pop now,
+         as next's do; the flag carries the ones left for the loop exit */
+      int bleft = rescues_crossed(g_loop_exc_base) - rescues_crossed(bctx->exc_base);
+      if (bleft < 0) bleft = 0;
+      emit_indent(b, indent);
+      buf_puts(b, "{ ");
+      emit_cur_exc_restore(b, bctx->exc_base);
+      buf_printf(b, "_brkf%d = %d; sp_exc_top -= %d; goto _ensure%d; }\n",
+                 bctx->lid, 1 + bleft, bpops, bctx->lid);
+      return;
     }
     emit_indent(b, indent);
     /* leaving through live begin/rescue frames opened inside the loop body:
