@@ -6561,11 +6561,15 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             const char *saved_self = g_self;
             const char *saved_deref = g_self_deref;
             char selfpbuf[320];  /* stack-local: nested inlines each need their own receiver buffer */
-            /* A default reads the receiver's ivars as `<self>-><iv>`: a struct
-               receiver is spelled as a parenthesized pointer, since a bare cast
-               binds looser than `->`, and a by-value class keeps the pointer
-               form rather than the dereferenced argument. */
-            if (_dstruct) {
+            /* A default reads the receiver's ivars as `<self><deref><iv>`, so
+               the receiver is parenthesized: a bare cast binds looser than
+               `->`. A by-value class is spelled as the dereferenced value, so
+               a `self` default passes what the callee takes. */
+            if (_dstruct && c->classes[defcls].is_value_type) {
+              snprintf(selfpbuf, sizeof selfpbuf, "(*(sp_%s *)_t%d.v.p)", _dcn, tv);
+              g_self_deref = ".";
+            }
+            else if (_dstruct) {
               snprintf(selfpbuf, sizeof selfpbuf, "((sp_%s *)_t%d.v.p)", _dcn, tv);
               g_self_deref = "->";
             }
@@ -7854,10 +7858,16 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                    mc(pfi8 >= 0 ? c->scopes[pfi8].name : c->scopes[mi].name),
                    c->classes[defcls].is_value_type ? "*" : "", selfpbuf2);
         const char *saved_self = g_self;
-        /* the defaults below read ivars off the pointer form, whatever the
-           calling scope's own self is */
+        /* the defaults below read ivars off this receiver, whatever the
+           calling scope's own self is; a by-value class is the value form */
         const char *saved_deref = g_self_deref;
-        if (self2_struct) g_self_deref = "->";
+        char selfdbuf2[340];
+        snprintf(selfdbuf2, sizeof selfdbuf2, "%s", selfpbuf2);
+        if (self2_struct && c->classes[defcls].is_value_type) {
+          snprintf(selfdbuf2, sizeof selfdbuf2, "(*%s)", selfpbuf2);
+          g_self_deref = ".";
+        }
+        else if (self2_struct) g_self_deref = "->";
         int r_idx = ms->rest_idx;
         int npost = ms->npost_rest;
         int rest_end = pos_argc - npost;   /* where the *rest collection stops */
@@ -7924,7 +7934,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
               else { emit_obj_upcast_prefix(c, kpt, at, &pa); buf_puts(&pa, tn); }
             }
             else {
-              g_self = selfpbuf2;
+              g_self = selfdbuf2;
               emit_arg_or_default(c, ms, a, -1, &pa);
               g_self = saved_self;
             }
@@ -8012,7 +8022,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             else { emit_obj_upcast_prefix(c, pt, at, &pa); buf_puts(&pa, tn); }
           }
 else {
-            g_self = selfpbuf2;
+            g_self = selfdbuf2;
             emit_arg_or_default(c, ms, a, -1, &pa);
             g_self = saved_self;
           }
