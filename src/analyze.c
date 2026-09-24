@@ -13956,6 +13956,7 @@ void analyze_program(Compiler *c) {
   register_include_attrs(c);
   register_extends(c);
   register_prepends(c);
+  rewrite_attr_supers(c);
   specialize_inherited_cls_new(c);
 
   /* collect top-level `include <Mod>` / `extend <Mod>` calls so bare method
