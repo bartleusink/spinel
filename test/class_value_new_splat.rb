@@ -191,3 +191,18 @@ puts REG5.fetch(:n).new(*nil)
 rescue ArgumentError => e
   puts e.message
 end
+
+# an anonymous `*` forwarding the method's rest reaches the same arms
+S6 = Struct.new(:x, :y)
+D6 = Data.define(:a)
+class Bare6; end
+def build6(k, *) = k.new(*)
+p build6(S6, 1, 2).y
+p build6([S6, Bare6][ARGV.size], 3, 4).x
+p build6(D6, 7).a
+p build6(Bare6).class
+begin
+  build6(Bare6, 1)
+rescue ArgumentError => e
+  puts e.message
+end

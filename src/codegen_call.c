@@ -8873,11 +8873,20 @@ static int call_has_splat_arg(const NodeTable *nt, const int *argv, int argc) {
 /* A splat operand as a poly array: an Array kept, and anything else -- a
    boxed operand that is an Array only at run time, nil, a scalar -- spread
    by Ruby's rule (nil to [], any other value to [v]). */
+/* `node` may also be an anonymous `*` itself (a SplatNode with no operand),
+   which forwards the enclosing method's rest array. */
 static int splat_operand_ok(Compiler *c, int node) {
+  if (nt_kind(c->nt, node) == NK_SplatNode) {
+    Buf ab; memset(&ab, 0, sizeof ab);
+    int ok = emit_anon_rest_ref(c, node, &ab);
+    free(ab.p);
+    return ok;
+  }
   TyKind t = comp_ntype(c, node);
   return ty_is_array(t) || t == TY_POLY || splat_operand_is_scalar(t);
 }
 static void emit_splat_operand_array(Compiler *c, int node, Buf *b) {
+  if (nt_kind(c->nt, node) == NK_SplatNode && emit_anon_rest_ref(c, node, b)) return;
   int spread = !ty_is_array(comp_ntype(c, node));
   buf_puts(b, spread ? "sp_poly_to_poly_array(sp_splat_to_array(" : "sp_poly_to_poly_array(");
   emit_boxed(c, node, b);
@@ -8997,7 +9006,10 @@ static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Bu
   int kt = ++g_tmp, rt2 = ++g_tmp;
   buf_printf(b, "({ %s _t%d = ", boxed ? "sp_RbVal" : "sp_Class", kt); emit_expr(c, recv, b);
   buf_printf(b, "; sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
+  /* the operand of a sole `*splat`, or the SplatNode itself for an anonymous
+     `*` forwarding the method's rest (`k.new(*)`) */
   int sole_splat = argc == 1 && nt_kind(nt, argv[0]) == NK_SplatNode ? nt_ref(nt, argv[0], "expression") : -1;
+  if (argc == 1 && sole_splat < 0 && nt_kind(nt, argv[0]) == NK_SplatNode) sole_splat = argv[0];
   for (int ci = 0; ci < c->nclasses; ci++) {
     if (is_builtin_reopen(c->classes[ci].name) || c->classes[ci].is_native_class) continue;
     int initm = comp_method_in_chain(c, ci, "initialize", NULL);

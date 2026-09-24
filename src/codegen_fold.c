@@ -5855,7 +5855,7 @@ int kwh_lookup(const NodeTable *nt, int kwh, const char *kname) {
    expression; it forwards the enclosing method's anonymous rest local. Returns
    that local's poly-array C expression into `buf` and 1, or 0 if `splat` is not
    an anonymous forward. */
-static int emit_anon_rest_ref(Compiler *c, int splat, Buf *buf) {
+int emit_anon_rest_ref(Compiler *c, int splat, Buf *buf) {
   if (nt_ref(c->nt, splat, "expression") >= 0) return 0;
   Scope *sc = comp_scope_of(c, splat);
   if (!sc || sc->rest_idx < 0 || sc->rest_idx >= sc->nparams) return 0;
