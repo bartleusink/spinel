@@ -842,6 +842,26 @@ sp_IOBuffer *sp_IOBuffer_unlock(sp_IOBuffer *b) {
   return b;
 }
 
+/* ---- FFI ----
+   An IO::Buffer passed to an ffi_func pointer argument hands C its base
+   address, as CRuby's rb_io_buffer_get_bytes_for_reading / _for_writing do:
+   NULL for a null buffer (freed, or zero-sized), InvalidatedError for a
+   slice whose source was freed or shrunk under it, and AccessError for a
+   read-only buffer in a slot other than :buffer_in. A nil (a buffer-typed
+   local that holds none) is NULL, as it is for :ptr. */
+void *sp_IOBuffer_ffi_base(sp_IOBuffer *b, sp_int writing) {
+  if (!b) return NULL;
+  if (writing) iob_writable(b);
+  return iob_ptr(b);
+}
+/* a boxed pointer argument: an IO::Buffer (class `cls_id`) gives its base,
+   anything else its raw pointer as before */
+void *sp_IOBuffer_ffi_ptr(sp_RbVal v, sp_int cls_id, sp_int writing) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == cls_id && v.v.p)
+    return sp_IOBuffer_ffi_base((sp_IOBuffer *)v.v.p, writing);
+  return v.v.p;
+}
+
 /* ---- IO integration (#4474) ----
    Spinel's IO is a stdio FILE* (sp_File), so a raw descriptor read has to
    stay coherent with the stdio buffer: bytes stdio already holds for the

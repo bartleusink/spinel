@@ -3010,6 +3010,17 @@ int ffi_find_callback(Compiler *c, const char *mod, const char *name) {
   return -1;
 }
 
+/* The IO::Buffer native class, whose instances an ffi_func pointer argument
+   takes by base address. Returns its class id, or -1 when the program never
+   loads it. */
+int ffi_iobuffer_class(Compiler *c) {
+  for (int i = 0; i < c->nclasses; i++)
+    if (c->classes[i].is_native_class && c->classes[i].c_struct &&
+        sp_streq(c->classes[i].c_struct, "sp_IOBuffer"))
+      return i;
+  return -1;
+}
+
 /* Look up an FFI writer by (module, name). Returns index or -1. */
 int ffi_find_writer(Compiler *c, const char *mod, const char *name) {
   for (int i = 0; i < c->n_ffi_writers; i++)

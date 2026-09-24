@@ -771,6 +771,9 @@ int comp_sym_intern_n(Compiler *c, const char *name, size_t len);
 /* Look up an ffi_callback type by (module, name); returns index or -1. */
 int ffi_find_callback(Compiler *c, const char *mod, const char *name);
 
+/* The IO::Buffer native class id, or -1 when the program does not load it. */
+int ffi_iobuffer_class(Compiler *c);
+
 /* Resolve Module.<method> against ffi_struct declarations: <Name>_new,
    <Name>_get_<field>, <Name>_set_<field>. Returns an FFI_SM_* op kind and,
    via out params, the struct and field indices (field -1 for _new). */

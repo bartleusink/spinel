@@ -10837,6 +10837,10 @@ char *codegen_program(const NodeTable *nt) {
       for (int ai = 0; ai < m->nargs; ai++) { buf_puts(&b, ", "); buf_puts(&b, native_c_type(m->args[ai])); }
       buf_puts(&b, ");\n");
     }
+    /* IO::Buffer as an ffi_func pointer argument (codegen_call.c) */
+    if (cf->n_ffi_funcs > 0 && ffi_iobuffer_class(cf) >= 0)
+      buf_puts(&b, "extern void *sp_IOBuffer_ffi_base(sp_IOBuffer *, sp_int);\n"
+                   "extern void *sp_IOBuffer_ffi_ptr(sp_RbVal, sp_int, sp_int);\n");
     /* native_obj link markers: the spinel driver links each object only when
        its module's require-gate feature is enabled (i.e. the require appears). */
     for (int noi = 0; noi < cf->n_native_objs; noi++) {

@@ -106,7 +106,7 @@ Recognized type specs:
 | `:bool` | `int` | `bool` |
 | `:str` | `const char *` | `string` (NUL-terminated) |
 | `:binstr` | `const char *` | `string` (binary-safe, return only) |
-| `:ptr` | `void *` | `ptr` |
+| `:ptr` | `void *` | `ptr`; an argument also takes an `IO::Buffer` (its base address) |
 | `:float_array` | `const double *` | `Array<Float>` (`.data` pointer) |
 | `:int_array` | `const int64_t *` | `Array<Int>` (`.data` pointer) |
 | `:void` | `void` | `void` (return only) |
@@ -160,6 +160,53 @@ waited out on the way back. The arguments are evaluated before the call
 leaves. The bracket costs a scheduler lock round trip, so it is for calls
 that block, not for every call; a callback-taking or variadic function
 keeps the plain call. The single-threaded runtime ignores the keyword.
+
+### Passing an `IO::Buffer`
+
+An `IO::Buffer` passed where the spec says `:ptr` (or the ffi gem's
+`:pointer`, `:buffer_in`, `:buffer_out`, `:buffer_inout`) hands C the
+buffer's base address. That is how to build a buffer of 8-, 16- or 32-bit
+values in Ruby, with `set_value` / `set_values`, and give it to C, or let C
+fill one and read it back with `get_value`:
+
+```ruby
+module SDL
+  ffi_lib "SDL2"
+  ffi_func :SDL_UpdateTexture, [:ptr, :ptr, :buffer_in, :int], :int
+  ffi_func :SDL_QueueAudio,    [:uint32, :buffer_in, :uint32], :int
+end
+
+pixels = IO::Buffer.new(320 * 200 * 4)
+pixels.set_value(:u32, (10 * 320 + 20) * 4, 0xff00ff00)   # x 20, y 10
+SDL.SDL_UpdateTexture(texture, nil, pixels, 320 * 4)
+
+samples = IO::Buffer.new(735)
+samples.set_values([:U8] * 3, 0, [128, 140, 152])
+SDL.SDL_QueueAudio(device, samples, samples.size)
+```
+
+The address is taken when the call is made, after every argument has been
+evaluated, so it reflects a `resize` and a slice's offset into its source.
+It follows CRuby's `rb_io_buffer_get_bytes_for_reading` /
+`_for_writing`:
+
+- A freed or zero-size buffer (a null buffer) passes `NULL`.
+- A slice whose source was freed or shrunk under it raises
+  `IO::Buffer::InvalidatedError`.
+- A read-only buffer (`IO::Buffer.for(string)`, a `READONLY` mapping, a
+  slice of either) raises `IO::Buffer::AccessError` in any slot except
+  `:buffer_in`, which is the one that promises C only reads.
+
+A buffer held in a boxed value, such as an element of a mixed Array, is
+recognised at run time. An instance of a user-defined class in a pointer
+slot is refused while compiling, since it has no address C can use. The length is not
+part of the spec: pass `buf.size` (or a count) as a separate argument.
+
+Lifetime is call-duration only, as for `:int_array`: the buffer is kept
+alive across the call, including a `blocking: true` call during which
+other threads collect, but the C side must not keep the pointer. Freeing
+or resizing the buffer from another thread while a `blocking: true` call
+uses it is a data race.
 
 ### `ffi_const :NAME, <int>`
 

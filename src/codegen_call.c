@@ -29531,8 +29531,28 @@ else {
            the call itself and comes back for the return. A callback-taking
            or variadic function keeps the plain call. */
         int blocking = c->ffi_funcs[fi].blocking && !hdr_call && !is_vararg;
+        /* An IO::Buffer in a pointer slot hands C its base address. The
+           buffer is evaluated in argument order into a rooted temp, and its
+           base is taken once every argument has run (a later one may resize
+           it), so a call carrying one takes the temp form too. A boxed
+           pointer argument asks at run time once the program loads the
+           class. A user-class instance has no address C can use; a native
+           class's struct is its package's to hand over. */
+        int iob_cls = ffi_iobuffer_class(c);
+        int iob_temps = 0;
+        for (int ai = 0; ai < fixed_argc && ai < argc; ai++) {
+          const FfiSpecInfo *psi = ffi_spec_lookup(c->ffi_funcs[fi].args[ai]);
+          if (!psi || !sp_streq(psi->c_type, "void *")) continue;
+          TyKind pat = comp_ntype(c, argv[ai]);
+          if (!ty_is_object(pat)) continue;
+          if (ty_object_class(pat) == iob_cls) { iob_temps = 1; continue; }
+          if (!c->classes[ty_object_class(pat)].is_native_class)
+            unsupported(c, argv[ai], "ffi pointer argument (a Ruby object has no C address; pass an IO::Buffer, a String or a :ptr value)");
+        }
+        int use_temps = blocking || iob_temps;
         Buf pre_buf; memset(&pre_buf, 0, sizeof pre_buf);
-        int tb = blocking ? ++g_tmp : 0;
+        Buf base_buf; memset(&base_buf, 0, sizeof base_buf);
+        int tb = use_temps ? ++g_tmp : 0;
         /* Build the raw C call */
         Buf call_buf; memset(&call_buf, 0, sizeof call_buf);
         if (is_vararg && (fixed_argc == 0 || hdr_call)) {
@@ -29553,7 +29573,34 @@ else {
           TyKind at = comp_ntype(c, argv[ai]);
           int cbidx = ffi_find_callback(c, rcmod, spec);
           if (cbidx >= 0) { emit_ffi_callback_arg(c, cbidx, argv[ai], &call_buf); continue; }
-          size_t arg_at = call_buf.len;   /* the converted argument, for the blocking form's temp */
+          size_t arg_at = call_buf.len;   /* the converted argument, for the temp form */
+          const FfiSpecInfo *asi = ffi_spec_lookup(spec);
+          int ptr_slot = asi && sp_streq(asi->c_type, "void *");
+          int iob_writing = !sp_streq(spec, "buffer_in");
+          if (ptr_slot && iob_cls >= 0 && (at == ty_object(iob_cls) || (at == TY_POLY && use_temps))) {
+            if (at == TY_POLY) {
+              buf_printf(&pre_buf, "sp_RbVal _bk%d_%d = ", tb, ai);
+              emit_expr(c, argv[ai], &pre_buf);
+              buf_printf(&pre_buf, "; SP_GC_ROOT_RBVAL(_bk%d_%d); ", tb, ai);
+              buf_printf(&base_buf, "void * _b%d_%d = sp_IOBuffer_ffi_ptr(_bk%d_%d, %d, %d); ",
+                         tb, ai, tb, ai, iob_cls, iob_writing);
+            }
+            else {
+              buf_printf(&pre_buf, "sp_IOBuffer *_bk%d_%d = ", tb, ai);
+              emit_expr(c, argv[ai], &pre_buf);
+              buf_printf(&pre_buf, "; SP_GC_ROOT(_bk%d_%d); ", tb, ai);
+              buf_printf(&base_buf, "void * _b%d_%d = sp_IOBuffer_ffi_base(_bk%d_%d, %d); ",
+                         tb, ai, tb, ai, iob_writing);
+            }
+            buf_printf(&call_buf, "_b%d_%d", tb, ai);
+            continue;
+          }
+          if (ptr_slot && iob_cls >= 0 && at == TY_POLY) {
+            buf_puts(&call_buf, "sp_IOBuffer_ffi_ptr(");
+            emit_expr(c, argv[ai], &call_buf);
+            buf_printf(&call_buf, ", %d, %d)", iob_cls, iob_writing);
+            continue;
+          }
           /* :ptr already emits a void*; str/int_array/float_array carry a const
              element pointer that must be genericized for the header call. */
           int voidp = hdr_call && (sp_streq(spec, "str") ||
@@ -29628,7 +29675,7 @@ else {
             else { buf_puts(&call_buf, "(("); buf_puts(&call_buf, ffi_c_type(spec)); buf_puts(&call_buf, ")("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))"); }
           }
           if (voidp) buf_puts(&call_buf, ")");
-          if (blocking) {
+          if (use_temps) {
             /* move the converted argument out to a temp ahead of the call */
             buf_printf(&pre_buf, "%s _b%d_%d = %s; ", ffi_c_type(spec), tb, ai, call_buf.p + arg_at);
             buf_erase(&call_buf, arg_at, call_buf.len - arg_at);
@@ -29666,13 +29713,24 @@ else {
           /* the worker is out of the world for exactly the call */
           Buf w; memset(&w, 0, sizeof w);
           if (is_void_ret)
-            buf_printf(&w, "({ %ssp_native_enter(); %s; sp_native_leave(); })", pre_buf.p ? pre_buf.p : "", call_buf.p);
+            buf_printf(&w, "({ %s%ssp_native_enter(); %s; sp_native_leave(); })",
+                       pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", call_buf.p);
           else
-            buf_printf(&w, "({ %s%s _b%d_r; sp_native_enter(); _b%d_r = %s; sp_native_leave(); _b%d_r; })",
-                       pre_buf.p ? pre_buf.p : "", ffi_c_type(ret_spec), tb, tb, call_buf.p, tb);
+            buf_printf(&w, "({ %s%s%s _b%d_r; sp_native_enter(); _b%d_r = %s; sp_native_leave(); _b%d_r; })",
+                       pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", ffi_c_type(ret_spec), tb, tb, call_buf.p, tb);
+          free(call_buf.p); call_buf = w;
+        }
+        else if (use_temps) {
+          Buf w; memset(&w, 0, sizeof w);
+          if (is_void_ret)
+            buf_printf(&w, "({ %s%s%s; })", pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", call_buf.p);
+          else
+            buf_printf(&w, "({ %s%s%s _b%d_r = %s; _b%d_r; })", pre_buf.p ? pre_buf.p : "",
+                       base_buf.p ? base_buf.p : "", ffi_c_type(ret_spec), tb, call_buf.p, tb);
           free(call_buf.p); call_buf = w;
         }
         free(pre_buf.p);
+        free(base_buf.p);
         if (is_void_ret) {
           buf_puts(b, "("); buf_puts(b, call_buf.p); buf_puts(b, ", (sp_int)0)");
         }
