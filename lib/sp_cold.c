@@ -2806,6 +2806,10 @@ sp_int sp_process_kill1(sp_RbVal sig, sp_int pid) {SP_GC_ROOT_RBVAL(sig);
 }
 sp_RbVal sp_Enumerator_size(sp_Enumerator *e) {SP_GC_ROOT(e);
   if (!e) return sp_box_nil();
+  /* the chunk family (chunk, chunk_while, slice_when, slice_before,
+     slice_after) answers a Generator-backed Enumerator in CRuby, whose size is
+     unknown until it is walked: nil, though the items here are a snapshot */
+  if (e->gen_label) return sp_box_nil();
   /* an argless cycle is endless unless there is nothing to repeat */
   if (e->endless) return (e->items && e->items->len > 0) ? sp_box_float(1.0 / 0.0) : sp_box_int(0);
   if (e->items) return sp_box_int(e->items->len);
