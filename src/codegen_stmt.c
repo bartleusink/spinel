@@ -7779,7 +7779,7 @@ else {
                ivt2 == TY_FIBER || ivt2 == TY_THREAD || ivt2 == TY_QUEUE || ivt2 == TY_MUTEX || ivt2 == TY_CONDVAR || ivt2 == TY_PROC || ivt2 == TY_IO ||
                ivt2 == TY_MATCHDATA || ivt2 == TY_EXCEPTION || ivt2 == TY_REGEX) {
         emitted_lit = emit_empty_literal_as(c, v, ivt2, &vval);
-        if (!emitted_lit) emit_expr(c, v, &vval);
+        if (!emitted_lit) emit_array_store_value(c, ivt2, v, &vval);   /* a seed-pinned kind converts */
       }
       else emit_expr(c, v, &vval);
       g_pre = saved_pre;
@@ -7995,6 +7995,15 @@ else {
     else if (ivt == TY_BIGINT && comp_ntype(c, v) != TY_BIGINT &&
              ty_is_numeric(comp_ntype(c, v))) {
       buf_puts(b, "sp_bigint_new_int("); emit_int_expr(c, v, b); buf_puts(b, ")");
+    }
+    else if (seeded_array_kind_mismatch(ivt, comp_ntype(c, v))) {
+      /* An array of another kind into an array ivar a true --rbs seed kept at
+         its own kind: `@storage: Array[Integer]` assigned a helper's result
+         that inference, seeing only an empty `[]` default, typed a general
+         Array. The slot cannot widen, so the value converts the way a boxed
+         one does (#4424); the raw pointer went into the other struct's slot
+         and the C did not build. */
+      emit_array_store_value(c, ivt, v, b);
     }
     else if (ivt != TY_POLY && ivt != TY_UNKNOWN && comp_ntype(c, v) == TY_POLY) {
       /* poly rhs assigned to a typed ivar: unbox to the concrete type. The

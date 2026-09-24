@@ -531,6 +531,8 @@ void emit_orw_guard(Compiler *c, int v, int boxed, const char *cond, const char 
 int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b);
 /* Wrap a boxed expression in the --rbs seed assertion (a no-op macro without
    -DSP_RBS_CHECK) before it narrows into a seeded slot. */
+int seeded_array_kind_mismatch(TyKind slot, TyKind vt);
+void emit_array_store_value(Compiler *c, TyKind slot, int v, Buf *b);
 void emit_rbs_checked_text(Compiler *c, TyKind slot, const char *slotname,
                            const char *expr, Buf *b);
 void emit_proc_literal(Compiler *c, int create, Buf *b);
