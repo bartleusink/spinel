@@ -5862,6 +5862,7 @@ static int pd_hoist(Compiler *c, Buf *b, size_t from, int tr, TyKind rct,
     buf_puts(&pb, "static __attribute__((unused, noinline)) ");
     buf_printf(&pb, sig.p, fn); buf_puts(&pb, ";\n");
     Buf db; memset(&db, 0, sizeof db);
+    emit_current_line_directive(c, &db);   /* the first site it came from */
     buf_puts(&db, "static ");
     buf_printf(&db, sig.p, fn);
     buf_printf(&db, " { %s } return _t%d; }\n", body.p ? body.p : "", tr_canon);

@@ -6819,6 +6819,19 @@ void emit_line_directive(Compiler *c, int id, Buf *b) {
   buf_printf(b, "#line %d \"%s\"\n", ln, path);
 }
 
+/* Write the position in effect (the last #line emitted) again, for code
+   written out of line from where it was generated: an out-of-line dispatch
+   function names the call site it was hoisted from, where it would otherwise
+   inherit whatever directive preceded it (#4928). Leaves the state alone. */
+void emit_current_line_directive(Compiler *c, Buf *b) {
+  if (!g_line_map) return;
+  const char *path = g_lm_last_line > 0 ? nt_file_path(c->nt, g_lm_last_fid) : NULL;
+  if (g_lm_last_line > 0 && !path) path = c->nt->source_file;
+  if (b->len > 0 && b->p[b->len - 1] != '\n') buf_puts(b, "\n");
+  if (g_lm_last_line > 0 && path && *path) buf_printf(b, "#line %d \"%s\"\n", g_lm_last_line, path);
+  else buf_puts(b, "#line 1 \"<spinel-synthesized>\"\n");
+}
+
 /* Mark the start of a SYNTHESIZED region: code generated whole from the
    class table -- the runtime dispatch switches, the generated constructors --
    is lowered from no node, so no #line is ever emitted inside it, and

@@ -301,6 +301,7 @@ extern TyKind g_yield_slot_ty_fallback2;
    at statement boundaries so a C compile error is reported against the
    original Ruby source line. Set once by codegen_program. */
 extern int g_line_map;
+void emit_current_line_directive(Compiler *c, Buf *b);
 extern int g_debug;
 extern int g_gate_raise;  /* SPINEL_GATE_RAISE: raise NoMethodError at the
                              unresolved-call gate instead of a silent default. */
