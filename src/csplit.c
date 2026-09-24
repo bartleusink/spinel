@@ -331,9 +331,9 @@ int c_split(const char *pre_path, const char *out_dir, int nparts,
       ident_before(t, x->st, fp, x->name, sizeof x->name);
       if (!x->name[0]) { ok = 0; break; }
       int inl = has_word(t, x->st, fp, "inline") || has_word(t, x->st, fp, "__inline__") ||
-                has_word(t, x->st, fp, "__inline");
-      /* a static local needs the single definition */
-      x->keep_inline = inl && !has_word(t, body, en, "static");
+                has_word(t, x->st, fp, "__inline") || has_word(t, x->st, body, "always_inline");
+      /* a static local needs the single definition; 2 marks it */
+      x->keep_inline = has_word(t, body, en, "static") ? 2 : inl;
     }
     else if (starts_with_word(t, x->st, en, "typedef") || starts_with_word(t, x->st, en, "extern") ||
              starts_with_word(t, x->st, en, "_Static_assert")) {
@@ -365,6 +365,10 @@ int c_split(const char *pre_path, const char *out_dir, int nparts,
     if (x->kind == IT_PROTO) {
       size_t fp = first_paren(t, x->st, en);
       ident_before(t, x->st, fp, x->name, sizeof x->name);
+      /* a prototype that says inline makes the function inline wherever it
+         is defined (keep_inline here: "declared inline") */
+      x->keep_inline = has_word(t, x->st, en, "inline") || has_word(t, x->st, en, "__inline__") ||
+                       has_word(t, x->st, en, "__inline") || has_word(t, x->st, en, "always_inline");
     }
     if (x->kind == IT_VAR && !x->name[0]) {
       long cut = decl_cut(t, x->st, en);
@@ -399,8 +403,23 @@ int c_split(const char *pre_path, const char *out_dir, int nparts,
     free(t); free(it); return -1;
   }
 
-  /* A name kept static inline keeps its prototypes static; every other
-     function's prototypes lose `static`. */
+  /* A function is inline when its definition or any prototype says so,
+     unless a static local needs its one definition. */
+  {
+    int np2 = 0;
+    const char **pin = malloc(sizeof(char *) * (size_t)(nit + 1));
+    for (int k = 0; k < nit; k++) if (it[k].kind == IT_PROTO && it[k].keep_inline) pin[np2++] = it[k].name;
+    qsort(pin, (size_t)np2, sizeof *pin, cmpstr);
+    for (int k = 0; k < nit; k++) {
+      if (it[k].kind != IT_FN) continue;
+      if (it[k].keep_inline == 2) { it[k].keep_inline = 0; continue; }
+      const char *key = it[k].name;
+      if (!it[k].keep_inline && bsearch(&key, pin, (size_t)np2, sizeof *pin, cmpstr)) it[k].keep_inline = 1;
+    }
+    free(pin);
+  }
+  /* A name kept static inline keeps its prototypes as written; every other
+     function's prototypes lose `static` and any inline word. */
   int nfn = 0; size_t fn_bytes = 0;
   for (int k = 0; k < nit; k++)
     if (it[k].kind == IT_FN && !it[k].keep_inline) { nfn++; fn_bytes += it[k].en - it[k].st; }
@@ -438,7 +457,7 @@ int c_split(const char *pre_path, const char *out_dir, int nparts,
         const char *key = x->name;
         int keep = bsearch(&key, inl, (size_t)ninl, sizeof *inl, cmpstr) != NULL;
         if (keep) fwrite(t + x->st, 1, x->en - x->st, h);
-        else put_stripped(h, t, x->st, x->en, 0);
+        else put_stripped(h, t, x->st, x->en, 1);
         fputc('\n', h);
         break;
       }
