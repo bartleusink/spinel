@@ -5057,6 +5057,20 @@ int emit_find_index_poly_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* The answer of an any?/all?/none?/one? loop: its count test, boxed when
+   the call's slot is (a poly receiver whose candidate classes answer the
+   name with something other than a Boolean); the raw test assigned into an
+   sp_RbVal was a C error (#4961). */
+static void pred_fold_answer(Compiler *c, int id, int tacc, int is_all, int is_any, int is_none, Buf *b) {
+  int boxed = comp_ntype(c, id) == TY_POLY;
+  if (boxed) buf_puts(b, "sp_box_bool(");
+  if (is_all) buf_printf(b, "_t%d", tacc);
+  else if (is_any) buf_printf(b, "(_t%d > 0)", tacc);
+  else if (is_none) buf_printf(b, "(_t%d == 0)", tacc);
+  else buf_printf(b, "(_t%d == 1)", tacc);
+  if (boxed) buf_puts(b, ")");
+}
+
 int emit_predicate_expr(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -5175,10 +5189,7 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_puts(g_pre, "}\n");
 
-    if (is_all) buf_printf(b, "_t%d", tacc);
-    else if (is_any) buf_printf(b, "(_t%d > 0)", tacc);
-    else if (is_none) buf_printf(b, "(_t%d == 0)", tacc);
-    else buf_printf(b, "(_t%d == 1)", tacc);
+    pred_fold_answer(c, id, tacc, is_all, is_any, is_none, b);
     return 1;
   }
 
@@ -5263,10 +5274,7 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "}\n");
 
-  if (is_all) buf_printf(b, "_t%d", tacc);
-  else if (is_any) buf_printf(b, "(_t%d > 0)", tacc);
-  else if (is_none) buf_printf(b, "(_t%d == 0)", tacc);
-  else buf_printf(b, "(_t%d == 1)", tacc);
+  pred_fold_answer(c, id, tacc, is_all, is_any, is_none, b);
   return 1;
 }
 
