@@ -5319,11 +5319,13 @@ int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc) {
   if (idx < 0 || idx >= m->nparams) return -1;
   if (!opt_before_required(m)) return idx < argc ? idx : -1;
   /* a rest parameter makes the arity a range rather than a map */
-  if (m->rest_idx >= 0 || m->kwrest_idx >= 0) return idx < argc ? idx : -1;
-  /* keywords sit in pnames too but take no positional argument; map over the
-     positional prefix only */
+  if (m->rest_idx >= 0) return idx < argc ? idx : -1;
+  /* keywords and a **rest sit in pnames too but take no positional
+     argument; map over the positional prefix only. A **kw was mapped by
+     position once, so `def m(a = 1, b, **kw)` given one argument bound it
+     to a and left b nil. */
   int n = m->nparams;
-  while (n > 0 && callee_param_is_declared_kwarg(c, m, m->pnames[n - 1])) n--;
+  while (n > 0 && (n - 1 == m->kwrest_idx || callee_param_is_declared_kwarg(c, m, m->pnames[n - 1]))) n--;
   if (idx >= n) return -1;
   int pre = 0;
   while (pre < n && (!m->pdefault || m->pdefault[pre] < 0)) pre++;

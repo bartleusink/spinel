@@ -5951,9 +5951,11 @@ static int poly_arm_count(Compiler *c, Scope *m, int kwh, int pos_argc, int spla
   if (splat_a >= 0) return 1;   /* judged at run time by emit_poly_splat_arity */
   int fills = kwh_fills_slot(c, m, kwh, pos_argc);
   int named = fills ? 0 : kwh_named_kwarg_fills(c, m, kwh);
-  /* arg_slot_for_param maps a leading optional by position when a *rest or
-     **kw sits in the list, so such an arm keeps the old judgement */
-  if (opt_before_required(m) && (m->rest_idx >= 0 || m->kwrest_idx >= 0))
+  /* arg_slot_for_param maps a leading optional by position when a *rest
+     sits in the list, so such an arm keeps the old judgement (a *rest takes
+     any surplus); a **kw alone is judged below, surplus positionals
+     included */
+  if (opt_before_required(m) && m->rest_idx >= 0)
     return pos_argc + fills + named >= m->nrequired ? 1 : 0;
   int given = pos_argc + fills;
   int need = m->nrequired, req = 0, tot = 0, kwd = 0, judged = !m->cs_synth;
