@@ -9125,7 +9125,7 @@ static int setter_value_open(Compiler *c, int id, Buf *b, TyKind *vt_out) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
   if (id == g_setter_stmt_id || argc != 1 || nt_ref(nt, id, "block") >= 0 ||
-      !name_is_plain_setter(nt_str(nt, id, "name")) || g_n_argov >= MAX_ARG_OVERRIDE)
+      !call_is_setter_assign(nt, id) || g_n_argov >= MAX_ARG_OVERRIDE)
     return -1;
   TyKind vt = comp_ntype(c, argv[0]);
   if (vt == TY_UNKNOWN) return -1;

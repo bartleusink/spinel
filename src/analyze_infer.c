@@ -4988,7 +4988,7 @@ else {
          and yields the argument's own temp, so no arm's return widens it.
          Only when some class has the writer -- otherwise the call is the
          NoMethodError the dispatch raises. */
-      if (argc == 1 && name_is_plain_setter(name) && nt_ref(nt, id, "block") < 0) {
+      if (argc == 1 && call_is_setter_assign(nt, id) && nt_ref(nt, id, "block") < 0) {
         int owned = 0;
         char sbase[256];
         int has_base = setter_base_name(name, sbase, sizeof sbase);

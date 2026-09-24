@@ -7270,7 +7270,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       /* `x = v` through a writer: the value is v as written, so the arms call
          the writer for effect and the argument's temp is the result (the
          static-receiver twin is setter_value_open). */
-      int is_setter_val = argc == 1 && !has_splat_arg && name_is_plain_setter(name) &&
+      int is_setter_val = argc == 1 && !has_splat_arg && call_is_setter_assign(nt, id) &&
                           nt_ref(nt, id, "block") < 0;
       int *atmp = malloc(sizeof(int) * argc);
       TyKind *atmp_ty = malloc(sizeof(TyKind) * argc);
@@ -30122,6 +30122,7 @@ else {
            other is bound once to a temporary local that the call reads. */
         if (argc == 1 && comp_method_in_chain(c, _arc, name, NULL) >= 0 &&
             nt_ref(nt, id, "block") < 0 && !g_setter_value_inner &&
+            call_is_setter_assign(nt, id) &&   /* not a send's plain call (#4921) */
             (name[0] == '_' || (name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z'))) {   /* a setter, not ==, <=, [] = */
           const char *aty = nt_type(nt, argv[0]);
           int simple = aty && (sp_streq(aty, "IntegerNode") || sp_streq(aty, "FloatNode") ||

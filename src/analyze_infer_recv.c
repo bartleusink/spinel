@@ -1502,7 +1502,7 @@ int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out) {
            passes the argument through a temp that is the expression's value).
            An argument not yet typed leaves the call to the method rule below,
            which the next round revisits. */
-        if (argc == 1 && name_is_plain_setter(name) &&
+        if (argc == 1 && call_is_setter_assign(c->nt, id) &&
             comp_method_in_chain(c, cid, name, NULL) >= 0) {
           TyKind rhsk = infer_type(c, argv[0]);
           if (rhsk != TY_UNKNOWN) { *out = rhsk; return 1; }

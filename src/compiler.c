@@ -984,6 +984,16 @@ int name_is_plain_setter(const char *name) {
   char p = name[ln - 2];
   return p != '=' && p != '!' && p != '<' && p != '>' && p != ']';
 }
+/* Is CallNode `id` a setter written as an assignment (`obj.x = v`), whose
+   value is the argument whatever the writer returns? A call the send desugar
+   retargeted (`obj.send(:x=, v)`, marked send_blind / vis_enforce) is a plain
+   method call: its value is what the method returns (#4921). */
+int call_is_setter_assign(const NodeTable *nt, int id) {
+  if (id < 0 || !name_is_plain_setter(nt_str(nt, id, "name"))) return 0;
+  const char *sb = nt_str(nt, id, "send_blind");
+  const char *ve = nt_str(nt, id, "vis_enforce");
+  return !(sb && sb[0] == '1') && !(ve && ve[0] == '1');
+}
 /* The attribute a setter name writes: "x=" -> "x". 0 when the name is not a
    plain setter or does not fit. */
 int setter_base_name(const char *name, char *out, size_t cap) {
