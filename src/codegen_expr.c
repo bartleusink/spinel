@@ -1526,6 +1526,22 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
         return;
       }
     }
+    if (lv && lv->type == TY_STRBUF) {
+      /* a shared-handle local: the statement form owns every way a value
+         becomes the handle (alias, boxed element, fresh wrap); the raw
+         const char * went into the sp_String * slot here (a write inside
+         Array.new's block, whose non-tail statements are emitted as
+         expressions). The value is the slot's ordinary read face, as the
+         ivar twin's is. */
+      buf_puts(b, "({ ");
+      emit_assign(c, id, b, 0);
+      buf_puts(b, " (_sp_ret_strbuf = (void *)");
+      emit_local_ref(c, id, nm, b);
+      buf_puts(b, ", sp_str_concat(sp_String_cstr(");
+      emit_local_ref(c, id, nm, b);
+      buf_puts(b, "), (&(\"\\xff\")[1]))); })");
+      return;
+    }
     buf_puts(b, "({ ");
     emit_local_ref(c, id, nm, b); buf_puts(b, " = ");
     if (lv && lv->type == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
