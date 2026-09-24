@@ -333,6 +333,18 @@ static int emit_array_block_index(Compiler *c, int id, int recv, TyKind rt, cons
 }
 
 
+/* An operand whose evaluation cannot allocate: a local's read or a scalar
+   literal. */
+static int fetch_operand_is_inert(Compiler *c, int n) {
+  switch (nt_kind(c->nt, n)) {
+    case NK_LocalVariableReadNode: case NK_IntegerNode: case NK_FloatNode:
+    case NK_SymbolNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 int emit_array_call(Compiler *c, int id, Buf *b) {
   /* The variadic Array mutators accept zero elements and return the receiver
      unchanged; every arm below is written for argc >= 1, so a no-argument call
@@ -5817,7 +5829,13 @@ else {
         int needs_box = (vt != TY_POLY && ty_unify(vt, dt) == TY_POLY);
         int th = ++g_tmp, tk = ++g_tmp;
         buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; SP_GC_ROOT(_t%d)", th);   /* rooted across the key, as the array arms are */
+        /* rooted across the key and the default, as the array arms are; a
+           local or literal key with a literal default allocates nothing, and
+           the root was a push and a pop per lookup in a counting loop */
+        if (!(fetch_operand_is_inert(c, argv[0]) && fetch_operand_is_inert(c, argv[1]) && !needs_box &&
+              (ty_hash_key(rt) != TY_STRING || comp_ntype(c, argv[0]) == TY_STRING) &&
+              !(vt == TY_POLY && dt != TY_POLY)))
+          buf_printf(b, "; SP_GC_ROOT(_t%d)", th);
         buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
         if (needs_box) {
           buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
@@ -5826,6 +5844,13 @@ else {
           emit_boxed_text(c, vt, _bx.p, b);
           free(_bx.p);
           buf_puts(b, " : "); emit_boxed(c, argv[1], b);
+        }
+        else if (vt == TY_INT && (dt == TY_INT || dt == TY_NIL) && fetch_operand_is_inert(c, argv[1]) &&
+                 (sp_streq(hn, "IntInt") || sp_streq(hn, "StrInt"))) {
+          /* an inert default costs nothing to evaluate up front: one probe */
+          buf_printf(b, "; sp_%sHash_fetch_or(_t%d, _t%d, ", hn, th, tk);
+          emit_expr_slot(c, argv[1], TY_INT, b);
+          buf_puts(b, ")");
         }
         else {
           buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);

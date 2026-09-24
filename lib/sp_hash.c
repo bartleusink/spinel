@@ -21,6 +21,9 @@ sp_int sp_StrIntHash_get(sp_StrIntHash*h,const char*k){SP_GC_ROOT(h);SP_GC_ROOT_
 sp_int sp_StrIntHash_get_opt(sp_StrIntHash*h,const char*k){SP_GC_ROOT(h);SP_GC_ROOT_STR(k);if(!h)return SP_INT_NIL;sp_int idx=(sp_int)(sp_str_hash(k)&h->mask);while(h->keys[idx]){if(sp_str_eq(h->keys[idx],k))return h->vals[idx];idx=(idx+1)&h->mask;}return h->default_v;}
 void sp_StrIntHash_set(sp_StrIntHash*h,const char*k,sp_int v){SP_GC_ROOT(h);SP_GC_ROOT_STR(k); if(!k){sp_raise_cls("TypeError","no implicit conversion of nil into String");return;} sp_gc_wb((void*)h);if(h->len*2>=h->cap)sp_StrIntHash_grow(h);sp_int idx=(sp_int)(sp_str_hash(k)&h->mask);while(h->keys[idx]){if(sp_str_eq(h->keys[idx],k)){h->vals[idx]=v;return;}idx=(idx+1)&h->mask;}h->keys[idx]=k;h->vals[idx]=v;h->order[h->len]=k;h->len++;}
 sp_bool sp_StrIntHash_has_key(sp_StrIntHash*h,const char*k){SP_GC_ROOT(h);SP_GC_ROOT_STR(k);sp_int idx=(sp_int)(sp_str_hash(k)&h->mask);while(h->keys[idx]){if(sp_str_eq(h->keys[idx],k))return TRUE;idx=(idx+1)&h->mask;}return FALSE;}
+/* h.fetch(k, d) in one probe: the value, or d when k is absent (the
+   hash's own default does not apply to fetch) */
+sp_int sp_StrIntHash_fetch_or(sp_StrIntHash*h,const char*k,sp_int d){SP_GC_ROOT(h);SP_GC_ROOT_STR(k);if(!h)return d;sp_int idx=(sp_int)(sp_str_hash(k)&h->mask);while(h->keys[idx]){if(sp_str_eq(h->keys[idx],k))return h->vals[idx];idx=(idx+1)&h->mask;}return d;}
 /* Hash#value? -- scan values in insertion order. Issue #738. */
 sp_bool sp_StrIntHash_has_value(sp_StrIntHash*h,sp_int v){if(!h)return FALSE;for(sp_int i=0;i<h->len;i++)if(sp_StrIntHash_get(h,h->order[i])==v)return TRUE;return FALSE;}
 sp_int sp_StrIntHash_length(sp_StrIntHash*h){return h->len;}
@@ -93,6 +96,7 @@ void sp_IntStrHash_delete(sp_IntStrHash*h,sp_int k){ sp_gc_wb((void*)h);if(!h)re
    Hash.new(N)). Proven-present reads keep using _get. */
 sp_int sp_IntIntHash_get_opt(sp_IntIntHash*h,sp_int k){if(!h)return SP_INT_NIL;sp_int idx=_sp_istr_idx(h->mask,k);while(h->used[idx]){if(h->keys[idx]==k)return h->vals[idx];idx=(idx+1)&h->mask;}return h->default_v;}
 sp_bool sp_IntIntHash_has_key(sp_IntIntHash*h,sp_int k){sp_int idx=_sp_istr_idx(h->mask,k);while(h->used[idx]){if(h->keys[idx]==k)return TRUE;idx=(idx+1)&h->mask;}return FALSE;}
+sp_int sp_IntIntHash_fetch_or(sp_IntIntHash*h,sp_int k,sp_int d){if(!h)return d;sp_int idx=_sp_istr_idx(h->mask,k);while(h->used[idx]){if(h->keys[idx]==k)return h->vals[idx];idx=(idx+1)&h->mask;}return d;}
 sp_int sp_IntIntHash_length(sp_IntIntHash*h){return h?h->len:0;}
 sp_IntArray*sp_IntIntHash_keys(sp_IntIntHash*h){SP_GC_ROOT(h);sp_IntArray*a=sp_IntArray_new();SP_GC_ROOT(a);if(h)for(sp_int i=0;i<h->len;i++)sp_IntArray_push(a,h->order[i]);return a;}
 sp_IntArray*sp_IntIntHash_values(sp_IntIntHash*h){SP_GC_ROOT(h);sp_IntArray*a=sp_IntArray_new();SP_GC_ROOT(a);if(h)for(sp_int i=0;i<h->len;i++)sp_IntArray_push(a,sp_IntIntHash_get(h,h->order[i]));return a;}
