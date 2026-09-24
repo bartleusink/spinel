@@ -11,3 +11,14 @@ RangeError: integer overflow in **
 -4
 2
 ivar RangeError: integer overflow in *
+RangeError: integer overflow in +
+RangeError: integer overflow in -
+RangeError: integer overflow in *
+RangeError: integer overflow in **
+RangeError: integer overflow in <<
+RangeError: integer overflow in +
+4611686018427387904
+cvar RangeError: integer overflow in -
+cvar RangeError: integer overflow in *
+cvar RangeError: integer overflow in **
+-4611686018427387904

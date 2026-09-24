@@ -1452,21 +1452,28 @@ static int local_is_bounded_counter(Compiler *c, int id, const char *nm, LocalVa
    prelude (`$a |= f`) sits beside the slot read as a sibling C argument,
    whose order C leaves unspecified. For an effectful rhs, read the slot into
    a rooted temp inserted in g_pre at `pre_mark`, ahead of any prelude, and
-   answer the temp as the operation's input; otherwise answer `lval` (#4875). */
-static const char *array_op_assign_src(Compiler *c, const char *lval, const char *k,
-                                       int v, size_t pre_mark, char *tn, size_t tnsz) {
+   answer the temp as the operation's input; otherwise answer `lval` (#4875).
+   `ctype` spells the temp's C type; a scalar (`root` 0) needs no root. */
+static const char *op_assign_slot_src(Compiler *c, const char *lval, const char *ctype,
+                                      int root, int v, size_t pre_mark,
+                                      char *tn, size_t tnsz) {
   if (!g_pre || !subtree_has_side_effect(c, v)) return lval;
   int t = ++g_tmp;
   snprintf(tn, tnsz, "_t%d", t);
   Buf cap; memset(&cap, 0, sizeof cap);
-  emit_indent(&cap, g_indent); buf_printf(&cap, "sp_%sArray *_t%d = %s;\n", k, t, lval);
-  emit_indent(&cap, g_indent); buf_printf(&cap, "SP_GC_ROOT(_t%d);\n", t);
+  emit_indent(&cap, g_indent); buf_printf(&cap, "%s_t%d = %s;\n", ctype, t, lval);
+  if (root) { emit_indent(&cap, g_indent); buf_printf(&cap, "SP_GC_ROOT(_t%d);\n", t); }
   char *prelude = strdup(g_pre->len > pre_mark ? g_pre->p + pre_mark : "");
   buf_erase(g_pre, pre_mark, g_pre->len - pre_mark);
   buf_puts(g_pre, cap.p);
   buf_puts(g_pre, prelude);
   free(prelude); free(cap.p);
   return tn;
+}
+static const char *array_op_assign_src(Compiler *c, const char *lval, const char *k,
+                                       int v, size_t pre_mark, char *tn, size_t tnsz) {
+  char ct[48]; snprintf(ct, sizeof ct, "sp_%sArray *", k);
+  return op_assign_slot_src(c, lval, ct, 1, v, pre_mark, tn, tnsz);
 }
 
 /* Array op-assign on any slot -- a local, an ivar, a global, a class
@@ -1546,6 +1553,70 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
   return 0;
 }
 
+/* The scalar arms of `x OP= v` -- Integer, Bignum, Float -- on any slot a
+   plain C lvalue names: a local, a global, a class variable, an ivar. `lval`
+   names the slot and `t` its type. The global and class variable forms had
+   only the raw C operator, so `$i += 2**62` skipped the overflow check the
+   local takes and read back as nil, and `**=` did not compile.
+
+   `capture` reads the slot ahead of an effectful rhs (op_assign_slot_src): a
+   method may reassign a global, class variable or ivar before it returns,
+   and CRuby has already read it. A local keeps its own spelling. The caller
+   has emitted the indent. Answers 1 when it emitted the write. */
+int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *op,
+                          int v, int capture, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (!op) return 0;
+  TyKind vt = comp_ntype(c, v);
+  const char *fn = t == TY_INT ? int_arith_fn(op)
+                 : t == TY_BIGINT ? bigint_arith_fn(op) : NULL;
+  int bitop = t == TY_INT && (sp_streq(op, "<<") || sp_streq(op, ">>") ||
+                              sp_streq(op, "|") || sp_streq(op, "&") || sp_streq(op, "^"));
+  int fop = t == TY_FLOAT && (sp_streq(op, "+") || sp_streq(op, "-") ||
+                              sp_streq(op, "*") || sp_streq(op, "/"));
+  if (!fn && !bitop && !fop) return 0;
+  /* A `<<=` by a literal count that overflows every nonzero receiver (>= 63)
+     or a negative count routes through sp_int_shl, mirroring the binary gate. */
+  if (bitop && sp_streq(op, "<<") && nt_kind(nt, v) == NK_IntegerNode) {
+    long long vlit = nt_int(nt, v, "value", 0);
+    if (vlit < 0 || vlit >= 63) {
+      buf_printf(b, "%s = sp_int_shl(%s, %lldLL);\n", lval, lval, vlit);
+      return 1;
+    }
+  }
+  size_t pre_mark = g_pre ? g_pre->len : 0;
+  Buf rb; memset(&rb, 0, sizeof rb);
+  if (t == TY_INT && fn && (sp_streq(op, "/") || sp_streq(op, "%"))) emit_int_divisor(c, v, &rb);
+  else if (vt == TY_POLY) {
+    buf_puts(&rb, t == TY_FLOAT ? "sp_poly_to_f(" : t == TY_BIGINT ? "sp_poly_as_bigint(" : "sp_poly_to_i(");
+    emit_expr(c, v, &rb); buf_puts(&rb, ")");
+  }
+  else if (t == TY_BIGINT && vt != TY_BIGINT) {
+    buf_puts(&rb, "sp_bigint_new_int("); emit_expr(c, v, &rb); buf_puts(&rb, ")");
+  }
+  /* an unresolved call (`t += f.weight` with no such method) lowers to the
+     gate's raise token, an sp_RbVal; coerce it as a plain write does */
+  else if (vt == TY_UNKNOWN && !bitop) emit_unresolved_coerced(c, v, t, &rb);
+  else emit_expr(c, v, &rb);
+  const char *rhs = rb.p ? rb.p : "";
+  char tn[32];
+  const char *src = lval;
+  if (capture) {
+    char ct[48]; snprintf(ct, sizeof ct, "%s ", c_type_name(t));
+    src = op_assign_slot_src(c, lval, ct, t == TY_BIGINT, v, pre_mark, tn, sizeof tn);
+  }
+  /* Int and Bignum arithmetic take the same overflow-checked helpers as the
+     binary form: a raw C `lv_x *= y` silently wrapped where `x * y` raised.
+     Bitwise ops map straight to the C operator (fixed-width wrap, same as the
+     binary `x << y` path). */
+  if (fn) buf_printf(b, "%s = %s(%s, %s);\n", lval, fn, src, rhs);
+  else if (bitop) buf_printf(b, "%s = (%s %s (%s));\n", lval, src, op, rhs);
+  else if (src == lval) buf_printf(b, "%s %s= %s;\n", lval, op, rhs);
+  else buf_printf(b, "%s = %s %s (%s);\n", lval, src, op, rhs);
+  free(rb.p);
+  return 1;
+}
+
 static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
                               const char *lval) {
   const NodeTable *nt = c->nt;
@@ -1577,67 +1648,13 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     buf_puts(b, ");\n");
     return;
   }
-  /* Int op-assign routes through the same overflow-checked helpers as the
-     binary form: a raw C `lv_x *= y` silently wrapped where `x * y` raised. */
-  if (t == TY_INT) {
-    const char *fn = int_arith_fn(op);
-    /* a loop-bounded counter's `+= k` is a plain C add (see above) */
-    if (fn && (sp_streq(op, "+") || sp_streq(op, "-")) && local_is_bounded_counter(c, id, nm, lv)) {
-      buf_printf(b, "%s = %s %s ", lval, lval, op); emit_expr(c, v, b); buf_puts(b, ";\n");
-      return;
-    }
-    if (fn) {
-      TyKind vt = comp_ntype(c, v);
-      int isdivmod = sp_streq(op, "/") || sp_streq(op, "%");
-      buf_printf(b, "%s = %s(%s, ", lval, fn, lval);
-      if (isdivmod) emit_int_divisor(c, v, b);
-      else if (vt == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, v, b); buf_puts(b, ")"); }
-      /* an unresolved call (`t += f.weight` with no such method) lowers to
-         the gate's raise token, an sp_RbVal; coerce it as a plain write does */
-      else if (vt == TY_UNKNOWN) emit_unresolved_coerced(c, v, TY_INT, b);
-      else emit_expr(c, v, b);
-      buf_puts(b, ");\n"); return;
-    }
-  }
-  /* Bitwise op-assign on an int: shift/and/or/xor map straight to the C
-     operator (fixed-width wrap, same as the binary `x << y` path). A `<<=`
-     by a literal count that overflows every nonzero receiver (>= 63) or a
-     negative count routes through sp_int_shl, mirroring the binary gate. */
-  if (t == TY_INT && (sp_streq(op, "<<") || sp_streq(op, ">>") ||
-                      sp_streq(op, "|") || sp_streq(op, "&") || sp_streq(op, "^"))) {
-    TyKind vt = comp_ntype(c, v);
-    const char *vty = nt_type(nt, v);
-    long long vlit = (vty && sp_streq(vty, "IntegerNode")) ? nt_int(nt, v, "value", 0) : 0;
-    if (sp_streq(op, "<<") && vty && sp_streq(vty, "IntegerNode") && (vlit < 0 || vlit >= 63)) {
-      buf_printf(b, "%s = sp_int_shl(%s, %lldLL);\n", lval, lval, vlit);
-      return;
-    }
-    buf_printf(b, "%s = (%s %s (", lval, lval, op);
-    if (vt == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, v, b); buf_puts(b, ")"); }
-    else emit_expr(c, v, b);
-    buf_puts(b, "));\n");
+  /* a loop-bounded counter's `+= k` is a plain C add (see above) */
+  if (t == TY_INT && int_arith_fn(op) && (sp_streq(op, "+") || sp_streq(op, "-")) &&
+      local_is_bounded_counter(c, id, nm, lv)) {
+    buf_printf(b, "%s = %s %s ", lval, lval, op); emit_expr(c, v, b); buf_puts(b, ";\n");
     return;
   }
-  if (t == TY_BIGINT) {
-    const char *bfn = bigint_arith_fn(op);
-    if (bfn) {
-      TyKind vt = comp_ntype(c, v);
-      buf_printf(b, "%s = %s(%s, ", lval, bfn, lval);
-      if (vt == TY_POLY) { buf_puts(b, "sp_poly_as_bigint("); emit_expr(c, v, b); buf_puts(b, ")"); }
-      else if (vt != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, v, b); buf_puts(b, ")"); }
-      else emit_expr(c, v, b);
-      buf_puts(b, ");\n"); return;
-    }
-  }
-  if (t == TY_FLOAT && (sp_streq(op, "+") || sp_streq(op, "-") || sp_streq(op, "*") || sp_streq(op, "/"))) {
-    TyKind vt = comp_ntype(c, v);
-    buf_printf(b, "%s %s= ", lval, op);
-    if (vt == TY_POLY) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, v, b); buf_puts(b, ")"); }
-    else if (vt == TY_UNKNOWN) emit_unresolved_coerced(c, v, TY_FLOAT, b);   /* the raise token */
-    else emit_expr(c, v, b);
-    buf_puts(b, ";\n");
-    return;
-  }
+  if (emit_scalar_op_assign(c, lval, t, op, v, 0, b)) return;
   if (t == TY_COMPLEX && (sp_streq(op, "+") || sp_streq(op, "*"))) {
     /* coerce the rhs like the binary path does: an Integer, a Float or a boxed
        value all have to reach sp_complex_* as an sp_Complex */
@@ -7977,6 +7994,7 @@ else {
       else if (bitop) { buf_printf(b, "%s = sp_box_int(sp_poly_to_i(%s) %s ", ref, ref, op); emit_int_expr(c, v, b); buf_puts(b, ");\n"); }
       else { buf_printf(b, "%s %s= ", ref, op ? op : "+"); emit_expr(c, v, b); buf_puts(b, ";\n"); }
     }
+    else if (emit_scalar_op_assign(c, ref, ct, op, v, 1, b)) { }
     else {
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ";\n");
@@ -8227,17 +8245,9 @@ else {
       int ival = nt_ref(nt, id, "value");
       TyKind rhst = comp_ntype(c, ival);
       /* An int ivar op-assign takes the overflow-checked helpers like the
-         binary form (raw `@x *= y` wrapped where `@x * y` raised). Bitwise
-         ops keep the raw C operator below. */
-      if (vt == TY_INT && op && int_arith_fn(op)) {
-        int ivdm = sp_streq(op, "/") || sp_streq(op, "%");
-        buf_printf(b, "%s = %s(%s, ", ref, int_arith_fn(op), ref);
-        if (ivdm) emit_int_divisor(c, ival, b);
-        else if (rhst == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, ival, b); buf_puts(b, ")"); }
-        else emit_expr(c, ival, b);
-        buf_puts(b, ");\n");
-        return;
-      }
+         binary form (raw `@x *= y` wrapped where `@x * y` raised), and reads
+         the ivar before an effectful rhs, which may reassign it. */
+      if (emit_scalar_op_assign(c, ref, vt, op, ival, 1, b)) return;
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
       /* a poly RHS feeding an int/float ivar op-assign needs coercing to the
          scalar before the C operator (e.g. `@bg_pattern |= chr_mem[i] * 256`). */
@@ -8786,6 +8796,7 @@ else {
       emit_expr(c, v, b); buf_puts(b, ");\n");
     }
     else if (emit_array_op_assign(c, gref, lv->type, op, v, b)) { }
+    else if (emit_scalar_op_assign(c, gref, lv->type, op, v, 1, b)) { }
     else {
       buf_printf(b, "gv_%s %s= ", rn, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ";\n");

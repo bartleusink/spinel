@@ -1112,6 +1112,18 @@ static int emit_array_op_assign_value(Compiler *c, const char *ref, TyKind t,
   return ok;
 }
 
+/* The scalar twin: the statement form, then the slot, in a statement
+   expression, so a global or class variable takes the overflow-checked
+   helpers in value position too. */
+static int emit_scalar_op_assign_value(Compiler *c, const char *ref, TyKind t,
+                                       const char *op, int v, Buf *b) {
+  Buf ab; memset(&ab, 0, sizeof ab);
+  int ok = emit_scalar_op_assign(c, ref, t, op, v, 1, &ab);
+  if (ok) buf_printf(b, "({ %s%s; })", ab.p, ref);
+  free(ab.p);
+  return ok;
+}
+
 static void emit_expr_node(Compiler *c, int id, Buf *b);
 
 /* How many expressions enclose the one being emitted: a call nested in an
@@ -2195,6 +2207,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       emit_expr(c, v, b); buf_puts(b, "))");
     }
     else if (emit_array_op_assign_value(c, gref, lv->type, op, v, b)) { }
+    else if (emit_scalar_op_assign_value(c, gref, lv->type, op, v, b)) { }
     else {
       buf_printf(b, "(gv_%s %s= ", rn, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ")");
@@ -2229,6 +2242,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       else if (bitop) { buf_printf(b, "(%s = sp_box_int(sp_poly_to_i(%s) %s ", ref, ref, op); emit_int_expr(c, v, b); buf_puts(b, "))"); }
       else { buf_printf(b, "(%s %s= ", ref, op ? op : "+"); emit_expr(c, v, b); buf_puts(b, ")"); }
     }
+    else if (emit_scalar_op_assign_value(c, ref, ct, op, v, b)) { }
     else {
       buf_printf(b, "(%s %s= ", ref, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ")");
