@@ -15160,6 +15160,13 @@ void analyze_program(Compiler *c) {
            loop's stability test already waits for the ivars to stop moving. */
         seed_unsupplied_nil_defaults(c);   /* a re-cleared nil-default parameter is poly again before anything binds on it (#4583) */
         infer_param_types(c);
+        /* A default is a binding like any call site's argument, and reads the
+           same settled state: after the re-clear below, a default reading a
+           reset ivar (`romh: @rom`, @rom poly) saw UNKNOWN every iteration, so
+           it never widened the parameter and the one call site's explicit
+           argument type stood alone. The pass further down still runs for
+           defaults over state this iteration derives; types only widen. */
+        int pre_def = infer_default_param_types(c);
         /* stash last-settled values, then re-clear the reset ivars so they
            recompute fresh (narrowing) this iteration. */
         for (int k = 0; k < nrec; k++) prev[k] = c->classes[recCi[k]].ivar_types[recIv[k]];
@@ -15167,7 +15174,7 @@ void analyze_program(Compiler *c) {
         for (int k = 0; k < nlrec; k++) lprev[k] = c->scopes[recLs[k]].locals[recLi[k]].type;
         for (int k = 0; k < nlrec; k++) c->scopes[recLs[k]].locals[recLi[k]].type = TY_UNKNOWN;
         sp_narrow_memo_bump();  /* invalidate per-iteration narrow-helper memo */
-        int ch = 0, ch_other = 0;
+        int ch = pre_def, ch_other = pre_def;
         ch |= infer_write_types(c);
         { int _w = bind_coerce_operator_params(c); ch |= _w; ch_other |= _w; }   /* 3 + obj calls obj's op WITH obj */
         { int _w = infer_param_hash_value(c); ch |= _w; ch_other |= _w; }
