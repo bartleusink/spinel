@@ -7451,6 +7451,19 @@ static void emit_arm_arg(Compiler *c, Scope *arm, int a, int atmp_id, TyKind fro
   else buf_puts(b, tn);
 }
 
+/* The scope a dispatch arm calls for `kmi`: the method itself when it has a
+   symbol, else its proc-form clone -- an inline-only method (a yield, or an
+   `&blk` used only by `.call`/`.nil?`) has no function of its own, and its
+   arm was dropped, so the ancestor's method ran for that class (#3399 made
+   the clone for the poly dispatch). -1 when neither exists. */
+static int dispatch_arm_scope(Compiler *c, int kmi) {
+  if (kmi < 0) return -1;
+  if (scope_has_callable_symbol(c, kmi)) return kmi;
+  /* emitted whatever reachability says (codegen.c): nothing names the clone
+     until this arm does */
+  return scope_proc_form_of(c, kmi);
+}
+
 /* Does an arm of a dispatch switch need the call's block as an sp_Proc *? */
 static int arm_takes_blk(Scope *s) {
   return s->blk_param && s->blk_param[0] && !s->yields;
@@ -7467,9 +7480,11 @@ static int dispatch_arms_disagree(Compiler *c, int cid, const char *name) {
   for (int k = 0; k < c->nclasses; k++) {
     if (!is_descendant(c, k, cid)) continue;
     int kd = -1;
-    int kmi = comp_method_in_chain(c, k, name, &kd);
-    if (kmi < 0 || !scope_has_callable_symbol(c, kmi)) continue;
+    int kmi = dispatch_arm_scope(c, comp_method_in_chain(c, k, name, &kd));
+    if (kmi < 0) continue;
     Scope *s = &c->scopes[kmi];
+    /* a clone always takes the block, which the shared path never passes */
+    if (s->is_proc_form) return 1;
     if (!first) { first = s; }
     if (s == first) continue;
     if (s->nparams != first->nparams || s->rest_idx != first->rest_idx ||
@@ -7523,6 +7538,12 @@ static void emit_dispatch_arm_call(Compiler *c, int kd, int kmi, const char *sel
     emit_boxed_text(c, arm_ret, call.p, b);
     buf_puts(b, "; ");
   }
+  /* a proc-form clone answers boxed, whatever slot the switch fills */
+  else if (arm_ret == TY_POLY && disp_ret != TY_POLY) {
+    buf_printf(b, "_t%d = ", rtmp);
+    emit_unbox_text(c, disp_ret, call.p, b);
+    buf_puts(b, "; ");
+  }
   else buf_printf(b, "_t%d = %s; ", rtmp, call.p);
   buf_puts(b, "break; }");
   free(apre.p); free(call.p);
@@ -7539,7 +7560,7 @@ static void emit_dispatch_per_arm(Compiler *c, int cid, const char *name, const 
   for (int k = 0; k < c->nclasses && !want_blk; k++) {
     if (!is_descendant(c, k, cid)) continue;
     int kd = -1;
-    int kmi = comp_method_in_chain(c, k, name, &kd);
+    int kmi = dispatch_arm_scope(c, comp_method_in_chain(c, k, name, &kd));
     if (kmi >= 0 && arm_takes_blk(&c->scopes[kmi])) want_blk = 1;
   }
   int blk_tmp = -1;
@@ -7562,15 +7583,17 @@ static void emit_dispatch_per_arm(Compiler *c, int cid, const char *name, const 
   for (int k = 0; k < c->nclasses; k++) {
     if (!is_descendant(c, k, cid)) continue;
     int kd = -1;
-    int kmi = comp_method_in_chain(c, k, name, &kd);
-    if (kmi < 0 || !scope_has_callable_symbol(c, kmi)) continue;
-    nd_callee(c, g_nd_call_id, kmi, kd, 1);
+    int kmi0 = comp_method_in_chain(c, k, name, &kd);
+    int kmi = dispatch_arm_scope(c, kmi0);
+    if (kmi < 0) continue;
+    nd_callee(c, g_nd_call_id, kmi0, kd, 1);
     buf_printf(b, " case %d: ", k);
     emit_dispatch_arm_call(c, kd, kmi, selfptr, argsNode, blk_tmp, ret, disp_ret, rtmp, b);
   }
   buf_puts(b, " default: ");
-  if (mi >= 0)
-    emit_dispatch_arm_call(c, defcls, mi, selfptr, argsNode, blk_tmp, ret, disp_ret, rtmp, b);
+  int dmi = mi >= 0 && dispatch_arm_scope(c, mi) >= 0 ? dispatch_arm_scope(c, mi) : mi;
+  if (dmi >= 0)
+    emit_dispatch_arm_call(c, defcls, dmi, selfptr, argsNode, blk_tmp, ret, disp_ret, rtmp, b);
   else
     buf_printf(b, "_t%d = %s; break;", rtmp,
                ret == TY_POLY ? "sp_box_nil()" : default_value(disp_ret));

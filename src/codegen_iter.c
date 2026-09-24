@@ -263,6 +263,15 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   }
   Scope *m = &c->scopes[mi];
   if (!m->yields) return 0;
+  /* A subclass overriding the method takes its own arm of the cls_id switch;
+     splicing this body answered for every class with the base's method. The
+     switch reaches this one through its proc-form clone. */
+  {
+    int disp_cls = implicit_self ? comp_scope_of(c, id)->class_id : recv_class;
+    if (disp_cls >= 0 && !m->is_cmethod && scope_proc_form_of(c, mi) >= 0 &&
+        dispatch_impl_count(c, disp_cls, name) > 1)
+      return 0;
+  }
   /* A `return` inside the yielding method used to bail here -- but a bailed
      block call falls back to a plain function call against a symbol that is
      never emitted (yielding methods have no standalone function), an
