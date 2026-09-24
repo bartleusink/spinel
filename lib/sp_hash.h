@@ -19,7 +19,7 @@
  */
 #include "sp_types.h"   /* sp_StrIntHash / sp_StrStrHash / sp_IntStrHash / sp_IntIntHash */
 #include "sp_gc.h"      /* sp_gc_alloc, SP_GC_ROOT, sp_mark_string */
-#include "sp_array.h"   /* sp_StrArray / sp_IntArray new/push (keys/values/tally) */
+#include "sp_array.h"   /* sp_StrArray / sp_IntArray new/push (keys/values) */
 #include "sp_str.h"     /* sp_str_hash / sp_str_eq / _sp_istr_idx */
 #include "sp_inspect.h" /* sp_inspect_container for the #inspect wrappers */
 #include "sp_string.h"  /* sp_String builder for sp_IntIntHash_inspect */
@@ -40,7 +40,6 @@ sp_int sp_StrIntHash_length(sp_StrIntHash*h);
 void sp_StrIntHash_delete(sp_StrIntHash*h,const char*k);
 sp_StrArray*sp_StrIntHash_keys(sp_StrIntHash*h);
 sp_IntArray*sp_StrIntHash_values(sp_StrIntHash*h);
-sp_StrIntHash*sp_StrArray_tally(sp_StrArray*a);
 sp_StrIntHash*sp_StrIntHash_merge(sp_StrIntHash*a,sp_StrIntHash*b);
 void sp_StrIntHash_update(sp_StrIntHash*a,sp_StrIntHash*b);
 sp_StrIntHash*sp_StrIntHash_dup(sp_StrIntHash*h);
@@ -103,7 +102,6 @@ sp_bool sp_IntIntHash_eq(sp_IntIntHash*a,sp_IntIntHash*b);
 sp_IntIntHash*sp_IntIntHash_dup(sp_IntIntHash*h);
 sp_IntIntHash*sp_IntIntHash_replace(sp_IntIntHash*h,sp_IntIntHash*o);
 void sp_IntIntHash_clear(sp_IntIntHash*h);
-sp_IntIntHash*sp_IntArray_tally_int(sp_IntArray*a);
 const char*sp_StrIntHash_inspect(sp_StrIntHash*h);
 sp_int sp_StrIntHash_proc_fn(void *cap, sp_int argc, sp_int *args);
 const char*sp_StrStrHash_inspect(sp_StrStrHash*h);

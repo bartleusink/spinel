@@ -1141,14 +1141,6 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
        Ruby method by now (builtins/enumerable.rb) and types as one */
     if (sp_streq(name, "each_with_object") && argc > 0 && argv && nt_ref(nt, id, "block") < 0)
       { *out = TY_ENUMERATOR; return 1; }
-    if (sp_streq(name, "tally") && argc == 0) {
-      if (rt == TY_INT_ARRAY) { *out = TY_INT_INT_HASH; return 1; }
-      if (rt == TY_STR_ARRAY) { *out = TY_STR_INT_HASH; return 1; }
-      /* poly array: keys are the elements (any type), counts are ints. */
-      if (rt == TY_POLY_ARRAY) { *out = TY_POLY_POLY_HASH; return 1; }
-    }
-    if (sp_streq(name, "tally") && argc == 1)   /* tally(hash) returns the accumulator, boxed (#2533) */
-      { *out = TY_POLY; return 1; }
     if ((sp_streq(name, "first") || sp_streq(name, "last")) && argc == 1) { *out = rt; return 1; }  /* first(n)/last(n) -> subarray */
     /* `arr.take(n)`/`drop(n)` is a subarray, but `arr.lazy.take(n)` stays a lazy
        stage -- let the lazy pipeline (below) type the forced chain, not this
@@ -1694,7 +1686,6 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (recv >= 0 && rt == TY_POLY && !an_user_defines_or_reads(c, name)) {
     int has_blk = nt_ref(nt, id, "block") >= 0;
     if (!has_blk && argc == 0 && sp_streq(name, "minmax")) { *out = TY_POLY_ARRAY; return 1; }
-    if (!has_blk && argc == 0 && sp_streq(name, "tally")) { *out = TY_POLY_POLY_HASH; return 1; }
     if (!has_blk && sp_streq(name, "product")) { *out = TY_POLY_ARRAY; return 1; }
     if (!has_blk && (sp_streq(name, "combination") || sp_streq(name, "permutation")))
       { *out = TY_POLY_ARRAY; return 1; }

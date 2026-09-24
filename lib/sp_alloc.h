@@ -1030,7 +1030,7 @@ sp_Bigint *sp_brat_round_b(sp_BigRational *r);
 /* ---- Marshal.dump/load helpers (lib/sp_marshal.c calls these): 0
    optcarrot uses. sp_marv_hash_new/set stay in spinel_rt.h instead of
    moving here -- they need sp_PolyPolyHash_new/set, which are hot
-   (called there dozens of times, e.g. via sp_PolyArray_tally) and
+   (called there dozens of times) and
    whose home is the struct's own definition deep in spinel_rt.h, not
    this early header; de-static'ing them in place to reach two
    one-line marv wrappers would grow spinel_rt.h's non-static-body

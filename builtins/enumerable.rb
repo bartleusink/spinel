@@ -31,6 +31,17 @@ module Enumerable
     end
   end
 
+  def tally(hash = nil)
+    if hash
+      each { |x| hash[x] = hash.fetch(x, 0) + 1 }
+      hash
+    else
+      counts = {}
+      each { |x| counts[x] = counts.fetch(x, 0) + 1 }
+      counts
+    end
+  end
+
   def partition
     if block_given?
       yes = []

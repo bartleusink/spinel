@@ -7158,7 +7158,7 @@ static void sp_PolyPolyHash_set(sp_PolyPolyHash*h,sp_RbVal k,sp_RbVal v){sp_gc_w
 /* Marshal.dump/load hash vtable slots (sp_marshal_v.hash_new/hash_set):
    kept here (not moved to lib/sp_cold.c with the rest of the sp_marv_*
    vtable fns) since they'd otherwise force sp_PolyPolyHash_new/set --
-   hot, called dozens of times elsewhere via sp_PolyArray_tally -- to
+   hot, called dozens of times elsewhere -- to
    become non-static just to save two one-line wrappers. */
 static sp_RbVal sp_marv_hash_new(void) { return sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH); }
 /* Hash#update / #merge! on the poly-keyed variant. Every other variant had it;
@@ -7173,10 +7173,6 @@ static void sp_PolyPolyHash_update(sp_PolyPolyHash *a, sp_PolyPolyHash *b) {
   }
 }
 static void sp_marv_hash_set(sp_RbVal h, sp_RbVal k, sp_RbVal v) { sp_PolyPolyHash_set((sp_PolyPolyHash *)h.v.p, k, v); }
-/* Array#tally over a poly array keys the count hash by the ELEMENT VALUE (any
-   type), matching CRuby's `#eql?`/`#hash` bucketing -- not by symbol identity.
-   Defined here so the PolyPolyHash helpers above are already in scope. */
-static sp_PolyPolyHash *sp_PolyArray_tally(sp_PolyArray *a) { if (!a) return sp_PolyPolyHash_new(); SP_GC_ROOT(a); sp_PolyPolyHash *h = sp_PolyPolyHash_new(); SP_GC_ROOT(h); for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; sp_RbVal cur = sp_PolyPolyHash_get(h, v); sp_int c = (cur.tag == SP_TAG_INT) ? cur.v.i : 0; sp_PolyPolyHash_set(h, v, sp_box_int(c + 1)); } return h; }
 /* order[] holds slot indices (not keys), so iterate keys/vals by the stored
    index; merge inherits the LEFT receiver's default per CRuby. */
 static sp_PolyPolyHash*sp_PolyPolyHash_merge(sp_PolyPolyHash*a,sp_PolyPolyHash*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_PolyPolyHash*r=sp_PolyPolyHash_new();SP_GC_ROOT(r);if(a){r->default_v=a->default_v;r->dproc=a->dproc;r->dproc_self=a->dproc_self;for(sp_int i=0;i<a->len;i++){sp_int idx=a->order[i];sp_PolyPolyHash_set(r,a->keys[idx],a->vals[idx]);}}if(b){for(sp_int i=0;i<b->len;i++){sp_int idx=b->order[i];sp_PolyPolyHash_set(r,b->keys[idx],b->vals[idx]);}}return r;}
@@ -9784,21 +9780,6 @@ static sp_RbVal sp_poly_hash_probe(sp_RbVal h, sp_RbVal k, sp_bool *found) {
     case SP_BUILTIN_POLY_POLY_HASH: { sp_PolyPolyHash *x=(sp_PolyPolyHash*)h.v.p; if (!sp_PolyPolyHash_has_key(x,k)) return sp_box_nil(); *found=TRUE; return sp_PolyPolyHash_get(x,k); }
     default: return sp_box_nil();
   }
-}
-/* Enumerable#tally(hash): count each element INTO the given accumulator hash
-   (any variant, held as a boxed value) and return it. Missing keys start from the
-   hash's current count (0 if absent), matching CRuby. (#2533) */
-static sp_RbVal sp_array_tally_into_poly(sp_RbVal arr, sp_RbVal hash) {
-  SP_GC_ROOT_RBVAL(arr); SP_GC_ROOT_RBVAL(hash);
-  sp_int n = sp_poly_length(arr);
-  for (sp_int i = 0; i < n; i++) {
-    sp_RbVal e = sp_poly_arr_get(arr, i);
-    sp_bool found = FALSE;
-    sp_RbVal cur = sp_poly_hash_probe(hash, e, &found);
-    sp_int c = (found && cur.tag == SP_TAG_INT) ? cur.v.i : 0;
-    sp_poly_set_poly(hash, e, sp_box_int(c + 1));
-  }
-  return hash;
 }
 static sp_bool sp_poly_hash_eq_cross(sp_RbVal a, sp_RbVal b) {
   if (!a.v.p || !b.v.p) return a.v.p == b.v.p;

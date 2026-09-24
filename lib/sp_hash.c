@@ -30,7 +30,6 @@ sp_int sp_StrIntHash_length(sp_StrIntHash*h){return h->len;}
 void sp_StrIntHash_delete(sp_StrIntHash*h,const char*k){SP_GC_ROOT(h);SP_GC_ROOT_STR(k); sp_gc_wb((void*)h);sp_int idx=(sp_int)(sp_str_hash(k)&h->mask);while(h->keys[idx]){if(sp_str_eq(h->keys[idx],k)){h->keys[idx]=NULL;h->vals[idx]=0;h->len--;sp_int j=(idx+1)&h->mask;while(h->keys[j]){sp_int nj=(sp_int)(sp_str_hash(h->keys[j])&h->mask);if((j>idx&&(nj<=idx||nj>j))||(j<idx&&nj<=idx&&nj>j)){h->keys[idx]=h->keys[j];h->vals[idx]=h->vals[j];h->keys[j]=NULL;h->vals[j]=0;idx=j;}j=(j+1)&h->mask;}{sp_int oi=0;while(oi<=h->len){if(strcmp(h->order[oi],k)==0){while(oi<h->len){h->order[oi]=h->order[oi+1];oi++;}break;}oi++;}}return;}idx=(idx+1)&h->mask;}}
 sp_StrArray*sp_StrIntHash_keys(sp_StrIntHash*h){SP_GC_ROOT(h);sp_StrArray*a=sp_StrArray_new();SP_GC_ROOT(a);for(sp_int i=0;i<h->len;i++)sp_StrArray_push(a,h->order[i]);return a;}
 sp_IntArray*sp_StrIntHash_values(sp_StrIntHash*h){SP_GC_ROOT(h);sp_IntArray*a=sp_IntArray_new();SP_GC_ROOT(a);for(sp_int i=0;i<h->len;i++)sp_IntArray_push(a,sp_StrIntHash_get(h,h->order[i]));return a;}
-sp_StrIntHash*sp_StrArray_tally(sp_StrArray*a){SP_GC_ROOT(a);sp_StrIntHash*h=sp_StrIntHash_new();for(sp_int i=0;i<a->len;i++){const char*k=a->data[i];sp_int c=sp_StrIntHash_has_key(h,k)?sp_StrIntHash_get(h,k):0;sp_StrIntHash_set(h,k,c+1);}return h;}
 sp_StrIntHash*sp_StrIntHash_merge(sp_StrIntHash*a,sp_StrIntHash*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_StrIntHash*r=sp_StrIntHash_new();r->default_v=a->default_v;for(sp_int i=0;i<a->len;i++)sp_StrIntHash_set(r,a->order[i],sp_StrIntHash_get(a,a->order[i]));for(sp_int i=0;i<b->len;i++)sp_StrIntHash_set(r,b->order[i],sp_StrIntHash_get(b,b->order[i]));return r;}
 void sp_StrIntHash_update(sp_StrIntHash*a,sp_StrIntHash*b){SP_GC_ROOT(a);SP_GC_ROOT(b);for(sp_int i=0;i<b->len;i++)sp_StrIntHash_set(a,b->order[i],sp_StrIntHash_get(b,b->order[i]));}
 sp_StrIntHash*sp_StrIntHash_dup(sp_StrIntHash*h){SP_GC_ROOT(h);sp_StrIntHash*r=sp_StrIntHash_new();r->default_v=h->default_v;for(sp_int i=0;i<h->len;i++)sp_StrIntHash_set(r,h->order[i],sp_StrIntHash_get(h,h->order[i]));return r;}
@@ -75,8 +74,7 @@ sp_IntStrHash*sp_IntStrHash_replace(sp_IntStrHash*h,sp_IntStrHash*o){SP_GC_ROOT(
 sp_bool sp_IntStrHash_eq(sp_IntStrHash*a,sp_IntStrHash*b){SP_GC_ROOT(a);SP_GC_ROOT(b);if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(sp_int i=0;i<a->len;i++){sp_int k=a->order[i];if(!sp_IntStrHash_has_key(b,k))return FALSE;if(!sp_str_eq(sp_IntStrHash_get(a,k),sp_IntStrHash_get(b,k)))return FALSE;}return TRUE;}
 /* Int → Int typed hash. Mirrors sp_IntStrHash's open-addressing
    layout (used[] bitmap so 0/-1 keys are distinguishable from
-   empty), with int-valued slots. Used by Array#tally on int
-   arrays -- see #865. */
+   empty), with int-valued slots (#865). */
 void sp_IntIntHash_fin(void*p){sp_IntIntHash*h=(sp_IntIntHash*)p;sp_pl_free(h->keys);sp_pl_free(h->vals);sp_pl_free(h->order);sp_pl_free(h->used);}
 /* default_v is SP_INT_NIL for a hash with no explicit default, so a
    missing-key `[]` read surfaces Ruby nil (#801). Hash.new(N) sets it via
@@ -105,9 +103,6 @@ sp_bool sp_IntIntHash_eq(sp_IntIntHash*a,sp_IntIntHash*b){SP_GC_ROOT(a);SP_GC_RO
 sp_IntIntHash*sp_IntIntHash_dup(sp_IntIntHash*h){SP_GC_ROOT(h);sp_IntIntHash*r=sp_IntIntHash_new();r->default_v=h->default_v;for(sp_int i=0;i<h->len;i++)sp_IntIntHash_set(r,h->order[i],sp_IntIntHash_get(h,h->order[i]));return r;}
 sp_IntIntHash*sp_IntIntHash_replace(sp_IntIntHash*h,sp_IntIntHash*o){SP_GC_ROOT(h);SP_GC_ROOT(o);if(!h)return h;for(sp_int i=0;i<h->cap;i++)h->used[i]=0;h->len=0;if(o)for(sp_int i=0;i<o->len;i++)sp_IntIntHash_set(h,o->order[i],sp_IntIntHash_get(o,o->order[i]));return h;}
 void sp_IntIntHash_clear(sp_IntIntHash*h){if(!h)return;for(sp_int i=0;i<h->cap;i++)h->used[i]=0;h->len=0;}
-/* Array#tally on int_array. CRuby returns an Integer-keyed Hash
-   mapping each distinct element to its occurrence count. */
-sp_IntIntHash*sp_IntArray_tally_int(sp_IntArray*a){SP_GC_ROOT(a);sp_IntIntHash*h=sp_IntIntHash_new();if(!a)return h;for(sp_int i=0;i<a->len;i++){sp_int k=a->data[a->start+i];sp_int c=sp_IntIntHash_has_key(h,k)?sp_IntIntHash_get(h,k):0;sp_IntIntHash_set(h,k,c+1);}return h;}
 /* Issue #851: Hash#inspect for typed-hash variants beyond
    sym_int_hash. Renders Ruby's `{"k" => v, ...}` (string keys),
    `{42 => "v", ...}` (int keys), or `{:k => v, ...}` (sym keys but
