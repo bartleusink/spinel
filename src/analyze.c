@@ -11525,46 +11525,54 @@ static int strbuf_map_block_tail(Compiler *c, int val) {
   return bn > 0 ? bb[bn - 1] : -1;
 }
 
-static int strbuf_container_stores_string(Compiler *c, const char *contn, Scope *conts) {
+/* The values node `w` stores into container local (contn, conts): the
+   elements of an array/hash literal written to it (with `map_tail`, also a
+   collecting iterator's block tail), or the arguments of a push/<</[]= on
+   it. Fills `stores` (64 slots) and answers the count; 0 when not a store. */
+static int strbuf_container_store_values(Compiler *c, int w, const char *contn, Scope *conts,
+                                         int map_tail, int *stores) {
   const NodeTable *nt = c->nt;
-  for (int w = 0; w < nt->count; w++) {
-    int stores[64]; int nst = 0;
-    NodeKind wk = nt_kind(nt, w);
-    if (wk == NK_LocalVariableWriteNode) {
-      const char *wn = nt_str(nt, w, "name");
-      if (!wn || !sp_streq(wn, contn) || comp_scope_of(c, w) != conts) continue;
-      int val = nt_ref(nt, w, "value");
-      if (val < 0) continue;
-      NodeKind vk = nt_kind(nt, val);
-      if (vk == NK_ArrayNode) {
-        int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
-        for (int e = 0; e < en && nst < 64; e++) stores[nst++] = el[e];
-      }
-      else if (strbuf_map_block_tail(c, val) >= 0)
-        stores[nst++] = strbuf_map_block_tail(c, val);
-      else if (vk == NK_HashNode || vk == NK_KeywordHashNode) {
-        int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
-        for (int e = 0; e < en && nst < 64; e++)
-          if (nt_kind(nt, el[e]) == NK_AssocNode) stores[nst++] = nt_ref(nt, el[e], "value");
-      }
+  int nst = 0;
+  NodeKind wk = nt_kind(nt, w);
+  if (wk == NK_LocalVariableWriteNode) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, contn) || comp_scope_of(c, w) != conts) return 0;
+    int val = nt_ref(nt, w, "value");
+    if (val < 0) return 0;
+    NodeKind vk = nt_kind(nt, val);
+    if (vk == NK_ArrayNode) {
+      int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
+      for (int e = 0; e < en && nst < 64; e++) stores[nst++] = el[e];
     }
-    else if (wk == NK_CallNode) {
-      int wr = nt_ref(nt, w, "receiver");
-      if (wr < 0 || nt_kind(nt, wr) != NK_LocalVariableReadNode) continue;
-      const char *wrn = nt_str(nt, wr, "name");
-      if (!wrn || !sp_streq(wrn, contn) || comp_scope_of(c, wr) != conts) continue;
-      const char *wcn = nt_str(nt, w, "name");
-      if (!wcn) continue;
-      int a = nt_ref(nt, w, "arguments");
-      int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-      if (sp_streq(wcn, "<<") || sp_streq(wcn, "push") ||
-          sp_streq(wcn, "append") || sp_streq(wcn, "unshift")) {
-        for (int e = 0; e < an && nst < 64; e++) stores[nst++] = av[e];
-      }
-      else if (sp_streq(wcn, "[]=") && an >= 2) stores[nst++] = av[an - 1];
-      else continue;
+    else if (map_tail && strbuf_map_block_tail(c, val) >= 0)
+      stores[nst++] = strbuf_map_block_tail(c, val);
+    else if (vk == NK_HashNode || vk == NK_KeywordHashNode) {
+      int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
+      for (int e = 0; e < en && nst < 64; e++)
+        if (nt_kind(nt, el[e]) == NK_AssocNode) stores[nst++] = nt_ref(nt, el[e], "value");
     }
-    else continue;
+  }
+  else if (wk == NK_CallNode) {
+    int wr = nt_ref(nt, w, "receiver");
+    if (wr < 0 || nt_kind(nt, wr) != NK_LocalVariableReadNode) return 0;
+    const char *wrn = nt_str(nt, wr, "name");
+    if (!wrn || !sp_streq(wrn, contn) || comp_scope_of(c, wr) != conts) return 0;
+    const char *wcn = nt_str(nt, w, "name");
+    if (!wcn) return 0;
+    int a = nt_ref(nt, w, "arguments");
+    int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (sp_streq(wcn, "<<") || sp_streq(wcn, "push") ||
+        sp_streq(wcn, "append") || sp_streq(wcn, "unshift")) {
+      for (int e = 0; e < an && nst < 64; e++) stores[nst++] = av[e];
+    }
+    else if (sp_streq(wcn, "[]=") && an >= 2) stores[nst++] = av[an - 1];
+  }
+  return nst;
+}
+static int strbuf_container_stores_string(Compiler *c, const char *contn, Scope *conts) {
+  for (int w = 0; w < c->nt->count; w++) {
+    int stores[64];
+    int nst = strbuf_container_store_values(c, w, contn, conts, 1, stores);
     for (int e = 0; e < nst; e++) {
       TyKind st = stores[e] >= 0 ? infer_type(c, stores[e]) : TY_UNKNOWN;
       if (st == TY_STRING || st == TY_STRBUF) return 1;
@@ -11579,43 +11587,9 @@ static int strbuf_container_stores_string(Compiler *c, const char *contn, Scope 
    whose type the analysis actually knows counts -- an UNKNOWN one says
    nothing, and answering yes on it would give up the promotion everywhere. */
 static int strbuf_container_stores_nonstring(Compiler *c, const char *contn, Scope *conts) {
-  const NodeTable *nt = c->nt;
-  for (int w = 0; w < nt->count; w++) {
-    int stores[64]; int nst = 0;
-    NodeKind wk = nt_kind(nt, w);
-    if (wk == NK_LocalVariableWriteNode) {
-      const char *wn = nt_str(nt, w, "name");
-      if (!wn || !sp_streq(wn, contn) || comp_scope_of(c, w) != conts) continue;
-      int val = nt_ref(nt, w, "value");
-      if (val < 0) continue;
-      NodeKind vk = nt_kind(nt, val);
-      if (vk == NK_ArrayNode) {
-        int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
-        for (int e = 0; e < en && nst < 64; e++) stores[nst++] = el[e];
-      }
-      else if (vk == NK_HashNode || vk == NK_KeywordHashNode) {
-        int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
-        for (int e = 0; e < en && nst < 64; e++)
-          if (nt_kind(nt, el[e]) == NK_AssocNode) stores[nst++] = nt_ref(nt, el[e], "value");
-      }
-    }
-    else if (wk == NK_CallNode) {
-      int wr = nt_ref(nt, w, "receiver");
-      if (wr < 0 || nt_kind(nt, wr) != NK_LocalVariableReadNode) continue;
-      const char *wrn = nt_str(nt, wr, "name");
-      if (!wrn || !sp_streq(wrn, contn) || comp_scope_of(c, wr) != conts) continue;
-      const char *wcn = nt_str(nt, w, "name");
-      if (!wcn) continue;
-      int a = nt_ref(nt, w, "arguments");
-      int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-      if (sp_streq(wcn, "<<") || sp_streq(wcn, "push") ||
-          sp_streq(wcn, "append") || sp_streq(wcn, "unshift")) {
-        for (int e = 0; e < an && nst < 64; e++) stores[nst++] = av[e];
-      }
-      else if (sp_streq(wcn, "[]=") && an >= 2) stores[nst++] = av[an - 1];
-      else continue;
-    }
-    else continue;
+  for (int w = 0; w < c->nt->count; w++) {
+    int stores[64];
+    int nst = strbuf_container_store_values(c, w, contn, conts, 0, stores);
     for (int e = 0; e < nst; e++) {
       TyKind st = stores[e] >= 0 ? infer_type(c, stores[e]) : TY_UNKNOWN;
       if (st == TY_UNKNOWN || st == TY_POLY || st == TY_STRING || st == TY_STRBUF)
@@ -11757,45 +11731,8 @@ static int strbuf_demand_container_stores_here(Compiler *c, const char *contn, S
     int nsn = 0;
     const int *sns0 = sb_store_nodes(c, contn, conts, &nsn);
     for (int si = 0; si < nsn; si++) {
-      int w2 = sns0[si];
-      int nst = 0; int stores[64];
-      NodeKind wk = nt_kind(nt, w2);
-      if (wk == NK_LocalVariableWriteNode) {
-        const char *wn2 = nt_str(nt, w2, "name");
-        if (!wn2 || !sp_streq(wn2, contn) || comp_scope_of(c, w2) != conts) continue;
-        int val2 = nt_ref(nt, w2, "value");
-        if (val2 < 0) continue;
-        NodeKind vk = nt_kind(nt, val2);
-        if (vk == NK_ArrayNode) {
-          int en2 = 0; const int *el2 = nt_arr(nt, val2, "elements", &en2);
-          for (int e2 = 0; e2 < en2 && nst < 64; e2++) stores[nst++] = el2[e2];
-        }
-        else if (strbuf_map_block_tail(c, val2) >= 0)
-          stores[nst++] = strbuf_map_block_tail(c, val2);
-        else if (vk == NK_HashNode || vk == NK_KeywordHashNode) {
-          int en2 = 0; const int *el2 = nt_arr(nt, val2, "elements", &en2);
-          for (int e2 = 0; e2 < en2 && nst < 64; e2++)
-            if (nt_kind(nt, el2[e2]) == NK_AssocNode)
-              stores[nst++] = nt_ref(nt, el2[e2], "value");
-        }
-      }
-      else if (wk == NK_CallNode) {
-        int wr2 = nt_ref(nt, w2, "receiver");
-        if (wr2 < 0 || nt_kind(nt, wr2) != NK_LocalVariableReadNode) continue;
-        const char *wrn2 = nt_str(nt, wr2, "name");
-        if (!wrn2 || !sp_streq(wrn2, contn) || comp_scope_of(c, wr2) != conts) continue;
-        const char *wcn2 = nt_str(nt, w2, "name");
-        if (!wcn2) continue;
-        int a2 = nt_ref(nt, w2, "arguments");
-        int an2 = 0; const int *av2 = a2 >= 0 ? nt_arr(nt, a2, "arguments", &an2) : NULL;
-        if (sp_streq(wcn2, "<<") || sp_streq(wcn2, "push") ||
-            sp_streq(wcn2, "append") || sp_streq(wcn2, "unshift")) {
-          for (int e2 = 0; e2 < an2 && nst < 64; e2++) stores[nst++] = av2[e2];
-        }
-        else if (sp_streq(wcn2, "[]=") && an2 >= 2) stores[nst++] = av2[an2 - 1];
-        else continue;
-      }
-      else continue;
+      int stores[64];
+      int nst = strbuf_container_store_values(c, sns0[si], contn, conts, 1, stores);
       for (int e3 = 0; e3 < nst; e3++) {
         int sn = stores[e3];
         if (sn < 0 || c->strbuf_box[sn]) continue;
