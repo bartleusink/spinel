@@ -15625,8 +15625,12 @@ void analyze_program(Compiler *c) {
       int v = nt_ref(c->nt, id, "value");
       if (v < 0) continue;
       /* DFS the value subtree for ivar reads (covers ternary/if arms);
-         stop at nested defs. Small fixed stack: value subtrees are tiny. */
-      int stack[256]; int sp = 0; stack[sp++] = v;
+         stop at nested defs. The worklist grows: a fixed 250 dropped the
+         children past it, and an ivar read there was missed. */
+      int cap = 256, sp = 0;
+      int *stack = (int *)malloc(sizeof(int) * (size_t)cap);
+      if (!stack) continue;
+      stack[sp++] = v;
       while (sp > 0) {
         int nid = stack[--sp];
         const char *t2 = nt_type(c->nt, nid);
@@ -15660,10 +15664,19 @@ void analyze_program(Compiler *c) {
           }
         }
         int nr2 = nt_num_refs(c->nt, nid);
-        for (int i2 = 0; i2 < nr2 && sp < 250; i2++) { int ch2 = nt_ref_at(c->nt, nid, i2); if (ch2 >= 0) stack[sp++] = ch2; }
         int na2 = nt_num_arrs(c->nt, nid);
-        for (int i2 = 0; i2 < na2 && sp < 250; i2++) { int nn2 = 0; const int *ids2 = nt_arr_at(c->nt, nid, i2, &nn2); for (int k2 = 0; k2 < nn2 && sp < 250; k2++) if (ids2[k2] >= 0) stack[sp++] = ids2[k2]; }
+        int more = nr2;
+        for (int i2 = 0; i2 < na2; i2++) { int nn2 = 0; nt_arr_at(c->nt, nid, i2, &nn2); more += nn2; }
+        if (sp + more > cap) {
+          while (sp + more > cap) cap *= 2;
+          int *g = (int *)realloc(stack, sizeof(int) * (size_t)cap);
+          if (!g) break;
+          stack = g;
+        }
+        for (int i2 = 0; i2 < nr2; i2++) { int ch2 = nt_ref_at(c->nt, nid, i2); if (ch2 >= 0) stack[sp++] = ch2; }
+        for (int i2 = 0; i2 < na2; i2++) { int nn2 = 0; const int *ids2 = nt_arr_at(c->nt, nid, i2, &nn2); for (int k2 = 0; k2 < nn2; k2++) if (ids2[k2] >= 0) stack[sp++] = ids2[k2]; }
       }
+      free(stack);
     }
     if (hb_changed) {
       for (int iter = 0; iter < 16; iter++) {

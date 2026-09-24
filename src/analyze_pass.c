@@ -5338,21 +5338,36 @@ static void subtree_self_to_const(Compiler *c, int root, const char *cname, int 
 }
 
 /* Splice a block body into the enclosing scope `encl`: re-home every node
-   that lived in the block's own scope (nested blocks keep theirs). */
+   that lived in the block's own scope (nested blocks keep theirs). The
+   worklist grows: a fixed 250 left the children past it in the block's
+   scope (a wide array literal in the body). */
 static void rehome_block_body(Compiler *c, int body, int encl) {
   const NodeTable *nt = c->nt;
   Scope *bs = comp_scope_of(c, body);
   int bsi = bs ? (int)(bs - c->scopes) : -1;
-  int stack[256]; int sp = 0; stack[sp++] = body;
-  while (sp > 0 && bsi >= 0) {
+  if (bsi < 0) return;
+  int cap = 256, sp = 0;
+  int *stack = (int *)malloc(sizeof(int) * (size_t)cap);
+  if (!stack) return;
+  stack[sp++] = body;
+  while (sp > 0) {
     int nid = stack[--sp];
     if (nid < 0 || nid >= nt->count) continue;
     if (c->nscope[nid] == bsi) c->nscope[nid] = encl;
     const SpNode *nd = &nt->nodes[nid];
-    for (int i2 = 0; i2 < nd->nr && sp < 250; i2++) stack[sp++] = nd->r[i2].ref;
+    int more = nd->nr;
+    for (int i2 = 0; i2 < nd->na; i2++) more += nd->a[i2].n;
+    if (sp + more > cap) {
+      while (sp + more > cap) cap *= 2;
+      int *g = (int *)realloc(stack, sizeof(int) * (size_t)cap);
+      if (!g) break;
+      stack = g;
+    }
+    for (int i2 = 0; i2 < nd->nr; i2++) stack[sp++] = nd->r[i2].ref;
     for (int i2 = 0; i2 < nd->na; i2++)
-      for (int j2 = 0; j2 < nd->a[i2].n && sp < 250; j2++) stack[sp++] = nd->a[i2].ids[j2];
+      for (int j2 = 0; j2 < nd->a[i2].n; j2++) stack[sp++] = nd->a[i2].ids[j2];
   }
+  free(stack);
 }
 
 /* The value forms of class_eval / class_exec (and module_*): the block is
