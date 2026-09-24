@@ -115,6 +115,21 @@ All integer types collapse to `sp_int` (int64) inside Spinel and are
 cast to the declared C type at the call boundary. Floats collapse to
 `double` the same way.
 
+The function's `extern` is built from these C types and declared under a
+private name that an asm label binds to the real symbol, so it can't
+conflict with a header that declares the same function with other types.
+`fopen`, which `<stdio.h>` declares returning `FILE *`, can be bound as
+`ffi_func :fopen, %i[str str], :ptr`; so can a function whose own header
+an `ffi_source` fragment includes. A variadic function with fixed
+arguments is declared the same way, with a trailing `...`.
+
+The label names the raw symbol, the one `dlsym` would find for the ffi
+gem, not a name a header redirects it to: glibc's `fopen64` under
+`_FILE_OFFSET_BITS=64`, `__isoc99_sscanf`, or a `_FORTIFY_SOURCE`
+`__*_chk` wrapper. The specs describe that raw symbol's ABI. To call the
+redirected variant, name it with the ffi gem's rename form,
+`attach_function :fopen, :fopen64, [:string, :string], :pointer`.
+
 `:str` builds the result String by `strlen`, so it stops at the first
 embedded NUL. `:binstr` is a return-only variant that builds a
 binary-safe String of an exact byte count instead (it reads

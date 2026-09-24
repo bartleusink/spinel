@@ -10683,7 +10683,7 @@ char *codegen_program(const NodeTable *nt) {
         s = semi + 1;
       }
     }
-    int any_binstr = 0;
+    int any_binstr = 0, any_extern = 0;
     for (int fi = 0; fi < cf->n_ffi_funcs; fi++) {
       const char *ret = cf->ffi_funcs[fi].ret;
       if (sp_streq(ret, "binstr")) any_binstr = 1;
@@ -10696,25 +10696,42 @@ char *codegen_program(const NodeTable *nt) {
         if (ffi_find_callback(cf, cf->ffi_funcs[fi].mod, cf->ffi_funcs[fi].args[ai]) >= 0) { has_cb = 1; break; }
       if (has_cb) continue;
       int na = cf->ffi_funcs[fi].nargs;
-      /* A variadic function (trailing :varargs) gets NO extern: redeclaring a
-         libc variadic already declared by a system header -- e.g. printf, which
-         glibc declares with fortify attributes/inlines -- conflicts under some
-         libc + compiler combinations (notably gcc + glibc _FORTIFY_SOURCE). The
-         call site instead casts the header-declared symbol to a variadic
-         function pointer, which cannot conflict. A user (non-libc) variadic
-         function must be declared via a header supplied through ffi_cflags. */
-      if (na > 0 && sp_streq(cf->ffi_funcs[fi].args[na - 1], "varargs")) continue;
+      /* Declared under a private name bound to the symbol by an asm label
+         (ffi_extern_name). __USER_LABEL_PREFIX__ is the target's symbol prefix
+         (`_` on Mach-O, empty on ELF and wasm). The label names the raw
+         symbol, not whatever a header redirects the name to (fopen64,
+         __isoc99_sscanf, a fortify __*_chk): the spec describes the raw
+         symbol's ABI, the one dlsym finds for the ffi gem.
+         A variadic function (trailing :varargs) is declared the same way, with
+         its fixed args and `...`: the private name cannot conflict with a
+         header's fortified declaration (printf under gcc + glibc
+         _FORTIFY_SOURCE), and calling it is no call through an incompatible
+         function type (gcc warns casting fprintf's FILE * to void *). With no
+         fixed arg there is no prototype to write (`(...)` needs C23), so the
+         call site casts the header-declared symbol instead. */
+      int is_va = na > 0 && sp_streq(cf->ffi_funcs[fi].args[na - 1], "varargs");
+      int fixed = is_va ? na - 1 : na;
+      if (is_va && fixed == 0) continue;
+      if (!any_extern) {
+        buf_puts(&b, "#define SP_FFI_STR_(x) #x\n#define SP_FFI_STR(x) SP_FFI_STR_(x)\n"
+                     "#ifdef __USER_LABEL_PREFIX__\n"
+                     "#define SP_FFI_SYM(s) SP_FFI_STR(__USER_LABEL_PREFIX__) s\n"
+                     "#else\n#define SP_FFI_SYM(s) s\n#endif\n");
+        any_extern = 1;
+      }
       buf_puts(&b, "extern ");
       buf_puts(&b, ffi_c_type(ret));
       buf_puts(&b, " ");
-      buf_puts(&b, cf->ffi_funcs[fi].csym ? cf->ffi_funcs[fi].csym : cf->ffi_funcs[fi].name);
+      ffi_extern_name(cf, fi, &b);
       buf_puts(&b, "(");
-      for (int ai = 0; ai < na; ai++) {
+      for (int ai = 0; ai < fixed; ai++) {
         if (ai) buf_puts(&b, ", ");
         buf_puts(&b, ffi_c_type(cf->ffi_funcs[fi].args[ai]));
       }
+      if (is_va) buf_puts(&b, ", ...");
       if (na == 0) buf_puts(&b, "void");
-      buf_puts(&b, ");\n");
+      buf_printf(&b, ") __asm__(SP_FFI_SYM(\"%s\"));\n",
+                 cf->ffi_funcs[fi].csym ? cf->ffi_funcs[fi].csym : cf->ffi_funcs[fi].name);
     }
     /* Byte count for the :binstr return mode (defined in sp_alloc.c). */
     /* sp_alloc.h already declares it, and declares it SP_TLS in the threaded
