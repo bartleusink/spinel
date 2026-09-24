@@ -7822,6 +7822,24 @@ static int narrow_object_arrays(Compiler *c) {
     int bn = 0; const int *bl = nt_arr(nt, sc->body, "body", &bn);
     if (bn > 0 && bl[bn - 1] >= 0 && bl[bn - 1] < nc) value_ok[bl[bn - 1]] = 0;
   }
+  /* walk_disc[id]: a walk's value is thrown away -- a statement followed by
+     another, or one of the program's top-level statements. An object array
+     walk narrows only there: `y = a.each { }` or `a.each { break r }` hands
+     the array (or the break value) to a consumer typed for the boxed array,
+     which the narrowed sp_PtrArray is not (#4879). */
+  char *walk_disc = (char *)calloc(nc, 1);
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || !sp_streq(ty, "StatementsNode")) continue;
+    int bn = 0; const int *bl = nt_arr(nt, id, "body", &bn);
+    for (int i = 0; i + 1 < bn; i++) if (bl[i] >= 0 && bl[i] < nc) walk_disc[bl[i]] = 1;
+  }
+  { int root = nt->count > 0 ? nt->count - 1 : -1;
+    for (int id = 0; id < nt->count; id++)
+      if (nt_type(nt, id) && sp_streq(nt_type(nt, id), "ProgramNode")) { root = id; break; }
+    int ps = root >= 0 ? nt_ref(nt, root, "statements") : -1;
+    int bn = 0; const int *bl = ps >= 0 ? nt_arr(nt, ps, "body", &bn) : NULL;
+    for (int i = 0; i < bn; i++) if (bl[i] >= 0 && bl[i] < nc) walk_disc[bl[i]] = 1; }
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "LocalVariableWriteNode")) continue;
@@ -8009,6 +8027,10 @@ static int narrow_object_arrays(Compiler *c) {
         /* a block with a block of its own may be lifted into a proc, whose
            parameter passing does not carry a typed object element yet (bit 4) */
         if (oa_block_has_nested_block(nt, nt_ref(nt, id, "block"))) sl[S].row_iter |= 4;
+        /* an each-family walk answers its receiver: one whose value is used
+           hands the array on (bit 8). A map answers a new array. */
+        int maps = name && (sp_streq(name, "map") || sp_streq(name, "collect"));
+        if (!fold && !maps && !(id < nc && walk_disc[id])) sl[S].row_iter |= 8;
       }
       else sl[S].alive = 0;
     }
@@ -8318,10 +8340,11 @@ static int narrow_object_arrays(Compiler *c) {
        (bit 2) on an object array would narrow a table those emitters do not
        walk. */
     /* ... and only while nothing yet unsupported comes with it: a block that
-       nests another (bit 4), or an element class that is itself Enumerable,
-       whose Enumerable methods have no emitter on a typed receiver. */
+       nests another (bit 4), a walk whose value is used (bit 8), or an
+       element class that is itself Enumerable, whose Enumerable methods have
+       no emitter on a typed receiver. */
     if (!OA_CLS_IS_NESTED(sl[r].cls) &&
-        ((sl[r].row_iter & 6) ||
+        ((sl[r].row_iter & 14) ||
          (sl[r].row_iter && sl[r].cls >= 0 &&
           (an_class_includes_enumerable(c, sl[r].cls) ||
            comp_method_in_chain(c, sl[r].cls, "each", NULL) >= 0)))) {
@@ -8411,7 +8434,7 @@ static int narrow_object_arrays(Compiler *c) {
   for (int k = 0; k < c->nclasses; k++) free(ivslot[k]);
   free(ivslot);
   #undef OA_IVSLOT
-  free(sl); free(read_slot); free(call_ret); free(claimed); free(value_ok); free(attr_sym); free(dead);
+  free(sl); free(read_slot); free(call_ret); free(claimed); free(value_ok); free(walk_disc); free(attr_sym); free(dead);
   return changed;
 }
 

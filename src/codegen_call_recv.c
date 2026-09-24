@@ -13922,7 +13922,15 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   }
   /* poly receiver: []= with symbol, string, int, or poly key -> runtime dispatch
      Skip Fiber/Fiber.current storage receivers (handled later). */
-  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "[]=") && argc == 2 &&
+  /* A user class that takes `[]=` with two arguments owns the name: the call
+     goes to the class dispatch, whose builtin arm re-enters here for a real
+     Array or Hash. Taking it here stored into a boxed user object as if it
+     were a hash and never ran the class's method (#4879). */
+  int user_aset = 0;
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "[]=") && argc == 2 && !g_poly_builtin_arm)
+    for (int kk = 0; kk < c->nclasses && !user_aset; kk++)
+      if (comp_poly_arm_defines_n(c, kk, "[]=", 2)) user_aset = 1;
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "[]=") && argc == 2 && !user_aset &&
       !sp_is_fiber_storage_recv(nt, recv)) {
     /* arr[range] = rhs on a poly receiver: a splice over the range's span. */
     if (comp_ntype(c, argv[0]) == TY_RANGE) {

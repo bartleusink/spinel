@@ -5595,6 +5595,28 @@ static int emit_poly_builtin_default(Compiler *c, int id, int recv, const char *
   return 1;
 }
 
+/* `x[k] = v` where a user class owns `[]=`: a receiver that is really an
+   Array or a Hash stores through the runtime, which dispatches on the
+   container's own kind (#4879). Written after the default label. */
+static int emit_poly_aset_default(Compiler *c, const char *name, int argc, const int *atmp,
+                                  const TyKind *atmp_ty, TyKind ret, int tv, int tr, Buf *b) {
+  if (argc != 2 || !name || !sp_streq(name, "[]=") || !atmp || !atmp_ty) return 0;
+  char k0[24], v0[24];
+  snprintf(k0, sizeof k0, "_t%d", atmp[0]);
+  snprintf(v0, sizeof v0, "_t%d", atmp[1]);
+  Buf kb; memset(&kb, 0, sizeof kb);
+  Buf vb; memset(&vb, 0, sizeof vb);
+  emit_boxed_text(c, atmp_ty[0], k0, &kb);
+  emit_boxed_text(c, atmp_ty[1], v0, &vb);
+  buf_printf(b, " sp_poly_set_poly(_t%d, %s, %s); _t%d = ", tv, kb.p, vb.p, tr);
+  if (ret == atmp_ty[1]) buf_puts(b, v0);
+  else if (ret == TY_POLY) buf_puts(b, vb.p);
+  else emit_unbox_text(c, is_scalar_ret(ret) ? ret : TY_INT, vb.p, b);
+  buf_puts(b, "; break;");
+  free(kb.p); free(vb.p);
+  return 1;
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -8262,8 +8284,9 @@ else {
            and a builtin answer there was not even of the slot's type. */
         int dl_open = b->len == dl_pos || (b->len > 0 && b->p[b->len - 1] == '}');
         if (!dl_open ||
-            !emit_poly_builtin_default(c, id, recv, name, argc, argv, atmp, atmp_ty,
-                                       ret, tv, tr, 0, b))
+            (!emit_poly_aset_default(c, name, argc, atmp, atmp_ty, ret, tv, tr, b) &&
+             !emit_poly_builtin_default(c, id, recv, name, argc, argv, atmp, atmp_ty,
+                                        ret, tv, tr, 0, b)))
           buf_printf(b, " sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", name, tv);
       }
       /* `[]` gets a default of its own. The arms above enumerate the kinds

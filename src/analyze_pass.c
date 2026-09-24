@@ -7755,6 +7755,12 @@ int infer_block_params(Compiler *c) {
        matching infer_call's redispatch and the codegen mirrors. */
     if (rt == TY_RANGE && range_enum_redispatch(c, id)) rt = TY_INT_ARRAY;
     if (ty_is_hash(rt) && hash_enum_redispatch(c, id)) rt = TY_POLY_ARRAY;
+    /* A narrowed object array's walk binds its element boxed into a boxed
+       parameter (the emitters' box_to_poly), as the array's elements were
+       before it narrowed: the parameter keeps the element type a poly array
+       gives it. Left untyped, the block's own uses typed it -- `r[k] = v`
+       made it a hash, and an sp_X * element was bound into it (#4879). */
+    if (ty_is_obj_array(rt)) rt = TY_POLY_ARRAY;
     const char *p0 = block_param_name(c, block, 0);
     if (!p0 && !block_param_is_multi(c, block, 0)) continue;
 
