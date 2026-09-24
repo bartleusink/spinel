@@ -5326,21 +5326,23 @@ int opt_before_required(Scope *m) {
 int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc) {
   if (idx < 0 || idx >= m->nparams) return -1;
   if (!opt_before_required(m)) return idx < argc ? idx : -1;
-  /* a rest parameter makes the arity a range rather than a map */
-  if (m->rest_idx >= 0) return idx < argc ? idx : -1;
   /* keywords and a **rest sit in pnames too but take no positional
      argument; map over the positional prefix only. A **kw was mapped by
      position once, so `def m(a = 1, b, **kw)` given one argument bound it
      to a and left b nil. */
   int n = m->nparams;
   while (n > 0 && (n - 1 == m->kwrest_idx || callee_param_is_declared_kwarg(c, m, m->pnames[n - 1]))) n--;
-  if (idx >= n) return -1;
+  if (idx >= n || idx == m->rest_idx) return -1;
   int pre = 0;
   while (pre < n && (!m->pdefault || m->pdefault[pre] < 0)) pre++;
   int opt_end = pre;
   while (opt_end < n && m->pdefault && m->pdefault[opt_end] >= 0) opt_end++;
-  if (opt_end == n) return idx < argc ? idx : -1;   /* optionals trail after all */
-  int post = n - opt_end;
+  /* a *rest sits between the optionals and the trailing requireds and takes
+     only what is left once both are funded: `def r(a = {}, *rest, c)` called
+     `r(5)` binds c and leaves a at its default, where mapping it positionally gave a the 5 too */
+  int post_from = (m->rest_idx >= 0 && m->rest_idx == opt_end) ? opt_end + 1 : opt_end;
+  if (post_from >= n) return idx < argc ? idx : -1;   /* optionals trail after all */
+  int post = n - post_from;
   if (idx < pre) return idx < argc ? idx : -1;
   if (idx < opt_end) {
     int avail = argc - pre - post;      /* optionals this call can fund */
@@ -7255,8 +7257,11 @@ else {
         emit_rest_pack_kwh(c, i, rest_end, argv, rest_kwh_tail(c, m, kwh, pos_argc), out);
       }
     }
-else if (m->rest_idx >= 0 && m->npost_rest > 0 && i > m->rest_idx) {
-      /* post-splat required param: take from the end of the call args */
+else if (m->rest_idx >= 0 && m->npost_rest > 0 && i > m->rest_idx &&
+         i <= m->rest_idx + m->npost_rest) {
+      /* post-splat required param: take from the end of the call args. Only
+         the posts: a keyword parameter after them binds by name below, where
+         it took the last positional instead */
       int post_j = i - m->rest_idx - 1;  /* 0-based index in posts */
       int argv_idx = pos_argc - m->npost_rest + post_j;
       if (argv && argv_idx >= 0 && argv_idx < pos_argc)
