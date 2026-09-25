@@ -11420,6 +11420,38 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
     }
   }
 
+  /* The same shim over a READER call that hands out the handle
+     (`obj.name[0] = "X"`), whose call node reads as the shadow. */
+  if ((rt == TY_STRING || rt == TY_STRBUF) && nt_kind(nt, recv) == NK_CallNode &&
+      (sp_streq(name, "[]=") || sp_streq(name, "insert"))) {
+    char srefR[1024];
+    SbReaderSave svR;
+    int tH = sb_reader_shim_open(c, recv, srefR, sizeof srefR, &svR);
+    if (tH) {
+      Buf armb; memset(&armb, 0, sizeof armb);
+      int handled = emit_array_mutate_stmt(c, id, &armb, indent + 1);
+      sb_reader_shim_close(c, recv, &svR);
+      if (!handled) free(armb.p);
+      else {
+        emit_indent(b, indent);
+        buf_printf(b, "{ sp_String *_t%d = %s;\n", tH, srefR);
+        emit_indent(b, indent + 1);
+        buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);\n", tH, tH);
+        emit_indent(b, indent + 1);
+        buf_printf(b, "const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));\n", tH, tH);
+        emit_indent(b, indent + 1);
+        buf_printf(b, "SP_GC_ROOT(lv__sb%d);\n", tH);
+        buf_puts(b, armb.p ? armb.p : "");
+        free(armb.p);
+        emit_indent(b, indent + 1);
+        buf_printf(b, "sp_String_set_bin(_t%d, lv__sb%d);\n", tH, tH);
+        emit_indent(b, indent);
+        buf_puts(b, "}\n");
+        return 1;
+      }
+    }
+  }
+
   /* Shared-mutable shim (#3227): a strbuf-local receiver of a rebinding
      string mutator re-runs the existing value-semantics arm against a plain
      SHADOW copy (a rename entry plus a temporary slot-type flip point every
@@ -11700,6 +11732,7 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
     const char *rty2 = nt_type(nt, recv);
     int assignable2 = rty2 && (sp_streq(rty2, "LocalVariableReadNode") ||
                                sp_streq(rty2, "InstanceVariableReadNode") || sp_streq(rty2, "SelfNode"));
+    if (sb_shadowed_reader(recv)) assignable2 = 1;   /* the reader shim's shadow */
     const char *abase = NULL, *abang = NULL;
     if      (sp_streq(name, "gsub!"))   { abase = "gsub";   abang = "gsub!"; }
     else if (sp_streq(name, "sub!"))    { abase = "sub";    abang = "sub!"; }
@@ -11801,6 +11834,7 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   if (rt == TY_STRING) {
     const char *rty = nt_type(nt, recv);
     int assignable = rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"));
+    if (sb_shadowed_reader(recv)) assignable = 1;   /* the reader shim's shadow */
     /* an in-place mutator on a frozen string literal raises FrozenError */
     if (rty && sp_streq(rty, "StringNode") &&
         (sp_streq(name, "insert") || sp_streq(name, "prepend") || sp_streq(name, "<<") ||
