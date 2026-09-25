@@ -1259,39 +1259,22 @@ int exc_subclass_defines(Compiler *c, const char *name) {
   return 0;
 }
 
-/* Can a call ever arrive at an instance method of this class or module? Only
-   through a value that is one, so a class nobody instantiates -- and that no
-   instantiated class inherits from or includes -- has neither a direct call
-   site nor a poly-dispatch arm. The same test analyze.c makes for the
-   by-reference name group (#4390), for the same reason: a class nothing can
-   reach cannot own a name.
+/* analyze.c's an_class_can_be_reached, plus reopened builtin primitives: a
+   class nothing can reach cannot own a name, and owning a name takes the
+   BUILTIN away. A program that merely declared `Bucket#partition`, never
+   instantiating Bucket, made a valid `String#partition` on a boxed receiver
+   compile to a dispatch with no arms at all -- a switch whose only branch
+   raises NoMethodError, naming String, for a method String has (#4413).
 
-   It matters here because owning a name takes the BUILTIN away. A program
-   that merely declared `Bucket#partition`, never instantiating Bucket, made a
-   valid `String#partition` on a boxed receiver compile to a dispatch with no
-   arms at all -- a switch whose only branch raises NoMethodError, naming
-   String, for a method String has (#4413). Unsure answers 1, which is the
-   old behaviour. */
+   A reopened builtin primitive has instances without any user constructor,
+   so the `.new` census never marks it -- the same reason the dispatch below
+   carries class_is_prim_reopen. Without it here, `user_defines_or_reads`
+   answered false for a name a reopen defines, and every poly arm that asks
+   it (succ, upcase, downcase, ... ) kept the name and answered the builtin
+   for a receiver typed at run time, while the concrete receiver took the
+   reopen. */
 static int uk_class_can_be_reached(Compiler *c, int ci) {
-  if (ci < 0 || ci >= c->nclasses) return 1;
-  if (c->classes[ci].instantiated) return 1;
-  /* A reopened builtin primitive has instances without any user constructor,
-     so the `.new` census never marks it -- the same reason the dispatch below
-     carries class_is_prim_reopen. Without it here, `user_defines_or_reads`
-     answered false for a name a reopen defines, and every poly arm that asks
-     it (succ, upcase, downcase, ... ) kept the name and answered the builtin
-     for a receiver typed at run time, while the concrete receiver took the
-     reopen. */
-  if (class_is_prim_reopen(c, ci)) return 1;
-  for (int j = 0; j < c->nclasses; j++) {
-    if (!c->classes[j].instantiated) continue;
-    for (int k = j; k >= 0; k = c->classes[k].parent)
-      if (k == ci) return 1;
-    for (int k = j; k >= 0; k = c->classes[k].parent)
-      for (int m = 0; m < c->classes[k].nincluded_mods; m++)
-        if (c->classes[k].included_mods[m] == ci) return 1;
-  }
-  return 0;
+  return an_class_can_be_reached(c, ci) || class_is_prim_reopen(c, ci);
 }
 
 int user_defines_or_reads(Compiler *c, const char *name) {
