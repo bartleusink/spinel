@@ -4274,6 +4274,15 @@ static int struct_new_types_members(Compiler *c, int id, int ci) {
   int an = 0;
   const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
   int kwh = (an == 1 && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode")) ? argv[0] : -1;
+  /* `S.new(*args)`: from the splat on, a member takes whatever element lands
+     there, or nil when a short array leaves it unset -- a run-time shape, so
+     the member is boxed. Reading the SplatNode as one positional argument
+     pinned the members to the other construction sites' types: a String
+     element arriving in an Integer member was unboxed as garbage, and the
+     nil fill as 0. */
+  int splat_at = -1;
+  for (int a = 0; a < an && kwh < 0; a++)
+    if (nt_kind(nt, argv[a]) == NK_SplatNode) { splat_at = a; break; }
   for (int a = 0; a < cls->nivars; a++) {
     /* a member not supplied at this construction can be nil */
     const char *mname = cls->ivars[a] + 1;
@@ -4289,6 +4298,11 @@ static int struct_new_types_members(Compiler *c, int id, int ci) {
     }
     else if (a < an) vnode = argv[a];
     if (class_ivar_pinned(cls, cls->ivars[a])) continue;
+    if (splat_at >= 0 && a >= splat_at) {
+      TyKind sm = ty_unify(cls->ivar_types[a], TY_POLY);
+      if (sm != cls->ivar_types[a]) { cls->ivar_types[a] = sm; changed = 1; }
+      continue;
+    }
     TyKind at = vnode >= 0 ? infer_type(c, vnode) : TY_NIL;
     /* An empty container literal (or `Array.new` / `Hash.new`) has
        no type of its own until a use fills it in, and a member
