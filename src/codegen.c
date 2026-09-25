@@ -8174,8 +8174,8 @@ void emit_super(Compiler *c, int id, Buf *b) {
     return;
   }
   /* Strip __prep_N_ prefix to get the user method name for parent chain lookup. */
-  const char *uname = comp_prep_user_name(s->name);
   int p = c->classes[s->class_id].parent;
+  const char *uname = comp_super_name(c, p, s->name, s->is_cmethod);
   /* super inside a class method: resolve through the parent's CLASS-method
      chain and call the sp_<Cls>_s_ form (class methods take no instance
      self). The instance path below would miss `def self.x` entirely. */
