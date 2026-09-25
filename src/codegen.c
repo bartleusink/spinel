@@ -240,6 +240,27 @@ void emit_unbox_nilable_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   emit_unbox_text(c, t, expr, b);
 }
 
+/* True when an array of kind `vt` is stored into a slot of another scalar
+   array kind (Int, Float or String elements). Inference widens such a slot
+   unless an --rbs seed pins it, so this is where a seeded slot meets an array
+   of the wrong kind; the store converts through emit_unbox_text. */
+int seeded_array_kind_mismatch(TyKind slot, TyKind vt) {
+  if (slot != TY_INT_ARRAY && slot != TY_FLOAT_ARRAY && slot != TY_STR_ARRAY) return 0;
+  return vt != slot && (vt == TY_POLY_ARRAY || vt == TY_INT_ARRAY ||
+                        vt == TY_FLOAT_ARRAY || vt == TY_STR_ARRAY);
+}
+
+/* Emit `v` for a store into a slot of array kind `slot`, converting it when
+   seeded_array_kind_mismatch says the kinds differ: boxed, then read back
+   through the slot's converting entry (#4424). Otherwise the plain value. */
+void emit_array_store_value(Compiler *c, TyKind slot, int v, Buf *b) {
+  if (!seeded_array_kind_mismatch(slot, comp_ntype(c, v))) { emit_expr(c, v, b); return; }
+  Buf rb; memset(&rb, 0, sizeof rb);
+  emit_boxed(c, v, &rb);
+  emit_unbox_text(c, slot, rb.p ? rb.p : "sp_box_nil()", b);
+  free(rb.p);
+}
+
 /* Wrap a boxed expression in the --rbs seed assertion before it is narrowed
    into a seeded slot. Emits the plain expression for a slot with no tag of its
    own (poly, or a by-value type), and for every slot when the program is built

@@ -1679,6 +1679,11 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       return;
     }
     else if (ivt2 == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
+    else if (seeded_array_kind_mismatch(ivt2, comp_ntype(c, v))) {
+      /* an array of another kind into a seed-pinned array ivar: converted,
+         as the statement form does */
+      emit_array_store_value(c, ivt2, v, b);
+    }
     else if (ivt2 != TY_POLY && ivt2 != TY_UNKNOWN && comp_ntype(c, v) == TY_POLY) {
       /* poly rhs assigned to a typed ivar: unbox to the concrete type */
       Buf _rb; memset(&_rb, 0, sizeof _rb);
@@ -1736,7 +1741,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     }
     else {
       Buf *saved_pre = g_pre; g_pre = &vpre;
-      emit_expr(c, v, &vval);
+      emit_array_store_value(c, ivt3, v, &vval);   /* a seed-pinned kind converts */
       g_pre = saved_pre;
       if (ivt3 == TY_BOOL || ivt3 == TY_STRING)
         snprintf(condb, sizeof condb, "%s%s", is_or ? "!" : "", ref3);
