@@ -6658,8 +6658,11 @@ int emit_unknown_kwarg_raise(Compiler *c, Scope *m, int kwh) {
     const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
     if (!kn) continue;
     int found = 0;
+    /* a key names a keyword parameter or nothing: a positional parameter of
+       the same name does not take it (`def f(x, k: 1)` called `f(1, x: 2)`
+       is "unknown keyword: :x") */
     for (int i = 0; i < m->nparams; i++)
-      if (m->pnames[i] && sp_streq(m->pnames[i], kn)) { found = 1; break; }
+      if (m->pnames[i] && sp_streq(m->pnames[i], kn) && callee_has_kwarg(c, m, kn)) { found = 1; break; }
     if (!found) { args_raise("unknown keyword: :%s", kn); return 1; }
   }
   return 0;
@@ -6817,13 +6820,39 @@ static void emit_call_arity_check(Compiler *c, Scope *m, int argc, const int *ar
     char expbuf2[32];
     if (nreq == nfixed) snprintf(expbuf2, sizeof expbuf2, "%d", nfixed);
     else snprintf(expbuf2, sizeof expbuf2, "%d..%d", nreq, nfixed);
+    /* CRuby names the required keywords in a positional-count error:
+       `def h(x, k:)` called `h(k: 3)` is "(given 0, expected 1; required
+       keyword: k)" */
+    char kwsuf[256] = "";
+    { int pn = m->def_node >= 0 ? nt_ref(nt, m->def_node, "parameters") : -1;
+      int kn = 0; const int *kws = pn >= 0 ? nt_arr(nt, pn, "keywords", &kn) : NULL;
+      int nrk = 0; size_t off = 0;
+      for (int j = 0; j < kn; j++) if (nt_type(nt, kws[j]) && sp_streq(nt_type(nt, kws[j]), "RequiredKeywordParameterNode")) nrk++;
+      if (nrk > 0) {
+        off = (size_t)snprintf(kwsuf, sizeof kwsuf, "; required keyword%s: ", nrk > 1 ? "s" : "");
+        int first = 1;
+        for (int j = 0; j < kn && off < sizeof kwsuf; j++) {
+          if (!nt_type(nt, kws[j]) || !sp_streq(nt_type(nt, kws[j]), "RequiredKeywordParameterNode")) continue;
+          const char *kpn = nt_str(nt, kws[j], "name");
+          off += (size_t)snprintf(kwsuf + off, sizeof kwsuf - off, "%s%s", first ? "" : ", ", kpn ? kpn : "?");
+          first = 0;
+        }
+      } }
     int raised = 0;
     if (eff_pos > nfixed && !bam_variadic_kernel(nt, m)) {
-      args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
+      args_raise("wrong number of arguments (given %d, expected %s%s)", eff_pos, expbuf2, kwsuf);
       raised = 1;
     }
-    if (!raised && emit_unknown_kwarg_raise(c, m, kwh)) raised = 1;
+    /* CRuby's order: the positional count, then a missing keyword, then an
+       unknown one. Two passes over the parameters, positional then keyword,
+       and the unknown-key check last. */
+    for (int pass = 0; pass < 2 && !raised; pass++)
     for (int i = 0; i < m->nparams && !raised; i++) {
+      /* only a keyword parameter is supplied by a key: a positional one that
+         shares the key's name is still missing (`def f(x, k: 1)` called
+         `f(x: 2)` is short a positional, CRuby's "given 0, expected 1") */
+      int is_kw = m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]);
+      if (is_kw != pass) continue;
       /* With a leading optional the shortfall is a count, not a position:
          this parameter may be undefaulted and still funded, because the
          required ones are covered first. */
@@ -6831,13 +6860,14 @@ static void emit_call_arity_check(Compiler *c, Scope *m, int argc, const int *ar
       if (lead_opt && arg_slot_for_param(c, m, i, eff_pos) >= 0) continue;
       if (i < eff_pos && !lead_opt) continue;
       if (m->pdefault && m->pdefault[i] >= 0) continue;
-      if (kw_matches && kwh_lookup(nt, kwh, m->pnames[i]) >= 0) continue;
-      if ((kwh >= 0 && kw_matches) || callee_param_is_declared_kwarg(c, m, m->pnames[i]))
+      if (is_kw && kw_matches && kwh_lookup(nt, kwh, m->pnames[i]) >= 0) continue;
+      if (is_kw)
         args_raise("missing keyword: :%s", m->pnames[i] ? m->pnames[i] : "?");
       else
-        args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
+        args_raise("wrong number of arguments (given %d, expected %s%s)", eff_pos, expbuf2, kwsuf);
       raised = 1;
     }
+    if (!raised && emit_unknown_kwarg_raise(c, m, kwh)) raised = 1;
   }
 }
 
