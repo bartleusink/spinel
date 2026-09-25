@@ -8027,7 +8027,12 @@ static void emit_zsuper_rest_pack(Compiler *c, Scope *s, Scope *pm, int npos, Bu
 static void emit_super_block_arg(Compiler *c, int id, Scope *s, Scope *pm, int lead_comma, Buf *b) {
   if (!pm->blk_param || !pm->blk_param[0] || pm->yields) return;
   if (lead_comma) buf_puts(b, ", ");
-  int blk = nt_ref(c->nt, id, "block");
+  /* In an inlined body a forwarded `&` / `&blk` names the block spliced in
+     from the caller: materialize that literal (the callee's own `lv_blk` is
+     never declared there). */
+  int blk0 = nt_ref(c->nt, id, "block");
+  int blk = resolve_forwarded_block(c, blk0);
+  if (blk < 0) blk = blk0;
   const char *bty = blk >= 0 ? nt_type(c->nt, blk) : NULL;
   if (bty && sp_streq(bty, "BlockNode")) { emit_proc_literal(c, blk, b); return; }
   if (bty && sp_streq(bty, "BlockArgumentNode")) {
@@ -8041,6 +8046,8 @@ static void emit_super_block_arg(Compiler *c, int id, Scope *s, Scope *pm, int l
   }
   if (s->blk_param && s->blk_param[0] && !s->yields)
     buf_printf(b, "lv_%s", rename_local(s->blk_param));
+  /* the caller's block, implicitly forwarded from an inlined body */
+  else if (s->yields && g_block_id >= 0) emit_proc_literal(c, g_block_id, b);
   else buf_puts(b, "NULL");
 }
 
