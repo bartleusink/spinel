@@ -249,6 +249,8 @@ int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out);
+/* The array a map-shaped call answers from its block's tail (analyze_infer_recv.c). */
+TyKind infer_map_block_ty(Compiler *c, int id, int block);
 /* A range endpoint that is the infinite Float constant (analyze_infer.c). */
 int infer_end_is_float_inf(Compiler *c, int right);
 int propagate_prep_params(Compiler *c);
