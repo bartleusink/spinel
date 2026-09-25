@@ -424,6 +424,12 @@ module Net
       request(req)
     end
 
+    def head(path, headers = nil)
+      req = HTTPRequest.new("HEAD", path)
+      headers.each { |k, v| req[k] = v } unless headers.nil?
+      request(req)
+    end
+
     def post(path, body, headers = nil)
       req = HTTPRequest.new("POST", path)
       req.body = body
@@ -475,7 +481,7 @@ module Net
       reconnect unless @fresh
       @fresh = false
       write_request(req)
-      read_response
+      read_response(req.method)
     end
 
     def reconnect
@@ -529,7 +535,7 @@ module Net
       wire_write(out)
     end
 
-    def read_response
+    def read_response(method)
       wait_for_response
       version = ""
       code = ""
@@ -559,8 +565,15 @@ module Net
         break unless code[0, 1] == "1" && code != "101"
       end
 
+      # A HEAD answer, a 1xx, 204 and 304 carry no body whatever their
+      # headers say (RFC 9112 s6.3): reading one waited for bytes that never
+      # come, until the server closed the connection. Their #body is nil,
+      # as CRuby's is.
+      bodyless = method == "HEAD" || code[0, 1] == "1" || code == "204" || code == "304"
       body =
-        if headers["transfer-encoding"].to_s.downcase == "chunked"
+        if bodyless
+          nil
+        elsif headers["transfer-encoding"].to_s.downcase == "chunked"
           read_chunked
         elsif headers.key?("content-length")
           n = headers["content-length"].to_i
