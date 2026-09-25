@@ -187,7 +187,20 @@ static int recv_has_array_write(Compiler *c, int recv) {
    and reused; per-call filters (exact name, receiver kind, scope) run fresh. */
 static const NodeTable *aw_nt = NULL;
 static int aw_ntc = -1, aw_buckets = 0;
+static unsigned aw_gen = 0;
 static int *aw_next = NULL, *aw_head = NULL;
+/* The bucket key is the receiver's name AND its owner -- the class for an
+   ivar, the scope for a local -- which every consumer filters by: keyed by
+   the name alone, a name every unit repeats (`@user`, `h`) put all of them in
+   one chain, walked per ask (rubys in #5035). */
+static unsigned aw_key(const char *nm, int is_ivar, int owner) {
+  return wrn_hash(nm) ^ ((unsigned)(owner + 2) * 2654435761u) ^ (is_ivar ? 0x9e3779b9u : 0);
+}
+static int aw_owner_of(Compiler *c, int recv, int is_ivar) {
+  Scope *s = comp_scope_of(c, recv);
+  if (is_ivar) return s ? s->class_id : -1;
+  return s ? (int)(s - c->scopes) : -1;
+}
 static void aw_build(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count;
@@ -219,17 +232,19 @@ static void aw_build(Compiler *c) {
     if (wk != NK_InstanceVariableReadNode && wk != NK_LocalVariableReadNode) continue;
     const char *wn = nt_str(nt, wr, "name");
     if (!wn) continue;
-    unsigned b = wrn_hash(wn) % (unsigned)aw_buckets;
+    int iv = wk == NK_InstanceVariableReadNode;
+    unsigned b = aw_key(wn, iv, aw_owner_of(c, wr, iv)) % (unsigned)aw_buckets;
     aw_next[id] = aw_head[b]; aw_head[b] = id;
   }
+  aw_gen = comp_scope_index_gen();
 }
 /* First `[]=` call id chained for receiver name `rnm`, or -1; walk via aw_next.
    Caller must still verify the exact name (hash collisions) and receiver kind. */
-static int aw_first(Compiler *c, const char *rnm) {
+static int aw_first(Compiler *c, const char *rnm, int is_ivar, int owner) {
   const NodeTable *nt = c->nt;
-  if (aw_nt != nt || aw_ntc != nt->count) aw_build(c);
+  if (aw_nt != nt || aw_ntc != nt->count || aw_gen != comp_scope_index_gen()) aw_build(c);
   if (!aw_buckets) return -1;
-  return aw_head[wrn_hash(rnm) % (unsigned)aw_buckets];
+  return aw_head[aw_key(rnm, is_ivar, owner) % (unsigned)aw_buckets];
 }
 
 /* Unified value type of `recv[k] = v` writes that target the same ivar/local
@@ -254,7 +269,7 @@ TyKind aset_value_type_ex(Compiler *c, int recv, int *nwrites) {
   Scope *rsc = comp_scope_of(c, recv);
   int rcls = rsc ? rsc->class_id : -1;
   TyKind acc = TY_UNKNOWN;
-  for (int id = aw_first(c, rnm); id >= 0; id = aw_next[id]) {
+  for (int id = aw_first(c, rnm, is_ivar, is_ivar ? rcls : (rsc ? (int)(rsc - c->scopes) : -1)); id >= 0; id = aw_next[id]) {
     int wrecv = nt_ref(nt, id, "receiver");
     if (wrecv < 0) continue;
     const char *wn = nt_str(nt, wrecv, "name");
@@ -291,7 +306,7 @@ TyKind local_aset_key_type(Compiler *c, Scope *sc, const char *name, int *nwrite
   const NodeTable *nt = c->nt;
   if (!sc || !name) return TY_UNKNOWN;
   TyKind acc = TY_UNKNOWN;
-  for (int id = aw_first(c, name); id >= 0; id = aw_next[id]) {
+  for (int id = aw_first(c, name, 0, (int)(sc - c->scopes)); id >= 0; id = aw_next[id]) {
     int wrecv = nt_ref(nt, id, "receiver");
     if (wrecv < 0 || nt_kind(nt, wrecv) != NK_LocalVariableReadNode) continue;
     const char *wn = nt_str(nt, wrecv, "name");
@@ -404,7 +419,7 @@ int infer_param_hash_value(Compiler *c) {
       int known_hash = ty_is_hash(cur);
       TyKind kt = TY_UNKNOWN, vt = TY_UNKNOWN;
       int saw = 0, ambiguous = 0;
-      for (int id = aw_first(c, sc->pnames[p]); id >= 0; id = aw_next[id]) {
+      for (int id = aw_first(c, sc->pnames[p], 0, (int)(sc - c->scopes)); id >= 0; id = aw_next[id]) {
         int wr = nt_ref(nt, id, "receiver");
         if (wr < 0 || nt_kind(nt, wr) != NK_LocalVariableReadNode) continue;
         const char *wn = nt_str(nt, wr, "name");
