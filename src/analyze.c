@@ -9920,6 +9920,7 @@ static void mark_empty_hash_cmp_peers(Compiler *c) {
 /* The key class a literal AST node names, as a bit: a hash whose keys are not
    all one class needs the general boxed variant. 0 for anything else, which
    makes the caller decline rather than guess. */
+static const MpIx *g_hkb_wix;   /* (name, scope) -> local writes, while set */
 static unsigned hash_key_bit(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *t = id >= 0 ? nt_type(nt, id) : NULL;
@@ -9934,7 +9935,12 @@ static unsigned hash_key_bit(Compiler *c, int id) {
     const Scope *ks = comp_scope_of(c, id);
     unsigned b = 0;
     if (!kn || !ks) return 0;
-    for (int w = 0; w < nt->count; w++) {
+    /* the local's own writes from mark_mixed_key_hash_locals' index when it
+       is set; the answer does not depend on their order */
+    int nwi = 0; const int *wis = NULL;
+    if (g_hkb_wix) wis = mp_get(g_hkb_wix, kn, (int)(ks - c->scopes), &nwi);
+    for (int wi = 0, w = 0; g_hkb_wix ? wi < nwi : w < nt->count; g_hkb_wix ? wi++ : w++) {
+      if (g_hkb_wix) w = wis[wi];
       if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
       const char *wn = nt_str(nt, w, "name");
       if (!wn || !sp_streq(wn, kn) || comp_scope_of(c, w) != ks) continue;
@@ -10078,21 +10084,34 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
   if (!c->hash_want) return;
   const NodeTable *nt = c->nt;
   HashKeyUse *uses = NULL; int nu = 0, cap = 0;
+  /* (name, scope) -> the use's index, and -> the local's writes: the uses
+     were found by a linear search per node, and a key's writes by a walk of
+     the table per key (rubys in #5035) */
+  MpIx uix = {0}, wix = {0};
+  for (int id = comp_kind_first(c, NK_LocalVariableWriteNode); id >= 0; id = comp_kind_next(c, id)) {
+    if (nt_kind(nt, id) != NK_LocalVariableWriteNode) continue;
+    const char *wn = nt_str(nt, id, "name");
+    if (wn) mp_add(&wix, wn, c->nscope[id], id);
+  }
+  g_hkb_wix = &wix;   /* hash_key_write_bits reads keys through it too */
   for (int id = 0; id < nt->count; id++) {
     const Scope *sc = NULL; const char *nm = NULL;
     unsigned b = hash_key_write_bits(c, id, &sc, &nm);
     if (!b) continue;
     int f = -1;
-    for (int k = 0; k < nu; k++) if (uses[k].sc == sc && sp_streq(uses[k].nm, nm)) { f = k; break; }
+    { int nf = 0; const int *fs = mp_get(&uix, nm, (int)(sc - c->scopes), &nf);
+      if (nf > 0) f = fs[0]; }
     if (f >= 0) { uses[f].bits |= b; continue; }
     if (nu >= cap) {
       cap = cap ? cap * 2 : 16;
       uses = realloc(uses, sizeof(*uses) * (size_t)cap);
       if (!uses) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
     }
-    uses[nu].sc = sc; uses[nu].nm = nm; uses[nu].bits = b; nu++;
+    uses[nu].sc = sc; uses[nu].nm = nm; uses[nu].bits = b;
+    mp_add(&uix, nm, (int)(sc - c->scopes), nu);
+    nu++;
   }
-  if (!nu) { free(uses); return; }
+  if (!nu) { g_hkb_wix = NULL; free(uses); mp_free(&uix); mp_free(&wix); return; }
   for (int id = 0; id < nt->count; id++) {
     if (nt_kind(nt, id) != NK_LocalVariableWriteNode) continue;
     int val = nt_ref(nt, id, "value");
@@ -10108,8 +10127,8 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
     const Scope *ls = comp_scope_of(c, id);
     if (!lname || !ls) continue;
     unsigned mask = 0;
-    for (int k = 0; k < nu; k++)
-      if (uses[k].sc == ls && sp_streq(uses[k].nm, lname)) { mask = uses[k].bits; break; }
+    { int nf = 0; const int *fs = mp_get(&uix, lname, (int)(ls - c->scopes), &nf);
+      if (nf > 0) mask = uses[fs[0]].bits; }
     if (!mask) continue;
     /* a copy of a literal (`{...}.dup`, `g.dup` with g a literal or a
        parameter) takes the literal's variant: widen the literals (#4540) */
@@ -10140,7 +10159,7 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
     for (int p = 0; ps && p < ps->nparams; p++)
       if (ps->pnames[p] && sp_streq(ps->pnames[p], uses[k].nm)) { pidx = p; break; }
     if (pidx < 0 || !ps->name) continue;
-    for (int id = 0; id < nt->count; id++) {
+    for (int id = an_calls_named_first(c, ps->name); id >= 0; id = an_calls_named_next(id)) {
       if (nt_kind(nt, id) != NK_CallNode) continue;
       const char *cn = nt_str(nt, id, "name");
       if (!cn || !sp_streq(cn, ps->name)) continue;
@@ -10153,7 +10172,8 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
       for (int q = 0; q < ns; q++) hash_literal_widen_if_mixed(c, srcs[q], uses[k].bits);
     }
   }
-  free(uses);
+  g_hkb_wix = NULL;
+  free(uses); mp_free(&uix); mp_free(&wix);
 }
 
 /* A bare `{}` indexed or fetched with a statically-typed key takes the variant
