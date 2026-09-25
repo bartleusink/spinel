@@ -2355,13 +2355,15 @@ gate-props:
 # a pass that rescans the node table per node, the regression that came back
 # four times before anyone profiled it (rubys/roundhouse#72), pushes it well
 # past. The count is deterministic, so the test does not depend on the
-# machine or its load. The limit sits just above today's ratio (4.3); the
-# Hash.new receiver rescan fixed in c54bb45f measured 5.5. Lower it as the
-# remaining superlinear passes are fixed.
-SCALE_LIMIT ?= 5.0
+# machine or its load. The pair is K=100 and K=400: at 25 -> 100 most of
+# what is still superlinear is too small to show, and real applications are
+# larger than either (rubys in #5035; lobsters is ~78K lines as emitted).
+# The limit sits just above today's ratio (4.68, down from 5.61 before the
+# #5035 fixes). Lower it as the remaining superlinear passes are fixed.
+SCALE_LIMIT ?= 5.2
 scale-test: $(SPINEL_WORK)
 	@tmp=$$(mktemp -d /tmp/spinel-scale.XXXXXX); \
-	sh test/scale/gen.sh 25 > "$$tmp/a.rb"; sh test/scale/gen.sh 100 > "$$tmp/b.rb"; \
+	sh test/scale/gen.sh 100 > "$$tmp/a.rb"; sh test/scale/gen.sh 400 > "$$tmp/b.rb"; \
 	wa=$$($(SPINEL_WORK) --emit-rbs -o "$$tmp/a.rbs" "$$tmp/a.rb" 2>&1 | sed -n 's/^spinel-work: //p'); \
 	wb=$$($(SPINEL_WORK) --emit-rbs -o "$$tmp/b.rbs" "$$tmp/b.rb" 2>&1 | sed -n 's/^spinel-work: //p'); \
 	rm -rf "$$tmp"; \
