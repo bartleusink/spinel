@@ -12984,6 +12984,25 @@ static int pf_wanted(Compiler *c, const char *name) {
   return 0;
 }
 
+/* Does a class above or below `src`'s define the same name? Then a call on
+   the ancestor's type dispatches on cls_id, and an inline-only `src` can only
+   take its arm through the clone: with none, the arm was dropped and the
+   ancestor's method ran in its place. */
+static int pf_in_class_dispatch(Compiler *c, const Scope *src) {
+  /* a constructor is not reached through that switch */
+  if (src->is_cmethod || sp_streq(src->name, "initialize")) return 0;
+  /* a Struct's generated each/each_pair is copied into every struct class, so
+     a struct subclass always "overrides" it; those copies are one method, and
+     their bodies read desugared accumulators a clone does not carry */
+  if (c->classes[src->class_id].is_struct) return 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (k == src->class_id) continue;
+    if (!is_descendant(c, k, src->class_id) && !is_descendant(c, src->class_id, k)) continue;
+    if (comp_method_in_class(c, k, src->name) >= 0) return 1;
+  }
+  return 0;
+}
+
 int make_yield_proc_forms(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = c->nscopes;
@@ -12995,7 +13014,7 @@ int make_yield_proc_forms(Compiler *c) {
     if (!src->yields || src->class_id < 0) continue;
     if (src->is_transplanted_source || !src->name) continue;
     if (src->body < 0) continue;
-    if (!pf_wanted(c, src->name)) continue;
+    if (!pf_wanted(c, src->name) && !pf_in_class_dispatch(c, src)) continue;
     /* A method the program reopens has two definitions in the scope table
        and the last one wins (comp_method_in_class): only that one gets the
        clone. Cloning the first left the poly dispatch arm running the
