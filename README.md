@@ -621,6 +621,15 @@ Adjacent ecosystem (community-built, not part of this repo):
   which RubyGems compile and run under Spinel, plus bundler-spinel, a
   Bundler plugin that vendors and compatibility-gates `Gemfile`
   dependencies.
+- [roundhouse](https://github.com/rubys/roundhouse): transpiles Rails
+  applications (models, controllers, views, routes) to plain Ruby
+  without metaprogramming, in a form Spinel compiles to a standalone
+  binary. Under Spinel,
+  [Campfire](https://github.com/basecamp/once-campfire) (37signals'
+  group chat app) passes its own test suite in full, and current
+  upstream [Lobsters](https://github.com/lobsters/lobsters) (the
+  link-aggregation site behind lobste.rs) compiles and links. It also
+  emits other target languages from the same analysis.
 
 ## History
 
