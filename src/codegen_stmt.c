@@ -4361,15 +4361,37 @@ static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int
    statement emitter had it, `r = case arr when [1, 2]` fell through to the
    pointer compare and took the else arm. */
 static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
-  if (!ty_is_array(pt) && !ty_is_hash(pt)) return 0;
+  if (!ty_is_array(pt) && !ty_is_obj_array(pt) && !ty_is_hash(pt)) return 0;
   TyKind wat = comp_ntype(c, cond);
   char stmp[24]; snprintf(stmp, sizeof stmp, "_t%d", t);
-  if (ty_is_array(wat) || ty_is_hash(wat) || wat == TY_POLY || wat == TY_UNKNOWN) {
+  if (ty_is_array(wat) || ty_is_obj_array(wat) || ty_is_hash(wat) || wat == TY_POLY || wat == TY_UNKNOWN) {
+    /* the arm is the receiver of `===`, so it is the left operand: an
+       element's own == is asked of the arm's element, as Ruby asks it */
     buf_puts(b, "sp_poly_eq(");
-    emit_boxed_text(c, pt, stmp, b);
-    buf_puts(b, ", ");
     emit_boxed(c, cond, b);
+    buf_puts(b, ", ");
+    emit_boxed_text(c, pt, stmp, b);
     buf_puts(b, ")");
+  }
+  else if (ty_is_object(wat) &&
+           (comp_method_in_chain(c, ty_object_class(wat), "===", NULL) >= 0 ||
+            comp_method_in_chain(c, ty_object_class(wat), "==", NULL) >= 0)) {
+    /* an object arm of a class with its own === (or ==) is asked with the
+       Array or Hash as the argument: a matcher may accept it */
+    int emi = comp_method_in_chain(c, ty_object_class(wat), "===", NULL);
+    if (emi < 0) emi = comp_method_in_chain(c, ty_object_class(wat), "==", NULL);
+    Scope *ems = &c->scopes[emi];
+    LocalVar *eplv = ems->nparams > 0 ? scope_local(ems, ems->pnames[0]) : NULL;
+    TyKind pty = eplv ? eplv->type : TY_POLY;
+    int poly_ret = ems->ret == TY_POLY;
+    buf_puts(b, poly_ret ? "sp_poly_truthy(" : "(");
+    emit_method_cname(c, ems, b);
+    buf_puts(b, "(");
+    emit_expr(c, cond, b);
+    buf_puts(b, ", ");
+    if (pty != pt) emit_boxed_text(c, pt, stmp, b);
+    else buf_puts(b, stmp);
+    buf_puts(b, "))");
   }
   else {
     buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, cond, b); buf_puts(b, "), 0)");
