@@ -209,7 +209,6 @@ typedef enum {
    the table per node shows up as a ratio far above the size ratio
    (rubys/roundhouse#72). Off in every normal build: the macro is empty. */
 #ifdef SP_WORK_COUNT
-extern unsigned long long g_nt_work;
 #define NT_WORK() (g_nt_work++)
 #else
 #define NT_WORK() ((void)0)

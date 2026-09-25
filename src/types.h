@@ -14,7 +14,13 @@
    this short (and is paid in full even when the first byte already differs). An
    inline byte loop is several times cheaper here -- strcmp self-time was ~47% of
    a profiled optcarrot compile. Returns 1 if equal. */
+#ifdef SP_WORK_COUNT
+extern unsigned long long g_nt_work;   /* see NT_WORK in node_table.h */
+#endif
 static inline int sp_streq(const char *a, const char *b) {
+#ifdef SP_WORK_COUNT
+  g_nt_work++;   /* a name compare is the unit of every by-name scan */
+#endif
   for (;; a++, b++) {
     if (*a != *b) return 0;
     if (*a == 0) return 1;

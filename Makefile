@@ -2339,10 +2339,10 @@ gate-props:
 # a pass that rescans the node table per node, the regression that came back
 # four times before anyone profiled it (rubys/roundhouse#72), pushes it well
 # past. The count is deterministic, so the test does not depend on the
-# machine or its load. The limit sits just above today's ratio (5.3); the
-# Hash.new receiver rescan fixed in c54bb45f measured 6.4. Lower it as the
+# machine or its load. The limit sits just above today's ratio (4.3); the
+# Hash.new receiver rescan fixed in c54bb45f measured 5.5. Lower it as the
 # remaining superlinear passes are fixed.
-SCALE_LIMIT ?= 6.0
+SCALE_LIMIT ?= 5.0
 scale-test: $(SPINEL_WORK)
 	@tmp=$$(mktemp -d /tmp/spinel-scale.XXXXXX); \
 	sh test/scale/gen.sh 25 > "$$tmp/a.rb"; sh test/scale/gen.sh 100 > "$$tmp/b.rb"; \
