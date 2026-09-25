@@ -12879,6 +12879,52 @@ static int convert_byref_handle_params(Compiler *c) {
   return changed;
 }
 
+/* The block-taking method named `fn` that KEEPS its block -- reads its &blk
+   parameter as anything but the receiver of `.call` or a `&blk` forward
+   (`blk_call_recv` / `blk_arg_expr` mark those reads) -- or -1. `*first` gets
+   the first block-taking method of that name, keeper or not. For a callee
+   whose receiver has no type yet: every same-named candidate is a possible
+   target, and one that keeps the block decides. */
+static int a_name_keeps_block(Compiler *c, const char *fn, const char *blk_call_recv,
+                              const char *blk_arg_expr, int *first) {
+  if (first) *first = -1;
+  if (!fn) return -1;
+  for (int si = 1; si < c->nscopes; si++) {
+    Scope *cs3 = &c->scopes[si];
+    if (cs3->is_cmethod || !cs3->name || !sp_streq(cs3->name, fn)) continue;
+    if (!cs3->blk_param || !cs3->blk_param[0]) continue;
+    if (first && *first < 0) *first = si;
+    for (int q = 0; q < c->nt->count; q++) {
+      if (c->nscope[q] != si) continue;
+      if (nt_kind(c->nt, q) != NK_LocalVariableReadNode) continue;
+      const char *qn = nt_str(c->nt, q, "name");
+      if (!qn || !sp_streq(qn, cs3->blk_param)) continue;
+      if (!(blk_call_recv && blk_call_recv[q]) &&
+          !(blk_arg_expr && blk_arg_expr[q])) return si;
+    }
+  }
+  return -1;
+}
+
+/* A literal block on a call whose receiver has no type yet, to a method name
+   some class defines with a block it keeps (a_name_keeps_block). Such a block
+   becomes a real proc once the receiver settles, so a pass that runs before
+   then has to count it lifted already. A constant receiver names a class and
+   is left to a_block_is_lifted, which resolves it without a type. */
+static int a_block_lifted_by_callee_name(Compiler *c, int id, const char *blk_call_recv,
+                                         const char *blk_arg_expr) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, id) != NK_CallNode) return 0;
+  int blk = nt_ref(nt, id, "block");
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0) return 0;
+  NodeKind rk = nt_kind(nt, recv);
+  if (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode) return 0;
+  if (infer_type(c, recv) != TY_UNKNOWN) return 0;
+  return a_name_keeps_block(c, nt_str(nt, id, "name"), blk_call_recv, blk_arg_expr, NULL) >= 0;
+}
+
 /* True if `blk`'s subtree contains a YieldNode. */
 static int subtree_has_yield_node(Compiler *c, int node, int depth) {
   const NodeTable *nt = c->nt;
@@ -15141,23 +15187,8 @@ void analyze_program(Compiler *c) {
              right or wrong depending on the order the classes were defined in
              (#3786). */
           int first = -1;
-          for (int si = 1; si < c->nscopes; si++) {
-            Scope *cs3 = &c->scopes[si];
-            if (cs3->is_cmethod || !cs3->name || !sp_streq(cs3->name, fn)) continue;
-            if (!cs3->blk_param || !cs3->blk_param[0]) continue;
-            if (first < 0) first = si;
-            int keeps = 0;
-            for (int q = 0; q < c->nt->count && !keeps; q++) {
-              if (c->nscope[q] != si) continue;
-              if (nt_kind(c->nt, q) != NK_LocalVariableReadNode) continue;
-              const char *qn = nt_str(c->nt, q, "name");
-              if (!qn || !sp_streq(qn, cs3->blk_param)) continue;
-              if (!(blk_call_recv && blk_call_recv[q]) &&
-                  !(blk_arg_expr && blk_arg_expr[q])) keeps = 1;
-            }
-            if (keeps) { first = si; break; }
-          }
-          fmi = first;
+          int keeper = a_name_keeps_block(c, fn, blk_call_recv, blk_arg_expr, &first);
+          fmi = keeper >= 0 ? keeper : first;
         }
       }
       blk_fwd_callee[fe] = fmi;
@@ -15197,7 +15228,15 @@ void analyze_program(Compiler *c) {
            captures like a proc literal: a blk_param read inside either is a
            real capture-escape, so the method must keep a heap-materialized
            &blk (not be yield-inlined). */
-        if (!a_proc_create_or_lifted(c, id)) continue;
+        /* ... and a literal block handed to a method on a receiver whose type
+           has not settled yet (`@reg.set { handler.call(v) }`, `@reg` typed
+           later): the callee is judged by name, as the forward above is, and
+           one that keeps its block lifts this one. Asking a_block_is_lifted
+           alone answered "spliced", the method was inlined with no storage for
+           `handler`, and codegen -- on settled types -- lifted the block and
+           named a `_cell_handler` nothing declared. */
+        if (!a_proc_create_or_lifted(c, id) &&
+            !a_block_lifted_by_callee_name(c, id, blk_call_recv, blk_arg_expr)) continue;
         if (comp_scope_of(c, id) != m) continue;
         int body = a_proc_body(c, id);
         if (body >= 0) a_mark_subtree(c, body, inproc_m);
