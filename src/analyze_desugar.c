@@ -1100,7 +1100,12 @@ int desugar_dynamic_send(Compiler *c) {
      accepts either; a string name interns to the same symbol at the call).
      Only names shaped like a method name: a log message or a label with a
      space in it is not one. */
+  /* The name lookups below go through hashed sets: every literal in the
+     program is a candidate, and comparing each against the candidates so far,
+     every scope and class, and every call name was (literals x names) per
+     round (rubys/roundhouse#72). */
   char **cand = NULL; int ncand = 0, candcap = 0;
+  ANameHash cand_set; memset(&cand_set, 0, sizeof cand_set);
   for (int id = 0; id < n0; id++) {
     const char *ty = nt_type(nt, id);
     const char *v = NULL;
@@ -1109,11 +1114,13 @@ int desugar_dynamic_send(Compiler *c) {
     if (!v || !*v || !dsend_method_name_shaped(v)) continue;
     int skip = 0;
     for (int k = 0; sends[k]; k++) if (sp_streq(v, sends[k])) { skip = 1; break; }  /* avoid send-of-send recursion */
-    for (int k = 0; !skip && k < ncand; k++) if (sp_streq(cand[k], v)) skip = 1;
+    if (!skip && anh_has(&cand_set, v)) skip = 1;
     if (skip) continue;
     if (ncand == candcap) { candcap = candcap ? candcap * 2 : 16; cand = (char **)realloc(cand, sizeof(char *) * candcap); }
     cand[ncand++] = strdup(v);
+    anh_add(&cand_set, cand[ncand - 1]);
   }
+  anh_free(&cand_set);
   if (ncand == 0) { free(cand); return 0; }
   /* The arms are one synthesized call per candidate per send, each typed by
      the fixpoint, so the set is capped. The cap used to be a hard 128 over
@@ -1124,21 +1131,28 @@ int desugar_dynamic_send(Compiler *c) {
      that can be meant survive whatever else the program spells. */
   if (ncand > 1) {
     int *score = (int *)calloc((size_t)ncand, sizeof(int));
-    for (int k = 0; k < ncand; k++) {
-      for (int s = 0; s < c->nscopes && score[k] < 2; s++)
-        if (c->scopes[s].name && sp_streq(c->scopes[s].name, cand[k])) score[k] = 2;
-      for (int ci = 0; ci < c->nclasses && score[k] < 2; ci++) {
-        ClassInfo *cl = &c->classes[ci];
-        if (comp_is_reader(cl, cand[k]) || comp_is_writer(cl, cand[k])) score[k] = 2;
-      }
-      if (score[k] < 2 && !((cand[k][0] >= 'a' && cand[k][0] <= 'z') || cand[k][0] == '_')) score[k] = 1;   /* an operator */
+    /* the names the program defines: its methods, and its classes' readers
+       and writers */
+    ANameHash defined; memset(&defined, 0, sizeof defined);
+    for (int s = 0; s < c->nscopes; s++)
+      if (c->scopes[s].name && !anh_has(&defined, c->scopes[s].name)) anh_add(&defined, c->scopes[s].name);
+    for (int ci = 0; ci < c->nclasses; ci++) {
+      ClassInfo *cl = &c->classes[ci];
+      for (int r = 0; r < cl->nreaders; r++) if (cl->readers[r] && !anh_has(&defined, cl->readers[r])) anh_add(&defined, cl->readers[r]);
+      for (int w = 0; w < cl->nwriters; w++) if (cl->writers[w] && !anh_has(&defined, cl->writers[w])) anh_add(&defined, cl->writers[w]);
     }
+    ANameHash called; memset(&called, 0, sizeof called);
     for (int id = 0; id < n0; id++) {
       if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
       const char *nm = nt_str(nt, id, "name");
-      if (!nm) continue;
-      for (int k = 0; k < ncand; k++) if (score[k] < 1 && sp_streq(cand[k], nm)) score[k] = 1;
+      if (nm && !anh_has(&called, nm)) anh_add(&called, nm);
     }
+    for (int k = 0; k < ncand; k++) {
+      if (anh_has(&defined, cand[k])) score[k] = 2;
+      if (score[k] < 2 && !((cand[k][0] >= 'a' && cand[k][0] <= 'z') || cand[k][0] == '_')) score[k] = 1;   /* an operator */
+      if (score[k] < 1 && anh_has(&called, cand[k])) score[k] = 1;
+    }
+    anh_free(&defined); anh_free(&called);
     /* stable sort by score, descending */
     for (int i = 1; i < ncand; i++) {
       char *cv = cand[i]; int cs = score[i]; int j = i - 1;
