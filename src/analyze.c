@@ -16877,9 +16877,9 @@ void analyze_program(Compiler *c) {
           }
           if (tail >= 0) br = infer_type(c, tail);
         }
-        for (int id = 0; id < nt->count && br != TY_POLY_ARRAY; id++) {
-          const char *ty = nt_type(nt, id);
-          if (ty && sp_streq(ty, "ReturnNode") && comp_scope_of(c, id) == sc) {
+        /* the ReturnNodes, not every node: this ran per scope (roundhouse#72) */
+        for (int id = comp_kind_first(c, NK_ReturnNode); id >= 0 && br != TY_POLY_ARRAY; id = comp_kind_next(c, id)) {
+          if (nt_kind(nt, id) == NK_ReturnNode && comp_scope_of(c, id) == sc) {
             int a = nt_ref(nt, id, "arguments"); int an = 0;
             const int *av = a >= 0 ? nt_arr(nt, id, "arguments", &an) : NULL;
             if (an == 1 && infer_type(c, av[0]) == TY_POLY_ARRAY) br = TY_POLY_ARRAY;
