@@ -2564,6 +2564,23 @@ static int obj_is_root_class(Compiler *c, int cid, const char *cn) {
   return !class_is_blank_slate(c, cid);
 }
 
+/* `when <builtin exception>` or `in <builtin exception>` against a user object
+   whose class descends from one: the class table ends at the program's own
+   classes, so is_descendant cannot see StandardError or Exception above them
+   and the arm folded to 0 (`case e when StandardError` took the else arm for
+   `class MyErr < StandardError`). The exception's runtime class chain knows
+   both halves, so ask it with sp_exc_is_a, the test a TY_EXCEPTION subject
+   already uses. Emits the test and answers 1 when it applies; a name the
+   program reassigns or defines a class of its own for is left to the static
+   test. */
+static int emit_obj_exc_when(Compiler *c, int cid, const char *cn, int t, Buf *b) {
+  if (!cn || comp_const(c, cn) || !is_builtin_exception_name(cn)) return 0;
+  if (comp_class_index(c, cn) >= 0) return 0;
+  if (!class_inherits_builtin_exception(c, cid)) return 0;
+  buf_printf(b, "sp_exc_is_a((sp_Exception *)_t%d, \"%s\")", t, cn);
+  return 1;
+}
+
 static int g_pm_hash_sink_indent = 0;
 
 /* The `keys` argument a hash pattern hands #deconstruct_keys: an Array of the
@@ -2663,6 +2680,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
         buf_puts(b, ")");
         return 1;
       }
+      if (emit_obj_exc_when(c, cid, cn2, t, b)) return 1;
       buf_puts(b, "0");
       return 1;
     }
@@ -4571,7 +4589,8 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             int tcid = comp_class_index(c, cn2);
             int yes = obj_is_root_class(c, cid, cn2) ||
                       ((tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid)));
-            buf_printf(b, "%d", yes ? 1 : 0);
+            if (yes) buf_puts(b, "1");
+            else if (!emit_obj_exc_when(c, cid, cn2, t, b)) buf_puts(b, "0");
           }
           else if (cn2 && pt == TY_CLASS) {
             /* `when <ClassName>` is ===: a Class VALUE is an instance only
@@ -4959,7 +4978,8 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
           int cid = ty_object_class(pt); int tcid = comp_class_index(c, cn2);
           int yes = obj_is_root_class(c, cid, cn2) ||
                     ((tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid)));
-          buf_printf(b, "%d", yes ? 1 : 0);
+          if (yes) buf_puts(b, "1");
+          else if (!emit_obj_exc_when(c, cid, cn2, t, b)) buf_puts(b, "0");
         }
         else if (cn2 && pt == TY_CLASS) {
           /* a Class VALUE is an instance only of Class/Module (see the

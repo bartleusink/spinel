@@ -8618,6 +8618,7 @@ static sp_bool sp_poly_equal(sp_RbVal a, sp_RbVal b) {
    caller (codegen) routes here only when `cn` is a known builtin; a user-class
    target is resolved inline via sp_class_le on the boxed object's cls_id. */
 static sp_int sp_exc_is_a(volatile struct sp_Exception_s *ve, const char *cn);  /* fwd (#3096) */
+extern const char *(*sp_user_exc_parent_fn)(const char *);  /* fwd: the program's exception parent table */
 static sp_bool sp_poly_kind_of_builtin(sp_RbVal v, const char *cn) {
   if (!cn) return FALSE;
   if (strcmp(cn, "Object") == 0 || strcmp(cn, "BasicObject") == 0 || strcmp(cn, "Kernel") == 0)
@@ -8648,6 +8649,15 @@ static sp_bool sp_poly_kind_of_builtin(sp_RbVal v, const char *cn) {
   /* a boxed exception (e.g. rescued into a poly-union local) walks the
      exception hierarchy: StopIteration is_a? StandardError etc. (#3096) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_EXCEPTION && v.v.p)
+    return (sp_bool)sp_exc_is_a((volatile struct sp_Exception_s *)v.v.p, cn);
+  /* A user exception boxes under its own class id, not SP_BUILTIN_EXCEPTION,
+     so the arm above never saw it and `case e when StandardError` on a
+     poly-slotted `MyErr < StandardError` answered false. Its object is an
+     sp_Exception all the same, and the program's parent table names exactly
+     the classes that descend from a builtin exception, so walk the chain
+     for those too. */
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_user_exc_parent_fn &&
+      sp_user_exc_parent_fn(sp_poly_class_name(v)))
     return (sp_bool)sp_exc_is_a((volatile struct sp_Exception_s *)v.v.p, cn);
   return FALSE;
 }
