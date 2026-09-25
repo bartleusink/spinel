@@ -902,6 +902,10 @@ typedef struct { int cls; int mi; int rdcls; int native; } PolyCand;
 const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n);
 extern unsigned comp_table_gen;
 void comp_poly_candidates_reset(void);
+/* The classes answering class method `name` through their chain, ascending,
+   each with the scope comp_cmethod_in_chain gives (`cls`, `mi`; the other
+   fields unused). Memoized under the same stamps as comp_poly_candidates. */
+const PolyCand *comp_cmethod_candidates(Compiler *c, const char *name, int *n);
 /* Every proper descendant of class `cid`, ascending; fixed once classes are
    collected. See comp_descendants. */
 const int *comp_descendants(Compiler *c, int cid, int *n);

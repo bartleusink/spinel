@@ -2625,10 +2625,12 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     {
       int recv_is_var = class_recv_is_dynamic(c, recv);
       TyKind uret = TY_UNKNOWN; int nc = recv_is_var ? 0 : -1000, set = 0;
-      for (int k = 0; recv_is_var && k < c->nclasses; k++) {
+      int ncc = 0;
+      const PolyCand *ccs = recv_is_var ? comp_cmethod_candidates(c, name, &ncc) : NULL;
+      for (int ki = 0; ki < ncc; ki++) {
+        int k = ccs[ki].cls;
         if (is_builtin_reopen(c->classes[k].name)) continue;
-        int kmi = comp_cmethod_in_chain(c, k, name, NULL);
-        if (kmi < 0) continue;
+        int kmi = ccs[ki].mi;
         /* A candidate that yields, takes a block, or has a rest param has no
            arm the emitter can build, so it kills the whole dispatch. A
            candidate with the WRONG ARITY does not: this call cannot reach it,
@@ -5093,8 +5095,10 @@ else {
          alone, `URI::HTTP.build` returned an object into another class's nil
          slot (#4930). */
       if (found && !an_builtin_only) {
-        for (int k = 0; k < c->nclasses; k++) {
-          int cmi = comp_cmethod_in_chain(c, k, name, NULL);
+        int ncc = 0;
+        const PolyCand *ccs = comp_cmethod_candidates(c, name, &ncc);
+        for (int ki = 0; ki < ncc; ki++) {
+          int cmi = ccs[ki].mi;
           if (cmi >= 0 && cmi < c->nscopes && c->scopes[cmi].ret != TY_UNKNOWN)
             r = ty_unify(r, (TyKind)c->scopes[cmi].ret);
         }
@@ -6537,8 +6541,9 @@ else {
        Type the call poly (not unknown) so the result flows as a value instead of
        being discarded as a void unresolved call. */
     if (rt == TY_POLY && name) {
-      for (int k = 0; k < c->nclasses; k++)
-        if (comp_cmethod_in_chain(c, k, name, NULL) >= 0) return TY_POLY;
+      int ncc = 0;
+      comp_cmethod_candidates(c, name, &ncc);
+      if (ncc > 0) return TY_POLY;
     }
   }
 

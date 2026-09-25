@@ -1310,6 +1310,7 @@ static unsigned pc_hash_name(const char *s) {
 struct pc_entry { char *name; PolyCand *cands; int n; struct pc_entry *next; };
 #define PC_BUCKETS 4096
 static struct pc_entry *pc_tab[PC_BUCKETS];
+static struct pc_entry *cc_tab[PC_BUCKETS];   /* class methods: comp_cmethod_candidates */
 static unsigned pc_gen_stamp; static int pc_nscopes_stamp, pc_nclasses_stamp; static unsigned pc_table_stamp;
 /* Invalidation never frees: a consumer may be iterating a list when a nested
    inference call invalidates the memo (bind_call_params -> infer_type -> this).
@@ -1324,6 +1325,10 @@ static void pc_clear(void) {
 }
 void comp_poly_candidates_reset(void) {
   pc_clear();
+  for (int b = 0; b < PC_BUCKETS; b++) {
+    for (struct pc_entry *e = cc_tab[b]; e; ) { struct pc_entry *nx = e->next; e->next = pc_retired; pc_retired = e; e = nx; }
+    cc_tab[b] = NULL;
+  }
   for (struct pc_entry *e = pc_retired; e; ) { struct pc_entry *nx = e->next; free(e->name); free(e->cands); free(e); e = nx; }
   pc_retired = NULL;
 }
@@ -1359,6 +1364,48 @@ const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n) {
   e->name = strdup(name);
   pc_build(c, name, &e->cands, &e->n);
   e->next = pc_tab[b]; pc_tab[b] = e;
+  *n = e->n; return e->cands;
+}
+
+/* ---- Class-method candidates by name ----
+   The same question for class methods: a boxed receiver that may hold a Class
+   dispatches `name` on the class tag, and three inference sites ask every
+   class's chain for it at each call, every round (lobsters: 240M chain walks,
+   #4965). Same memo, same stamps, same never-free invalidation; kept in its
+   own table so the two lists never alias. */
+static unsigned cc_gen_stamp; static int cc_nscopes_stamp, cc_nclasses_stamp; static unsigned cc_table_stamp;
+static void cc_build(Compiler *c, const char *name, PolyCand **out, int *n_out) {
+  PolyCand *v = NULL; int n = 0, cap = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    int mi = comp_cmethod_in_chain(c, k, name, NULL);
+    if (mi < 0) continue;
+    if (n == cap) { cap = cap ? cap * 2 : 8; v = realloc(v, sizeof *v * (size_t)cap); }
+    v[n].cls = k; v[n].mi = mi; v[n].rdcls = -1; v[n].native = 0; n++;
+  }
+  *out = v; *n_out = n;
+}
+const PolyCand *comp_cmethod_candidates(Compiler *c, const char *name, int *n) {
+  if (!name) { *n = 0; return NULL; }
+  if (!sm_frozen) {
+    struct pc_entry *e = calloc(1, sizeof *e);
+    cc_build(c, name, &e->cands, &e->n);
+    e->next = pc_retired; pc_retired = e;
+    *n = e->n; return e->cands;
+  }
+  if (cc_gen_stamp != sm_gen || cc_nscopes_stamp != c->nscopes || cc_nclasses_stamp != c->nclasses || cc_table_stamp != comp_table_gen) {
+    for (int b = 0; b < PC_BUCKETS; b++) {
+      for (struct pc_entry *e = cc_tab[b]; e; ) { struct pc_entry *nx = e->next; e->next = pc_retired; pc_retired = e; e = nx; }
+      cc_tab[b] = NULL;
+    }
+    cc_gen_stamp = sm_gen; cc_nscopes_stamp = c->nscopes; cc_nclasses_stamp = c->nclasses; cc_table_stamp = comp_table_gen;
+  }
+  unsigned b = pc_hash_name(name) % PC_BUCKETS;
+  for (struct pc_entry *e = cc_tab[b]; e; e = e->next)
+    if (sp_streq(e->name, name)) { *n = e->n; return e->cands; }
+  struct pc_entry *e = calloc(1, sizeof *e);
+  e->name = strdup(name);
+  cc_build(c, name, &e->cands, &e->n);
+  e->next = cc_tab[b]; cc_tab[b] = e;
   *n = e->n; return e->cands;
 }
 
