@@ -1041,6 +1041,42 @@ static int a_scope_returns_a_yield(Compiler *c, int mi) {
   return 0;
 }
 
+/* (key, scope) -> ascending node list, for mark_proc_captures' per-name
+   lookups (rubys/roundhouse#72): the writes of a name in the enclosing scope,
+   and the procs and block calls that bind a name as a parameter. Each was a
+   walk of every write, or every proc and block call, per captured name per
+   proc. */
+typedef struct MpEnt { const char *key; int sc; int *ids; int n, cap; struct MpEnt *next; } MpEnt;
+typedef struct { MpEnt **tab; int nb; } MpIx;
+static unsigned mp_hash(const char *k, int sc) {
+  unsigned h = 2166136261u ^ (unsigned)sc * 2654435761u;
+  for (; *k; k++) { h ^= (unsigned char)*k; h *= 16777619u; }
+  return h;
+}
+static void mp_add(MpIx *ix, const char *k, int sc, int id) {
+  if (!ix->tab) { ix->nb = 4096; ix->tab = calloc((size_t)ix->nb, sizeof(MpEnt *)); }
+  unsigned b = mp_hash(k, sc) % (unsigned)ix->nb;
+  MpEnt *e = ix->tab[b];
+  while (e && !(e->sc == sc && sp_streq(e->key, k))) e = e->next;
+  if (!e) { e = calloc(1, sizeof *e); e->key = k; e->sc = sc; e->next = ix->tab[b]; ix->tab[b] = e; }
+  if (e->n && e->ids[e->n - 1] == id) return;   /* a proc naming a param twice */
+  if (e->n == e->cap) { e->cap = e->cap ? e->cap * 2 : 4; e->ids = realloc(e->ids, sizeof(int) * (size_t)e->cap); }
+  e->ids[e->n++] = id;
+}
+static const int *mp_get(const MpIx *ix, const char *k, int sc, int *n) {
+  *n = 0;
+  if (!ix->tab) return NULL;
+  for (MpEnt *e = ix->tab[mp_hash(k, sc) % (unsigned)ix->nb]; e; e = e->next)
+    if (e->sc == sc && sp_streq(e->key, k)) { *n = e->n; return e->ids; }
+  return NULL;
+}
+static void mp_free(MpIx *ix) {
+  if (!ix->tab) return;
+  for (int b = 0; b < ix->nb; b++)
+    for (MpEnt *e = ix->tab[b]; e; ) { MpEnt *nx = e->next; free(e->ids); free(e); e = nx; }
+  free(ix->tab);
+}
+
 void mark_proc_captures(Compiler *c) {
   const NodeTable *nt = c->nt;
   char *inproc = (char *)calloc((size_t)nt->count, 1);
@@ -1102,6 +1138,20 @@ void mark_proc_captures(Compiler *c) {
       }
       if (qp || qb) { qproc[q] = (char)qp; ql[nql++] = q; }
     }
+  MpIx wix = {0}, qix = {0};
+  for (int wi = 0; wi < nwl; wi++) {
+    const char *wn = nt_str(nt, wl[wi], "name");
+    if (wn) mp_add(&wix, wn, c->nscope[wl[wi]], wl[wi]);
+  }
+  for (int qi = 0; qi < nql; qi++) {
+    int q = ql[qi];
+    int qpn = a_proc_params_node(c, q);
+    int qrn = 0; const int *qreqs = qpn >= 0 ? nt_arr(nt, qpn, "requireds", &qrn) : NULL;
+    for (int k = 0; k < qrn; k++) {
+      const char *qn = nt_str(nt, qreqs[k], "name");
+      if (qn) mp_add(&qix, qn, -1, q);
+    }
+  }
 
   for (int id = 0; id < nt->count; id++) {
     if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_into_poly(c, id)) continue;
@@ -1184,8 +1234,9 @@ void mark_proc_captures(Compiler *c) {
       if (!lv) continue;                              /* not an enclosing local */
       int owned = lv->is_param;
       int myframe = procof ? procof[id] : -1;
-      for (int wi = 0; wi < nwl && !owned; wi++) {
-        int w = wl[wi];
+      int nwn = 0; const int *wns = mp_get(&wix, nm, encl, &nwn);
+      for (int wi = 0; wi < nwn && !owned; wi++) {
+        int w = wns[wi];
         if (c->nscope[w] != encl) continue;
         const char *wn = nt_str(nt, w, "name");
         if (!wn || !sp_streq(wn, nm)) continue;
@@ -1217,8 +1268,9 @@ void mark_proc_captures(Compiler *c) {
       int shadow = 0;
       {
         int owned_q = 0;
-        for (int qi = 0; qi < nql && !owned_q; qi++) {
-          int q = ql[qi];
+        int nqn = 0; const int *qns = mp_get(&qix, nm, -1, &nqn);
+        for (int qi = 0; qi < nqn && !owned_q; qi++) {
+          int q = qns[qi];
           if (q == id) continue;
           /* An INLINED iteration block binds its params in the loop, where the
              emitters write the plain C slot -- so celling one needs the slot
@@ -1274,6 +1326,7 @@ void mark_proc_captures(Compiler *c) {
   }
   free(procof);
   free(inproc); free(wl); free(ql); free(qproc);
+  mp_free(&wix); mp_free(&qix);
 }
 
 /* ---- bigint loop-variable detection ---- */
