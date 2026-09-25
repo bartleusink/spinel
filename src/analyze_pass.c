@@ -1750,6 +1750,20 @@ static int getter_exit_ivars(Compiler *c, int mi, const char **names, int max) {
   return n;
 }
 
+/* `super` or `super()` with no block: in a zero-argument method, the
+   ancestor's same-named method called with the same (no) arguments. */
+static int is_bare_super(Compiler *c, int e) {
+  const NodeTable *nt = c->nt;
+  if (e < 0) return 0;
+  NodeKind k = nt_kind(nt, e);
+  if (k == NK_ForwardingSuperNode) return nt_ref(nt, e, "block") < 0;
+  if (k != NK_SuperNode || nt_ref(nt, e, "block") >= 0) return 0;
+  int a = nt_ref(nt, e, "arguments");
+  int n = 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &n);
+  return n == 0;
+}
+
 /* The (class, ivar) pairs an index write or push through the zero-argument
    call `mname` can reach: for `cid` and each descendant, the method the call
    dispatches to there (class side when `cside`), taken when it is an
@@ -1762,41 +1776,67 @@ static int getter_ivar_targets(Compiler *c, int cid, int cside, const char *mnam
   for (int k = 0; k < c->nclasses; k++) {
     if (k != cid && !is_descendant(c, k, cid)) continue;
     const char *ivs[8];
-    int niv = 0, defcls = -1;
+    int niv = 0, defcls = -1, supered = 0;
     char rbuf[300];
-    if (cside) {
-      int mi = comp_cmethod_in_chain(c, k, mname, &defcls);
-      if (mi < 0) continue;
-      niv = getter_exit_ivars(c, mi, ivs, 8);
-    }
-    else {
-      int mdef = -1, rdef = -1;
-      int mi = comp_method_in_chain(c, k, mname, &mdef);
-      int rd = comp_reader_in_chain(c, k, mname, &rdef);
-      if (mi >= 0 && (!rd || (mdef != rdef && is_descendant(c, mdef, rdef)))) {
-        defcls = mdef;
+    /* `def cache = super` hands back whatever the ancestor's getter does:
+       follow it up the chain to the method or reader that names the ivar */
+    for (int from = k, hop = 0; from >= 0 && hop < 8; hop++) {
+      int mi = -1;
+      defcls = -1;
+      if (cside) {
+        mi = comp_cmethod_in_chain(c, from, mname, &defcls);
+        if (mi < 0) break;
         niv = getter_exit_ivars(c, mi, ivs, 8);
       }
-      else if (rd && (mi < 0 || (mdef != rdef && is_descendant(c, rdef, mdef)))) {
-        snprintf(rbuf, sizeof rbuf, "@%s", comp_resolve_alias(c, k, mname));
-        defcls = rdef;
-        ivs[0] = rbuf;
-        niv = 1;
+      else {
+        int mdef = -1, rdef = -1;
+        mi = comp_method_in_chain(c, from, mname, &mdef);
+        int rd = comp_reader_in_chain(c, from, mname, &rdef);
+        /* a class carries its parent's readers as its own, so a method there
+           over an inherited reader is the override, not a tie */
+        int pdef = mdef >= 0 ? c->classes[mdef].parent : -1;
+        int over = mi >= 0 && rd && mdef == rdef && pdef >= 0 &&
+                   comp_reader_in_chain(c, pdef, mname, NULL);
+        if (mi >= 0 && (!rd || over || (mdef != rdef && is_descendant(c, mdef, rdef)))) {
+          defcls = mdef;
+          niv = getter_exit_ivars(c, mi, ivs, 8);
+        }
+        else if (rd && (mi < 0 || (mdef != rdef && is_descendant(c, rdef, mdef)))) {
+          snprintf(rbuf, sizeof rbuf, "@%s", comp_resolve_alias(c, from, mname));
+          defcls = rdef;
+          ivs[0] = rbuf;
+          niv = 1;
+          break;
+        }
+        else mi = -1;
       }
+      if (mi < 0 || niv > 0 || defcls < 0) break;
+      if (!is_bare_super(c, scope_body_last(c, mi))) break;
+      from = c->classes[defcls].parent;
+      defcls = -1;
+      supered = 1;
     }
     if (defcls < 0) continue;
-    ClassInfo *dci = &c->classes[defcls];
-    for (int i = 0; i < niv; i++) {
-      int ivx = comp_ivar_index(dci, ivs[i]);
-      if (ivx < 0) continue;
-      int seen = 0;
-      for (int j = 0; j < n; j++)
-        if (tcls[j] == defcls && sp_streq(tiv[j], ivs[i])) seen = 1;
-      if (seen) continue;
-      if (n >= max) return -1;
-      tcls[n] = defcls;
-      tiv[n] = dci->ivars[ivx];
-      n++;
+    /* Every class keeps its own copy of an inherited ivar's type, and the
+       ancestors' methods run on this object too: credit the copies from the
+       defining class up (from `k`, whose object it is, through a `super`
+       getter). Crediting the defining class alone left a base class that
+       writes the ivar with its narrower copy, which the up-merge after the
+       fixpoint unified with the widened one into a plain box. */
+    for (int cc = supered ? k : defcls; cc >= 0; cc = c->classes[cc].parent) {
+      ClassInfo *dci = &c->classes[cc];
+      for (int i = 0; i < niv; i++) {
+        int ivx = comp_ivar_index(dci, ivs[i]);
+        if (ivx < 0) continue;
+        int seen = 0;
+        for (int j = 0; j < n; j++)
+          if (tcls[j] == cc && sp_streq(tiv[j], ivs[i])) seen = 1;
+        if (seen) continue;
+        if (n >= max) return -1;
+        tcls[n] = cc;
+        tiv[n] = dci->ivars[ivx];
+        n++;
+      }
     }
   }
   return n;
