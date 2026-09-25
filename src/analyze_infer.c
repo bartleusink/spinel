@@ -7551,9 +7551,9 @@ TyKind infer_uncached(Compiler *c, int id) {
       int mi = comp_method_in_class(c, s->class_id, shadow);
       return mi >= 0 ? c->scopes[mi].ret : TY_UNKNOWN;
     }
-    const char *uname = comp_prep_user_name(s->name);
     int p = c->classes[s->class_id].parent;
     if (p < 0) return TY_UNKNOWN;
+    const char *uname = comp_super_name(c, p, s->name, s->is_cmethod);
     /* super inside a class method resolves through the parent's CLASS-method
        chain (the instance chain would miss `def self.x` entirely). */
     int mi = s->is_cmethod ? comp_cmethod_in_chain(c, p, uname, NULL)

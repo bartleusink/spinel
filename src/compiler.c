@@ -1739,6 +1739,31 @@ const char *comp_prep_user_name(const char *name) {
   return (*p == '_') ? p + 1 : name;
 }
 
+/* The name `super` resolves under from the scope named `name` whose class's
+   parent is `parent`. A yielding method's proc-form clone (make_yield_proc_forms)
+   is named "<m>#pf", and its super wants the ancestor's own clone when that
+   ancestor yields too -- but an ancestor that does not yield has no clone, so
+   the clone of `def on(&) = super(&)` behind a poly receiver raised
+   "no superclass method 'on#pf'". It falls back to the ancestor's plain method,
+   which is callable, since only a yielding method is inlined away. */
+const char *comp_super_name(Compiler *c, int parent, const char *name, int is_cmethod) {
+  const char *u = comp_prep_user_name(name);
+  if (!u || parent < 0) return u;
+  size_t n = strlen(u);
+  if (n <= 3 || strcmp(u + n - 3, "#pf") != 0) return u;
+  int hit = is_cmethod ? comp_cmethod_in_chain(c, parent, u, NULL)
+                       : comp_method_in_chain(c, parent, u, NULL);
+  if (hit >= 0) return u;
+  static struct pf_base { char *from, *to; struct pf_base *next; } *cache;
+  for (struct pf_base *e = cache; e; e = e->next)
+    if (strcmp(e->from, u) == 0) return e->to;
+  struct pf_base *e = (struct pf_base *)malloc(sizeof *e);
+  char *to = strndup(u, n - 3), *from = strdup(u);
+  if (!e || !to || !from) { free(e); free(to); free(from); return u; }
+  e->from = from; e->to = to; e->next = cache; cache = e;
+  return to;
+}
+
 /* The sp_poly_enum_proc op for a block-carrying Enumerable name, or NULL.
    These are the names a poly dispatch can serve from a builtin Array/Hash
    receiver by driving the materialized block proc over the elements; only the
