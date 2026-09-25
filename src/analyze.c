@@ -3543,28 +3543,44 @@ static void synth_struct_each(Compiler *c) {
 
 /* Does `class <ci>`'s body say `include Enumerable`? A builtin module has no
    class-table entry, so the AST is what records it (#3755). */
+/* The names of the classes whose body includes Enumerable, from one walk of
+   the ClassNodes; asked per enum call site (desugar_builtin_enum_calls,
+   narrow_object_arrays), the walk of every node per ask was quadratic
+   (rubys/roundhouse#72). Rebuilt whenever the node table changes. */
+static ANameHash g_enum_cls;
+static const NodeTable *g_enum_cls_nt;
+static unsigned g_enum_cls_ver;
+static int g_enum_cls_cnt = -1;
+static int class_body_includes_enumerable(const NodeTable *nt, int id);
 int an_class_includes_enumerable(Compiler *c, int ci) {
   const NodeTable *nt = c->nt;
   if (ci < 0 || ci >= c->nclasses) return 0;
   const char *cn = c->classes[ci].name;
   if (!cn) return 0;
-  for (int id = 0; id < nt->count; id++) {
-    if (nt_kind(nt, id) != NK_ClassNode) continue;
-    int cp = nt_ref(nt, id, "constant_path");
-    const char *n = cp >= 0 ? nt_str(nt, cp, "name") : nt_str(nt, id, "name");
-    if (!n || !sp_streq(n, cn)) continue;
-    int body = nt_ref(nt, id, "body");
-    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-    for (int k = 0; k < bn; k++) {
-      if (nt_kind(nt, bb[k]) != NK_CallNode) continue;
-      const char *nm = nt_str(nt, bb[k], "name");
-      if (!nm || !sp_streq(nm, "include") || nt_ref(nt, bb[k], "receiver") >= 0) continue;
-      int an = nt_ref(nt, bb[k], "arguments");
-      int n2 = 0; const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &n2) : NULL;
-      for (int j = 0; j < n2; j++) {
-        const char *mn = nt_str(nt, av[j], "name");
-        if (mn && sp_streq(mn, "Enumerable")) return 1;
-      }
+  if (g_enum_cls_nt != nt || g_enum_cls_ver != nt->version || g_enum_cls_cnt != nt->count) {
+    anh_free(&g_enum_cls); memset(&g_enum_cls, 0, sizeof g_enum_cls);
+    NT_FOREACH_KIND(nt, NK_ClassNode, id) {
+      if (!class_body_includes_enumerable(nt, id)) continue;
+      int cp = nt_ref(nt, id, "constant_path");
+      const char *n = cp >= 0 ? nt_str(nt, cp, "name") : nt_str(nt, id, "name");
+      if (n && !anh_has(&g_enum_cls, n)) anh_add(&g_enum_cls, n);
+    }
+    g_enum_cls_nt = nt; g_enum_cls_ver = nt->version; g_enum_cls_cnt = nt->count;
+  }
+  return anh_has(&g_enum_cls, cn);
+}
+static int class_body_includes_enumerable(const NodeTable *nt, int id) {
+  int body = nt_ref(nt, id, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  for (int k = 0; k < bn; k++) {
+    if (nt_kind(nt, bb[k]) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, bb[k], "name");
+    if (!nm || !sp_streq(nm, "include") || nt_ref(nt, bb[k], "receiver") >= 0) continue;
+    int an = nt_ref(nt, bb[k], "arguments");
+    int n2 = 0; const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &n2) : NULL;
+    for (int j = 0; j < n2; j++) {
+      const char *mn = nt_str(nt, av[j], "name");
+      if (mn && sp_streq(mn, "Enumerable")) return 1;
     }
   }
   return 0;
