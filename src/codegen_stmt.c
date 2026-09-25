@@ -4333,6 +4333,32 @@ static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int
   return 0;
 }
 
+/* `case <array or hash> when <cond>`: Array#=== and Hash#=== are Object#===,
+   which is ==, so the arm compares by value through sp_poly_eq. An arm of
+   another kind can never be == an Array or a Hash, and comparing the two
+   pointers is a compare of distinct pointer types, so it runs for its
+   effects and answers false, the shape the String subject uses. Answers 0 for any other subject
+   kind, leaving the arm to the emitter's later tests. Both case emitters
+   (statement and value position) read this one arm; when only the
+   statement emitter had it, `r = case arr when [1, 2]` fell through to the
+   pointer compare and took the else arm. */
+static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
+  if (!ty_is_array(pt) && !ty_is_hash(pt)) return 0;
+  TyKind wat = comp_ntype(c, cond);
+  char stmp[24]; snprintf(stmp, sizeof stmp, "_t%d", t);
+  if (ty_is_array(wat) || ty_is_hash(wat) || wat == TY_POLY || wat == TY_UNKNOWN) {
+    buf_puts(b, "sp_poly_eq(");
+    emit_boxed_text(c, pt, stmp, b);
+    buf_puts(b, ", ");
+    emit_boxed(c, cond, b);
+    buf_puts(b, ")");
+  }
+  else {
+    buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, cond, b); buf_puts(b, "), 0)");
+  }
+  return 1;
+}
+
 /* `when <cond>` against the subject in _t<t>: the subject class's own ===
    or == when cond has its type, else a native === or the pointer compare. */
 static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
@@ -4668,28 +4694,9 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
               buf_puts(b, ")");
             }
           }
-          /* `case <array or hash> when <array or hash>`: Array#=== and
-             Hash#=== are Object#===, which is ==, so the arm compares by
-             value. Without this the subject and the arm went to the pointer
-             compare below and `case [1,2] when [1,2]` fell through. */
-          else if (ty_is_array(pt) || ty_is_hash(pt)) {
-            TyKind wat2 = comp_ntype(c, conds[j]);
-            char stmp[24]; snprintf(stmp, sizeof stmp, "_t%d", t);
-            if (ty_is_array(wat2) || ty_is_hash(wat2) || wat2 == TY_POLY || wat2 == TY_UNKNOWN) {
-              buf_puts(b, "sp_poly_eq(");
-              emit_boxed_text(c, pt, stmp, b);
-              buf_puts(b, ", ");
-              emit_boxed(c, conds[j], b);
-              buf_puts(b, ")");
-            }
-            else {
-              /* An arm of another kind can never be == an Array or a Hash;
-                 comparing the two pointers is not even well-typed C. Same
-                 shape as the String arm above: run it for its effects and
-                 answer false. */
-              buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, conds[j], b); buf_puts(b, "), 0)");
-            }
-          }
+          /* an Array or Hash subject compares by value (Array#=== and
+             Hash#=== are Object#===, which is ==) */
+          else if (emit_case_container_eq(c, conds[j], t, pt, b)) { }
           else if (pt == TY_POLY) {
             buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")");
           }
@@ -5070,6 +5077,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
             buf_puts(b, ")");
           }
         }
+        else if (emit_case_container_eq(c, conds[j], t, pt, b)) { }
         else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
         else emit_case_obj_eq(c, conds[j], t, pt, b);
         } /* close non-ConstantReadNode else */
