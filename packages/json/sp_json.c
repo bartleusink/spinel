@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>           /* strtoll, strtod */
 #include <errno.h>            /* ERANGE past int64 */
+#include <math.h>             /* isinf, isnan */
 sp_Bigint *sp_bigint_new_str(const char *s, int base);   /* the runtime archive (sp_bigint.c) */
 
 /* A 0xff-marked rodata literal, so sp_str_byte_len reads its length correctly
@@ -164,7 +165,13 @@ static const char *sp_json_scalar(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT:  return sp_int_to_s(v.v.i);
     case SP_TAG_BIGINT: return sp_bigint_to_s((sp_Bigint *)v.v.p);
-    case SP_TAG_FLT:  return sp_float_to_s(v.v.f);
+    case SP_TAG_FLT:
+      /* Infinity and NaN are not JSON: CRuby refuses them rather than write
+         a document no parser reads back */
+      if (isinf(v.v.f))
+        sp_raise_cls("JSON::GeneratorError", v.v.f > 0 ? "Infinity not allowed in JSON" : "-Infinity not allowed in JSON");
+      if (isnan(v.v.f)) sp_raise_cls("JSON::GeneratorError", "NaN not allowed in JSON");
+      return sp_float_to_s(v.v.f);
     case SP_TAG_BOOL: return v.v.b ? JSPL("true") : JSPL("false");
     case SP_TAG_NIL:  return JSPL("null");
     case SP_TAG_STR:  return sp_json_str(v.v.s);
