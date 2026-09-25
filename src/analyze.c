@@ -14648,14 +14648,21 @@ static int bam_wrapper_binds_receiver(Compiler *c, Scope *sc) {
    reaches it. Before this every call bound to the FIRST definition: a later
    def of another arity refused its calls, one of the same arity was a C
    redefinition. */
+static int g_redef_self_too;   /* also rename `self.from` (main's singleton methods) */
 static void redef_rename_calls(NodeTable *nt, int id, const char *from, const char *to, int depth) {
   if (id < 0 || id >= nt->count || depth > 400) return;
   NodeKind k = nt_kind(nt, id);
   if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode)
     return;
-  if (k == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
+  int crecv = k == NK_CallNode ? nt_ref(nt, id, "receiver") : -1;
+  if (k == NK_CallNode && (crecv < 0 || (g_redef_self_too && nt_kind(nt, crecv) == NK_SelfNode))) {
     const char *nm = nt_str(nt, id, "name");
-    if (nm && sp_streq(nm, from)) nt_set_str(nt, id, "name", to);
+    if (nm && sp_streq(nm, from)) {
+      if (!sp_streq(from, to)) nt_set_str(nt, id, "name", to);
+      /* `self.k` on main is the singleton method, which is a receiverless
+         top-level function here: drop the self (see rename_main_singleton_defs) */
+      if (crecv >= 0) nt_node_set_ref(nt, id, "receiver", -1);
+    }
   }
   const SpNode *nd = &nt->nodes[id];
   for (int i = 0; i < nd->nr; i++) redef_rename_calls(nt, nd->r[i].ref, from, to, depth + 1);
@@ -14711,6 +14718,60 @@ static void rename_redefined_toplevel_defs(Compiler *c) {
        entry, the same. */
     redef_rename_calls(nt, nt_ref(nt, st[i], "body"), nm, to, 0);
     redef_rename_calls(nt, nt_ref(nt, st[i], "parameters"), nm, to, 0);
+    free(nm);
+  }
+  free(st);
+}
+
+/* A top-level `def self.k` is a singleton method of main, and a top-level
+   `def k` a private method of Object: both can exist, and on main -- the
+   top-level statements, their blocks, and the singleton method's own body --
+   a call of `k` or `self.k` reaches the singleton, while from any other object
+   `k` is Object's. Both were emitted as sp_k and the C did not compile. The
+   singleton gets a private name, and the calls that run with main as self
+   after its `def` are renamed to it; a method body keeps `k`, since it runs
+   with whatever self it was called on. */
+static void rename_main_singleton_defs(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int body = nt_ref(nt, nt->root_id, "statements");
+  int n = 0;
+  const int *st0 = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+  if (!st0 || n < 2) return;
+  int *st = malloc(sizeof(int) * (size_t)n);
+  if (!st) return;
+  memcpy(st, st0, sizeof(int) * (size_t)n);
+  int serial = 0;
+  for (int i = 0; i < n; i++) {
+    if (nt_kind(nt, st[i]) != NK_DefNode) continue;
+    int rv = nt_ref(nt, st[i], "receiver");
+    if (rv < 0 || nt_kind(nt, rv) != NK_SelfNode) continue;
+    const char *nm0 = nt_str(nt, st[i], "name");
+    if (!nm0) continue;
+    int plain = 0;
+    for (int j = 0; j < n && !plain; j++)
+      if (nt_kind(nt, st[j]) == NK_DefNode && nt_ref(nt, st[j], "receiver") < 0 &&
+          nt_str(nt, st[j], "name") && sp_streq(nt_str(nt, st[j], "name"), nm0)) plain = 1;
+    char *nm = strdup(nm0);
+    char to[256];
+    /* alone, the singleton keeps its name and only `self.k` loses its self:
+       the dispatch on main had no arm for main's own singleton methods, and
+       `self.k` raised NoMethodError */
+    if (!plain) snprintf(to, sizeof to, "%s", nm);
+    else for (;;) {
+      snprintf(to, sizeof to, "%s__main%d", nm, ++serial);
+      int taken = 0;
+      NT_FOREACH_KIND(nt, NK_DefNode, d) {
+        const char *dn = nt_str(nt, d, "name");
+        if (dn && sp_streq(dn, to)) { taken = 1; break; }
+      }
+      if (!taken) break;
+    }
+    if (plain) nt_set_str(nt, st[i], "name", to);
+    g_redef_self_too = 1;
+    for (int j = i + 1; j < n; j++) redef_rename_calls(nt, st[j], nm, to, 0);
+    redef_rename_calls(nt, nt_ref(nt, st[i], "body"), nm, to, 0);
+    redef_rename_calls(nt, nt_ref(nt, st[i], "parameters"), nm, to, 0);
+    g_redef_self_too = 0;
     free(nm);
   }
   free(st);
@@ -14792,6 +14853,7 @@ void analyze_program(Compiler *c) {
      container per file (analyze_desugar.c's sp_bx_* table) */
   desugar_builtin_scalar_defs(c);
   rename_redefined_toplevel_defs(c);     /* def f; f; def f -> def f__redef1; f__redef1; def f */
+  rename_main_singleton_defs(c);         /* def self.k beside def k -> def self.k__main1 */
   scope_numbered_block_params(c);
   rename_shadowing_block_params(c);
   /* `:m.to_proc.call(r, a)` -> `r.m(a)`, before the to_proc rewrite below
