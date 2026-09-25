@@ -8244,6 +8244,22 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
 }
 
 /* super(args) / super -> call the parent's same-named method. */
+/* One parameter a bare `super` forwards, converted to the parent's slot:
+   boxed when the parent's is poly, and unboxed when this method's is poly and
+   the parent's is typed -- a proc-form clone's parameters are boxed, and its
+   super reaching the parent's plain method passed an sp_RbVal into an sp_int
+   parameter, which the C compiler refused. */
+static void emit_zsuper_arg(Compiler *c, TyKind st, TyKind dt, const char *pname, Buf *b) {
+  Buf _bx; memset(&_bx, 0, sizeof _bx);
+  buf_printf(&_bx, "lv_%s", rename_local(pname));
+  if (dt == TY_POLY && st != TY_POLY && st != TY_UNKNOWN) emit_boxed_text(c, st, _bx.p, b);
+  else if (st == TY_POLY && dt == TY_INT) buf_printf(b, "sp_poly_to_i_or_nil(%s)", _bx.p);
+  else if (st == TY_POLY && dt == TY_FLOAT) buf_printf(b, "sp_poly_to_f_or_nil(%s)", _bx.p);
+  else if (st == TY_POLY && dt != TY_POLY && dt != TY_UNKNOWN) emit_unbox_text(c, dt, _bx.p, b);
+  else buf_puts(b, _bx.p);
+  free(_bx.p);
+}
+
 void emit_super(Compiler *c, int id, Buf *b) {
   Scope *s = comp_scope_of(c, id);
   if (s->class_id < 0 || !s->name) { unsupported(c, id, "super (not in a method)"); return; }
@@ -8301,13 +8317,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
         TyKind st = src ? src->type : TY_UNKNOWN;
         TyKind dt = dst ? dst->type : TY_UNKNOWN;
         buf_puts(b, i == 0 ? "" : ", ");
-        if (dt == TY_POLY && st != TY_POLY && st != TY_UNKNOWN) {
-          Buf _bx; memset(&_bx, 0, sizeof _bx);
-          buf_printf(&_bx, "lv_%s", rename_local(s->pnames[i]));
-          emit_boxed_text(c, st, _bx.p, b);
-          free(_bx.p);
-        }
-        else buf_printf(b, "lv_%s", rename_local(s->pnames[i]));
+        emit_zsuper_arg(c, st, dt, s->pnames[i], b);
       }
       /* the parent's extra parameters take their defaults (#4852) */
       for (int i = n; i < pm->nparams; i++) {
@@ -8487,16 +8497,8 @@ void emit_super(Compiler *c, int id, Buf *b) {
       /* Use the local's emitted C name: when this method body is inlined at a
          block call site the params are renamed (e.g. `x` -> `_y5_x`), so bare
          `super`'s implicit forwarding must reference the renamed identifier. */
-      if (dt == TY_POLY && st != TY_POLY && st != TY_UNKNOWN) {
-        buf_puts(b, ", ");
-        Buf _bx; memset(&_bx, 0, sizeof _bx);
-        buf_printf(&_bx, "lv_%s", rename_local(s->pnames[i]));
-        emit_boxed_text(c, st, _bx.p, b);
-        free(_bx.p);
-      }
-      else {
-        buf_printf(b, ", lv_%s", rename_local(s->pnames[i]));
-      }
+      buf_puts(b, ", ");
+      emit_zsuper_arg(c, st, dt, s->pnames[i], b);
     }
     /* The parent may declare more than this method does -- an optional,
        `*rest`, a keyword, `**` -- which a bare super leaves to their defaults
