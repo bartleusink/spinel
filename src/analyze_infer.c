@@ -1,4 +1,5 @@
 #include "analyze_internal.h"
+#include <stdint.h>
 
 /* Per-iteration memo for the (cid, ivname) full-table-scan narrow helpers
    below. Each is O(nodes); they are queried once per `@ivar[i]` expression,
@@ -6264,6 +6265,15 @@ else {
         long long pa, pb;
         if (!(infer_const_int_node(nt, recv, &pa) && infer_const_int_node(nt, argv[0], &pb)))
           return TY_POLY;
+        /* Two constants escape the word too when their result does: `max + 1`
+           was typed sp_int and took the raising helper (#4968). Judged in
+           intptr_t, sp_int's own type in the compiler that emits for it. */
+        intptr_t ia = (intptr_t)pa, ib = (intptr_t)pb, ir;
+        if ((long long)ia != pa || (long long)ib != pb) return TY_POLY;
+        int ovf = sp_streq(name, "+") ? __builtin_add_overflow(ia, ib, &ir)
+                : sp_streq(name, "-") ? __builtin_sub_overflow(ia, ib, &ir)
+                : __builtin_mul_overflow(ia, ib, &ir);
+        if (ovf) return TY_POLY;
       }
       return TY_INT;
     }
