@@ -5398,6 +5398,27 @@ static int scope_mutates_array_local(Compiler *c, int mi, const char *name, int 
 
 static void emit_arg_or_default_at(Compiler *c, Scope *m, int idx, int provided, Buf *out);
 
+/* A write to a shared-mutable-string local, `buf = +"abc"`, where the value
+   has to be the HANDLE (a shared-string parameter's argument). Its node type
+   is String, so the value forms produce the const char * copy; run the write
+   as a statement instead and yield the local's sp_String *. A write already
+   hoisted into a temp (emit_args_filled) is that temp. Returns 0 for any
+   other node. */
+static int emit_strbuf_local_write_handle(Compiler *c, int node, Buf *out) {
+  if (node < 0 || nt_kind(c->nt, node) != NK_LocalVariableWriteNode) return 0;
+  const char *nm = nt_str(c->nt, node, "name");
+  LocalVar *lv = nm ? scope_local(comp_scope_of(c, node), nm) : NULL;
+  if (!lv || lv->type != TY_STRBUF) return 0;
+  for (int i = g_n_argov - 1; i >= 0; i--)
+    if (g_argov_node[i] == node) { buf_puts(out, g_argov_text[i]); return 1; }
+  buf_puts(out, "({ ");
+  emit_assign(c, node, out, 0);
+  buf_puts(out, " ");
+  emit_local_ref(c, node, nm, out);
+  buf_puts(out, "; })");
+  return 1;
+}
+
 /* A default a dispatch arm omits runs on the receiver as the arm's class: the
    caller's self may be another class, or none at all at top level (#4873). */
 void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
@@ -5509,6 +5530,11 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
   /* shared-handle string parameter (#3227 P5): a shared slot argument passes
      the handle itself; a plain value wraps a fresh handle (a non-lvalue
      argument's mutation is invisible to the caller in CRuby too). */
+  /* `show(buf = +"abc")`: the write runs, and the argument is the local's
+     handle -- the parameter and the local are one object. The analyzer
+     types the parameter from the write, which is the local's sp_String *,
+     while the write's value form is the const char * copy. */
+  if (p && pt == TY_STRBUF && emit_strbuf_local_write_handle(c, provided, out)) return;
   if (p && pt == TY_STRBUF && p->str_shared) {
     if (provided >= 0) {
       char srefP[192];
@@ -7223,6 +7249,19 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
          setup into g_pre, which must be fully flushed before this temp's
          declaration line is written. */
       Buf hb; memset(&hb, 0, sizeof hb);
+      /* a write to a shared-string local handed to a mutable-string parameter
+         is sequenced as the local's handle, which is what the slot takes */
+      LocalVar *hp = m->pnames[k] ? scope_local(m, m->pnames[k]) : NULL;
+      if (hp && hp->type == TY_STRBUF &&
+          emit_strbuf_local_write_handle(c, argv[k], &hb)) {
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", ht, hb.p, ht);
+        free(hb.p);
+        g_argov_node[g_n_argov] = argv[k];
+        snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ht);
+        g_n_argov++;
+        continue;
+      }
       emit_expr(c, argv[k], &hb);
       emit_indent(g_pre, g_indent);
       if (at == TY_POLY) {
