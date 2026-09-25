@@ -10852,6 +10852,28 @@ static int an_str_mutator_name(const char *nm) {
    unused class dropped a callee's appends (#4390). */
 static int an_any_scope_by_name(Compiler *c, const char *nm) {
   if (!nm) return -1;
+  /* frozen (scope names fixed): the first scope of each name from a table
+     built once per scope-index epoch; asked per call site, the scan was
+     (sites x scopes) (rubys in #5035) */
+  if (comp_scope_index_is_frozen()) {
+    static ANameHash names; static int *first, nfirst, stamp_n = -1;
+    static unsigned stamp_gen;
+    if (stamp_n != c->nscopes || stamp_gen != comp_scope_index_gen()) {
+      anh_free(&names); memset(&names, 0, sizeof names);
+      free(first); first = NULL; nfirst = 0;
+      int cap = 0;
+      for (int i = 1; i < c->nscopes; i++) {
+        const char *sn = c->scopes[i].name;
+        if (!sn || anh_has(&names, sn)) continue;
+        if (nfirst == cap) { cap = cap ? cap * 2 : 256; first = realloc(first, sizeof(int) * (size_t)cap); }
+        first[nfirst++] = i;
+        anh_add(&names, sn);
+      }
+      stamp_n = c->nscopes; stamp_gen = comp_scope_index_gen();
+    }
+    int k = anh_find(&names, nm);
+    return k >= 0 ? first[k] : -1;
+  }
   for (int i = 1; i < c->nscopes; i++)
     if (c->scopes[i].name && sp_streq(c->scopes[i].name, nm)) return i;
   return -1;
