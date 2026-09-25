@@ -5412,12 +5412,15 @@ static sp_int sp_poly_arr_index_val(sp_RbVal a, sp_RbVal v, int rev) {
   else     { for (sp_int i = 0; i < n; i++)      if (sp_poly_eq(sp_poly_arr_get(a, i), v)) return i; }
   return SP_INT_NIL;
 }
-static sp_bool sp_PolyArray_include_val(sp_PolyArray *a, sp_RbVal v) { if (!a) return FALSE; for (sp_int i = 0; i < a->len; i++) if (sp_poly_eq(a->data[i], v)) return TRUE; return FALSE; }
-static sp_PolyArray *sp_PolyArray_intersect(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a || !b) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (sp_PolyArray_include_val(b, v) && !sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } return r; }
+/* Membership for the set operations (-, |, &, intersect?): Ruby matches their
+   elements by hash/eql?, not ==, so 2 and 2.0 are different elements. */
+static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b);
+static sp_bool sp_PolyArray_include_eql(sp_PolyArray *a, sp_RbVal v) { if (!a) return FALSE; for (sp_int i = 0; i < a->len; i++) if (sp_poly_eql(a->data[i], v)) return TRUE; return FALSE; }
+static sp_PolyArray *sp_PolyArray_intersect(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a || !b) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (sp_PolyArray_include_eql(b, v) && !sp_PolyArray_include_eql(r, v)) sp_PolyArray_push(r, v); } return r; }
 /* intersect? predicate: early-exit, no allocation (matches CRuby's non-building Array#intersect?). */
-static sp_bool sp_PolyArray_intersect_p(sp_PolyArray *a, sp_PolyArray *b) { if (!a || !b) return 0; for (sp_int i = 0; i < a->len; i++) if (sp_PolyArray_include_val(b, a->data[i])) return 1; return 0; }
-static sp_PolyArray *sp_PolyArray_union(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } if (b) for (sp_int i = 0; i < b->len; i++) { sp_RbVal v = b->data[i]; if (!sp_PolyArray_include_val(r, v)) sp_PolyArray_push(r, v); } return r; }
-static sp_PolyArray *sp_PolyArray_difference(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_val(b, v)) sp_PolyArray_push(r, v); } return r; }
+static sp_bool sp_PolyArray_intersect_p(sp_PolyArray *a, sp_PolyArray *b) { if (!a || !b) return 0; for (sp_int i = 0; i < a->len; i++) if (sp_PolyArray_include_eql(b, a->data[i])) return 1; return 0; }
+static sp_PolyArray *sp_PolyArray_union(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_eql(r, v)) sp_PolyArray_push(r, v); } if (b) for (sp_int i = 0; i < b->len; i++) { sp_RbVal v = b->data[i]; if (!sp_PolyArray_include_eql(r, v)) sp_PolyArray_push(r, v); } return r; }
+static sp_PolyArray *sp_PolyArray_difference(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (!sp_PolyArray_include_eql(b, v)) sp_PolyArray_push(r, v); } return r; }
 /* Array#compact for poly_array: keep elements whose tag is not SP_TAG_NIL. */
 static sp_PolyArray *sp_PolyArray_compact(sp_PolyArray *a) { SP_GC_ROOT(a); sp_PolyArray *b = sp_PolyArray_new(); SP_GC_ROOT(b); if (!a) return b; for (sp_int i = 0; i < a->len; i++) { if (a->data[i].tag != SP_TAG_NIL) sp_PolyArray_push(b, a->data[i]); } return b; }
 static sp_PolyArray *sp_PolyArray_compact_bang(sp_PolyArray *a) {sp_gc_wb((void*)a);  if (!a) return a; sp_int w = 0; for (sp_int i = 0; i < a->len; i++) { if (a->data[i].tag != SP_TAG_NIL) a->data[w++] = a->data[i]; } a->len = w; return a; }
