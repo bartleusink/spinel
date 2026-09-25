@@ -3160,15 +3160,38 @@ int infer_write_types(Compiler *c) {
      computing proc_ret there would see stale TY_UNKNOWN for variables assigned
      inside the proc body. Running after the first pass ensures those locals
      have their correct types (e.g. `x = 10` -> TY_INT) before proc_node_ret
-     evaluates the body's return type. */
-  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, id) {
-    const char *nm = nt_str(nt, id, "name");
-    if (!nm) continue;
-    LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
-    if (!lv || lv->type != TY_PROC) continue;
-    int vnode = nt_ref(nt, id, "value");
-    TyKind pr = vnode >= 0 ? proc_ret_of(c, vnode) : TY_UNKNOWN;
-    if (pr != TY_UNKNOWN && (TyKind)lv->proc_ret != pr) { lv->proc_ret = (int)pr; changed = 1; }
+     evaluates the body's return type.
+     A local written with two procs of different return types takes the
+     last write's, as before; what counts as a change is the value the pass
+     leaves against the one it found. Comparing write by write reported both
+     writes of `sh = ->(x) { x }; sh = ->(a, b, c) { a + b + c }` as changes
+     every round, and the fixpoint ran to its cap (#4962). */
+  {
+    int npr = 0, cappr = 0;
+    LocalVar **pr_lv = NULL; int *pr_old = NULL;
+    NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, id) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm) continue;
+      LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
+      if (!lv || lv->type != TY_PROC) continue;
+      int vnode = nt_ref(nt, id, "value");
+      TyKind pr = vnode >= 0 ? proc_ret_of(c, vnode) : TY_UNKNOWN;
+      if (pr == TY_UNKNOWN || (TyKind)lv->proc_ret == pr) continue;
+      int seen = 0;
+      for (int k = 0; k < npr && !seen; k++) if (pr_lv[k] == lv) seen = 1;
+      if (!seen) {
+        if (npr == cappr) {
+          cappr = cappr ? cappr * 2 : 8;
+          pr_lv = (LocalVar **)realloc(pr_lv, sizeof(LocalVar *) * (size_t)cappr);
+          pr_old = (int *)realloc(pr_old, sizeof(int) * (size_t)cappr);
+          if (!pr_lv || !pr_old) { fprintf(stderr, "oom\n"); exit(1); }
+        }
+        pr_lv[npr] = lv; pr_old[npr] = lv->proc_ret; npr++;
+      }
+      lv->proc_ret = (int)pr;
+    }
+    for (int k = 0; k < npr; k++) if (pr_lv[k]->proc_ret != pr_old[k]) changed = 1;
+    free(pr_lv); free(pr_old);
   }
 
   /* A slot already promoted to the append handle keeps that REPRESENTATION
@@ -3404,7 +3427,14 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
        stay dispatchable (#2989, #3137). A push-widened param is the special
        case of this where the widening came from a use rather than a call. */
     TyKind merged;
-    if (ty_is_array(p->type) && ty_is_array(at) && p->type != at)
+    /* A push-widened param takes any array argument as the poly array, and
+       decides that first: tested after the two-kinds rule, a param already on
+       the poly array met an int-array argument as two kinds (-> poly), and
+       the next round met it from poly (-> poly array), every round until the
+       fixpoint's cap (#4962). */
+    if (p->push_widened && ty_is_array(at))
+      merged = TY_POLY_ARRAY;
+    else if (ty_is_array(p->type) && ty_is_array(at) && p->type != at)
       /* Two array kinds meet as the poly SCALAR, not the poly ARRAY: the
          boxed value keeps its concrete array class, so the callee's array
          methods dispatch through the poly runtime by cls_id, and every call
@@ -3414,8 +3444,6 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
          types POLY_ARRAY for the whole fixpoint and only re-narrows to the
          int array after it, so the conflict is usually transient, not real). */
       merged = TY_POLY;
-    else if (p->push_widened && ty_is_array(at))
-      merged = TY_POLY_ARRAY;
     else
       merged = ty_unify(p->type, at);
     changed |= slot_set(c, p, merged, at, argv[k]);

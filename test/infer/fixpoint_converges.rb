@@ -34,3 +34,44 @@ sub["body"] = "hi"
 store(sub, 1)
 store({ 2 => 3 }, 2)
 p sub
+
+# Four more shapes, each to the cap for its own reason (#4962).
+#
+# A table the object-array narrowing withdrew: `fc_pair`'s value narrowed to
+# an int-array table before `FcBox.new(qr[0])` had widened the ivar, and the
+# decision it then withdrew came back every round as a pin.
+def fc_pair(a) = [a, []]
+class FcBox
+  attr_reader :v
+  def initialize(v) = @v = v
+end
+fb = FcBox.new([1, 2])
+qr = fc_pair(fb.v)
+fb = FcBox.new(qr[0])
+p fb.v
+
+# A string range's block-driven step, lowered to `step(n).each { }` and folded
+# straight back by the Enumerator#each rule.
+fs = []
+("a".."e").step(2) { |s| fs << s }
+p fs
+
+# Two procs of different return types in one local: each write reported
+# a change of the local's proc return type.
+fsh = ->(x) { x }
+fsh = ->(a, b, c) { a + b + c }
+p fsh.curry(3).call(1).call(2).call(3)
+
+# A parameter widened by a push, bound from an int-array ivar: the two-kinds
+# rule and the push rule answered it in turn.
+module FcHeld
+  def self.add(into) = into.push("pushed")
+end
+class FcNamed
+  def initialize = @a = [0]
+  def go = FcHeld.add(@a)
+  def out = @a
+end
+fn = FcNamed.new
+fn.go
+p fn.out

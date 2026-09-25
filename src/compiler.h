@@ -155,6 +155,9 @@ typedef struct {
                        the writes, which still read the poly array -- and the
                        two array kinds unify to the plain poly SCALAR, strictly
                        worse than either. TY_UNKNOWN = not narrowed. */
+  unsigned char oa_grace; /* narrow_object_arrays reached no decision on this
+                       slot last round and kept its own pin once; a second
+                       such round drops the pin (#4962) */
   TyKind rbs_type;  /* the type an --rbs seed declared for this slot, kept
                        beside `type` because inference may narrow the slot
                        afterwards. A narrowing of an `untyped` (poly) seed is
@@ -274,6 +277,7 @@ typedef struct {
   TyKind ret_oa_pin;   /* the pointer-array return type the narrowing pass gave
                           this method, re-asserted every round for the same
                           reason LocalVar.oa_pin is. TY_UNKNOWN = not narrowed. */
+  unsigned char ret_oa_grace;   /* LocalVar.oa_grace for the return slot */
   int ret_proc_ret; /* when ret==TY_PROC: the returned proc's body return type
                        (TyKind), so a caller's `m.call` knows the result type */
   int blk_ret;      /* for a method with a &block param: the unified value type

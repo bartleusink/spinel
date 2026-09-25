@@ -4526,6 +4526,9 @@ static int desugar_str_range_methods(Compiler *c) {
       nt_node_set_ref(nt, id, "receiver", inner);
       nt_node_set_str(nt, id, "name", "each");
       nt_node_set_ref(nt, id, "arguments", -1);
+      /* the Enumerator#each fold in desugar_enum_method_recv would turn this
+         straight back into the block-driven step, every round (#4962) */
+      nt_node_set_int(nt, id, "lowered_each", 1);
       comp_grow_node_arrays(c);
       c->nscope[inner] = c->nscope[id];
       changed = 1;
@@ -5579,8 +5582,9 @@ int desugar_enum_method_recv(Compiler *c) {
            lowered to `Enumerator.product(a, b).each { blk }` above (#3589), and
            rewriting that back left the two rules undoing each other until the
            fixpoint gave up, with the block never run. The nil_result marker is
-           what that lowering leaves behind. */
-        !nt_int(nt, id, "nil_result", 0)) {
+           what that lowering leaves behind, and `lowered_each` the string
+           range's block-driven step (#4962). */
+        !nt_int(nt, id, "nil_result", 0) && !nt_int(nt, id, "lowered_each", 0)) {
       int ea = nt_ref(nt, id, "arguments"); int eac = 0;
       if (ea >= 0) nt_arr(nt, ea, "arguments", &eac);
       int er = nt_ref(nt, id, "receiver");
@@ -8389,8 +8393,22 @@ static int narrow_object_arrays(Compiler *c) {
     if (!sl[r].alive || sl[r].cls == -1 || sl[r].cls == -2) {
       OA_DROP_SRC_STAMP();
       if (sl[i].ici >= 0) continue;   /* an ivar with no decision stays the poly array it was reset to */
-      if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
-      else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
+      /* This pass's OWN narrowing gets one round of grace: a slot can miss a
+         decision for a round while the slots around it catch up (a callee's
+         parameter that is not a candidate yet), and the pin carries it over.
+         A second round in a row means the evidence is really gone: the slot
+         was reset to the poly array at the top, and handing the withdrawn
+         decision back as a pin had infer_write_types re-narrow it next round,
+         only for this pass to reset it again, every round until the cap
+         (#4962). */
+      TyKind back = sl[i].old_pin;
+      unsigned char *grace = sl[i].lv ? &sl[i].lv->oa_grace : &c->scopes[sl[i].sidx].ret_oa_grace;
+      if (back == TY_INT_ARRAY_ARRAY || back == TY_FLOAT_ARRAY_ARRAY || ty_is_obj_array(back)) {
+        if (*grace) { back = TY_UNKNOWN; *grace = 0; }
+        else *grace = 1;
+      }
+      if (sl[i].lv) sl[i].lv->oa_pin = back;
+      else c->scopes[sl[i].sidx].ret_oa_pin = back;
       continue;
     }
     /* A block iterator is kept for a numeric row, and for an object element
@@ -8453,9 +8471,9 @@ static int narrow_object_arrays(Compiler *c) {
       cl->ivar_types[sl[i].iiv] = nty; cl->ivar_oa_type[sl[i].iiv] = nty; cl->ivar_int_table[sl[i].iiv] = 1;
     }
     else if (sl[i].lv) {
-      sl[i].lv->type = nty; sl[i].lv->oa_pin = nty;
+      sl[i].lv->type = nty; sl[i].lv->oa_pin = nty; sl[i].lv->oa_grace = 0;
     }
-    else { c->scopes[sl[i].sidx].ret = nty; c->scopes[sl[i].sidx].ret_oa_pin = nty; }
+    else { c->scopes[sl[i].sidx].ret = nty; c->scopes[sl[i].sidx].ret_oa_pin = nty; c->scopes[sl[i].sidx].ret_oa_grace = 0; }
     /* and the sources that BUILD the table in place, so the emitter builds it
        at the narrowed kind rather than building a poly array and assigning it
        into a narrowed slot */
@@ -17840,6 +17858,12 @@ void analyze_program(Compiler *c) {
      the cls_id dispatch (a real proc) while analyze left its captures
      uncelled, and the emit refuses. Only sets is_cell, and is idempotent. */
   mark_proc_captures(c);
+  /* A capped run emits from whatever the last round left, which need not be a
+     fixpoint; that is a compiler bug worth hearing about, not a quiet log. */
+  if (g_fixpoint_rounds >= 128)
+    fprintf(stderr, "spinel: warning: type inference did not converge in %d rounds; "
+            "the output may be built from unsettled types (please report this program)\n",
+            g_fixpoint_rounds);
   if (getenv("SP_FIXPOINT_LOG"))
     fprintf(stderr, "[fp] rounds=%d%s\n", g_fixpoint_rounds,
             g_fixpoint_rounds >= 128 ? " (CAP -- did not converge)" : "");
