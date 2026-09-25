@@ -6338,18 +6338,26 @@ int desugar_dir_surface(Compiler *c) {
       snprintf(valn, sizeof valn, "__cd_val_%d", id);
       snprintf(dirn, sizeof dirn, "__cd_dir_%d", id);
       Scope *es = comp_scope_of(c, id);
-      LocalVar *slv = es ? scope_local_intern(es, sav) : NULL;
-      LocalVar *vlv = es ? scope_local_intern(es, valn) : NULL;
-      LocalVar *dlv = es ? scope_local_intern(es, dirn) : NULL;
-      if (!slv || !vlv || !dlv) continue;
-      slv->type = TY_STRING; slv->rbs_seeded = 1;
       /* Dir.chdir yields the directory it switched to. The splice dropped
          the block's parameters, so `chdir(d) { |p| ... }` read p as nil.
          The argument goes into a temp, which the switch and the parameter
          both read (evaluating the argument expression twice would run its
          side effects twice). */
       const char *cdp0 = block_param_name(c, blk, 0);
-      LocalVar *plv = (cdp0 && es) ? scope_local_intern(es, cdp0) : NULL;
+      /* every local is interned before any pointer is taken: an intern can
+         grow (realloc) the scope's locals, and a LocalVar * from an earlier
+         one then points into the freed array -- a write through it
+         crashed the compiler on macOS (valgrind: invalid write) */
+      if (es) {
+        scope_local_intern(es, sav); scope_local_intern(es, valn); scope_local_intern(es, dirn);
+        if (cdp0) scope_local_intern(es, cdp0);
+      }
+      LocalVar *slv = es ? scope_local(es, sav) : NULL;
+      LocalVar *vlv = es ? scope_local(es, valn) : NULL;
+      LocalVar *dlv = es ? scope_local(es, dirn) : NULL;
+      if (!slv || !vlv || !dlv) continue;
+      slv->type = TY_STRING; slv->rbs_seeded = 1;
+      LocalVar *plv = (cdp0 && es) ? scope_local(es, cdp0) : NULL;
       int aan = 0; const int *aav = nt_arr(nt, args, "arguments", &aan);
       if (aan < 1) continue;
       int base = nt->count;
