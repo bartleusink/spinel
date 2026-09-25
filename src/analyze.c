@@ -13002,7 +13002,9 @@ static int pf_dynamic_new(Compiler *c) {
 static int pf_wanted(Compiler *c, const char *name) {
   const NodeTable *nt = c->nt;
   if (sp_streq(name, "initialize")) return pf_dynamic_new(c);
-  for (int id = 0; id < nt->count; id++) {
+  /* the calls of this name, not every node: asked per yielding method
+     (rubys in #5035) */
+  for (int id = an_calls_named_first(c, name); id >= 0; id = an_calls_named_next(id)) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
     if (!nm || !sp_streq(nm, name)) continue;
