@@ -11442,12 +11442,72 @@ static int strbuf_elem_first_iterator(const char *n) {
   for (int i = 0; names[i]; i++) if (sp_streq(n, names[i])) return 1;
   return 0;
 }
+/* The nodes that can store into a local, keyed by (name, scope): a write of
+   it, and a call on it as the receiver. The question below was answered by a
+   walk of the whole node table per container, and it is asked per container
+   per round -- the largest single term of lobsters' analysis. Built once per
+   promote_shared_stored_strings run (a round's desugars rename and re-point
+   nodes in between) and again if the table grows; each list is ascending, so
+   the stores are met in the order the walk met them. */
+typedef struct SbStoreEnt { const char *name; Scope *sc; int *ids; int n, cap; struct SbStoreEnt *next; } SbStoreEnt;
+#define SB_STORE_BUCKETS 4096
+static SbStoreEnt *sb_store_tab[SB_STORE_BUCKETS];
+static const NodeTable *sb_store_nt; static int sb_store_count = -1; static int sb_store_valid;
+static unsigned sb_store_hash(const char *nm, Scope *sc) {
+  unsigned h = 2166136261u ^ (unsigned)(uintptr_t)sc;
+  for (; *nm; nm++) { h ^= (unsigned char)*nm; h *= 16777619u; }
+  return h;
+}
+static void sb_store_clear(void) {
+  for (int b = 0; b < SB_STORE_BUCKETS; b++) {
+    for (SbStoreEnt *e = sb_store_tab[b]; e; ) { SbStoreEnt *nx = e->next; free(e->ids); free(e); e = nx; }
+    sb_store_tab[b] = NULL;
+  }
+  sb_store_valid = 0;
+}
+static void sb_store_add(const char *nm, Scope *sc, int id) {
+  unsigned b = sb_store_hash(nm, sc) % SB_STORE_BUCKETS;
+  SbStoreEnt *e = sb_store_tab[b];
+  while (e && !(e->sc == sc && sp_streq(e->name, nm))) e = e->next;
+  if (!e) {
+    e = calloc(1, sizeof *e); e->name = nm; e->sc = sc;
+    e->next = sb_store_tab[b]; sb_store_tab[b] = e;
+  }
+  if (e->n == e->cap) { e->cap = e->cap ? e->cap * 2 : 4; e->ids = realloc(e->ids, sizeof(int) * (size_t)e->cap); }
+  e->ids[e->n++] = id;
+}
+static const int *sb_store_nodes(Compiler *c, const char *nm, Scope *sc, int *n) {
+  const NodeTable *nt = c->nt;
+  if (!sb_store_valid || sb_store_nt != nt || sb_store_count != nt->count) {
+    sb_store_clear();
+    for (int id = 0; id < nt->count; id++) {
+      NodeKind k = nt_kind(nt, id);
+      if (k == NK_LocalVariableWriteNode) {
+        const char *wn = nt_str(nt, id, "name");
+        if (wn) sb_store_add(wn, comp_scope_of(c, id), id);
+      }
+      else if (k == NK_CallNode) {
+        int r = nt_ref(nt, id, "receiver");
+        if (r < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode) continue;
+        const char *rn = nt_str(nt, r, "name");
+        if (rn) sb_store_add(rn, comp_scope_of(c, r), id);
+      }
+    }
+    sb_store_nt = nt; sb_store_count = nt->count; sb_store_valid = 1;
+  }
+  for (SbStoreEnt *e = sb_store_tab[sb_store_hash(nm, sc) % SB_STORE_BUCKETS]; e; e = e->next)
+    if (e->sc == sc && sp_streq(e->name, nm)) { *n = e->n; return e->ids; }
+  *n = 0; return NULL;
+}
 static int strbuf_demand_container_stores_here(Compiler *c, const char *contn, Scope *conts) {
   const NodeTable *nt = c->nt;
   int changed = 0;
     /* every store into this container local (same scope): array/hash
        literal writes, push/<<, []= */
-    for (int w2 = 0; w2 < nt->count; w2++) {
+    int nsn = 0;
+    const int *sns0 = sb_store_nodes(c, contn, conts, &nsn);
+    for (int si = 0; si < nsn; si++) {
+      int w2 = sns0[si];
       int nst = 0; int stores[64];
       NodeKind wk = nt_kind(nt, w2);
       if (wk == NK_LocalVariableWriteNode) {
@@ -11824,6 +11884,7 @@ static int promote_append_accumulators(Compiler *c) {
 
 static int promote_shared_stored_strings(Compiler *c) {
   int changed = 0;
+  sb_store_valid = 0;   /* this run's store index is built on first use */
   const NodeTable *nt = c->nt;
   /* mutated string locals: receivers of an in-place mutator */
   /* per-kind chains: these walks run every fixpoint round, and the full-table
