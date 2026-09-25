@@ -5062,8 +5062,18 @@ void inherit_members(Compiler *c) {
     free(old); free(oldt); free(old_ss); free(old_it); free(old_oa); free(old_os);
     free(old_oc); free(old_ni); free(old_ne); free(old_ae);
 
-    for (int k = 0; k < pc->nreaders; k++) comp_add_reader(ci, pc->readers[k]);
-    for (int k = 0; k < pc->nwriters; k++) comp_add_writer(ci, pc->writers[k]);
+    /* An inherited attribute the child overrides with a `def` stops there: the
+       def answers the name for the child and everything below it, so copying
+       the flag on let a grandchild read the attribute past the def -- and a
+       grandchild that re-declares the attribute looked like it had only
+       inherited it, so a `super` below it skipped to the def. */
+    for (int k = 0; k < pc->nreaders; k++)
+      if (comp_method_in_class(c, i, pc->readers[k]) < 0) comp_add_reader(ci, pc->readers[k]);
+    for (int k = 0; k < pc->nwriters; k++) {
+      char wn[300];
+      snprintf(wn, sizeof wn, "%s=", pc->writers[k]);
+      if (comp_method_in_class(c, i, wn) < 0) comp_add_writer(ci, pc->writers[k]);
+    }
     }
     if (!progressed) break;   /* the rest are cycles or dangling parents */
   }
