@@ -4485,11 +4485,23 @@ static int pad_unsupplied_params(Compiler *c) {
 static int expand_literal_splat_args(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
-  for (int id = 0; id < nt->count; id++) {
-    const char *ty = nt_type(nt, id);
-    if (!ty || !sp_streq(ty, "CallNode")) continue;
+  for (int id = comp_kind_first(c, NK_CallNode); id >= 0; id = comp_kind_next(c, id)) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
+    /* the shape first: only a call with a `*[...]` argument is rewritten, and
+       the receiver's type (asked below) cost a lookup for every call, every
+       round */
+    { int argsn0 = nt_ref(nt, id, "arguments"), an0 = 0;
+      const int *av0 = argsn0 >= 0 ? nt_arr(nt, argsn0, "arguments", &an0) : NULL;
+      int lit = 0;
+      for (int j = 0; j < an0 && !lit; j++)
+        if (av0[j] >= 0 && nt_kind(nt, av0[j]) == NK_SplatNode) {
+          int in0 = nt_ref(nt, av0[j], "expression");
+          lit = in0 >= 0 && nt_kind(nt, in0) == NK_ArrayNode;
+          break;
+        }
+      if (!lit) continue; }
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0) {
       if (comp_method_index(c, nm) >= 0 || comp_included_method_index(c, nm) >= 0)
