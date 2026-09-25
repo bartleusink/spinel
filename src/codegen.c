@@ -10942,14 +10942,12 @@ char *codegen_program(const NodeTable *nt) {
     for (int fi = 0; fi < cf->n_ffi_funcs; fi++) {
       const char *ret = cf->ffi_funcs[fi].ret;
       if (sp_streq(ret, "binstr")) any_binstr = 1;
-      /* A function taking a callback (e.g. qsort, bsearch) is declared by a
-         system header; emitting our own extern -- whose array/pointer specs may
-         not match the header's void* -- conflicts under gcc. Skip it and call
-         the header-declared symbol directly (implicit pointer conversions). */
-      int has_cb = 0;
-      for (int ai = 0; ai < cf->ffi_funcs[fi].nargs; ai++)
-        if (ffi_find_callback(cf, cf->ffi_funcs[fi].mod, cf->ffi_funcs[fi].args[ai]) >= 0) { has_cb = 1; break; }
-      if (has_cb) continue;
+      /* A function taking a callback (qsort, bsearch, lfind) is declared like
+         any other: the private name cannot conflict with a header's own
+         declaration, and one no included header declares (lfind lives in
+         <search.h>) was otherwise called with no prototype at all -- an
+         implicit int, truncating a :ptr result. The callback parameter takes
+         the trampoline's own pointer type (ffi_cb_arg_ctype). */
       int na = cf->ffi_funcs[fi].nargs;
       /* Declared under a private name bound to the symbol by an asm label
          (ffi_extern_name). __USER_LABEL_PREFIX__ is the target's symbol prefix
@@ -10981,7 +10979,13 @@ char *codegen_program(const NodeTable *nt) {
       buf_puts(&b, "(");
       for (int ai = 0; ai < fixed; ai++) {
         if (ai) buf_puts(&b, ", ");
-        buf_puts(&b, ffi_c_type(cf->ffi_funcs[fi].args[ai]));
+        int cbi = ffi_find_callback(cf, cf->ffi_funcs[fi].mod, cf->ffi_funcs[fi].args[ai]);
+        if (cbi < 0) { buf_puts(&b, ffi_c_type(cf->ffi_funcs[fi].args[ai])); continue; }
+        FfiCallback *k = &cf->ffi_callbacks[cbi];
+        buf_printf(&b, "%s (*)(", ffi_c_type(k->ret_spec));
+        for (int ki = 0; ki < k->nargs; ki++)
+          buf_printf(&b, "%s%s", ki ? ", " : "", ffi_cb_arg_ctype(k->arg_specs[ki]));
+        buf_puts(&b, k->nargs ? ")" : "void)");
       }
       if (is_va) buf_puts(&b, ", ...");
       if (na == 0) buf_puts(&b, "void");
