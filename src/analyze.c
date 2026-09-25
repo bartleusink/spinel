@@ -3601,7 +3601,6 @@ static void synth_struct_each(Compiler *c) {
    (rubys/roundhouse#72). Rebuilt whenever the node table changes. */
 static ANameHash g_enum_cls;
 static const NodeTable *g_enum_cls_nt;
-static unsigned g_enum_cls_ver;
 static int g_enum_cls_cnt = -1;
 static int class_body_includes_enumerable(const NodeTable *nt, int id);
 int an_class_includes_enumerable(Compiler *c, int ci) {
@@ -3609,7 +3608,14 @@ int an_class_includes_enumerable(Compiler *c, int ci) {
   if (ci < 0 || ci >= c->nclasses) return 0;
   const char *cn = c->classes[ci].name;
   if (!cn) return 0;
-  if (g_enum_cls_nt != nt || g_enum_cls_ver != nt->version || g_enum_cls_cnt != nt->count) {
+  /* Keyed on the class declarations, not the table's version: the pass
+     that asks most (desugar_builtin_enum_calls) rewrites nodes between asks,
+     and a version key rebuilt the set once per rewrite -- K rebuilds of K
+     classes (rubys in #5035). An include comes only from a class body, and
+     no pass adds one to an existing body; a new class grows the table. */
+  int ncls_now = c->nclasses;   /* not the kind list: asking it rebuilds the
+                                    kind index after every rewrite */
+  if (g_enum_cls_nt != nt || g_enum_cls_cnt != ncls_now) {
     anh_free(&g_enum_cls); memset(&g_enum_cls, 0, sizeof g_enum_cls);
     NT_FOREACH_KIND(nt, NK_ClassNode, id) {
       if (!class_body_includes_enumerable(nt, id)) continue;
@@ -3617,7 +3623,7 @@ int an_class_includes_enumerable(Compiler *c, int ci) {
       const char *n = cp >= 0 ? nt_str(nt, cp, "name") : nt_str(nt, id, "name");
       if (n && !anh_has(&g_enum_cls, n)) anh_add(&g_enum_cls, n);
     }
-    g_enum_cls_nt = nt; g_enum_cls_ver = nt->version; g_enum_cls_cnt = nt->count;
+    g_enum_cls_nt = nt; g_enum_cls_cnt = ncls_now;
   }
   return anh_has(&g_enum_cls, cn);
 }
