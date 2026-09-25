@@ -1022,6 +1022,13 @@ static int yvt_call_forwards_block(const NodeTable *nt, int cid) {
    skipped for it. Every yielding method used to resolve every block call in
    the program, methods x calls per round (#4847). An aliased name, and a
    prepend shadow (named `__prep_N_m`), are left to the full resolution. */
+static int *yvt_nm_head = NULL, *yvt_nm_next = NULL, *yvt_always = NULL;
+static int yvt_nb = 0, yvt_always_n = 0;
+static unsigned yvt_hash(const char *s) {
+  unsigned h = 2166136261u;
+  for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+  return h;
+}
 static unsigned char *yvt_alias_name = NULL;   /* per yvt_ids entry: its name is an alias somewhere */
 static unsigned char *yvt_fwd = NULL;          /* per yvt_ids entry: yvt_call_forwards_block */
 static int yvt_name_is_alias(Compiler *c, const char *cn) {
@@ -1073,6 +1080,57 @@ static void yvt_build(Compiler *c) {
       const char *cn = nt_str(nt, yvt_ids[ii], "name");
       yvt_alias_name[ii] = cn ? (unsigned char)yvt_name_is_alias(c, cn) : 1;
     }
+  /* The entries by call name, each chain ascending, and the ones any method
+     may be reached by (no name, or an alias). A yielding method walked every
+     entry to find those of its own name, per ask: (yielding methods x block
+     calls), quadratic in a program of many same-shaped classes. */
+  free(yvt_nm_head); free(yvt_nm_next); free(yvt_always);
+  yvt_nb = yvt_n > 0 ? yvt_n : 1;
+  yvt_nm_head = malloc(sizeof(int) * (size_t)yvt_nb);
+  yvt_nm_next = malloc(sizeof(int) * (size_t)(yvt_n > 0 ? yvt_n : 1));
+  yvt_always = malloc(sizeof(int) * (size_t)(yvt_n > 0 ? yvt_n : 1));
+  yvt_always_n = 0;
+  if (!yvt_nm_head || !yvt_nm_next || !yvt_always) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int b = 0; b < yvt_nb; b++) yvt_nm_head[b] = -1;
+  for (int ii = yvt_n - 1; ii >= 0; ii--) {
+    const char *cn = nt_str(nt, yvt_ids[ii], "name");
+    yvt_nm_next[ii] = -1;
+    if (!cn) continue;
+    int b = (int)(yvt_hash(cn) % (unsigned)yvt_nb);
+    yvt_nm_next[ii] = yvt_nm_head[b]; yvt_nm_head[b] = ii;
+  }
+  for (int ii = 0; ii < yvt_n; ii++)
+    if (!nt_str(nt, yvt_ids[ii], "name") || (yvt_alias_name && yvt_alias_name[ii]))
+      yvt_always[yvt_always_n++] = ii;
+}
+/* The entries that may reach `mi`, ascending: its name's chain, `new`'s for
+   an initialize, and the always-list, merged. A method with no name, or a
+   prepend shadow, takes every entry (see yvt_may_reach). */
+typedef struct { int s[3]; int ai; int all; int next_all; int last; } YvtIt;
+static void yvt_it_init(Compiler *c, YvtIt *it, int mi) {
+  const char *mn = c->scopes[mi].name;
+  it->all = !mn || strncmp(mn, "__prep_", 7) == 0 || !yvt_nm_head;
+  it->next_all = 0; it->last = -1; it->ai = 0;
+  it->s[0] = it->s[1] = -1;
+  if (it->all) return;
+  it->s[0] = yvt_nm_head[yvt_hash(mn) % (unsigned)yvt_nb];
+  if (sp_streq(mn, "initialize")) it->s[1] = yvt_nm_head[yvt_hash("new") % (unsigned)yvt_nb];
+}
+static int yvt_it_next(YvtIt *it) {
+  if (it->all) return it->next_all < yvt_n ? it->next_all++ : -1;
+  for (;;) {
+    int a = it->s[0], b = it->s[1];
+    int c3 = it->ai < yvt_always_n ? yvt_always[it->ai] : -1;
+    int m = -1;
+    if (a >= 0) m = a;
+    if (b >= 0 && (m < 0 || b < m)) m = b;
+    if (c3 >= 0 && (m < 0 || c3 < m)) m = c3;
+    if (m < 0) return -1;
+    if (a == m) it->s[0] = yvt_nm_next[a];
+    if (b == m) it->s[1] = yvt_nm_next[b];
+    if (c3 == m) it->ai++;
+    if (m > it->last) { it->last = m; return m; }
+  }
 }
 /* Which method does block-passing call site `cid` reach? Shared by
    yield_value_type and yield_block_tails so the two agree on what counts as a
@@ -1168,7 +1226,8 @@ TyKind yield_value_type(Compiler *c, int mi) {
   const NodeTable *nt = c->nt;
   TyKind result = TY_UNKNOWN;
   if (yvt_nt != nt || yvt_ntc != nt->count) yvt_build(c);
-  for (int ii = 0; ii < yvt_n; ii++) {
+  YvtIt yit; yvt_it_init(c, &yit, mi);
+  for (int ii; (ii = yvt_it_next(&yit)) >= 0; ) {
     int cid = yvt_ids[ii];
     int blk = nt_ref(nt, cid, "block");
     /* A `callee(...)` forward carries its block implicitly inside the `...`
@@ -1279,7 +1338,8 @@ int yield_block_tails(Compiler *c, int mi, int *out, int max) {
   const NodeTable *nt = c->nt;
   int n = 0;
   if (yvt_nt != nt || yvt_ntc != nt->count) yvt_build(c);
-  for (int ii = 0; ii < yvt_n && n < max; ii++) {
+  YvtIt yit; yvt_it_init(c, &yit, mi);
+  for (int ii; n < max && (ii = yvt_it_next(&yit)) >= 0; ) {
     int cid = yvt_ids[ii];
     int blk = nt_ref(nt, cid, "block");
     if (!yvt_may_reach(c, ii, mi)) continue;
