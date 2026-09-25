@@ -6336,6 +6336,7 @@ static const char *sp_PolyPolyHash_inspect(sp_PolyPolyHash *h);
    table yet (follow-up PR). Returns a GC-managed C string. */
 struct sp_OpenStruct_s;
 static const char *sp_OpenStruct_inspect(struct sp_OpenStruct_s *o);
+static const char *sp_enum_inspect_boxed(sp_RbVal v);  /* defined below, after sp_enum.h */
 static inline const char *sp_poly_inspect(sp_RbVal v) {
   switch (v.tag) {
     /* An int-typed nil (unfilled int block param, nullable-int miss) carries
@@ -6383,6 +6384,7 @@ static inline const char *sp_poly_inspect(sp_RbVal v) {
         case SP_BUILTIN_SYM_POLY_HASH: return sp_SymPolyHash_inspect((sp_SymPolyHash *)v.v.p);
         case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_inspect((sp_PolyPolyHash *)v.v.p);
         case SP_BUILTIN_OPENSTRUCT: return sp_OpenStruct_inspect((struct sp_OpenStruct_s *)v.v.p);
+        case SP_BUILTIN_ENUMERATOR: return sp_enum_inspect_boxed(v);
         default:
           /* a user object: the generated per-class ivar walk renders
              #<Name:0x... @a=..., ...> like CRuby's default inspect */
@@ -12385,6 +12387,8 @@ static const char *sp_enum_inspect(sp_Enumerator *e) {
                : sp_box_poly_array(e->items ? e->items : sp_PolyArray_new());
   return sp_sprintf("#<Enumerator: %s:%s>", sp_poly_inspect(src), e->meth ? e->meth : "each");
 }
+/* An Enumerator carried in a poly slot inspects as a typed one does */
+static const char *sp_enum_inspect_boxed(sp_RbVal v) { return sp_enum_inspect((sp_Enumerator *)v.v.p); }
 /* Pull the next value from the generator fiber, or raise StopIteration when it
    has run to completion. A resume that ends the body terminates the fiber and
    returns the body value, which is discarded in favor of StopIteration. */

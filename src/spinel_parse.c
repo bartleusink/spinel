@@ -2698,6 +2698,40 @@ static char *sp_splice_builtins(char *source, const char *exe_path,
   return resolve_plain_requires(ns, exe_path, fsl, fsl_n);
 }
 
+/* builtins/enumerator.rb: the Enumerator walks desugar_enum_walk_calls
+   (analyze_desugar.c) moves a breaking block's call onto. It can only be
+   wanted by a program that breaks out of a block given to one of the
+   names it covers; like the Integer/Float/Comparable files, a missing file
+   just never splices, and the calls stay on their typed emitters. */
+static char *sp_splice_builtin_enumerator(char *source, const char *exe_path,
+                                          unsigned char **fsl, size_t *fsl_n) {
+  if (getenv("SPINEL_NO_BUILTINS")) return source;
+  if (!strstr(source, "break")) return source;
+  static const char *const names[] = {
+    "map", "collect", "select", "filter", "reject", "filter_map", "each_with_object", "with_object",
+    "inject", "reduce", "each_slice", "each_cons", "each_entry", "with_index", NULL
+  };
+  int any = 0;
+  for (int i = 0; names[i] && !any; i++) if (sp_source_mentions_method(source, names[i])) any = 1;
+  if (!any) return source;
+  char lib_dir[1024], gp[1200];
+  sp_lib_dir(exe_path, lib_dir, sizeof lib_dir);
+  int base_len = (int)strlen(lib_dir);
+  if (base_len >= 4 && strcmp(lib_dir + base_len - 4, "/lib") == 0) base_len -= 4;
+  snprintf(gp, sizeof gp, "%.*s/builtins/enumerator.rb", base_len, lib_dir);
+  FILE *fp = fopen(gp, "r");
+  if (!fp) { snprintf(gp, sizeof gp, "%.*s/../builtins/enumerator.rb", base_len, lib_dir); fp = fopen(gp, "r"); }
+  if (!fp) return source;
+  fclose(fp);
+  const char *head = "require \"builtins/enumerator\"\n";
+  size_t sl = strlen(source), hl = strlen(head);
+  char *ns = (char *)malloc(sl + hl + 1);
+  if (!ns) return source;
+  memcpy(ns, head, hl); memcpy(ns + hl, source, sl + 1);
+  free(source);
+  return resolve_plain_requires(ns, exe_path, fsl, fsl_n);
+}
+
 /* ---- builtins/: the other containers (Integer, Float, Comparable) ----
    Same splice-if-mentioned idea as enumerable.rb above, generalized to a
    small table so a new container is one more row here plus its own file
@@ -3727,6 +3761,7 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
   source = resolve_plain_requires(resolved, argv0, &fsl, &fsl_n);
   source = sp_splice_builtins(source, argv0, &fsl, &fsl_n);
   source = sp_splice_builtin_extras(source, argv0, &fsl, &fsl_n);
+  source = sp_splice_builtin_enumerator(source, argv0, &fsl, &fsl_n);
 
   /* Debug: build the buffer-line -> (file, original line) map from the
      marker-annotated buffer *before* syntax-sugar rewriting (which could

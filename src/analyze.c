@@ -15653,7 +15653,8 @@ void analyze_program(Compiler *c) {
     }
     /* a def in value position evaluates to :name. A builtin's definition
        (`__enum_<m>`, `__int_<m>`, `__flt_<m>`, `__cmp_<m>`, and each of
-       their per-call-site copies) is never in value position: its name
+       their per-call-site copies, and enumerator.rb's `__enumw_<m>`) is
+       never in value position: its name
        would only add a string per call site to the symbol table. The
        Integer/Float/Comparable containers (analyze_desugar.c's sp_bx_*
        tables) share this same "generic def cloned per call site" shape
@@ -15665,7 +15666,8 @@ void analyze_program(Compiler *c) {
     else if (ty && sp_streq(ty, "DefNode")) {
       const char *dn = nt_str(c->nt, id, "name");
       if (dn && strncmp(dn, "__enum_", 7) != 0 && strncmp(dn, "__int_", 6) != 0 &&
-          strncmp(dn, "__flt_", 6) != 0 && strncmp(dn, "__cmp_", 6) != 0)
+          strncmp(dn, "__flt_", 6) != 0 && strncmp(dn, "__cmp_", 6) != 0 &&
+          strncmp(dn, "__enumw_", 8) != 0)
         comp_sym_intern(c, dn);
     }
     /* __method__ / __callee__ yield the enclosing method's name as a symbol;
@@ -15801,6 +15803,7 @@ void analyze_program(Compiler *c) {
     ch |= desugar_kernel_recv(c);              /* Kernel.puts x -> puts x */
     ch |= desugar_class_literal_ctors(c);      /* Array[a,b] -> [a,b]; Range.new -> (a..b) */
     ch |= desugar_multi_yield_map_param(c);    /* multi-yield each: map's |x| takes the 1st */
+    ch |= desugar_enum_walk_calls(c);          /* enum.map { break } -> __enumw_map(enum) { } */
     ch |= desugar_enum_method_recv(c);         /* obj.map{} -> obj.__enum_to_a.map{} */
     ch |= give_native_self_calls_a_receiver(c);  /* native class: implicit self -> self.m */
     ch |= give_self_predicates_a_receiver(c);    /* is_a?(X) on implicit self -> self.is_a?(X) */

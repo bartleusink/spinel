@@ -3107,6 +3107,91 @@ int nested_row_iter_call(Compiler *c, int id) {
   return 0;
 }
 
+/* Does `node` hold a `break` that leaves the block it sits in, rather than a
+   loop or a block nested inside it? */
+static int block_body_breaks(const NodeTable *nt, int node) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_BreakNode) return 1;
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+      k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode ||
+      k == NK_SingletonClassNode) return 0;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (block_body_breaks(nt, nt_ref_at(nt, node, i))) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (block_body_breaks(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+
+/* `enum.m(args) { ... break ... }` on an Enumerator -> `__enumw_m(enum, args)
+   { ... }` (builtins/enumerator.rb). The typed emitters and enumerable.rb's
+   copies of these names take an Enumerator receiver through to_a first,
+   which never returns for an endless one, so a block written to `break` out
+   of it never ran; each_entry and each_slice/each_cons answered the
+   Enumerator itself even when the block broke. The helpers walk the
+   receiver with `each`, which drives it one element at a time, and a
+   `break` leaves the helper with its value, as it leaves the method in Ruby.
+   Only a block that can break is moved: without one the walk runs to the
+   end either way, and the typed emitters are the faster path. */
+int desugar_enum_walk_calls(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  if (comp_method_index(c, "__enumw_map") < 0) return 0;   /* not spliced */
+  int n0 = nt->count;
+  int changed = 0;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *name = nt_str(nt, id, "name");
+    if (!name) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    int blk = nt_ref(nt, id, "block");
+    if (recv < 0 || blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    const char *hn = NULL;
+    if ((sp_streq(name, "map") || sp_streq(name, "collect")) && an == 0) hn = "__enumw_map";
+    else if ((sp_streq(name, "select") || sp_streq(name, "filter")) && an == 0) hn = "__enumw_select";
+    else if (sp_streq(name, "reject") && an == 0) hn = "__enumw_reject";
+    else if (sp_streq(name, "filter_map") && an == 0) hn = "__enumw_filter_map";
+    else if ((sp_streq(name, "each_with_object") || sp_streq(name, "with_object")) && an == 1) hn = "__enumw_each_with_object";
+    else if ((sp_streq(name, "inject") || sp_streq(name, "reduce")) && an <= 1) hn = an ? "__enumw_inject1" : "__enumw_inject0";
+    else if ((sp_streq(name, "each_slice") || sp_streq(name, "each_cons")) && an == 1)
+      hn = name[5] == 's' ? "__enumw_each_slice" : "__enumw_each_cons";
+    else if (sp_streq(name, "each_entry") && an == 0) hn = "__enumw_each_entry";
+    else if (sp_streq(name, "with_index") && an <= 1) {
+      /* `arr.map.with_index { }` is map's, answering the mapped array; only
+         an Enumerator that just walks its source (each, cycle, a generator)
+         is a plain walk with a counter */
+      if (nt_kind(nt, recv) == NK_CallNode && nt_ref(nt, recv, "block") < 0) {
+        const char *rn = nt_str(nt, recv, "name");
+        if (!rn || (!sp_streq(rn, "each") && !sp_streq(rn, "cycle") && !sp_streq(rn, "new"))) continue;
+      }
+      hn = "__enumw_with_index";
+    }
+    if (!hn) continue;
+    const char *cop = nt_str(nt, id, "call_operator");
+    if (cop && sp_streq(cop, "&.")) continue;
+    if (infer_type(c, recv) != TY_ENUMERATOR) continue;
+    if (!block_body_breaks(nt, nt_ref(nt, blk, "body"))) continue;
+    int *na = (int *)malloc(sizeof(int) * (size_t)(an + 1));
+    if (!na) return changed;
+    na[0] = recv; for (int j = 0; j < an; j++) na[j + 1] = av[j];
+    int nargs = nt_new_node(nt, "ArgumentsNode");
+    if (nargs < 0) { free(na); return changed; }
+    nt_node_set_arr(nt, nargs, "arguments", na, an + 1);
+    free(na);
+    nt_node_set_ref(nt, id, "arguments", nargs);
+    nt_node_set_ref(nt, id, "receiver", -1);
+    nt_node_set_str(nt, id, "name", hn);
+    comp_grow_node_arrays(c);
+    c->nscope[nargs] = c->nscope[id];
+    changed = 1;
+  }
+  return changed;
+}
+
 int desugar_builtin_enum_calls(Compiler *c) {
   if (sp_builtin_enum_names_n == 0) return 0;
   NodeTable *nt = (NodeTable *)c->nt;
