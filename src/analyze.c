@@ -14723,6 +14723,168 @@ static void rename_redefined_toplevel_defs(Compiler *c) {
   free(st);
 }
 
+/* Can evaluating `e` do anything observable? A read of a local, an ivar or a
+   constant, a literal, self, `&:sym`, and a lambda or `proc { }` literal
+   cannot; anything else (a call, above all) may. */
+static int bo_may_act(const NodeTable *nt, int e) {
+  if (e < 0) return 0;
+  switch (nt_kind(nt, e)) {
+  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+  case NK_ConstantReadNode: case NK_SelfNode: case NK_NilNode: case NK_TrueNode:
+  case NK_FalseNode: case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode:
+  case NK_StringNode: case NK_LambdaNode:
+    return 0;
+  /* a literal container of such values, and parentheses around one */
+  case NK_ArrayNode: case NK_HashNode: case NK_KeywordHashNode: {
+    int en = 0; const int *el = nt_arr(nt, e, "elements", &en);
+    for (int k = 0; k < en; k++) if (bo_may_act(nt, el[k])) return 1;
+    return 0;
+  }
+  case NK_AssocNode:
+    return bo_may_act(nt, nt_ref(nt, e, "key")) || bo_may_act(nt, nt_ref(nt, e, "value"));
+  case NK_RangeNode:
+    return bo_may_act(nt, nt_ref(nt, e, "left")) || bo_may_act(nt, nt_ref(nt, e, "right"));
+  case NK_ParenthesesNode: case NK_StatementsNode: {
+    int b = nt_kind(nt, e) == NK_ParenthesesNode ? nt_ref(nt, e, "body") : e;
+    if (b < 0) return 0;
+    if (b != e) return bo_may_act(nt, b);
+    int bn = 0; const int *bb = nt_arr(nt, b, "body", &bn);
+    for (int k = 0; k < bn; k++) if (bo_may_act(nt, bb[k])) return 1;
+    return 0;
+  }
+  case NK_CallNode: {
+    const char *nm = nt_str(nt, e, "name");
+    int blk = nt_ref(nt, e, "block");
+    if (nt_ref(nt, e, "receiver") < 0 && nm && (sp_streq(nm, "proc") || sp_streq(nm, "lambda")) &&
+        blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && nt_ref(nt, e, "arguments") < 0)
+      return 0;
+    /* `method(:m)` / `obj.method(:m)` only builds the Method object, and the
+       block-argument emitters lower that spelling to the method itself */
+    if (nm && sp_streq(nm, "method") && blk < 0 && !bo_may_act(nt, nt_ref(nt, e, "receiver"))) {
+      int ma = nt_ref(nt, e, "arguments"), mn = 0;
+      const int *mv = ma >= 0 ? nt_arr(nt, ma, "arguments", &mn) : NULL;
+      if (mn == 1 && nt_kind(nt, mv[0]) == NK_SymbolNode) return 0;
+    }
+    return 1;
+  }
+  default:
+    return 1;
+  }
+}
+/* A copy of call `id`'s fields into a fresh CallNode (the children are shared,
+   not cloned). */
+static int bo_shallow_copy(NodeTable *nt, int id) {
+  int nc = nt_new_node(nt, "CallNode");
+  if (nc < 0) return -1;
+  const SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->ns; j++) nt_node_set_str(nt, nc, nd->s[j].key, nd->s[j].val);
+  nd = &nt->nodes[id];
+  for (int j = 0; j < nd->ni; j++) nt_node_set_int(nt, nc, nd->i[j].key, nd->i[j].val);
+  nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++) nt_node_set_ref(nt, nc, nd->r[j].key, nd->r[j].ref);
+  nd = &nt->nodes[id];
+  for (int j = 0; j < nd->na; j++) nt_node_set_arr(nt, nc, nd->a[j].key, nd->a[j].ids, nd->a[j].n);
+  return nc;
+}
+/* `recv.m(args, &expr)`: Ruby evaluates the receiver, then the arguments, then
+   the block expression. The emitted C passes the block as one more function
+   argument (or hoists it ahead of a Class-value dispatch, #4992), and C leaves
+   the order of function arguments to the compiler: `run(say(1), &blk(1))`
+   printed the block's side effect first. When the block expression can act
+   and something ahead of it can too, the call becomes
+     (__bo_N_0 = recv; __bo_N_1 = arg; ...; __bo_N_b = expr; __bo_N_0.m(__bo_N_1, ..., &__bo_N_b))
+   so the order is the statements'. The node itself becomes the parentheses,
+   keeping its id, line and scope. */
+static void desugar_block_arg_order(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    int blk = nt_ref(nt, id, "block");
+    if (blk < 0 || nt_kind(nt, blk) != NK_BlockArgumentNode) continue;
+    int be = nt_ref(nt, blk, "expression");
+    if (!bo_may_act(nt, be)) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av0 = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    int ahead = bo_may_act(nt, recv), plain = 1;
+    for (int k = 0; k < an; k++) {
+      NodeKind ak = nt_kind(nt, av0[k]);
+      if (ak == NK_BlockArgumentNode || (nt_type(nt, av0[k]) && sp_streq(nt_type(nt, av0[k]), "ForwardingArgumentsNode"))) plain = 0;
+      else if (ak == NK_SplatNode) ahead |= bo_may_act(nt, nt_ref(nt, av0[k], "expression"));
+      else if (ak == NK_KeywordHashNode) {
+        int en = 0; const int *el = nt_arr(nt, av0[k], "elements", &en);
+        for (int e = 0; e < en; e++) {
+          if (nt_kind(nt, el[e]) != NK_AssocNode) { plain = 0; break; }
+          ahead |= bo_may_act(nt, nt_ref(nt, el[e], "key")) | bo_may_act(nt, nt_ref(nt, el[e], "value"));
+        }
+      }
+      else ahead |= bo_may_act(nt, av0[k]);
+    }
+    if (!plain || !ahead) continue;
+    Scope *sc = comp_scope_of(c, id);
+    if (!sc) continue;
+    int *av = an > 0 ? malloc(sizeof(int) * (size_t)an) : NULL;
+    if (an > 0 && !av) continue;
+    for (int k = 0; k < an; k++) av[k] = av0[k];
+    int first = nt->count;
+    int stm[256]; int ns = 0, serial = 0;
+    char tn[64];
+    /* one `__bo_<id>_<k> = e` statement; answers the read that replaces e */
+    #define BO_HOIST(E) ({ int _e = (E), _r = _e; if (ns < 255 && bo_may_act(nt, _e)) { \
+        snprintf(tn, sizeof tn, "__bo_%d_%d", id, serial++); \
+        int _w = nt_new_node(nt, "LocalVariableWriteNode"); \
+        int _rd = nt_new_node(nt, "LocalVariableReadNode"); \
+        nt_node_set_str(nt, _w, "name", tn); nt_node_set_ref(nt, _w, "value", _e); \
+        nt_node_set_str(nt, _rd, "name", tn); \
+        stm[ns++] = _w; scope_local_intern(sc, tn); _r = _rd; } _r; })
+    int nrecv = BO_HOIST(recv);
+    for (int k = 0; k < an; k++) {
+      NodeKind ak = nt_kind(nt, av[k]);
+      if (ak == NK_SplatNode) {
+        int ex = nt_ref(nt, av[k], "expression");
+        int nex = BO_HOIST(ex);
+        if (nex != ex) nt_node_set_ref(nt, av[k], "expression", nex);
+      }
+      else if (ak == NK_KeywordHashNode) {
+        int en = 0; const int *el0 = nt_arr(nt, av[k], "elements", &en);
+        int *el = malloc(sizeof(int) * (size_t)(en > 0 ? en : 1));
+        for (int e = 0; e < en; e++) el[e] = el0[e];
+        for (int e = 0; e < en; e++) {
+          int key = nt_ref(nt, el[e], "key"), val = nt_ref(nt, el[e], "value");
+          int nk = BO_HOIST(key); if (nk != key) nt_node_set_ref(nt, el[e], "key", nk);
+          int nv = BO_HOIST(val); if (nv != val) nt_node_set_ref(nt, el[e], "value", nv);
+        }
+        free(el);
+      }
+      else av[k] = BO_HOIST(av[k]);
+    }
+    int nbe = BO_HOIST(be);
+    #undef BO_HOIST
+    if (ns == 0 || ns >= 255) { free(av); continue; }
+    nt_node_set_ref(nt, blk, "expression", nbe);
+    if (args >= 0) nt_node_set_arr(nt, args, "arguments", av, an);
+    free(av);
+    int nc = bo_shallow_copy(nt, id);
+    if (nc < 0) continue;
+    if (recv >= 0) nt_node_set_ref(nt, nc, "receiver", nrecv);
+    stm[ns++] = nc;
+    int stmts = nt_new_node(nt, "StatementsNode");
+    nt_node_set_arr(nt, stmts, "body", stm, ns);
+    /* the node keeps its id, line and file: the parentheses */
+    long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0),
+              col = nt_int(nt, id, "node_col", 0);
+    nt_node_reset(nt, id, "ParenthesesNode");
+    nt_node_set_int(nt, id, "node_line", line);
+    nt_node_set_int(nt, id, "node_file", file);
+    nt_node_set_int(nt, id, "node_col", col);
+    nt_node_set_ref(nt, id, "body", stmts);
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = first; j < nt->count; j++) c->nscope[j] = encl;
+  }
+}
+
 /* A top-level `def self.k` is a singleton method of main, and a top-level
    `def k` a private method of Object: both can exist, and on main -- the
    top-level statements, their blocks, and the singleton method's own body --
@@ -14880,6 +15042,7 @@ void analyze_program(Compiler *c) {
   fix_struct_block_scopes(c);
   register_module_functions(c);
   register_locals(c);
+  desugar_block_arg_order(c);   /* recv.m(a, &expr): receiver, args, then the block (#4992) */
   register_attrs(c);
   register_method_visibility(c);
   register_aliases(c);
