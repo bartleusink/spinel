@@ -2254,6 +2254,53 @@ static int g_fi_nscopes = 0;
 static const NodeTable *g_fi_nt = NULL;
 static int g_fi_ntcount = 0;
 
+/* The scopes by name, each chain in ascending scope order: fi_callees is asked
+   for every call of every body the cycle check walks, recursively, and a scan
+   of all the scopes per ask made that check most of the C generation of a
+   large program (campfire: 60 s of 77). Built once the scopes stop changing
+   (the forced-inline set is decided after analysis) and rebuilt if their
+   count moves. */
+static int *g_fi_nm_head, *g_fi_nm_next, *g_fi_nm_tail;
+static int g_fi_nm_nb, g_fi_nm_nscopes = -1;
+static const Scope *g_fi_nm_scopes;
+
+static unsigned fi_name_hash(const char *s) {
+  unsigned h = 2166136261u;
+  for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+  return h;
+}
+
+static int fi_first_scope_named(Compiler *c, const char *nm) {
+  if (g_fi_nm_nscopes != c->nscopes || g_fi_nm_scopes != c->scopes) {
+    free(g_fi_nm_head); free(g_fi_nm_next); free(g_fi_nm_tail);
+    int nb = 64;
+    while (nb < c->nscopes * 2) nb *= 2;
+    g_fi_nm_head = (int *)malloc(sizeof(int) * (size_t)nb);
+    g_fi_nm_tail = (int *)malloc(sizeof(int) * (size_t)nb);
+    g_fi_nm_next = (int *)malloc(sizeof(int) * (size_t)(c->nscopes ? c->nscopes : 1));
+    if (!g_fi_nm_head || !g_fi_nm_tail || !g_fi_nm_next) {
+      free(g_fi_nm_head); free(g_fi_nm_next); free(g_fi_nm_tail);
+      g_fi_nm_head = g_fi_nm_next = g_fi_nm_tail = NULL;
+      g_fi_nm_nscopes = -1;
+      return -2;   /* no index: the caller scans */
+    }
+    for (int b = 0; b < nb; b++) g_fi_nm_head[b] = g_fi_nm_tail[b] = -1;
+    for (int si = 0; si < c->nscopes; si++) {
+      g_fi_nm_next[si] = -1;
+      const char *sn = c->scopes[si].name;
+      if (!sn) continue;
+      unsigned b = fi_name_hash(sn) & (unsigned)(nb - 1);
+      if (g_fi_nm_tail[b] < 0) g_fi_nm_head[b] = si;
+      else g_fi_nm_next[g_fi_nm_tail[b]] = si;
+      g_fi_nm_tail[b] = si;
+    }
+    g_fi_nm_nb = nb;
+    g_fi_nm_nscopes = c->nscopes;
+    g_fi_nm_scopes = c->scopes;
+  }
+  return g_fi_nm_head[fi_name_hash(nm) & (unsigned)(g_fi_nm_nb - 1)];
+}
+
 /* Every user method a call could reach: by the receiver's class when it names
    one, by the bare name when the receiver is boxed or absent. */
 static void fi_callees(Compiler *c, int callnode, int *out, int *n, int max) {
@@ -2267,7 +2314,10 @@ static void fi_callees(Compiler *c, int callnode, int *out, int *n, int max) {
     if (ty_is_object(rt)) cid = ty_object_class(rt);
     else if (rt != TY_POLY && rt != TY_UNKNOWN && rt != TY_CLASS) return;  /* builtin */
   }
-  for (int si = 0; si < c->nscopes && *n < max; si++) {
+  int first = fi_first_scope_named(c, nm);
+  int indexed = first != -2;
+  for (int si = indexed ? first : 0; si >= 0 && si < c->nscopes && *n < max;
+       si = indexed ? g_fi_nm_next[si] : si + 1) {
     Scope *m = &c->scopes[si];
     if (!m->name || !sp_streq(m->name, nm)) continue;
     if (cid >= 0 && m->class_id != cid &&
