@@ -720,9 +720,8 @@ static int multi_return_elem_types(Compiler *c, int value, TyKind *out, int max)
     if (s->class_id >= 0) mi = comp_method_in_chain(c, s->class_id, mn, NULL);
     else {
       /* a top-level `def k` is a free function, not in any class chain (#2924) */
-      for (int si = 0; si < c->nscopes; si++)
-        if (c->scopes[si].class_id < 0 && c->scopes[si].name &&
-            sp_streq(c->scopes[si].name, mn) && c->scopes[si].def_node >= 0) { mi = si; break; }
+      mi = comp_method_index(c, mn);
+      if (mi >= 0 && c->scopes[mi].def_node < 0) mi = -1;
     }
   }
   if (mi < 0) return 0;

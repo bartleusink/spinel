@@ -14116,6 +14116,62 @@ static int bam_wrapper_binds_receiver(Compiler *c, Scope *sc) {
 }
 
 
+/* A top-level method redefined by a later top-level `def` is a different
+   method until that def runs: `def tw(&b)`, calls, then `def tw(a)` and more
+   calls reach the first body from the first calls and the second from the
+   rest. Spinel has one function per name, so the earlier definitions are
+   given a private name each, and the top-level calls that run between one
+   definition and the next -- statements of the program body and the blocks
+   in them, not method bodies (which run whenever they are called, by then
+   usually after the last def) and not class or module bodies -- are renamed
+   to match. The last definition keeps the name, and every other call
+   reaches it. Before this every call bound to the FIRST definition: a later
+   def of another arity refused its calls, one of the same arity was a C
+   redefinition. */
+static void redef_rename_calls(NodeTable *nt, int id, const char *from, const char *to, int depth) {
+  if (id < 0 || id >= nt->count || depth > 400) return;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode)
+    return;
+  if (k == NK_CallNode && nt_ref(nt, id, "receiver") < 0) {
+    const char *nm = nt_str(nt, id, "name");
+    if (nm && sp_streq(nm, from)) nt_set_str(nt, id, "name", to);
+  }
+  const SpNode *nd = &nt->nodes[id];
+  for (int i = 0; i < nd->nr; i++) redef_rename_calls(nt, nd->r[i].ref, from, to, depth + 1);
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      redef_rename_calls(nt, nd->a[i].ids[j], from, to, depth + 1);
+}
+static void rename_redefined_toplevel_defs(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int body = nt_ref(nt, nt->root_id, "statements");
+  int n = 0;
+  const int *st0 = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+  if (!st0 || n < 2) return;
+  int *st = malloc(sizeof(int) * (size_t)n);   /* renaming may move the array */
+  if (!st) return;
+  memcpy(st, st0, sizeof(int) * (size_t)n);
+  int serial = 0;
+  for (int i = 0; i < n; i++) {
+    if (nt_kind(nt, st[i]) != NK_DefNode || nt_ref(nt, st[i], "receiver") >= 0) continue;
+    const char *nm0 = nt_str(nt, st[i], "name");
+    if (!nm0) continue;
+    int next = -1;
+    for (int j = i + 1; j < n && next < 0; j++)
+      if (nt_kind(nt, st[j]) == NK_DefNode && nt_ref(nt, st[j], "receiver") < 0 &&
+          nt_str(nt, st[j], "name") && sp_streq(nt_str(nt, st[j], "name"), nm0)) next = j;
+    if (next < 0) continue;
+    char *nm = strdup(nm0);
+    char to[256];
+    snprintf(to, sizeof to, "%s__redef%d", nm, ++serial);
+    nt_set_str(nt, st[i], "name", to);
+    for (int j = i + 1; j < next; j++) redef_rename_calls(nt, st[j], nm, to, 0);
+    free(nm);
+  }
+  free(st);
+}
+
 void analyze_program(Compiler *c) {
   comp_poly_candidates_reset();
   comp_descendants_reset();
@@ -14191,6 +14247,7 @@ void analyze_program(Compiler *c) {
   /* builtins/integer.rb, float.rb, comparable.rb: the same idea, one more
      container per file (analyze_desugar.c's sp_bx_* table) */
   desugar_builtin_scalar_defs(c);
+  rename_redefined_toplevel_defs(c);     /* def f; f; def f -> def f__redef1; f__redef1; def f */
   scope_numbered_block_params(c);
   rename_shadowing_block_params(c);
   /* `:m.to_proc.call(r, a)` -> `r.m(a)`, before the to_proc rewrite below

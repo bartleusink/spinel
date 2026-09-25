@@ -783,9 +783,10 @@ const char *mc(const char *name);
 const char *mc_reopen_cls(Compiler *c, int class_id, const char *mname);
 const char *mc_top(Compiler *c, const char *name);
 const char *iv_c(const char *name);  /* ivar/member name -> valid C field id (#3110) */
-/* A class method scope is shadowed (and must not be emitted) when a later
+/* A method scope is shadowed (and must not be emitted) when a later
    scope redefines the same (class, name, is_cmethod) -- a reopened class
-   where the last definition wins, matching comp_method_in_class. */
+   where the last definition wins, matching comp_method_in_class. A top-level
+   `def` is shadowed by a later top-level `def` of the same name. */
 int scope_is_shadowed(Compiler *c, int s);
 #define SP_MAX_PROC_FORM 4096
 extern int g_pf_emitting;   /* inside a proc-form body (#3399) */

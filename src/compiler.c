@@ -530,8 +530,10 @@ static void sm_build(Compiler *c) {
       sm_next[s] = sm_head[b]; sm_head[b] = s;
     }
   }
-  /* top-level methods: descending so the lowest scope index ends at the head */
-  for (int s = ns - 1; s >= 0; s--) {
+  /* top-level methods: ascending so the highest scope index ends at the head.
+     A redefined top-level method is its LAST def, as for a class (the
+     class buckets above are built the same way) */
+  for (int s = 0; s < ns; s++) {
     if (c->scopes[s].class_id >= 0 || !c->scopes[s].name) continue;
     unsigned b = sm_hash(-1, c->scopes[s].name, 0) % (unsigned)sm_buckets;
     tm_next[s] = tm_head[b]; tm_head[b] = s;
@@ -1589,7 +1591,8 @@ int comp_method_index(Compiler *c, const char *name) {
 static int comp_method_index_direct(Compiler *c, const char *name) {
   if (!name) return -1;
   if (!sm_frozen) {
-    for (int s = 0; s < c->nscopes; s++)
+    /* in reverse, so a redefinition wins, matching the frozen index */
+    for (int s = c->nscopes - 1; s >= 0; s--)
       if (c->scopes[s].class_id < 0 && c->scopes[s].name &&
           sp_streq(c->scopes[s].name, name)) return s;
     return -1;
