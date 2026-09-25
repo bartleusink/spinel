@@ -233,6 +233,54 @@ const char *an_regex_lit_src(Compiler *c, int nid) {
   }
   return NULL;
 }
+/* The CallNodes of each name, ascending, rebuilt whenever the node table
+   changes (a rename or a new node bumps its version). Passes that asked "the
+   calls named m" walked every call per ask (rubys/roundhouse#72). A caller
+   must still check the node, which a re-point since the build may have
+   changed; the list only narrows the walk. */
+static ANameHash g_cn_names;
+static int *g_cn_first, *g_cn_next, g_cn_cap;
+static const NodeTable *g_cn_nt;
+static unsigned g_cn_ver;
+static int g_cn_cnt = -1;
+static int g_cn_empty = -1;
+int an_calls_named_first(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  if (!name) return -1;
+  if (g_cn_nt != nt || g_cn_ver != nt->version || g_cn_cnt != nt->count) {
+    anh_free(&g_cn_names); memset(&g_cn_names, 0, sizeof g_cn_names);
+    free(g_cn_first); free(g_cn_next);
+    g_cn_cap = 64;
+    g_cn_first = malloc(sizeof(int) * (size_t)g_cn_cap);
+    g_cn_next = malloc(sizeof(int) * (size_t)(nt->count > 0 ? nt->count : 1));
+    int *last = malloc(sizeof(int) * (size_t)g_cn_cap);
+    if (!g_cn_first || !g_cn_next || !last) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int id = comp_kind_first(c, NK_CallNode); id >= 0; id = comp_kind_next(c, id)) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm) continue;
+      g_cn_next[id] = -1;
+      int k = anh_find(&g_cn_names, nm);
+      if (k < 0) {
+        anh_add(&g_cn_names, nm); k = g_cn_names.n - 1;
+        if (k >= g_cn_cap) {
+          g_cn_cap *= 2;
+          g_cn_first = realloc(g_cn_first, sizeof(int) * (size_t)g_cn_cap);
+          last = realloc(last, sizeof(int) * (size_t)g_cn_cap);
+          if (!g_cn_first || !last) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+        }
+        g_cn_first[k] = id;
+      }
+      else g_cn_next[last[k]] = id;
+      last[k] = id;
+    }
+    free(last);
+    g_cn_nt = nt; g_cn_ver = nt->version; g_cn_cnt = nt->count;
+  }
+  int k = anh_find(&g_cn_names, name);
+  return k >= 0 ? g_cn_first[k] : -1;
+}
+int an_calls_named_next(int id) { return (id >= 0 && id < g_cn_cnt) ? g_cn_next[id] : -1; }
+
 int str_in(const char *s, const char *const *set) {
   if (!s) return 0;
   for (int i = 0; set[i]; i++) if (sp_streq(s, set[i])) return 1;

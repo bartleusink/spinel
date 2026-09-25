@@ -331,7 +331,10 @@ static TyKind aset_value_type(Compiler *c, int recv) {
 static int param_gets_boxed_arg(Compiler *c, Scope *sc, int p) {
   const NodeTable *nt = c->nt;
   if (!sc->name) return 0;
-  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+  /* the calls of this name only: asked per parameter of every scope, a walk
+     of every call per ask was quadratic (rubys/roundhouse#72) */
+  for (int id = an_calls_named_first(c, sc->name); id >= 0; id = an_calls_named_next(id)) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
     if (!nm || !sp_streq(nm, sc->name)) continue;
     int args = nt_ref(nt, id, "arguments");

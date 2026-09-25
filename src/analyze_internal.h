@@ -92,6 +92,10 @@ int an_ty_holds_nil(TyKind t);
 int an_chunk_family_to_a(Compiler *c, int id);
 const char *an_regex_lit_src(Compiler *c, int nid);
 int str_in(const char *s, const char *const *set);
+/* The calls named `name`, ascending: for (id = an_calls_named_first(c, nm);
+   id >= 0; id = an_calls_named_next(id)). Check each node as before. */
+int an_calls_named_first(Compiler *c, const char *name);
+int an_calls_named_next(int id);
 int is_arith_op(const char *op);
 int node_is_empty_container(const NodeTable *nt, int node);
 int bind_coerce_operator_params(Compiler *c);
