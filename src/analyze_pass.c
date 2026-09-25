@@ -2882,6 +2882,7 @@ int infer_write_types(Compiler *c) {
     int slot_reset = 0;  /* slot is a plain local, reset+recomputed per iteration:
                             net change is the stash compare's job, not this site's */
     const char *watch_nm = NULL;  /* ivar name for SP_IVWATCH, NULL for locals */
+    int watch_cls = -1;           /* the ivar's class, with watch_nm */
     if (rty && sp_streq(rty, "LocalVariableReadNode")) {
       const char *rnm = nt_str(nt, recv, "name");
       Scope *lsc = rnm ? comp_scope_of(c, recv) : NULL;
@@ -2970,6 +2971,7 @@ int infer_write_types(Compiler *c) {
       if (!slot) continue;
       vt = ivt;
       watch_nm = inm;
+      watch_cls = ivar_cls_id;
     }
     else if ((is_push || is_idx_write) && rty && sp_streq(rty, "CallNode") &&
              nt_ref(nt, recv, "block") < 0) {
@@ -3124,7 +3126,24 @@ int infer_write_types(Compiler *c) {
       if (dn >= 0) vt = ty_unify(vt, hash_default_value_ty(c, dn));
     }
     TyKind before = *slot;
-    if (!fold_container_evidence(slot, is_push, is_splice, kt, vt)) continue;
+    int fits = fold_container_evidence(slot, is_push, is_splice, kt, vt);
+    /* An ivar hash the write does not fit widens to the poly-keyed variant,
+       with the literals the ivar is assigned, as a write through its getter
+       does: other sites (a getter's `c[1] = 2`) settled the key, and the fold
+       refusing a Symbol key into an Integer-keyed slot -- or trading the key
+       for a String one -- left the direct write to a hash that cannot hold
+       it. */
+    if (watch_nm && !is_push && !is_splice && ty_is_hash(before) &&
+        before != TY_POLY_POLY_HASH &&
+        ((!fits && kt != TY_UNKNOWN && vt != TY_UNKNOWN) ||
+         (ty_is_hash(*slot) && ty_hash_key(*slot) != ty_hash_key(before)))) {
+      *slot = TY_POLY_POLY_HASH;
+      widen_ivar_hash_literals(c, &ivw_ix, watch_cls, watch_nm);
+      sp_ivwatch(watch_nm, "usage_idxwrite_misfit", before, *slot);
+      changed = 1;
+      continue;
+    }
+    if (!fits) continue;
     sp_ivwatch(watch_nm, is_push ? "usage_push" : (is_idx_write ? "usage_idxwrite" : "usage_read"), before, *slot);
     if (*slot != before && !slot_reset) changed = 1;
     /* A LOCAL that widened to the poly array under a push and whose writes
