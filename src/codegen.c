@@ -2123,17 +2123,30 @@ static int  g_mih_ntcount = 0;
    program with thousands of methods (campfire) that was 80% of the front
    end (#4662) */
 static unsigned mih_hash(const char *s) { unsigned h = 2166136261u; for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u; return h; }
+/* name -> first scope of that name; scopes sharing a name chain through
+   next. Kept with the counts, so a call node appended later is counted
+   without rebuilding it. */
+static int *g_mih_head = NULL, *g_mih_next = NULL, g_mih_cap = 0;
+static void mih_count_call(Compiler *c, int id) {
+  const char *nm = nt_str(c->nt, id, "name");
+  if (!nm) return;
+  unsigned h = mih_hash(nm) & (unsigned)(g_mih_cap - 1);
+  while (g_mih_head[h] >= 0 && !sp_streq(c->scopes[g_mih_head[h]].name, nm))
+    h = (h + 1) & (unsigned)(g_mih_cap - 1);
+  for (int si = g_mih_head[h]; si >= 0; si = g_mih_next[si]) g_mih_calls[si]++;
+}
 static void mih_count_calls(Compiler *c) {
   const NodeTable *nt = c->nt;
   int ns = c->nscopes;
   free(g_mih_calls);
   g_mih_calls = (int *)calloc((size_t)(ns > 0 ? ns : 1), sizeof(int));
   if (!g_mih_calls) return;
-  /* name -> first scope of that name; scopes sharing a name chain through next */
   int cap = 1; while (cap < ns * 2 + 8) cap <<= 1;
-  int *head = (int *)malloc(sizeof(int) * (size_t)cap);
-  int *next = (int *)malloc(sizeof(int) * (size_t)(ns > 0 ? ns : 1));
-  if (!head || !next) { free(head); free(next); return; }
+  free(g_mih_head); free(g_mih_next);
+  int *head = g_mih_head = (int *)malloc(sizeof(int) * (size_t)cap);
+  int *next = g_mih_next = (int *)malloc(sizeof(int) * (size_t)(ns > 0 ? ns : 1));
+  g_mih_cap = cap;
+  if (!head || !next) { free(g_mih_calls); g_mih_calls = NULL; return; }
   for (int i = 0; i < cap; i++) head[i] = -1;
   for (int si = 0; si < ns; si++) {
     next[si] = -1;
@@ -2144,19 +2157,25 @@ static void mih_count_calls(Compiler *c) {
     if (head[h] < 0) head[h] = si;
     else { int t = head[h]; while (next[t] >= 0) t = next[t]; next[t] = si; }
   }
-  NT_FOREACH_KIND(nt, NK_CallNode, id) {
-    const char *nm = nt_str(nt, id, "name");
-    if (!nm) continue;
-    unsigned h = mih_hash(nm) & (unsigned)(cap - 1);
-    while (head[h] >= 0 && !sp_streq(c->scopes[head[h]].name, nm)) h = (h + 1) & (unsigned)(cap - 1);
-    for (int si = head[h]; si >= 0; si = next[si]) g_mih_calls[si]++;
-  }
-  free(head); free(next);
+  NT_FOREACH_KIND(nt, NK_CallNode, id) mih_count_call(c, id);
 }
 static int method_inline_hint(Compiler *c, Scope *s) {
   if (g_debug) return 0;                      /* debug builds want real frames */
   if (!s->name || s->body < 0 || s->yields) return 0;
   const NodeTable *nt = c->nt;
+  /* Codegen appends a few nodes as it goes, and each append used to rebuild
+     both counts from the whole table: 349 rebuilds of ~277K nodes on
+     lobsters. Nodes are only ever appended, so counting the new ones gives
+     the same numbers. */
+  if (g_mih_nt == nt && g_mih_nscopes == c->nscopes && g_mih_nodes && g_mih_calls &&
+      g_mih_ntcount < nt->count) {
+    for (int id = g_mih_ntcount; id < nt->count; id++) {
+      int sc = c->nscope[id];
+      if (sc >= 0 && sc < c->nscopes) g_mih_nodes[sc]++;
+      if (nt_kind(nt, id) == NK_CallNode) mih_count_call(c, id);
+    }
+    g_mih_ntcount = nt->count;
+  }
   if (g_mih_nt != nt || g_mih_ntcount != nt->count || g_mih_nscopes != c->nscopes) {
     free(g_mih_nodes);
     g_mih_nodes = (int *)calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), sizeof(int));
@@ -3542,10 +3561,14 @@ static void gc_wb_insert(Compiler *c, Buf *b, size_t fn_off) {
     /* track the enclosing function's receiver type */
     if (b->p[i] == '\n' && !strncmp(b->p + i + 1, "static ", 7)) {
       const char *ln = b->p + i + 1;
-      const char *sf = strstr(ln, "*self");
+      /* only this line: a strstr ran on past a line without `*self` to the
+         next one anywhere in the buffer, for every prototype and proc */
       const char *nl = strchr(ln, '\n');
+      const char *sf = NULL;
+      for (const char *t = ln; *t && (!nl || t < nl); t++)
+        if (t[0] == '*' && !strncmp(t, "*self", 5)) { sf = t; break; }
       cur_self_cls = -1;
-      if (sf && (!nl || sf < nl)) {
+      if (sf) {
         const char *t = sf;
         while (t > ln && (t[-1] == ' ' || t[-1] == '*')) t--;
         const char *e = t;
