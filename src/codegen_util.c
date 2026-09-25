@@ -1317,6 +1317,38 @@ int strbuf_boxed_elem_read(Compiler *c, int v) {
   TyKind rt = comp_ntype(c, r);
   return rt == TY_POLY || rt == TY_POLY_ARRAY || ty_is_hash(rt);
 }
+/* A reader call the shared-mutable shim has substituted with its shadow copy
+   (through the argument-override table): the value arms may rebind it as they
+   would a local. */
+int sb_shadowed_reader(int node) {
+  for (int i = 0; i < g_n_argov; i++)
+    if (g_argov_node[i] == node && strncmp(g_argov_text[i], "lv__sb", 6) == 0) return 1;
+  return 0;
+}
+/* Open the shim over a reader call `recv` that hands out the shared handle:
+   the handle's text goes to sref, and until sb_reader_shim_close the call node
+   reads as the shadow `lv__sbT`, with the handle marks lifted. Answers T, or 0
+   when `recv` is no such call. */
+int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderSave *sv) {
+  if (recv < 0 || nt_kind(c->nt, recv) != NK_CallNode) return 0;
+  if (!c->strbuf_box[recv] && !c->strbuf_handle_demand[recv]) return 0;
+  if (g_n_argov >= MAX_ARG_OVERRIDE) return 0;
+  if (!strbuf_slot_ref(c, recv, sref, cap)) return 0;
+  int tH = ++g_tmp;
+  sv->box = c->strbuf_box[recv]; sv->demand = c->strbuf_handle_demand[recv];
+  sv->ty = c->ntype[recv];
+  c->strbuf_box[recv] = 0; c->strbuf_handle_demand[recv] = 0;
+  if (sv->ty == TY_STRBUF) c->ntype[recv] = TY_STRING;
+  g_argov_node[g_n_argov] = recv;
+  snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "lv__sb%d", tH);
+  g_n_argov++;
+  return tH;
+}
+void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv) {
+  g_n_argov--;
+  c->strbuf_box[recv] = sv->box; c->strbuf_handle_demand[recv] = sv->demand;
+  c->ntype[recv] = sv->ty;
+}
 const char *g_sb_iv_name = NULL;
 int         g_sb_iv_cid  = -1;
 char        g_sb_iv_repl[64];

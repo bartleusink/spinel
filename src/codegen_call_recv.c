@@ -286,6 +286,31 @@ static int sb_iv_expr_shim(Compiler *c, int id, int recvS, Buf *b,
   return 1;
 }
 
+/* The expression-position shim over a READER call that hands out the handle
+   (`x = obj.name.insert(0, "-")`), as sb_iv_expr_shim is over an ivar. */
+static int sb_reader_expr_shim(Compiler *c, int id, int recvS, Buf *b,
+                               int (*rerun)(Compiler *, int, Buf *)) {
+  char srefR[1024];
+  SbReaderSave svR;
+  int tH = sb_reader_shim_open(c, recvS, srefR, sizeof srefR, &svR);
+  if (!tH) return 0;
+  Buf armb; memset(&armb, 0, sizeof armb);
+  int handled = rerun(c, id, &armb);
+  sb_reader_shim_close(c, recvS, &svR);
+  if (!handled) { free(armb.p); return 0; }
+  TyKind resty = comp_ntype(c, id);
+  buf_printf(b, "({ sp_String *_t%d = %s;"
+                " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
+                " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
+                " SP_GC_ROOT(lv__sb%d); ",
+             tH, srefR, tH, tH, tH, tH, tH);
+  emit_ctype(c, resty == TY_UNKNOWN || resty == TY_VOID ? TY_STRING : resty, b);
+  buf_printf(b, " _res%d = %s;", tH, armb.p ? armb.p : "0");
+  free(armb.p);
+  buf_printf(b, " sp_String_set_bin(_t%d, lv__sb%d); _res%d; })", tH, tH, tH);
+  return 1;
+}
+
 /* find_index { |x| cond } / index { |x| cond } / rindex { |x| cond } on an
    array of kind `k` ("Int", ..., "Poly") - the index or nil (rindex scans
    from the end). Returns 0 when the block has no body. */
@@ -495,6 +520,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     const NodeTable *ntS = c->nt;
     const char *nmS = nt_str(ntS, id, "name");
     int recvS = nt_ref(ntS, id, "receiver");
+    if (nmS && recvS >= 0 && comp_ntype(c, recvS) == TY_STRBUF &&
+        (sp_streq(nmS, "insert") || sp_streq(nmS, "[]=")) &&
+        sb_reader_expr_shim(c, id, recvS, b, emit_array_call)) return 1;
     if (nmS && recvS >= 0 && comp_ntype(c, recvS) == TY_STRING &&
         (sp_streq(nmS, "slice!") || sp_streq(nmS, "setbyte") ||
          sp_streq(nmS, "insert") || sp_streq(nmS, "clear") ||
@@ -978,8 +1006,9 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     }
     if (sp_streq(name, "insert") && argc == 2) {
       const char *rvt2 = nt_type(nt, recv);
-      int lvw = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                         sp_streq(rvt2, "InstanceVariableReadNode"));
+      int lvw = (rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
+                          sp_streq(rvt2, "InstanceVariableReadNode"))) ||
+                sb_shadowed_reader(recv);
       int to = ++g_tmp, ti2 = ++g_tmp, tn2 = ++g_tmp;
       /* rooted across the index and the text, which may allocate */
       buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);

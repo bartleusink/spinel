@@ -31937,10 +31937,13 @@ else {
   /* value-position String#[]= (s[i] = v / s[i, n] = v / s[range] = v / s["sub"]
      = v on an assignable receiver): run the mutate statement, the expression's
      value is the assigned string (#2370). */
+  /* A reader call handing out the shared handle takes the same statement,
+     through its shim (#3227). */
   if (recv >= 0 && sp_streq(name, "[]=") && (argc == 2 || argc == 3) &&
-      comp_ntype(c, recv) == TY_STRING &&
-      nt_type(nt, recv) && (sp_streq(nt_type(nt, recv), "LocalVariableReadNode") ||
-                            sp_streq(nt_type(nt, recv), "InstanceVariableReadNode"))) {
+      ((comp_ntype(c, recv) == TY_STRING &&
+        nt_type(nt, recv) && (sp_streq(nt_type(nt, recv), "LocalVariableReadNode") ||
+                              sp_streq(nt_type(nt, recv), "InstanceVariableReadNode"))) ||
+       (comp_ntype(c, recv) == TY_STRBUF && nt_kind(nt, recv) == NK_CallNode))) {
     Buf mb; memset(&mb, 0, sizeof mb);
     if (emit_array_mutate_stmt(c, id, &mb, 0)) {
       buf_puts(b, "({ ");
