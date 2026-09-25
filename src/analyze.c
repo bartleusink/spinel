@@ -176,6 +176,37 @@ static int an_seed_is_builtin(const NodeTable *nt, int id) {
   }
 }
 
+/* A hashed name set (ANameHash). Passes that asked "is this name among
+   those" with a linear scan, once per node or per mark, paid (asks x names)
+   every round (rubys/roundhouse#72); compute_reachable's called-name set is
+   the first user. */
+static unsigned cr_hash(const char *s) {
+  unsigned h = 2166136261u;
+  for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+  return h;
+}
+int anh_has(const ANameHash *st, const char *nm) {
+  if (!st->nb) return 0;
+  for (int i = st->head[cr_hash(nm) % (unsigned)st->nb]; i >= 0; i = st->next[i])
+    if (sp_streq(st->key[i], nm)) return 1;
+  return 0;
+}
+void anh_add(ANameHash *st, const char *nm) {
+  if (!st->nb) {
+    st->nb = 4096;
+    st->head = malloc(sizeof(int) * (size_t)st->nb);
+    for (int b = 0; b < st->nb; b++) st->head[b] = -1;
+  }
+  if (st->n == st->cap) {
+    st->cap = st->cap ? st->cap * 2 : 64;
+    st->key = realloc(st->key, sizeof(char *) * (size_t)st->cap);
+    st->next = realloc(st->next, sizeof(int) * (size_t)st->cap);
+  }
+  unsigned b = cr_hash(nm) % (unsigned)st->nb;
+  st->key[st->n] = nm; st->next[st->n] = st->head[b]; st->head[b] = st->n; st->n++;
+}
+void anh_free(ANameHash *st) { free(st->key); free(st->next); free(st->head); }
+
 void compute_reachable(Compiler *c) {
   /* Build per-scope call sets (CallNode names, not entering nested DefNodes). */
   char ***scope_calls = calloc((size_t)c->nscopes, sizeof(char **));
@@ -233,16 +264,45 @@ void compute_reachable(Compiler *c) {
 
   /* "called_names" tracks every method name reached from any reachable scope.
      Used by alias and prep_to propagation (aliases have no scope of their own). */
+  /* Both name lookups below were linear scans, one per mark: (calls x names)
+     for the called set, (calls x scopes) for a name's scopes. */
   char **called_names = NULL; int cn_n = 0, cn_cap = 0;
-  #define CN_ADD(NM) do { const char *_n=(NM); if(_n){ int _f=0; \
-    for(int _i=0;_i<cn_n;_i++) if(sp_streq(called_names[_i],_n)){_f=1;break;} \
-    if(!_f){if(cn_n>=cn_cap){cn_cap=cn_cap?cn_cap*2:32;called_names=realloc(called_names,sizeof(char*)*cn_cap);} \
-    called_names[cn_n++]=strdup(_n);}} } while(0)
+  ANameHash cn_set; memset(&cn_set, 0, sizeof cn_set);
+  /* name -> its scopes, ascending: scope names are fixed for this pass */
+  ANameHash sn_set; memset(&sn_set, 0, sizeof sn_set);
+  int *sn_first = NULL, *sn_link = malloc(sizeof(int) * (size_t)(c->nscopes + 1));
+  for (int t = 0; t < c->nscopes; t++) {
+    sn_link[t] = -1;
+    const char *tn = c->scopes[t].name;
+    if (!tn) continue;
+    int k = -1;
+    if (sn_set.nb)
+      for (int i = sn_set.head[cr_hash(tn) % (unsigned)sn_set.nb]; i >= 0; i = sn_set.next[i])
+        if (sp_streq(sn_set.key[i], tn)) { k = i; break; }
+    if (k < 0) {
+      anh_add(&sn_set, tn); k = sn_set.n - 1;
+      sn_first = realloc(sn_first, sizeof(int) * (size_t)sn_set.cap);
+      sn_first[k] = t;
+    }
+    else {
+      int last = sn_first[k];
+      while (sn_link[last] >= 0) last = sn_link[last];
+      sn_link[last] = t;
+    }
+  }
+  #define SN_FIRST(NM) ({ const char *_q = (NM); int _r = -1; \
+    if (sn_set.nb) for (int _i = sn_set.head[cr_hash(_q) % (unsigned)sn_set.nb]; _i >= 0; _i = sn_set.next[_i]) \
+      if (sp_streq(sn_set.key[_i], _q)) { _r = sn_first[_i]; break; } _r; })
+  /* A name already called is fully marked: reachability never clears, so a
+     second MARK_NAME of it found nothing to do. */
+  #define CN_ADD(NM) do { const char *_n=(NM); if(_n && !anh_has(&cn_set,_n)){ \
+    if(cn_n>=cn_cap){cn_cap=cn_cap?cn_cap*2:32;called_names=realloc(called_names,sizeof(char*)*cn_cap);} \
+    called_names[cn_n++]=strdup(_n); anh_add(&cn_set,called_names[cn_n-1]);} } while(0)
 
   /* Helper: mark a name reachable -- all scopes with that name join the BFS. */
-  #define MARK_NAME(NM) do { const char *_mn=(NM); if(_mn){ CN_ADD(_mn); \
-    for(int _t=0;_t<c->nscopes;_t++) \
-      if(!c->scopes[_t].reachable&&c->scopes[_t].name&&sp_streq(c->scopes[_t].name,_mn)) \
+  #define MARK_NAME(NM) do { const char *_mn=(NM); if(_mn && !anh_has(&cn_set,_mn)){ CN_ADD(_mn); \
+    for(int _t=SN_FIRST(_mn);_t>=0;_t=sn_link[_t]) \
+      if(!c->scopes[_t].reachable) \
         { c->scopes[_t].reachable=1; queue[qtail++]=_t; } } } while(0)
 
   while (qhead < qtail) {
@@ -416,18 +476,10 @@ void compute_reachable(Compiler *c) {
       ClassInfo *cls = &c->classes[ci];
       for (int i = 0; i < cls->naliases; i++) {
         const char *an = cls->alias_new[i], *ao = cls->alias_old[i];
-        int an_live = 0, ao_live = 0;
-        for (int j = 0; j < cn_n; j++) {
-          if (an && sp_streq(called_names[j], an)) an_live = 1;
-          if (ao && sp_streq(called_names[j], ao)) ao_live = 1;
-        }
+        int an_live = (an && anh_has(&cn_set, an)), ao_live = (ao && anh_has(&cn_set, ao));
         /* also check reachable scope names (covers scope-backed aliases) */
-        for (int s = 0; s < c->nscopes; s++) {
-          if (c->scopes[s].reachable && c->scopes[s].name) {
-            if (an && sp_streq(c->scopes[s].name, an)) an_live = 1;
-            if (ao && sp_streq(c->scopes[s].name, ao)) ao_live = 1;
-          }
-        }
+        if (an) for (int t = SN_FIRST(an); t >= 0 && !an_live; t = sn_link[t]) if (c->scopes[t].reachable) an_live = 1;
+        if (ao) for (int t = SN_FIRST(ao); t >= 0 && !ao_live; t = sn_link[t]) if (c->scopes[t].reachable) ao_live = 1;
         if (an_live && !ao_live) {
           int prev_qtail = qtail;
           MARK_NAME(ao);
@@ -454,12 +506,10 @@ void compute_reachable(Compiler *c) {
         if (!pf || !pt) continue;
         /* When the user-facing name is called, the codegen wrapper calls the shadow
            implementation directly -- so mark the shadow reachable too. */
-        int pf_in_called = 0;
-        for (int j = 0; j < cn_n; j++) if (sp_streq(called_names[j], pf)) { pf_in_called = 1; break; }
-        if (!pf_in_called) {
-          for (int s = 0; s < c->nscopes; s++)
-            if (c->scopes[s].reachable && c->scopes[s].name && sp_streq(c->scopes[s].name, pf)) { pf_in_called = 1; break; }
-        }
+        int pf_in_called = anh_has(&cn_set, pf);
+        if (!pf_in_called)
+          for (int t = SN_FIRST(pf); t >= 0; t = sn_link[t])
+            if (c->scopes[t].reachable) { pf_in_called = 1; break; }
         if (pf_in_called) {
           int prev_qtail = qtail;
           MARK_NAME(pt);
@@ -473,8 +523,10 @@ void compute_reachable(Compiler *c) {
 
   for (int i = 0; i < cn_n; i++) free(called_names[i]);
   free(called_names);
+  anh_free(&cn_set); anh_free(&sn_set); free(sn_first); free(sn_link);
   #undef CN_ADD
   #undef MARK_NAME
+  #undef SN_FIRST
 
   /* Cleanup. */
   for (int s = 0; s < c->nscopes; s++) {

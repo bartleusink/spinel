@@ -329,6 +329,11 @@ void compute_reachable(Compiler *c);
 void compute_instantiated(Compiler *c, int early);
 int aname_has(ANameSet *s, const char *nm);
 void aname_add(ANameSet *s, const char *nm);
+/* A hashed name set (keys borrowed, not copied); zero-initialize to start. */
+typedef struct { const char **key; int *next, *head, n, cap, nb; } ANameHash;
+int anh_has(const ANameHash *st, const char *nm);
+void anh_add(ANameHash *st, const char *nm);
+void anh_free(ANameHash *st);
 int a_nested_block(const char *ty);
 int a_is_local_node(const char *ty);
 int a_is_write_node(const char *ty);
