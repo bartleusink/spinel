@@ -3506,11 +3506,30 @@ static void check_blk_param_writes(Compiler *c) {
 static void check_class_redeclarations(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count;
+  /* Both searches below walked the whole table per declaration: the constant
+     writes (now their kind list, ascending) and the first declaration of the
+     name (now a name -> first id map built on the way). rubys/roundhouse#72 */
+  ANameHash decl_names; memset(&decl_names, 0, sizeof decl_names);
+  int *decl_first = NULL, ndecl = 0, capdecl = 0;
+  int ncw = 0; const int *cws = nt_nodes_of_kind(nt, NK_ConstantWriteNode, &ncw);
   for (int id = 0; id < n; id++) {
     NodeKind k = nt_kind(nt, id);
     if (k != NK_ClassNode && k != NK_ModuleNode) continue;
     int cp = nt_ref(nt, id, "constant_path");
     const char *nm = cp >= 0 ? nt_str(nt, cp, "name") : nt_str(nt, id, "name");
+    /* registered before any skip below: a qualified or unnamed-skip
+       declaration still counts as an earlier one, as the scan it replaces
+       counted every declaration ahead of this node */
+    int first_prev = -1;
+    if (nm) {
+      int di = anh_find(&decl_names, nm);
+      if (di >= 0) first_prev = decl_first[di];
+      else {
+        if (ndecl == capdecl) { capdecl = capdecl ? capdecl * 2 : 64; decl_first = realloc(decl_first, sizeof(int) * (size_t)capdecl); }
+        decl_first[ndecl++] = id;
+        anh_add(&decl_names, nm);
+      }
+    }
     if (!nm || !*nm) continue;
     /* The same name also ASSIGNED a value. CRuby refuses to load the file when
        the value is not the kind the declaration says -- `A = 1` then `class A`
@@ -3529,7 +3548,9 @@ static void check_class_redeclarations(Compiler *c) {
        judge. Both shapes are in the suite, and both tripped the first cut. */
     if (cp >= 0 && nt_kind(nt, cp) == NK_ConstantPathNode) continue;
     { int dcid = (c->node_cbody && id < c->node_cap) ? c->node_cbody[id] : -1;
-    for (int cw = 0; cw < n; cw++) {
+    for (int ci = 0; ci < ncw; ci++) {
+      int cw = cws[ci];
+      if (cw >= n) break;
       if (nt_kind(nt, cw) != NK_ConstantWriteNode) continue;
       const char *wn = nt_str(nt, cw, "name");
       if (!wn || !sp_streq(wn, nm)) continue;
@@ -3547,14 +3568,7 @@ static void check_class_redeclarations(Compiler *c) {
       unsupported_feature(c, cw, msg);
     } }
     /* the FIRST declaration of this name; nothing to say if this is it */
-    int first = -1;
-    for (int j = 0; j < id && first < 0; j++) {
-      NodeKind jk = nt_kind(nt, j);
-      if (jk != NK_ClassNode && jk != NK_ModuleNode) continue;
-      int jcp = nt_ref(nt, j, "constant_path");
-      const char *jn = jcp >= 0 ? nt_str(nt, jcp, "name") : nt_str(nt, j, "name");
-      if (jn && sp_streq(jn, nm)) first = j;
-    }
+    int first = first_prev;
     if (first < 0) continue;
     int fline = (int)nt_int(nt, first, "node_line", 0);
     if (nt_kind(nt, first) != k) {
@@ -3580,6 +3594,7 @@ static void check_class_redeclarations(Compiler *c) {
              nm, sn, fn, fline);
     unsupported_feature(c, id, msg);
   }
+  anh_free(&decl_names); free(decl_first);
 }
 
 /* Resolve each class's superclass index from its ClassNode. */

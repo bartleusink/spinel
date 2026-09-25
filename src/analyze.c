@@ -185,12 +185,13 @@ static unsigned cr_hash(const char *s) {
   for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
   return h;
 }
-int anh_has(const ANameHash *st, const char *nm) {
-  if (!st->nb) return 0;
+int anh_find(const ANameHash *st, const char *nm) {
+  if (!st->nb) return -1;
   for (int i = st->head[cr_hash(nm) % (unsigned)st->nb]; i >= 0; i = st->next[i])
-    if (sp_streq(st->key[i], nm)) return 1;
-  return 0;
+    if (sp_streq(st->key[i], nm)) return i;   /* the most recent add of it */
+  return -1;
 }
+int anh_has(const ANameHash *st, const char *nm) { return anh_find(st, nm) >= 0; }
 void anh_add(ANameHash *st, const char *nm) {
   if (!st->nb) {
     st->nb = 4096;

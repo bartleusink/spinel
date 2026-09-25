@@ -332,6 +332,7 @@ void aname_add(ANameSet *s, const char *nm);
 /* A hashed name set (keys borrowed, not copied); zero-initialize to start. */
 typedef struct { const char **key; int *next, *head, n, cap, nb; } ANameHash;
 int anh_has(const ANameHash *st, const char *nm);
+int anh_find(const ANameHash *st, const char *nm);   /* insertion index, or -1 */
 void anh_add(ANameHash *st, const char *nm);
 void anh_free(ANameHash *st);
 int a_nested_block(const char *ty);
