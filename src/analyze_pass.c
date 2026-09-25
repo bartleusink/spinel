@@ -1802,6 +1802,49 @@ static int getter_ivar_targets(Compiler *c, int cid, int cside, const char *mnam
   return n;
 }
 
+/* The getter call or ivar read a hash local aliases: `x` read at `recv`,
+   whose only write in its scope is `x = @c` or `x = recv.getter`, where the
+   getter answers an ivar (getter_ivar_targets). -1 otherwise. */
+static int local_hash_alias_source(Compiler *c, const LWIndex *lw, int recv) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, recv, "name");
+  Scope *sc = nm ? comp_scope_of(c, recv) : NULL;
+  LocalVar *lv = sc ? scope_local(sc, nm) : NULL;
+  if (!lv || lv->is_param || lv->is_block_param || !ty_is_hash(lv->type)) return -1;
+  int sid = (int)(sc - c->scopes), src = -1, nw = 0;
+  for (int r = lw_index_first(lw, nm, sid); r >= 0; r = lw->next[r]) {
+    int w = lw->node[r];
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, nm) || comp_scope_of(c, w) != sc) continue;
+    if (nt_kind(nt, w) != NK_LocalVariableWriteNode || ++nw > 1) return -1;
+    src = unwrap_parens(c, nt_ref(nt, w, "value"));
+  }
+  if (src < 0) return -1;
+  if (nt_kind(nt, src) == NK_InstanceVariableReadNode) return src;
+  if (nt_kind(nt, src) != NK_CallNode || nt_ref(nt, src, "block") >= 0 ||
+      nt_ref(nt, src, "arguments") >= 0) return -1;
+  const char *mname = nt_str(nt, src, "name");
+  if (!mname) return -1;
+  int gr = nt_ref(nt, src, "receiver"), gcid = -1, cside = 0;
+  if (gr >= 0 && nt_kind(nt, gr) == NK_ConstantReadNode) {
+    const char *cnm = nt_str(nt, gr, "name");
+    gcid = cnm ? comp_class_index(c, cnm) : -1;
+    cside = 1;
+  }
+  else if (gr >= 0 && nt_kind(nt, gr) != NK_SelfNode) {
+    TyKind grt = infer_type(c, gr);
+    gcid = ty_is_object(grt) ? ty_object_class(grt) : -1;
+  }
+  else {
+    Scope *cs = comp_scope_of(c, src);
+    gcid = cs ? cs->class_id : -1;
+    cside = cs ? cs->is_cmethod : 0;
+  }
+  if (gcid < 0 || gcid >= c->nclasses) return -1;
+  int tcls[16]; const char *tiv[16];
+  return getter_ivar_targets(c, gcid, cside, mname, tcls, tiv, 16) > 0 ? src : -1;
+}
+
 /* Does class `cls` write `inm` with an array (literal or typed)? */
 static int ivar_has_array_write(Compiler *c, const LWIndex *ivw, int cls, const char *inm) {
   const NodeTable *nt = c->nt;
@@ -2823,6 +2866,15 @@ int infer_write_types(Compiler *c) {
         rty = nt_kind(nt, orw) == NK_InstanceVariableOrWriteNode ? "InstanceVariableReadNode"
                                                                  : "LocalVariableReadNode";
       }
+    }
+    /* `x = c.cache; x[k] = v` writes into the hash the getter answers, not
+       into a copy: a hash local whose one write is a getter call (or an ivar
+       read) takes the write as that source's evidence, through the getter
+       branch below. Folding it into the local alone typed the local apart
+       from the ivar it aliases, and the C build refused the assignment. */
+    if (is_idx_write && !is_splice && rty && sp_streq(rty, "LocalVariableReadNode")) {
+      int src = local_hash_alias_source(c, &lw_ix, recv);
+      if (src >= 0) { recv = src; rty = nt_type(nt, src); }
     }
     /* fold into a local's type or an ivar's type (an empty `@buf=[]` filled by
        `@buf << x` infers its element type the same way a local does) */
