@@ -941,6 +941,17 @@ int main(int argc, char **argv) {
      flag for the runtime and the test harness. */
   s_add(&cmd, "-ffp-contract=off ");
   bi_put(&bi, "cflag", "-ffp-contract=off");
+  /* Functions and loop heads on a cache line. A hot loop's speed otherwise
+     depends on where the linker happened to put it, which moves with any
+     unrelated change to the program: optcarrot swung ~5% between builds of
+     the same C. Aligned, it is +4.7% (1260 -> 1319 fps), the benchmark set
+     is 0.8% faster on the geometric mean, campfire's req/s is unchanged,
+     and the binary is 2% larger. Both gcc and clang take the spelling; a
+     wasm module has no cache line to aim at. */
+  if (!target_wasi) {
+    s_add(&cmd, "-falign-functions=64 -falign-loops=64 ");
+    bi_put(&bi, "cflag", "-falign-functions=64"); bi_put(&bi, "cflag", "-falign-loops=64");
+  }
   /* A 32-bit target gets what common.mk gives the runtime there: 64-bit
      time_t and file offsets, and SSE arithmetic on i386 (the x87 unit rounds
      every intermediate at 80 bits, and 3.7.round(1) came out 3.8). */
