@@ -1660,8 +1660,9 @@ static int is_heavy_brk_call(Compiler *c, int id) {
    (real-setjmp) break-carrying call (so its locals need volatile across the
    setjmp it emits)? */
 int scope_has_begin(Compiler *c, int si) {
-  for (int id = 0; id < c->nt->count; id++) {
-    if (c->nscope[id] != si) continue;
+  int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+  for (int k = 0; k < nids; k++) {
+    int id = ids[k];
     const char *ty = nt_type(c->nt, id);
     if (ty && (sp_streq(ty, "BeginNode") || sp_streq(ty, "RescueNode")))
       return 1;
@@ -1708,14 +1709,18 @@ static void begin_volatile_names(Compiler *c, int si, char ***out, int *nout, in
   *out = NULL; *nout = 0; *all = 0;
   char *inb = (char *)calloc((size_t)(nt->count > 0 ? nt->count : 1), 1);
   if (!inb) { *all = 1; return; }  /* OOM: fall back to the conservative whole-scope rule */
-  for (int id = 0; id < nt->count; id++)
-    if (((nt_kind(nt, id) == NK_BeginNode) || is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) && c->nscope[id] == si) mark_subtree(nt, id, inb);
-  for (int id = 0; id < nt->count; id++)
-    if (nt_kind(nt, id) == NK_RescueNode && c->nscope[id] == si && !inb[id]) { *all = 1; break; }
+  int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+  for (int k = 0; k < nids; k++) {
+    int id = ids[k];
+    if ((nt_kind(nt, id) == NK_BeginNode) || is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) mark_subtree(nt, id, inb);
+  }
+  for (int k = 0; k < nids; k++)
+    if (nt_kind(nt, ids[k]) == NK_RescueNode && !inb[ids[k]]) { *all = 1; break; }
   if (*all) { free(inb); return; }
   char **names = NULL; int n = 0, cap = 0;
-  for (int id = 0; id < nt->count; id++) {
-    if (!inb[id] || c->nscope[id] != si || !lv_is_write_or_target(nt_kind(nt, id))) continue;
+  for (int k = 0; k < nids; k++) {
+    int id = ids[k];
+    if (!inb[id] || !lv_is_write_or_target(nt_kind(nt, id))) continue;
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
     int dup = 0;
@@ -1744,8 +1749,9 @@ static int name_in(char **names, int n, const char *nm) {
    channel (#3729). */
 int scope_reads_callee(Compiler *c, int si) {
   const NodeTable *nt = c->nt;
-  for (int id = 0; id < nt->count; id++) {
-    if (c->nscope[id] != si) continue;
+  int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+  for (int k = 0; k < nids; k++) {
+    int id = ids[k];
     if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "receiver") >= 0) continue;
     const char *nm = nt_str(nt, id, "name");
     if (nm && sp_streq(nm, "__callee__")) return 1;
@@ -1759,8 +1765,9 @@ static int scope_performs_match(Compiler *c, int si) {
     "=~", "match", "match?", "scan", "gsub", "gsub!", "sub", "sub!",
     "split", "slice", "index", "rindex", "partition", "rpartition",
     "start_with?", "end_with?", "grep", "grep_v", "[]", "===", NULL };
-  for (int id = 0; id < nt->count; id++) {
-    if (c->nscope[id] != si) continue;
+  int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+  for (int k = 0; k < nids; k++) {
+    int id = ids[k];
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
@@ -2191,7 +2198,10 @@ static int method_inline_hint(Compiler *c, Scope *s) {
   int si = (int)(s - c->scopes);
   if (si < 0 || si >= g_mih_nscopes) return 0;
   int limit = 90;
-  { const char *e = getenv("SPINEL_INLINE_NODES"); if (e && *e) limit = atoi(e); }
+  /* read once: this runs per method, and getenv walks the environment (#4966) */
+  static int env_rd; static const char *env_nodes;
+  if (!env_rd) { env_nodes = getenv("SPINEL_INLINE_NODES"); env_rd = 1; }
+  { const char *e = env_nodes; if (e && *e) limit = atoi(e); }
   if (g_mih_limit_override > 0) limit = g_mih_limit_override;
   if (limit <= 0) return 0;
   if (g_mih_nodes[si] > limit) return 0;
@@ -2445,9 +2455,11 @@ static void fi_build(Compiler *c) {
        (larger) body budget: render_pixel is past the hint's, and it is
        exactly the method worth forcing. */
     int sv = g_mih_limit_override, sv2 = g_mih_callers_override;
-    { const char *e = getenv("SPINEL_INLINE_FORCE_NODES");
+    { static int env_rd; static const char *env_fn, *env_fc;
+      if (!env_rd) { env_fn = getenv("SPINEL_INLINE_FORCE_NODES"); env_fc = getenv("SPINEL_INLINE_FORCE_CALLERS"); env_rd = 1; }
+      const char *e = env_fn;
       g_mih_limit_override = (e && *e) ? atoi(e) : 250;
-      const char *e2 = getenv("SPINEL_INLINE_FORCE_CALLERS");
+      const char *e2 = env_fc;
       g_mih_callers_override = (e2 && *e2) ? atoi(e2) : 12; }
     int ok = (method_inline_hint(c, m) == 1);
     g_mih_limit_override = sv; g_mih_callers_override = sv2;
@@ -2603,7 +2615,9 @@ static void fi_build(Compiler *c) {
 }
 
 static int method_inline_force(Compiler *c, Scope *s) {
-  { const char *e = getenv("SPINEL_INLINE_FORCE");
+  static int env_rd; static const char *env_force;
+  if (!env_rd) { env_force = getenv("SPINEL_INLINE_FORCE"); env_rd = 1; }
+  { const char *e = env_force;
     if (e && *e) { if (*e == '0') return 0; }
     else if (!g_inline_hot) return 0; }
   if (g_debug) return 0;
@@ -3553,9 +3567,34 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
   (void)c;
 }
 
+static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off);
+/* Each insertion shifts the rest of the buffer, so over the whole program the
+   splices cost (barriers x output size): 9,462 barriers into 43 MB on lobsters
+   (#4966). They are made per top-level segment instead, split in front of each
+   `\nstatic ` line. Nothing the splice reads crosses such a line: the lvalue
+   scan walks back over an lvalue and stops at the `}` or `;` before it, the
+   statement scan forward stops at the enclosing block's close, and the
+   receiver class is reset at every `static ` line anyway. */
 static void gc_wb_insert(Compiler *c, Buf *b, size_t fn_off) {
   if (g_no_write_barrier) return;
   gc_wb_cells(c, b);
+  if (fn_off != 0 || !b->p) { gc_wb_insert_seg(c, b, fn_off); return; }
+  Buf out; memset(&out, 0, sizeof out);
+  size_t start = 0;
+  while (start < b->len) {
+    size_t end = start + 1;
+    while (end < b->len && !(b->p[end] == '\n' && !strncmp(b->p + end + 1, "static ", 7))) end++;
+    Buf seg; memset(&seg, 0, sizeof seg);
+    buf_putn(&seg, b->p + start, end - start);
+    gc_wb_insert_seg(c, &seg, 0);
+    buf_putn(&out, seg.p, seg.len);
+    free(seg.p);
+    start = end;
+  }
+  free(b->p);
+  *b = out;
+}
+static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
   int cur_self_cls = -1;
   for (size_t i = fn_off; i + 4 < b->len; i++) {
     /* track the enclosing function's receiver type */
@@ -4431,9 +4470,8 @@ int proc_does_nonlocal_return(Compiler *c, int create) {
   /* The dispatch lift hands us the BlockNode itself; the lifted-ness is a
      property of the call that owns it. */
   if (cty && sp_streq(cty, "BlockNode")) {
-    for (int o = 0; o < c->nt->count; o++)
-      if (nt_ref(c->nt, o, "block") == create) return proc_does_nonlocal_return(c, o);
-    return 0;
+    int o = cg_block_owner(c, create);
+    return o >= 0 ? proc_does_nonlocal_return(c, o) : 0;
   }
   if (!cty || !sp_streq(cty, "CallNode")) return 0;          /* proc/Proc.new are calls */
   const char *cn = nt_str(c->nt, create, "name");
@@ -4460,8 +4498,9 @@ int proc_does_nonlocal_return(Compiler *c, int create) {
    method must set up a proc-return frame. Blocks/procs share their method's
    scope, so a returning proc's create node is nscope == si. */
 int scope_creates_returning_proc(Compiler *c, int si) {
-  for (int id = 0; id < c->nt->count; id++)
-    if (c->nscope[id] == si && proc_does_nonlocal_return(c, id)) return 1;
+  int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+  for (int k = 0; k < nids; k++)
+    if (proc_does_nonlocal_return(c, ids[k])) return 1;
   return 0;
 }
 

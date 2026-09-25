@@ -1957,7 +1957,28 @@ static int ivar_has_generated_writer(Compiler *c, const char *nm) {
 /* Scan every program-wide write to ivar `nm` ("@foo"): returns 0 when at least
    one write exists and all of them assign nil (statically falsy), -1 otherwise
    (no writes seen, a non-nil write, or an opaque write form). */
+static int ivar_all_writes_nil_scan(Compiler *c, const char *nm);
+/* asked for every `if` on an ivar reader; the answer is fixed per name (#4966) */
+static int ivar_write_or_set(Compiler *c, int id) {
+  NodeKind k = nt_kind(c->nt, id);
+  if (k == NK_CallNode) {
+    const char *cn = nt_str(c->nt, id, "name");
+    return cn && sp_streq(cn, "instance_variable_set");
+  }
+  return k == NK_InstanceVariableWriteNode || k == NK_InstanceVariableOrWriteNode ||
+         k == NK_InstanceVariableAndWriteNode || k == NK_InstanceVariableOperatorWriteNode ||
+         k == NK_InstanceVariableTargetNode;
+}
 static int ivar_all_writes_nil(Compiler *c, const char *nm) {
+  if (!nm) return -1;
+  static CgMemo memo = { .touches = ivar_write_or_set };
+  int got;
+  if (cg_memo_get(c, &memo, nm, 0, &got)) return got;
+  got = ivar_all_writes_nil_scan(c, nm);
+  cg_memo_put(&memo, nm, 0, got);
+  return got;
+}
+static int ivar_all_writes_nil_scan(Compiler *c, const char *nm) {
   const NodeTable *nt = c->nt;
   if (!nm) return -1;
   if (ivar_has_generated_writer(c, nm)) return -1;

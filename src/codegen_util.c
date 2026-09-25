@@ -645,6 +645,113 @@ int re_engine_flags(int pf) {
    follow a local, so codegen picked the capturing `scan` emit for a pattern
    named by a constant while typing the same call from the non-capturing shape,
    and dropped the capture groups for one named by a local (#3391). */
+/* ---- whole-program indexes for codegen (#4966) ----
+   Several emit-time questions were answered by walking every node, once per
+   method, per scope or per call site: quadratic in program size. The answers
+   depend only on the node table, which codegen extends in two places (each
+   setting the new node's scope right away) and otherwise only renames call
+   names in place, so the indexes are keyed on the table and its counts. */
+static const NodeTable *sn_nt; static int sn_count = -1, sn_nscopes = -1;
+static int *sn_off, *sn_ids;
+/* A caller may be walking a list when a query from inside its loop meets a
+   grown table and rebuilds: the previous arrays stay alive one more build. */
+static int *sn_off_prev, *sn_ids_prev;
+static void sn_build(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int ns = c->nscopes, n = nt->count;
+  free(sn_off_prev); free(sn_ids_prev);
+  sn_off_prev = sn_off; sn_ids_prev = sn_ids;
+  sn_off = calloc((size_t)ns + 2, sizeof(int));
+  sn_ids = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+  for (int id = 0; id < n; id++) {
+    int si = c->nscope[id];
+    if (si >= 0 && si < ns) sn_off[si + 2]++;
+  }
+  for (int si = 0; si < ns; si++) sn_off[si + 2] += sn_off[si + 1];
+  for (int id = 0; id < n; id++) {
+    int si = c->nscope[id];
+    if (si >= 0 && si < ns) sn_ids[sn_off[si + 1]++] = id;
+  }
+  sn_nt = nt; sn_count = n; sn_nscopes = ns;
+}
+const int *cg_scope_nodes(Compiler *c, int si, int *n) {
+  if (sn_nt != c->nt || sn_count != c->nt->count || sn_nscopes != c->nscopes) sn_build(c);
+  if (si < 0 || si >= sn_nscopes) { *n = 0; return sn_ids; }
+  *n = sn_off[si + 1] - sn_off[si];
+  return sn_ids + sn_off[si];
+}
+
+static const NodeTable *bo_nt; static int bo_count = -1;
+static int *bo_owner;
+int cg_block_owner(Compiler *c, int blk) {
+  const NodeTable *nt = c->nt;
+  /* nodes codegen appends only extend the map: each is above every node
+     already in it, so the lowest owner of an older block cannot change */
+  if (bo_nt == nt && bo_count >= 0 && nt->count > bo_count) {
+    int *nb = realloc(bo_owner, sizeof(int) * (size_t)nt->count);
+    if (nb) {
+      bo_owner = nb;
+      for (int i = bo_count; i < nt->count; i++) bo_owner[i] = -1;
+      for (int o = bo_count; o < nt->count; o++) {
+        int b = nt_ref(nt, o, "block");
+        if (b >= 0 && b < nt->count && bo_owner[b] < 0) bo_owner[b] = o;
+      }
+      bo_count = nt->count;
+    }
+  }
+  if (bo_nt != nt || bo_count != nt->count) {
+    free(bo_owner);
+    bo_owner = malloc(sizeof(int) * (size_t)(nt->count > 0 ? nt->count : 1));
+    for (int i = 0; i < nt->count; i++) bo_owner[i] = -1;
+    for (int o = nt->count - 1; o >= 0; o--) {   /* descending: the lowest owner wins */
+      int b = nt_ref(nt, o, "block");
+      if (b >= 0 && b < nt->count) bo_owner[b] = o;
+    }
+    bo_nt = nt; bo_count = nt->count;
+  }
+  return (blk >= 0 && blk < bo_count) ? bo_owner[blk] : -1;
+}
+
+struct CgMemoEnt { char *key; int tag; int val; CgMemoEnt *next; };
+#define CG_MEMO_BUCKETS 1024
+static unsigned cg_memo_hash(const char *s, int tag) {
+  unsigned h = 2166136261u ^ (unsigned)tag;
+  while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+  return h;
+}
+int cg_memo_get(Compiler *c, CgMemo *m, const char *key, int tag, int *val) {
+  /* appended nodes the answers do not depend on (codegen's own to_s calls)
+     keep the memo */
+  if (m->tab && m->touches && m->nt == c->nt && m->nscopes == c->nscopes && c->nt->count > m->count) {
+    int hit = 0;
+    for (int id = m->count; id < c->nt->count && !hit; id++) hit = m->touches(c, id);
+    if (!hit) m->count = c->nt->count;
+  }
+  if (m->tab && (m->nt != c->nt || m->count != c->nt->count || m->nscopes != c->nscopes)) {
+    for (int b = 0; b < CG_MEMO_BUCKETS; b++)
+      for (CgMemoEnt *e = m->tab[b]; e; ) { CgMemoEnt *nx = e->next; free(e->key); free(e); e = nx; }
+    free(m->tab); m->tab = NULL;
+  }
+  if (!m->tab) {
+    m->tab = calloc(CG_MEMO_BUCKETS, sizeof *m->tab);
+    m->nt = c->nt; m->count = c->nt->count; m->nscopes = c->nscopes;
+  }
+  for (CgMemoEnt *e = m->tab[cg_memo_hash(key, tag) % CG_MEMO_BUCKETS]; e; e = e->next)
+    if (e->tag == tag && sp_streq(e->key, key)) { *val = e->val; return 1; }
+  return 0;
+}
+void cg_memo_put(CgMemo *m, const char *key, int tag, int val) {
+  if (!m->tab) return;
+  CgMemoEnt *e = malloc(sizeof *e);
+  e->key = strdup(key); e->tag = tag; e->val = val;
+  unsigned b = cg_memo_hash(key, tag) % CG_MEMO_BUCKETS;
+  e->next = m->tab[b]; m->tab[b] = e;
+}
+
+static int re_lit_write_node(Compiler *c, int id) {
+  NodeKind k = nt_kind(c->nt, id);
+  return k == NK_ConstantWriteNode || k == NK_ConstantPathWriteNode || k == NK_LocalVariableWriteNode;
+}
 int re_lit_node(Compiler *c, int nid) {
   if (nid < 0) return -1;
   const NodeTable *nt = c->nt;
@@ -656,7 +763,12 @@ int re_lit_node(Compiler *c, int nid) {
   if (!want_const && !want_local) return -1;
   const char *nm = nt_str(nt, nid, "name");
   if (!nm) return -1;
-  for (int k = 0; k < nt->count; k++) {
+  /* the answer is fixed by (name, kind): one scan per name, not per use */
+  static CgMemo memo = { .touches = re_lit_write_node };
+  int got;
+  if (cg_memo_get(c, &memo, nm, want_const, &got)) return got;
+  int found = -1;
+  for (int k = 0; k < nt->count && found < 0; k++) {
     const char *kt = nt_type(nt, k);
     if (!kt) continue;
     if (want_const ? (!sp_streq(kt, "ConstantWriteNode") && !sp_streq(kt, "ConstantPathWriteNode"))
@@ -668,9 +780,10 @@ int re_lit_node(Compiler *c, int nid) {
     if (want_const && v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
         nt_str(nt, v, "name") && sp_streq(nt_str(nt, v, "name"), "freeze"))
       v = nt_ref(nt, v, "receiver");
-    if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "RegularExpressionNode")) return v;
+    if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "RegularExpressionNode")) found = v;
   }
-  return -1;
+  cg_memo_put(&memo, nm, want_const, found);
+  return found;
 }
 int re_lit_index(Compiler *c, int nid) {
   nid = re_lit_node(c, nid);

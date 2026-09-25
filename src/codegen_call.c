@@ -741,11 +741,13 @@ static int emit_poly_cls_value_prearm(Compiler *c, const char *name, int argc,
                                       const int *atmp, const TyKind *atmp_ty,
                                       int tv, int tr, TyKind ret, Buf *b) {
   int ccls8[64], cmi8[64], nc8 = 0;
-  for (int k = 0; k < c->nclasses && nc8 < 64; k++) {
+  int ncc8 = 0;
+  const PolyCand *cc8 = comp_cmethod_candidates(c, name, &ncc8);   /* per name, not per site (#4966) */
+  for (int ki = 0; ki < ncc8 && nc8 < 64; ki++) {
+    int k = cc8[ki].cls;
     if (is_builtin_reopen(c->classes[k].name)) continue;
-    int dc8 = -1;
-    int kmi = comp_cmethod_in_chain(c, k, name, &dc8);
-    if (kmi < 0 || !scope_has_callable_symbol(c, kmi)) continue;
+    int kmi = cc8[ki].mi;
+    if (!scope_has_callable_symbol(c, kmi)) continue;
     Scope *ks = &c->scopes[kmi];
     /* a yielding / block-taking / rest candidate has no arm this emitter can
        fill; such a class falls to the default raise */
@@ -6421,9 +6423,12 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       int blk_tmp0 = -1;
       { int cblk0 = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
         if (cblk0 >= 0) {
-          for (int k = 0; k < c->nclasses && blk_tmp0 < 0; k++) {
+          int npc0 = 0;
+          const PolyCand *pc0 = comp_poly_candidates(c, name, &npc0);   /* (#4966) */
+          for (int ki = 0; ki < npc0 && blk_tmp0 < 0; ki++) {
+            int k = pc0[ki].cls;
             if (!c->classes[k].instantiated) continue;
-            int mi0 = comp_method_in_chain(c, k, name, NULL);
+            int mi0 = pc0[ki].mi;
             if (mi0 < 0) continue;
             Scope *cm0 = &c->scopes[mi0];
             /* a yielding candidate is reachable through its proc form */

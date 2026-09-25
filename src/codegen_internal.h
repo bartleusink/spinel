@@ -581,6 +581,19 @@ int re_engine_flags(int pf);
    -1 if the node isn't a static regex literal. */
 int re_lit_index(Compiler *c, int nid);
 int re_lit_node(Compiler *c, int nid);
+/* Codegen's whole-program lookups, built once and rebuilt when the node or
+   scope count changes (#4966). cg_scope_nodes: the node ids whose nscope is
+   `si`, ascending. cg_block_owner: the lowest node whose "block" ref is
+   `blk`, or -1. A name-keyed int memo for answers fixed by the node table. */
+const int *cg_scope_nodes(Compiler *c, int si, int *n);
+int cg_block_owner(Compiler *c, int blk);
+typedef struct CgMemoEnt CgMemoEnt;
+typedef struct {
+  CgMemoEnt **tab; const NodeTable *nt; int count; int nscopes;
+  int (*touches)(Compiler *c, int id);   /* can an appended node change an answer? */
+} CgMemo;
+int cg_memo_get(Compiler *c, CgMemo *m, const char *key, int tag, int *val);
+void cg_memo_put(CgMemo *m, const char *key, int tag, int val);
 /* The unescaped source of a regex literal or a constant bound to one (for
    capture detection). Returns NULL when nid is not a resolvable regex. */
 const char *re_lit_src(Compiler *c, int nid);
