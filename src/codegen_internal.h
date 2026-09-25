@@ -892,6 +892,7 @@ void emit_obj_upcast_prefix(Compiler *c, TyKind slot, TyKind val, Buf *b);
 int kwh_lookup(const NodeTable *nt, int kwh, const char *kname);
 int callee_has_kwarg(Compiler *c, Scope *m, const char *name);
 int callee_param_is_declared_kwarg(Compiler *c, Scope *m, const char *name);
+int callee_declares_kwargs(Compiler *c, Scope *m);
 int emit_ds_hash_materialize(Compiler *c, int kwh, TyKind *out_type);
 void emit_ds_param_extract(Compiler *c, Scope *m, int i, int ds_hash_tmp,
                            TyKind ds_hash_type, Buf *out);
