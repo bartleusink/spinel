@@ -531,20 +531,32 @@ module Net
 
     def read_response
       wait_for_response
-      status = wire_gets
-      raise HTTPError, "no response from #{@address}" if status.nil?
-      parts = status.strip.split(" ")
-      version = parts[0].to_s
-      code = parts.length > 1 ? parts[1].to_s : ""
-      message = parts.length > 2 ? parts[2..-1].join(" ") : ""
-
+      version = ""
+      code = ""
+      message = ""
       headers = {}
-      while (line = wire_gets)
-        line = line.strip
-        break if line.empty?
-        ci = line.index(":")
-        next if ci.nil?
-        headers[line[0, ci].downcase] = line[(ci + 1)..-1].to_s.strip
+      # An informational response (100 Continue, 103 Early Hints) comes
+      # before the final one on the same connection and is not the answer:
+      # read past it, as CRuby does, or its successor was taken for its body.
+      # 101 Switching Protocols is final -- the connection is someone else's
+      # after it.
+      loop do
+        status = wire_gets
+        raise HTTPError, "no response from #{@address}" if status.nil?
+        parts = status.strip.split(" ")
+        version = parts[0].to_s
+        code = parts.length > 1 ? parts[1].to_s : ""
+        message = parts.length > 2 ? parts[2..-1].join(" ") : ""
+
+        headers = {}
+        while (line = wire_gets)
+          line = line.strip
+          break if line.empty?
+          ci = line.index(":")
+          next if ci.nil?
+          headers[line[0, ci].downcase] = line[(ci + 1)..-1].to_s.strip
+        end
+        break unless code[0, 1] == "1" && code != "101"
       end
 
       body =
