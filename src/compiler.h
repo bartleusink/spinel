@@ -739,6 +739,7 @@ int comp_scall_first(Compiler *c, int scope_idx);
 int comp_scall_next(const Compiler *c, int u);
 int comp_kind_first(Compiler *c, int kind);
 int comp_kind_next(const Compiler *c, int id);
+int comp_bare_gets_is_argf(Compiler *c);
 int    comp_method_index(Compiler *c, const char *name); /* -1 if none */
 /* A receiverless call's target: the enclosing self's ancestry first, a
    top-level def (a private Object method, and so last in every ancestry) only

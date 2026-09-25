@@ -24881,6 +24881,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       buf_puts(b, "sp_kernel_srand("); emit_int_expr_conv(c, av[0], b); buf_puts(b, ")");
       return;
     }
+    /* Kernel#gets reads the next line of ARGF, as `ARGF.gets` does; nil at
+       end of input. Only the bare form (a separator, limit or `chomp:`
+       would be dropped here), and only in the programs comp_bare_gets_is_argf
+       admits: inference reads the same answer, so the two never disagree. */
+    if (sp_streq(name, "gets") && ac == 0 && comp_bare_gets_is_argf(c)) {
+      buf_puts(b, "sp_argf_gets()");
+      return;
+    }
   }
 
   /* exit / abort as expressions (noreturn, emit as C statement-expression) */

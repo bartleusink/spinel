@@ -4374,6 +4374,8 @@ else {
     }
     if (sp_streq(name, "srand")) return TY_INT;
     if (sp_streq(name, "sleep") && argc <= 1) return TY_INT;
+    if (sp_streq(name, "gets") && argc == 0 && comp_bare_gets_is_argf(c))
+      return TY_STRING;   /* ARGF's next line, or nil */
   }
   /* Kernel.sleep(seconds) / ::Kernel.sleep -> Integer seconds slept */
   if (recv >= 0 && sp_streq(name, "sleep") && argc <= 1) {

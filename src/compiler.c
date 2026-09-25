@@ -1618,6 +1618,67 @@ int comp_kind_next(const Compiler *c, int id) {
   return (id >= 0 && id < c->kind_count) ? c->kind_next[id] : -1;
 }
 
+/* Whether a bare `gets` may answer ARGF's next line, as `ARGF.gets` does.
+   Not when the program has a `gets` of its own anywhere: a def, an alias, a
+   symbol or string spelling the name (define_method, send, attr_reader), or a
+   symbol built at run time, which may reach the call through include, extend
+   or a reopened Object or Kernel. Nor when it reads `$_`, which Kernel#gets
+   sets and this does not: by name, through a `print` with no arguments (a
+   symbol or string spelling `print` counts too), or through a unary `~`. Nor
+   when it names BasicObject, whose instances have no Kernel#gets: the call
+   may run with one as self, through instance_eval, from places the arm
+   cannot see. Such a program keeps its NameError rather than a silent wrong
+   answer. Syntax only, over the whole node table (a required package's
+   source too), so it is asked once per version of the table and again when
+   the table grows. */
+static int bare_gets_scan(const NodeTable *nt) {
+  for (int i = 0; i < nt->count; i++) {
+    const char *ty = nt_type(nt, i);
+    if (!ty) continue;
+    const char *v = NULL;
+    if (sp_streq(ty, "DefNode")) v = nt_str(nt, i, "name");
+    else if (sp_streq(ty, "SymbolNode")) {
+      v = nt_str(nt, i, "value");
+      if (!v) v = nt_str(nt, i, "unescaped");
+    }
+    else if (sp_streq(ty, "StringNode")) {
+      v = nt_str(nt, i, "content");
+      if (!v) v = nt_str(nt, i, "unescaped");
+    }
+    else if (sp_streq(ty, "InterpolatedSymbolNode")) return 0;
+    else if (sp_streq(ty, "ConstantReadNode") || sp_streq(ty, "ConstantPathNode")) {
+      const char *cn = nt_str(nt, i, "name");
+      if (cn && sp_streq(cn, "BasicObject")) return 0;
+    }
+    else if (sp_streq(ty, "GlobalVariableReadNode")) {
+      const char *gn = nt_str(nt, i, "name");
+      if (gn && (sp_streq(gn, "$_") || sp_streq(gn, "$LAST_READ_LINE"))) return 0;
+    }
+    else if (sp_streq(ty, "CallNode")) {
+      const char *cn = nt_str(nt, i, "name");
+      int ac = 0, args = nt_ref(nt, i, "arguments");
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+      int splats_only = 1;
+      for (int k = 0; k < ac; k++)
+        if (nt_kind(nt, av[k]) != NK_SplatNode) splats_only = 0;
+      if (cn && sp_streq(cn, "print") && splats_only) return 0;
+      if (cn && sp_streq(cn, "~") && ac == 0) return 0;
+    }
+    if (v && (sp_streq(v, "gets") || sp_streq(v, "print"))) return 0;
+  }
+  return 1;
+}
+int comp_bare_gets_is_argf(Compiler *c) {
+  static const NodeTable *memo_nt = NULL;
+  static unsigned memo_ver = 0;
+  static int memo_count = -1, memo_ans = 0;
+  if (memo_nt != c->nt || memo_ver != c->nt->version || memo_count != c->nt->count) {
+    memo_nt = c->nt; memo_ver = c->nt->version; memo_count = c->nt->count;
+    memo_ans = bare_gets_scan(c->nt);
+  }
+  return memo_ans;
+}
+
 static int comp_method_index_direct(Compiler *c, const char *name);
 int comp_method_index(Compiler *c, const char *name) {
   int mi = comp_method_index_direct(c, name);
