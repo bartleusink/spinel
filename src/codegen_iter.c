@@ -585,11 +585,14 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      param fell through to a fabricated default. */
   TyKind ds_type = TY_UNKNOWN;
   int ds_tmp = emit_ds_hash_materialize(c, kwh, &ds_type);
-  /* A key naming no parameter. The loop below walks the PARAMETERS looking for
-     keys, so a key nobody claims is simply never read -- the call ran with the
-     keyword gone. The ordinary call path has raised on this all along; sharing
-     the rule is what keeps the two answers the same (#4419). */
-  emit_unknown_kwarg_raise(c, m, kwh);
+  /* The count and the keys, by the rule the ordinary call path follows. The
+     loop below walks the PARAMETERS, so an argument none of them reads --
+     a key naming no parameter (#4419), a positional past the last one --
+     was simply dropped, and a missing one bound its zero value: `y1 { }` on
+     `def y1(x)` ran with x padded, `y(1, 2) { }` on `def y(x, k: 1)`
+     dropped the 2. A `...` forward carries the forwarder's own params. */
+  if (fwd_encl) emit_unknown_kwarg_raise(c, m, kwh);
+  else emit_call_arity_check(c, m, argc, argv, 1);
   /* The options-hash idiom: a braceless keyword hash no keyword parameter
      claims packs into the first unfilled positional (`def check(sel, opts =
      nil)` called `check(".x", count: 0)`). The other two call paths have done
@@ -670,7 +673,19 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
           buf_printf(b, "; sp_gc_pin_remembered((void *)_cell_%s)", rename_local(avn));
       }
     }
-    else if (i < pos_argc && !(m->rest_idx >= 0 && i > m->rest_idx))
+    /* a **kwrest collects the keywords no declared keyword param takes, as
+       on the other call paths; it bound its nil default here */
+    else if (i == m->kwrest_idx) {
+      int krhash = emit_kwrest_collect(c, m, kwh, ds_tmp, ds_type, args);
+      LocalVar *krp = scope_local(m, m->pnames[i]);
+      if (krp && krp->type == TY_POLY) buf_printf(b, "sp_box_obj(_t%d, SP_BUILTIN_SYM_POLY_HASH)", krhash);
+      else buf_printf(b, "_t%d", krhash);
+    }
+    /* a keyword or **kwrest param never takes a positional: a surplus one
+       (refused above) bound `ykw(1, 2)`'s 2 into the kwrest's hash slot, a
+       C type error */
+    else if (i < pos_argc && !(m->rest_idx >= 0 && i > m->rest_idx) && i != m->kwrest_idx &&
+             !callee_param_is_declared_kwarg(c, m, m->pnames[i]))
       emit_arg_or_default(c, m, i, argv[i], b);
     else if (i == kwh_slot)
       emit_arg_or_default(c, m, i, kwh, b);
