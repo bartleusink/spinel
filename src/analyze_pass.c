@@ -3808,7 +3808,11 @@ int infer_default_param_types(Compiler *c) {
           if (dn == 0) dt = TY_POLY_ARRAY;
         }
       }
-      if (dt == TY_NIL || dt == TY_UNKNOWN) continue;
+      /* A default that cannot complete (`for_user: (raise "...")`, the Rails
+         shape for a keyword that must be passed) gives the slot no value, so
+         it says nothing about the type: typed from it the parameter was void,
+         which no C slot holds, and the method refused to compile. */
+      if (dt == TY_NIL || dt == TY_UNKNOWN || dt == TY_VOID) continue;
       LocalVar *p = scope_local(sc, sc->pnames[i]);
       if (!p || p->rbs_seeded) continue;
       /* an empty literal default is untyped by the rule above, not by any

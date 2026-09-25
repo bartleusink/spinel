@@ -5841,6 +5841,13 @@ else if (dty && sp_streq(dty, "NilNode")) {
     else if (pt == TY_STRING) buf_puts(out, "NULL");
     else buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
   }
+  /* A default that cannot complete (`x: (raise "...")`) runs for its effect
+     and never reaches the slot; the comma gives the slot's C type a value */
+  else if (pt != TY_POLY && comp_ntype(c, dv) == TY_VOID) {
+    buf_puts(out, "(");
+    emit_expr(c, dv, out);
+    buf_printf(out, ", %s)", pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
+  }
   else if (pt == TY_POLY) emit_boxed(c, dv, out);
   /* A default expression typed poly landing in a concrete parameter slot: it
      was typed in a scope whose class differs from the emitted receiver (a
