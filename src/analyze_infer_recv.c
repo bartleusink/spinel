@@ -2035,7 +2035,18 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   /* poly.new(args): instantiating a Class value read out of a container yields
      a fresh object, boxed poly (#2888). */
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "new") &&
-      nt_ref(nt, id, "block") < 0 && !an_user_defines_method(c, name))
-    { *out = TY_POLY; return 1; }
+      !an_user_defines_method(c, name)) {
+    /* a block goes to each class's `&blk`; a yielding initialize has none,
+       and is inlined at static sites only (codegen's ctor_block_dispatchable) */
+    int blk_ok = nt_ref(nt, id, "block") < 0;
+    if (!blk_ok) {
+      blk_ok = 1;
+      for (int k = 0; k < c->nclasses && blk_ok; k++) {
+        int im = comp_method_in_chain(c, k, "initialize", NULL);
+        if (im >= 0 && c->scopes[im].yields) blk_ok = 0;
+      }
+    }
+    if (blk_ok) { *out = TY_POLY; return 1; }
+  }
   return 0;
 }

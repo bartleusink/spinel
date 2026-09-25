@@ -326,6 +326,7 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
 }
 
 static void emit_cmethod_block_arg(Compiler *c, int id, Scope *cm, int blk_tmp, Buf *b);
+static void emit_ctor_block_slot(Compiler *c, int id, int initm, const char *lead, Buf *b);
 
 /* Emit `node` as a `sp_Bigint *` for a mixed bigint operand (arithmetic or
    comparison where the other side is bigint): a bigint stays itself, a poly is
@@ -9330,7 +9331,7 @@ int ctor_needs_self_defaults(Compiler *c, int initm, int argc) {
    object (no initialize), then run initialize with self bound to it, so the
    default sees the object CRuby would have evaluated it on. Answers the object
    (a pointer, or the struct itself for a value-type class). */
-void emit_ctor_alloc_init(Compiler *c, int cid, int initm, int argsNode, Buf *b) {
+void emit_ctor_alloc_init(Compiler *c, int cid, int initm, int argsNode, int call_id, Buf *b) {
   ClassInfo *ci = &c->classes[cid];
   int is_val = comp_ty_value_obj(c, ty_object(cid));
   int initcls = cid;
@@ -9353,6 +9354,7 @@ void emit_ctor_alloc_init(Compiler *c, int cid, int initm, int argsNode, Buf *b)
   Buf *sv_pre = g_pre; int sv_ind = g_indent;
   g_pre = &apre; g_indent = 0;
   if (initm >= 0) emit_args_filled(c, initm, argsNode, ", ", &args);
+  if (initm >= 0) emit_ctor_block_slot(c, call_id, initm, ", ", &args);   /* its `&blk` */
   g_pre = sv_pre; g_indent = sv_ind;
   if (apre.p) buf_puts(b, apre.p);
   /* An INHERITED #initialize takes the defining class's pointer: without the
@@ -9573,14 +9575,86 @@ static int init_takes_keywords(Compiler *c, int initm) {
   return nkw > 0 || nt_ref(nt, pn, "keyword_rest") >= 0;
 }
 
-static void emit_ctor_block_slot(Compiler *c, int initm, const char *lead, Buf *b);
+static void emit_ctor_block_slot(Compiler *c, int id, int initm, const char *lead, Buf *b);
+
+/* The block a constructor call hands its initialize's `&blk`: a literal
+   block as a proc, a forwarded `&h` resolved against the site it was
+   inlined into (resolve_forwarded_block), a proc value, or NULL. The
+   dispatches below hoist it once as _t<g_ctor_blk_tmp>. Each spelling of
+   `new` wrote its own subset of this: the Class-value dispatches passed NULL
+   whatever the call carried, and bare `new(&h)` in a class method left the
+   slot out, so the C did not compile. */
+static int g_ctor_blk_tmp = -1;
+static void emit_ctor_block_value(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (g_ctor_blk_tmp >= 0) { buf_printf(b, "_t%d", g_ctor_blk_tmp); return; }
+  int blk = id >= 0 ? resolve_forwarded_block(c, nt_ref(nt, id, "block")) : -1;
+  NodeKind bk = nt_kind(nt, blk);
+  if (bk == NK_BlockNode) { emit_proc_literal(c, blk, b); return; }
+  if (bk != NK_BlockArgumentNode) { buf_puts(b, "NULL"); return; }
+  int bexpr = nt_ref(nt, blk, "expression");
+  /* a proc value threads itself into the stored `&blk`; a boxed one (read
+     out of a poly slot) unboxes to its sp_Proc * */
+  if (bexpr >= 0 && comp_ntype(c, bexpr) == TY_PROC) emit_expr(c, bexpr, b);
+  else if (bexpr >= 0 && comp_ntype(c, bexpr) == TY_POLY) {
+    buf_puts(b, "(sp_Proc *)("); emit_expr(c, bexpr, b); buf_puts(b, ").v.p");
+  }
+  /* an anonymous `&` forwards the enclosing method's own proc */
+  else if (bexpr < 0) emit_forwarded_proc_arg(c, blk, b);
+  /* a block of an unmodeled static type: refuse rather than thread NULL,
+     which a later @blk.call would misread */
+  else unsupported(c, id, "forwarding a block of this type into a stored-block initialize");
+}
+
+/* Hoist the call's block into a rooted temp at the head of a dispatch's
+   statement expression, so each arm passes the one proc. Returns the
+   previous g_ctor_blk_tmp for the caller to restore. */
+static int hoist_ctor_block(Compiler *c, int id, Buf *b) {
+  int sv = g_ctor_blk_tmp;
+  g_ctor_blk_tmp = -1;
+  if (nt_ref(c->nt, id, "block") < 0) return sv;
+  Buf pb; memset(&pb, 0, sizeof pb);
+  emit_ctor_block_value(c, id, &pb);
+  int t = ++g_tmp;
+  buf_printf(b, "sp_Proc *_t%d = %s; SP_GC_ROOT(_t%d); ", t, pb.p ? pb.p : "NULL", t);
+  free(pb.p);
+  g_ctor_blk_tmp = t;
+  return sv;
+}
+
+/* Can a Class-value `new` dispatch take this call's block? Each arm hands
+   it to its class's `&blk` (emit_ctor_block_slot); a yielding initialize
+   has no such slot and is inlined at static sites only. */
+static int ctor_block_dispatchable(Compiler *c, int id) {
+  if (nt_ref(c->nt, id, "block") < 0) return 1;
+  for (int k = 0; k < c->nclasses; k++) {
+    int im = comp_method_in_chain(c, k, "initialize", NULL);
+    if (im >= 0 && c->scopes[im].yields) return 0;
+  }
+  return 1;
+}
+
+/* The trailing block slot of a class's constructor: an initialize that keeps
+   a named `&blk` (and does not yield) takes it as a C parameter. Leaving it
+   out put a call with too few arguments into every such arm -- a class the
+   receiver was never going to be stopped the build (#4855). `lead` is the
+   separator after the positional arguments. */
+static void emit_ctor_block_slot(Compiler *c, int id, int initm, const char *lead, Buf *b) {
+  if (initm < 0) return;
+  Scope *is = &c->scopes[initm];
+  if (!is->blk_param || !is->blk_param[0] || is->yields) return;
+  buf_puts(b, lead);
+  emit_ctor_block_value(c, id, b);
+}
 
 static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Buf *b) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
   int kt = ++g_tmp, rt2 = ++g_tmp;
   buf_printf(b, "({ %s _t%d = ", boxed ? "sp_RbVal" : "sp_Class", kt); emit_expr(c, recv, b);
-  buf_printf(b, "; sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
+  buf_puts(b, "; ");
+  int sv_cbt = hoist_ctor_block(c, id, b);
+  buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
   /* the operand of a sole `*splat`, or the SplatNode itself for an anonymous
      `*` forwarding the method's rest (`k.new(*)`) */
   int sole_splat = argc == 1 && nt_kind(nt, argv[0]) == NK_SplatNode ? nt_ref(nt, argv[0], "expression") : -1;
@@ -9681,7 +9755,7 @@ static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Bu
     emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", &aval);
     /* the constructor's &block slot, as in the positional arms: a `**`
        forwarded here left it out (#4882) */
-    emit_ctor_block_slot(c, initm, aval.p && aval.p[0] ? ", " : "", &aval);
+    emit_ctor_block_slot(c, id, initm, aval.p && aval.p[0] ? ", " : "", &aval);
     g_pre = sv_pre;
     buf_printf(b, "case %d: { %s _t%d=", ci, apre.p ? apre.p : "", rt2);
     if (c->classes[ci].is_value_type)
@@ -9696,20 +9770,7 @@ static void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Bu
     buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", _t%d)); } _t%d; })", kt, rt2);
   else
     buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", sp_box_class(_t%d))); } _t%d; })", kt, rt2);
-}
-
-/* The trailing block slot of a class's constructor, for the class-value
-   `new` dispatch arms: an initialize that keeps a named `&blk` (and does not
-   yield) takes it as a C parameter. These dispatches are only reached with no
-   block at the call, so the slot is NULL. Leaving it out put a call with too
-   few arguments into every such arm -- a class the receiver was never going
-   to be stopped the build (#4855). `lead` is the separator after the
-   positional arguments. */
-static void emit_ctor_block_slot(Compiler *c, int initm, const char *lead, Buf *b) {
-  if (initm < 0) return;
-  Scope *is = &c->scopes[initm];
-  if (!is->blk_param || !is->blk_param[0] || is->yields) return;
-  buf_printf(b, "%sNULL", lead);
+  g_ctor_blk_tmp = sv_cbt;
 }
 
 static int emit_class_new_call(Compiler *c, int id, Buf *b) {
@@ -9851,7 +9912,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         int initm = comp_method_in_chain(c, ci, "initialize", NULL);
         if (ctor_needs_self_defaults(c, initm, argc) && !class_is_exc_subclass(c, ci)) {
           buf_printf(b, is_val ? "sp_box_vobj_%s(" : "sp_box_obj(", c->classes[ci].c_name);
-          emit_ctor_alloc_init(c, ci, initm, nt_ref(nt, id, "arguments"), b);
+          emit_ctor_alloc_init(c, ci, initm, nt_ref(nt, id, "arguments"), id, b);
           if (is_val) buf_puts(b, ")");
           else buf_printf(b, ", %d)", ci);
           return 1;
@@ -9859,6 +9920,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         if (is_val) buf_printf(b, "sp_box_vobj_%s(sp_%s_new(", c->classes[ci].c_name, c->classes[ci].c_name);
         else buf_printf(b, "sp_box_obj(sp_%s_new(", c->classes[ci].c_name);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
+        if (initm >= 0) emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
         if (is_val) buf_puts(b, "))");
         else buf_printf(b, "), %d)", ci);
         return 1;
@@ -10097,6 +10159,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
             /* user initialize: sp_ClassName_new(args) calls initialize which calls super(msg) */
             buf_printf(b, "sp_%s_new(", c->classes[ci].c_name);
             emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
+            emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
             buf_puts(b, ")");
           }
           else {
@@ -10146,7 +10209,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         {
           int initm0 = comp_method_in_chain(c, ci, "initialize", NULL);
           if (ctor_needs_self_defaults(c, initm0, argc) && !class_is_exc_subclass(c, ci)) {
-            emit_ctor_alloc_init(c, ci, initm0, nt_ref(nt, id, "arguments"), b);
+            emit_ctor_alloc_init(c, ci, initm0, nt_ref(nt, id, "arguments"), id, b);
             return 1;
           }
         }
@@ -10154,43 +10217,8 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         int initm = comp_method_in_chain(c, ci, "initialize", NULL);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
         /* An explicit `&blk` on a non-yielding initialize is threaded as a
-           trailing sp_Proc* (the constructor accepts + forwards it). Pass the
-           call's block, or NULL when the block is omitted. */
-        if (initm >= 0 && c->scopes[initm].blk_param && c->scopes[initm].blk_param[0] &&
-            !c->scopes[initm].yields) {
-          if (c->scopes[initm].nparams > 0) buf_puts(b, ", ");
-          /* A forwarded `&blk` / `&` of an inlined enclosing method resolves to
-             that method's literal block (as in emit_method_call); one that
-             survives names a real proc param (anonymous `&` in a real-function
-             body) and emit_forwarded_proc_arg writes it. */
-          int blk = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
-          const char *bty = blk >= 0 ? nt_type(nt, blk) : NULL;
-          int bexpr = (bty && sp_streq(bty, "BlockArgumentNode")) ? nt_ref(nt, blk, "expression") : -1;
-          if (bty && sp_streq(bty, "BlockNode"))
-            emit_proc_literal(c, blk, b);
-          else if (bty && sp_streq(bty, "BlockArgumentNode") && bexpr < 0)
-            emit_forwarded_proc_arg(c, blk, b);
-          /* A forwarded `&proc` (BlockArgumentNode) threads the proc value
-             itself into the stored `&blk`. This is faithful now that every proc
-             publishes its result on the boxed return channel, so a later
-             `@blk.call` reads it back correctly regardless of the proc's body
-             type (the reason this once had to be a loud reject). */
-          else if (bexpr >= 0 && comp_ntype(c, bexpr) == TY_PROC)
-            emit_expr(c, bexpr, b);
-          /* A poly-carried proc (a proc pulled from a poly slot -- a container
-             element, an untyped ivar/return) arrives boxed; unbox it to the
-             sp_Proc*, mirroring the poly `.call` site's `(sp_Proc *)v.v.p`. */
-          else if (bexpr >= 0 && comp_ntype(c, bexpr) == TY_POLY) {
-            buf_puts(b, "(sp_Proc *)("); emit_expr(c, bexpr, b); buf_puts(b, ").v.p");
-          }
-          /* A forwarded block of an unmodeled static type: refuse loudly rather
-             than silently thread a NULL block (a later @blk.call would misfire
-             -- the silent-wrong outcome). block omitted (bexpr < 0) is the real
-             NULL case below. */
-          else if (bexpr >= 0)
-            unsupported(c, id, "forwarding a block of this type into a stored-block initialize");
-          else buf_puts(b, "NULL");
-        }
+           trailing sp_Proc* (the constructor accepts + forwards it). */
+        if (initm >= 0) emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
         buf_puts(b, ")");
         return 1;
       }
@@ -25619,6 +25647,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             emit_ctor_yield_inline(c, id, new_cls, b)) return;
         buf_printf(b, "sp_%s_new(", ncls->c_name);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
+        if (initm >= 0) emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
         buf_puts(b, ")");
         return;
       }
@@ -27720,7 +27749,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
      whose constructor takes exactly these positional args, each argument
      hoisted once and coerced per arm. */
   if (recv >= 0 && sp_streq(name, "new") && comp_ntype(c, recv) == TY_CLASS &&
-      argc > 0 && nt_ref(nt, id, "block") < 0 &&
+      argc > 0 && ctor_block_dispatchable(c, id) &&
       (class_recv_is_dynamic(c, recv) ||
        /* `self.new(args)` in a class method: self is the RECEIVING class (a
           subclass inherits the method with self = itself), so the receiver
@@ -27745,6 +27774,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     }
     int *atmp = calloc((size_t)argc, sizeof(int));
     buf_printf(b, "({ sp_Class _t%d = ", kt); emit_expr(c, recv, b); buf_puts(b, "; ");
+    int sv_cbt = hoist_ctor_block(c, id, b);
     for (int a = 0; a < argc; a++) {
       atmp[a] = ++g_tmp;
       buf_printf(b, "sp_RbVal _t%d = ", atmp[a]); emit_boxed(c, argv[a], b);
@@ -27845,7 +27875,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         if (pt == TY_POLY) buf_puts(b, tn);
         else emit_unbox_text(c, pt, tn, b);
       }
-      emit_ctor_block_slot(c, initm, np > 0 ? ", " : "", b);
+      emit_ctor_block_slot(c, id, initm, np > 0 ? ", " : "", b);
       if (c->classes[ci].is_value_type) buf_printf(b, "));break;");
       else buf_printf(b, "),%d);break;", ci);
     }
@@ -27856,6 +27886,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        later. */
     buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", sp_box_class(_t%d))); } _t%d; })",
                kt, rt2);
+    g_ctor_blk_tmp = sv_cbt;
     free(atmp);
     return;
   }
@@ -27873,6 +27904,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       argc == 0) {
     int kt = ++g_tmp, rt2 = ++g_tmp;
     buf_printf(b, "({ sp_Class _t%d = ", kt); emit_expr(c, recv, b); buf_printf(b, "; ");
+    int sv_cbt = hoist_ctor_block(c, id, b);
     buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); ", rt2);
     buf_printf(b, "switch(_t%d.cls_id){", kt);
     for (int ci = 0; ci < c->nclasses; ci++) {
@@ -27913,7 +27945,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       Buf ab9; memset(&ab9, 0, sizeof ab9);
       if (initm >= 0 && c->scopes[initm].nparams > 0)
         emit_args_filled(c, initm, -1, "", &ab9);
-      emit_ctor_block_slot(c, initm, ab9.p && ab9.p[0] ? ", " : "", &ab9);
+      emit_ctor_block_slot(c, id, initm, ab9.p && ab9.p[0] ? ", " : "", &ab9);
       const char *args9 = ab9.p ? ab9.p : "";
       /* a value-type object returns by value: box via its vobj boxer, not
          sp_box_obj which expects a heap pointer (#2450) */
@@ -27926,6 +27958,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       free(ab9.p);
     }
     buf_printf(b, "} _t%d; })", rt2);
+    g_ctor_blk_tmp = sv_cbt;
     return;
   }
 
@@ -27936,7 +27969,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
      arm; any other runtime class lands in the NoMethodError default, matching
      CRuby's ArgumentError/NoMethodError. (#2888) */
   if (recv >= 0 && sp_streq(name, "new") && comp_ntype(c, recv) == TY_POLY &&
-      nt_ref(nt, id, "block") < 0) {
+      ctor_block_dispatchable(c, id)) {
     /* keyword arguments: laid out per class by name, as in the Class-valued
        form above (#4845) -- positionally they bound `k: v` to a parameter;
        likewise a `*splat`, which bound the whole array */
@@ -27947,6 +27980,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     int kt = ++g_tmp, rt2 = ++g_tmp;
     int *atmp = argc ? calloc(argc, sizeof(int)) : NULL;
     buf_printf(b, "({ sp_RbVal _t%d = ", kt); emit_expr(c, recv, b); buf_puts(b, "; ");
+    int sv_cbt = hoist_ctor_block(c, id, b);
     for (int a = 0; a < argc; a++) {
       atmp[a] = ++g_tmp;
       buf_printf(b, "sp_RbVal _t%d = ", atmp[a]); emit_boxed(c, argv[a], b); buf_puts(b, "; ");
@@ -27970,14 +28004,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         if (ctor_needs_self_defaults(c, initm, 0)) {
           buf_printf(b, c->classes[ci].is_value_type ? "sp_box_vobj_%s(" : "sp_box_obj(",
                      c->classes[ci].c_name);
-          emit_ctor_alloc_init(c, ci, initm, -1, b);
+          emit_ctor_alloc_init(c, ci, initm, -1, id, b);
           if (c->classes[ci].is_value_type) buf_puts(b, "); break;");
           else buf_printf(b, ",%d); break;", ci);
           continue;
         }
         Buf ad; memset(&ad, 0, sizeof ad);
         emit_args_filled(c, initm, -1, "", &ad);
-        emit_ctor_block_slot(c, initm, ad.p && ad.p[0] ? ", " : "", &ad);
+        emit_ctor_block_slot(c, id, initm, ad.p && ad.p[0] ? ", " : "", &ad);
         if (c->classes[ci].is_value_type)
           buf_printf(b, "sp_box_vobj_%s(sp_%s_new(%s)); break;",
                      c->classes[ci].c_name, c->classes[ci].c_name, ad.p ? ad.p : "");
@@ -28025,11 +28059,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, pt, tn, &ub);
         buf_puts(b, ub.p ? ub.p : tn); free(ub.p);
       }
-      emit_ctor_block_slot(c, initm, np > 0 ? ", " : "", b);
+      emit_ctor_block_slot(c, id, initm, np > 0 ? ", " : "", b);
       if (c->classes[ci].is_value_type) buf_puts(b, ")); break;");
       else buf_printf(b, "),%d); break;", ci);
     }
     buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", _t%d)); } _t%d; })", kt, rt2);
+    g_ctor_blk_tmp = sv_cbt;
     free(atmp);
     return;
   }
@@ -28074,6 +28109,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       int initm = comp_method_in_chain(c, cid, "initialize", NULL);
       if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
       else for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
+      if (initm >= 0) emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
       buf_puts(b, ")");
       return;
     }
@@ -28094,6 +28130,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           /* user initialize: call the generated sp_ClassName_new(args) constructor */
           buf_printf(b, "sp_%s_new(", c->classes[ci].c_name);
           emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
+          emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
           buf_puts(b, ")");
         }
         else {
@@ -28128,6 +28165,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, "sp_%s_new(", c->classes[ci].c_name);
         int initm = comp_method_in_chain(c, ci, "initialize", NULL);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
+        if (initm >= 0) emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
         buf_puts(b, ")");
         return;
       }
