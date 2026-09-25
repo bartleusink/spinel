@@ -1358,7 +1358,12 @@ static TyKind an_poly_concrete(Compiler *c, const char *name, TyKind t) {
      and a poly there made the arm assign sp_poly_values()'s raw sp_PolyArray *
      into the boxed slot the user arms need. */
   if (an_builtin_only) return t;
-  for (int k = 0; k < c->nclasses; k++) {
+  /* the classes answering the name, memoized per name: this ran
+     comp_method_in_chain over every class on every poly call (#4965) */
+  int npc = 0;
+  const PolyCand *pcs = comp_poly_candidates(c, name, &npc);
+  for (int pi = 0; pi < npc; pi++) {
+    int k = pcs[pi].cls;
     /* A native class's methods are its declared bindings, and that is the
        rule the poly dispatch counts candidates by (codegen's iocand loop,
        #4474): a Ruby-side def on one -- IO::Buffer#read over an IO -- is no
@@ -1368,7 +1373,7 @@ static TyKind an_poly_concrete(Compiler *c, const char *name, TyKind t) {
        the poly-IO arm answered its raw const char *, and the C did not
        build. an_user_read_ty and the dispatch union already skip them. */
     if (c->classes[k].is_native_class) continue;
-    int mi = comp_method_in_chain(c, k, name, NULL);
+    int mi = pcs[pi].mi;
     if (mi < 0 || mi >= c->nscopes) continue;
     TyKind r = (TyKind)c->scopes[mi].ret;
     if (r == t || r == TY_UNKNOWN || r == TY_VOID) continue;
