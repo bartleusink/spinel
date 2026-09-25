@@ -2501,7 +2501,20 @@ const char *iv_c(const char *name) {
 }
 int scope_is_shadowed(Compiler *c, int s) {
   Scope *sc = &c->scopes[s];
-  if (sc->class_id < 0 || !sc->name) return 0;
+  if (!sc->name) return 0;
+  /* a redefined top-level method: only a later `def` of the same name
+     shadows it, and comp_method_index answers that one. Emitting both was
+     a C redefinition when the signatures matched. */
+  if (sc->class_id < 0) {
+    if (sc->def_node < 0 || nt_kind(c->nt, sc->def_node) != NK_DefNode) return 0;
+    for (int k = s + 1; k < c->nscopes; k++) {
+      Scope *o = &c->scopes[k];
+      if (o->class_id < 0 && o->is_cmethod == sc->is_cmethod && o->name &&
+          sp_streq(o->name, sc->name) && o->def_node >= 0 && o->def_node != sc->def_node &&
+          nt_kind(c->nt, o->def_node) == NK_DefNode) return 1;
+    }
+    return 0;
+  }
   for (int k = s + 1; k < c->nscopes; k++) {
     Scope *o = &c->scopes[k];
     if (o->class_id == sc->class_id && o->is_cmethod == sc->is_cmethod &&
