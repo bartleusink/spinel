@@ -228,6 +228,29 @@ int an_user_defines_or_reads(Compiler *c, const char *name) {
 
 void sp_narrow_memo_bump(void) { g_narrow_gen++; }
 
+/* Is node `id` the receiver of some call? Asked while typing every
+   `Hash.new` (#3823), it walked every call in the program per ask, per round
+   (rubys/roundhouse#72). A bit per node, rebuilt per fixpoint iteration like
+   the narrow memo above, and when the table grows. */
+static unsigned char *g_recv_used;
+static unsigned g_recv_gen;
+static const NodeTable *g_recv_nt;
+static int g_recv_cnt = -1;
+static int node_is_call_receiver(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (g_recv_gen != g_narrow_gen || g_recv_nt != nt || g_recv_cnt != nt->count) {
+    free(g_recv_used);
+    g_recv_used = calloc((size_t)(nt->count > 0 ? nt->count : 1), 1);
+    if (!g_recv_used) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    NT_FOREACH_KIND(nt, NK_CallNode, use) {
+      int r = nt_ref(nt, use, "receiver");
+      if (r >= 0 && r < nt->count) g_recv_used[r] = 1;
+    }
+    g_recv_gen = g_narrow_gen; g_recv_nt = nt; g_recv_cnt = nt->count;
+  }
+  return id >= 0 && id < g_recv_cnt && g_recv_used[id];
+}
+
 /* ---- A hash whose values are all one class (#4846) ----
    `@items = {}` filled only by `@items[k] = item` keeps boxed values (there is
    no object-valued hash kind), so every read of a value was poly and every
@@ -3033,9 +3056,7 @@ else {
            staying unknown made every method on it an unresolved call
            ("undefined method 'fetch' for unknown", #3823). The faithful
            variant is the one the argument position already uses. */
-        NT_FOREACH_KIND(nt, NK_CallNode, use) {
-          if (nt_ref(nt, use, "receiver") == id) return TY_POLY_POLY_HASH;
-        }
+        if (node_is_call_receiver(c, id)) return TY_POLY_POLY_HASH;
         /* ...and a Hash.new that is a method's VALUE has no receiver use of
            its own either, so it stayed unknown and the method emitted as
            void: `def mk = Hash.new(0)` answered nothing, and every call on
