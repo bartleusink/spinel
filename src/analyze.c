@@ -2873,12 +2873,77 @@ static int method_in_override_family(Compiler *c, int class_id,
   return 0;
 }
 
+/* Does every value `id` can produce name a class (a constant that is one of
+   the program's classes)? The class names met are appended to `names`. */
+static int value_leaves_are_classes(Compiler *c, int id, char *names, size_t cap, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || depth > 32) return 0;
+  switch (nt_kind(nt, id)) {
+  case NK_StatementsNode: {
+    int n = 0; const int *b = nt_arr(nt, id, "body", &n);
+    return b && n > 0 && value_leaves_are_classes(c, b[n - 1], names, cap, depth + 1);
+  }
+  case NK_ParenthesesNode:
+    return value_leaves_are_classes(c, nt_ref(nt, id, "body"), names, cap, depth + 1);
+  case NK_IfNode: case NK_UnlessNode: {
+    int els = nt_ref(nt, id, nt_kind(nt, id) == NK_IfNode ? "subsequent" : "else_clause");
+    return value_leaves_are_classes(c, nt_ref(nt, id, "statements"), names, cap, depth + 1) &&
+           value_leaves_are_classes(c, els, names, cap, depth + 1);
+  }
+  case NK_ElseNode:
+    return value_leaves_are_classes(c, nt_ref(nt, id, "statements"), names, cap, depth + 1);
+  case NK_ConstantReadNode: case NK_ConstantPathNode: {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || comp_class_index(c, nm) < 0) return 0;
+    if (!strstr(names, nm) && strlen(names) + strlen(nm) + 3 < cap) {
+      if (*names) strcat(names, ", ");
+      strcat(names, nm);
+    }
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+/* A return seed naming an instance type (`-> Story`, or a union of them)
+   on a method whose every value is a class (`def searched_model = Story`):
+   the RBS means `singleton(Story)`. Pinned as it stands, a single class
+   declared the C return as `sp_Story *` and returned the sp_Class into it,
+   which the C compiler rejected without a word about the signature; a union
+   compiles (both are boxed) but types every call on the value from the wrong
+   side. Answers 1 when the seed must be dropped. */
+static int seed_ret_contradicts_class_body(Compiler *c, Scope *s, TyKind rt) {
+  if (!ty_is_object(rt) && rt != TY_POLY) return 0;
+  if (s->body < 0) return 0;
+  char names[256] = "";
+  if (!value_leaves_are_classes(c, s->body, names, sizeof names, 0)) return 0;
+  const NodeTable *nt = c->nt;
+  int si = (int)(s - c->scopes);
+  NT_FOREACH_KIND(nt, NK_ReturnNode, rid) {
+    if (c->nscope[rid] != si) continue;
+    int an = nt_ref(nt, rid, "arguments"), n = 0;
+    const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &n) : NULL;
+    if (!av || n != 1 || !value_leaves_are_classes(c, av[0], names, sizeof names, 0)) return 0;
+  }
+  const char *cls = s->class_id >= 0 && s->class_id < c->nclasses ? c->classes[s->class_id].name : NULL;
+  fprintf(stderr, "spinel: warning: --rbs: %s%s%s is declared to return an instance, but it returns "
+                  "the class itself (%s); write singleton(...) in the signature. %s\n",
+          cls ? cls : "", cls ? (s->is_cmethod ? "." : "#") : "", s->name ? s->name : "?", names,
+          ty_is_object(rt) ? "The declaration is ignored."
+                           : "Calls on its value are typed from the declaration.");
+  return ty_is_object(rt);
+}
+
 /* Pin scope `s`'s return and each named parameter to its seeded type. ptypes
    is a comma-separated, param-index-aligned list (empty fields preserved so a
    skipped middle param doesn't shift the rest). */
 static void seed_method(Compiler *c, Scope *s, const char *ret_tok, char *ptypes) {
   if (!s) return;
   TyKind rt = parse_seed_type(c, ret_tok);
+  int nilable_seed = g_seed_nilable;
+  if (rt != TY_UNKNOWN && seed_ret_contradicts_class_body(c, s, rt)) rt = TY_UNKNOWN;
+  g_seed_nilable = nilable_seed;
   if (rt != TY_UNKNOWN) {
     s->ret = rt; s->ret_rbs_seeded = 1;
     /* `String?` is as nilable as `Integer?`: a bare `const char *` slot

@@ -1440,6 +1440,30 @@ __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what
           unsup_leave(file, ln, msg);
         }
       }
+      /* A Class value no class answers: `searched_model.none` where the method
+         returns `Story` or `Comment` and neither defines `self.none`. CRuby
+         raises NoMethodError when it is reached; say that rather than the
+         node dump. A name Module/Class itself has is a spinel gap instead. */
+      if (rvt == TY_CLASS) {
+        static const char *const module_surface[] = {
+          "new", "allocate", "superclass", "name", "to_s", "inspect", "ancestors",
+          "instance_methods", "public_instance_methods", "private_instance_methods",
+          "instance_method", "method_defined?", "public_method_defined?",
+          "private_method_defined?", "protected_method_defined?", "const_get",
+          "const_set", "const_defined?", "constants", "class_variable_get",
+          "class_variable_set", "class_variables", "class_eval", "module_eval",
+          "class_exec", "module_exec", "include?", "included_modules", "define_method",
+          "alias_method", "attr_accessor", "attr_reader", "attr_writer", "subclasses",
+          "attached_object", "private_constant", "module_function", "include",
+          "extend", "prepend", "remove_method", "undef_method", "<", "<=", ">", ">=",
+          "<=>", "==", "===", "hash", "freeze", NULL };
+        int ncc = 0;
+        comp_cmethod_candidates(c, mname, &ncc);
+        if (ncc == 0 && !builtin_object_method_known(mname) && !str_in(mname, module_surface)) {
+          snprintf(msg, sizeof msg, "undefined method '%s' for a Class: no class in the program defines a class method '%s' (NoMethodError)", mname, mname);
+          unsup_leave(file, ln, msg);
+        }
+      }
       if (ty_is_object(rvt)) {
         int cid = ty_object_class(rvt);
         /* a name every object answers (`send`, `tap`, ...) is not the
