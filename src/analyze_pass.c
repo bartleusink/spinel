@@ -1971,6 +1971,40 @@ static int recv_hash_or_write(Compiler *c, int recv) {
   return n;
 }
 
+/* Unify elem into each local / ivar / constant target of a multi-write's
+   lefts or rights. Returns 1 when an ivar or constant slot moved. */
+static int masgn_unify_elem(Compiler *c, Scope *ms, const int *tgts, int n, TyKind elem) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int i = 0; i < n; i++) {
+    const char *lty_ms = nt_type(nt, tgts[i]) ? nt_type(nt, tgts[i]) : "";
+    if (sp_streq(lty_ms, "LocalVariableTargetNode")) {
+      const char *lnm = nt_str(nt, tgts[i], "name");
+      LocalVar *lv = lnm ? scope_local(ms, lnm) : NULL;
+      if (!lv || lv->is_param || lv->is_block_param) continue;
+      lv->type = ty_unify(lv->type, elem);
+    }
+    else if (sp_streq(lty_ms, "InstanceVariableTargetNode") &&
+             ms && ms->class_id >= 0) {
+      const char *ivnm = nt_str(nt, tgts[i], "name");
+      int iv_ms = ivnm ? comp_ivar_index(&c->classes[ms->class_id], ivnm) : -1;
+      if (iv_ms < 0 || class_ivar_pinned(&c->classes[ms->class_id], ivnm)) continue;
+      TyKind mg = ty_unify(c->classes[ms->class_id].ivar_types[iv_ms], elem);
+      if (mg != c->classes[ms->class_id].ivar_types[iv_ms]) {
+        c->classes[ms->class_id].ivar_types[iv_ms] = mg; changed = 1;
+      }
+    }
+    else if (sp_streq(lty_ms, "ConstantTargetNode")) {
+      const char *cnm_ms = nt_str(nt, tgts[i], "name");
+      LocalVar *cv_ms = cnm_ms ? comp_const(c, cnm_ms) : NULL;
+      if (!cv_ms) continue;
+      TyKind mg_ms = ty_unify(cv_ms->type, elem);
+      if (mg_ms != cv_ms->type) { cv_ms->type = mg_ms; changed = 1; }
+    }
+  }
+  return changed;
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -2311,58 +2345,8 @@ int infer_write_types(Compiler *c) {
           int rn2 = 0;
           const int *rights2 = nt_arr(nt, id, "rights", &rn2);
           Scope *ms_arr = comp_scope_of(c, id);
-          for (int i = 0; i < ln; i++) {
-            const char *lty_ms = nt_type(nt, lefts[i]) ? nt_type(nt, lefts[i]) : "";
-            if (sp_streq(lty_ms, "LocalVariableTargetNode")) {
-              const char *lnm = nt_str(nt, lefts[i], "name");
-              LocalVar *lv = lnm ? scope_local(ms_arr, lnm) : NULL;
-              if (!lv || lv->is_param || lv->is_block_param) continue;
-              lv->type = ty_unify(lv->type, elem);
-            }
-            else if (sp_streq(lty_ms, "InstanceVariableTargetNode") &&
-                     ms_arr && ms_arr->class_id >= 0) {
-              const char *ivnm = nt_str(nt, lefts[i], "name");
-              int iv_ms = ivnm ? comp_ivar_index(&c->classes[ms_arr->class_id], ivnm) : -1;
-              if (iv_ms < 0 || class_ivar_pinned(&c->classes[ms_arr->class_id], ivnm)) continue;
-              TyKind mg = ty_unify(c->classes[ms_arr->class_id].ivar_types[iv_ms], elem);
-              if (mg != c->classes[ms_arr->class_id].ivar_types[iv_ms]) {
-                c->classes[ms_arr->class_id].ivar_types[iv_ms] = mg; changed = 1;
-              }
-            }
-            else if (sp_streq(lty_ms, "ConstantTargetNode")) {
-              const char *cnm_ms = nt_str(nt, lefts[i], "name");
-              LocalVar *cv_ms = cnm_ms ? comp_const(c, cnm_ms) : NULL;
-              if (!cv_ms) continue;
-              TyKind mg_ms = ty_unify(cv_ms->type, elem);
-              if (mg_ms != cv_ms->type) { cv_ms->type = mg_ms; changed = 1; }
-            }
-          }
-          for (int j = 0; j < rn2; j++) {
-            const char *lty_ms = nt_type(nt, rights2[j]) ? nt_type(nt, rights2[j]) : "";
-            if (sp_streq(lty_ms, "LocalVariableTargetNode")) {
-              const char *rnm2 = nt_str(nt, rights2[j], "name");
-              LocalVar *lv = rnm2 ? scope_local(ms_arr, rnm2) : NULL;
-              if (!lv || lv->is_param || lv->is_block_param) continue;
-              lv->type = ty_unify(lv->type, elem);
-            }
-            else if (sp_streq(lty_ms, "InstanceVariableTargetNode") &&
-                     ms_arr && ms_arr->class_id >= 0) {
-              const char *ivnm2 = nt_str(nt, rights2[j], "name");
-              int iv_ms2 = ivnm2 ? comp_ivar_index(&c->classes[ms_arr->class_id], ivnm2) : -1;
-              if (iv_ms2 < 0 || class_ivar_pinned(&c->classes[ms_arr->class_id], ivnm2)) continue;
-              TyKind mg2 = ty_unify(c->classes[ms_arr->class_id].ivar_types[iv_ms2], elem);
-              if (mg2 != c->classes[ms_arr->class_id].ivar_types[iv_ms2]) {
-                c->classes[ms_arr->class_id].ivar_types[iv_ms2] = mg2; changed = 1;
-              }
-            }
-            else if (sp_streq(lty_ms, "ConstantTargetNode")) {
-              const char *cnm_ms2 = nt_str(nt, rights2[j], "name");
-              LocalVar *cv_ms2 = cnm_ms2 ? comp_const(c, cnm_ms2) : NULL;
-              if (!cv_ms2) continue;
-              TyKind mg_ms2 = ty_unify(cv_ms2->type, elem);
-              if (mg_ms2 != cv_ms2->type) { cv_ms2->type = mg_ms2; changed = 1; }
-            }
-          }
+          changed |= masgn_unify_elem(c, ms_arr, lefts, ln, elem);
+          changed |= masgn_unify_elem(c, ms_arr, rights2, rn2, elem);
           int rest_nid2 = nt_ref(nt, id, "rest");
           if (rest_nid2 >= 0) {
             const char *rsty2 = nt_type(nt, rest_nid2);
