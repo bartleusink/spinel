@@ -8663,6 +8663,16 @@ static sp_bool sp_poly_is_a_dyn(sp_RbVal v, sp_RbVal cls, int exact) {
   return exact ? FALSE : sp_poly_kind_of_builtin(v, cn);
 }
 static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
+  /* An Integer read in range out of a boxed array first: it is the hot
+     receiver (optcarrot's `@fetch[addr][addr]`, whose ROM page is a
+     `[nil] * 0x10000` array filled with bytes), and it otherwise went past
+     the Method and IntArray tests into the general element read and a
+     second unbox. Anything else -- a negative index, a miss, a non-Integer
+     element -- takes the full path below, which answers it as before. */
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_POLY_ARRAY && a.v.p) {
+    sp_PolyArray *ar = (sp_PolyArray *)a.v.p;
+    if (i >= 0 && i < ar->len && ar->data[i].tag == SP_TAG_INT) return ar->data[i].v.i;
+  }
   if (a.tag == SP_TAG_INT) return (a.v.i >> i) & 1;
   if (a.tag == SP_TAG_OBJ) {
     if (a.cls_id == SP_BUILTIN_METHOD) {
