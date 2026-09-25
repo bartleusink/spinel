@@ -10,6 +10,8 @@
 #include "sp_json.h"          /* this package's sp_json_str / sp_json_val API */
 #include <string.h>
 #include <stdlib.h>           /* strtoll, strtod */
+#include <errno.h>            /* ERANGE past int64 */
+sp_Bigint *sp_bigint_new_str(const char *s, int base);   /* the runtime archive (sp_bigint.c) */
 
 /* A 0xff-marked rodata literal, so sp_str_byte_len reads its length correctly
    (matches spinel_rt.h's SPL). Used for the fixed tokens true/false/null. */
@@ -161,6 +163,7 @@ SP_COLD static __attribute__((noinline, noreturn)) void sp_json_too_deep(jbuf *b
 static const char *sp_json_scalar(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT:  return sp_int_to_s(v.v.i);
+    case SP_TAG_BIGINT: return sp_bigint_to_s((sp_Bigint *)v.v.p);
     case SP_TAG_FLT:  return sp_float_to_s(v.v.f);
     case SP_TAG_BOOL: return v.v.b ? JSPL("true") : JSPL("false");
     case SP_TAG_NIL:  return JSPL("null");
@@ -440,11 +443,26 @@ static sp_RbVal jp_number(jrd *j) {
     if (j->p == es) jp_err("expected a digit in exponent");
   }
   size_t n = (size_t)(j->p - start);
-  char tmp[64];
-  if (n == 0 || n >= sizeof tmp) jp_err("invalid number");
+  if (n == 0) jp_err("invalid number");
+  /* the digits as a C string: a stack buffer for the usual width, the heap
+     for an integer longer than that, which is a Bignum and has no limit */
+  char stk[64];
+  char *tmp = n < sizeof stk ? stk : (char *)malloc(n + 1);
+  if (!tmp) jp_err("invalid number");
   memcpy(tmp, start, n); tmp[n] = 0;
-  if (is_float) return sp_box_float(strtod(tmp, NULL));
-  return sp_box_i64((int64_t)strtoll(tmp, NULL, 10));   /* a Bignum past a 32-bit sp_int */
+  sp_RbVal r;
+  if (is_float) r = sp_box_float(strtod(tmp, NULL));
+  else {
+    /* past int64 strtoll clamps with ERANGE and the value was answered
+       clamped (9223372036854775808 read back as ...807); the digits
+       themselves make the Bignum instead */
+    errno = 0;
+    long long v = strtoll(tmp, NULL, 10);
+    if (errno == ERANGE) r = sp_box_bigint(sp_bigint_new_str(tmp, 10));
+    else r = sp_box_i64((int64_t)v);   /* a Bignum past a 32-bit sp_int */
+  }
+  if (tmp != stk) free(tmp);
+  return r;
 }
 static sp_RbVal jp_array(jrd *j, int depth) {
   j->p++;  /* '[' */
