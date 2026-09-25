@@ -798,7 +798,12 @@ int recv_hash_new_default_arg(Compiler *c, int recv) {
   Scope *rs = comp_scope_of(c, recv);
   if (!ivn || !rs || rs->class_id < 0) return -1;
   int found = -1;
-  NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, w) {
+  /* the writes of this ivar name only: a key site asks this per round, and a
+     walk of every ivar write in the program per ask was quadratic. The answer
+     does not depend on the order (one Hash.new write, or nothing). */
+  for (int r = ivw_shared_first(c, ivn); r >= 0; r = ivw_shared_next(r)) {
+    int w = ivw_shared_node(r);
+    if (nt_kind(nt, w) != NK_InstanceVariableWriteNode) continue;
     const char *wn = nt_str(nt, w, "name");
     if (!wn || !sp_streq(wn, ivn)) continue;
     Scope *ws = comp_scope_of(c, w);
