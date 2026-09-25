@@ -4326,6 +4326,15 @@ static int struct_new_types_members(Compiler *c, int id, int ci) {
     }
     TyKind m = ty_unify(cls->ivar_types[a], at);
     if (m != cls->ivar_types[a]) { cls->ivar_types[a] = m; changed = 1; }
+    /* An empty `{}` argument has no keys of its own: build it as the variant
+       the member settles on, which writes through the member's reader can
+       widen past what the literal alone says. Built as its own default it
+       was a different hash type from the member it initializes. */
+    if (vnode >= 0 && c->hash_want && vnode < c->node_cap && ty_is_hash(m) &&
+        nt_kind(nt, vnode) == NK_HashNode && c->hash_want[vnode] != m) {
+      int hen = 0; nt_arr(nt, vnode, "elements", &hen);
+      if (hen == 0) { c->hash_want[vnode] = m; changed = 1; }
+    }
   }
   return changed;
 }
