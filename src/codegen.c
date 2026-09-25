@@ -7687,8 +7687,9 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *fci = &c->classes[i];
     if (is_builtin_reopen(fci->name) || fci->is_native_class) continue;
-    if (comp_ty_value_obj(c, ty_object(i))) continue;
     if (comp_class_is_module(c, fci)) continue;
+    /* a value-type class's methods take self by value */
+    int is_val = comp_ty_value_obj(c, ty_object(i));
     const char *mnames[2] = { "to_s", "inspect" };
     for (int m = 0; m < 2; m++) {
       int fdef = -1;
@@ -7697,9 +7698,10 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
           c->scopes[fmi].nparams != 0 || fdef != i) continue;
       /* a debug (-g) build gives user methods external linkage (see
          emit_method_signature); this forward decl must match it */
-      buf_printf(b, "%sconst char *sp_%s_%s(sp_%s *self);\n",
+      buf_printf(b, "%sconst char *sp_%s_%s(sp_%s %sself);\n",
                  g_debug ? "" : "static ",
-                 c->classes[fdef].c_name, mc(c->scopes[fmi].name), c->classes[fdef].c_name);
+                 c->classes[fdef].c_name, mc(c->scopes[fmi].name), c->classes[fdef].c_name,
+                 is_val ? "" : "*");
     }
   }
   /* user #to_s dispatcher: only classes defining one get an arm; NULL means
@@ -7717,15 +7719,25 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
       continue;
     }
     if (is_builtin_reopen(tci->name) || tci->is_native_class) continue;
-    if (comp_ty_value_obj(c, ty_object(i))) continue;
     /* a module has no instances and its methods are emitted only as the
        includer's (sp_V_to_s, never sp_M_to_s): an arm for it referenced a
        function no TU defines and the program did not link (#4533) */
     if (comp_class_is_module(c, tci)) continue;
     int tdef = -1;
     int tmi = comp_method_in_chain(c, i, "to_s", &tdef);
-    if (tmi >= 0 && c->scopes[tmi].reachable && c->scopes[tmi].ret == TY_STRING &&
-        c->scopes[tmi].nparams == 0) {
+    int tsok = tmi >= 0 && c->scopes[tmi].reachable && c->scopes[tmi].ret == TY_STRING &&
+               c->scopes[tmi].nparams == 0;
+    /* A boxed value-type object carries a pointer to its struct and the
+       method takes self by value, as the inline poly dispatch calls it.
+       Skipping value types sent `puts obj` / "#{obj}" to the #<A:0x...>
+       default past the user's #to_s. */
+    if (comp_ty_value_obj(c, ty_object(i))) {
+      if (tsok && tdef == i)
+        buf_printf(b, "    case %d: return sp_%s_%s(*(sp_%s *)p);\n",
+                   i, tci->c_name, mc(c->scopes[tmi].name), tci->c_name);
+      continue;
+    }
+    if (tsok) {
       buf_printf(b, "    case %d: return sp_%s_%s((sp_%s *)p);\n",
                  i, c->classes[tdef].c_name, mc(c->scopes[tmi].name), c->classes[tdef].c_name);
       continue;
@@ -7774,6 +7786,18 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
       if (nin >= 0 && sp_streq(c->native_methods[nin].ret, "string"))
         buf_printf(b, "    case %d: return %s((%s *)p);\n",
                    i, c->native_methods[nin].csym, c->classes[i].c_struct);
+      continue;
+    }
+    /* a value-type class has no stable address for the default render, but
+       a user #inspect of its own still answers (self by value, as in the
+       #to_s dispatcher) */
+    if (comp_ty_value_obj(c, ty_object(i)) && !comp_class_is_module(c, &c->classes[i])) {
+      int vdef = -1;
+      int vmi = comp_method_in_chain(c, i, "inspect", &vdef);
+      if (vmi >= 0 && vdef == i && c->scopes[vmi].reachable &&
+          c->scopes[vmi].ret == TY_STRING && c->scopes[vmi].nparams == 0)
+        buf_printf(b, "    case %d: return sp_%s_%s(*(sp_%s *)p);\n",
+                   i, c->classes[i].c_name, mc(c->scopes[vmi].name), c->classes[i].c_name);
       continue;
     }
     if (!class_inspectable(c, i)) continue;
