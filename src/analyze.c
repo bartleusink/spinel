@@ -955,12 +955,55 @@ int a_is_fiber_or_gen_create(Compiler *c, int id) {
   return rn && (sp_streq(rn, "Fiber") || sp_streq(rn, "Enumerator") || sp_streq(rn, "Thread"));
 }
 
-/* The block of a call whose target hands the block on to a poly receiver. The
-   target is yield-inlined, so the block is spliced into its body -- and lands
-   on the dispatch there, which materializes it as a real proc. Only the
-   capture marking needs this: the target itself keeps no &block, so the
-   inlining decision (which reads a_proc_create_or_lifted) must not see it. */
-static int a_block_forwarded_into_poly(Compiler *c, int id) {
+/* Does yield-inlined scope `mi` hand its block on to a method that KEEPS it --
+   one taking a real named &block that it is not spliced into? An anonymous `&`
+   is always inlined (it has no name to escape through), so a literal block at
+   its call site is spliced onto the forward and lands on the keeper's call,
+   which materializes it as a proc that outlives the call. A named `&blk`
+   forward straight into a keeper is never inlined in the first place (#3772);
+   one into an anonymous forwarder is, so inlined forwarders are followed a few
+   links deep. */
+static int a_scope_forwards_block_to_keeper(Compiler *c, int mi, int depth) {
+  const NodeTable *nt = c->nt;
+  Scope *m = &c->scopes[mi];
+  if (!m->blk_param || !m->yields || depth > 4) return 0;
+  for (int nid = 0; nid < nt->count; nid++) {
+    if (c->nscope[nid] != mi) continue;
+    if (nt_kind(nt, nid) != NK_CallNode) continue;
+    int blk = nt_ref(nt, nid, "block");
+    const char *bty = blk >= 0 ? nt_type(nt, blk) : NULL;
+    if (!bty || !sp_streq(bty, "BlockArgumentNode")) continue;
+    int fwd = nt_ref(nt, blk, "expression");
+    if (fwd >= 0) {   /* named `&blk`: only THIS method's block param counts */
+      const char *fty = nt_type(nt, fwd);
+      const char *fn = fty && sp_streq(fty, "LocalVariableReadNode") ? nt_str(nt, fwd, "name") : NULL;
+      if (!fn || !m->blk_param[0] || !sp_streq(fn, m->blk_param)) continue;
+    }
+    const char *tn = nt_str(nt, nid, "name");
+    if (!tn) continue;
+    int recv = nt_ref(nt, nid, "receiver");
+    int tmi = -1;
+    if (recv < 0) tmi = comp_self_call_mi(c, nid, tn);
+    else {
+      TyKind rt = infer_type(c, recv);
+      if (ty_is_object(rt)) tmi = comp_method_in_chain(c, ty_object_class(rt), tn, NULL);
+    }
+    if (tmi < 0 || tmi == mi) continue;
+    Scope *t = &c->scopes[tmi];
+    if (!t->blk_param) continue;
+    if (!t->yields && t->blk_param[0]) return 1;
+    if (a_scope_forwards_block_to_keeper(c, tmi, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+/* The block of a call whose target hands the block on to a poly receiver, or
+   to a method that keeps it. The target is yield-inlined, so the block is
+   spliced into its body -- and lands on the dispatch or the keeper's call
+   there, which materializes it as a real proc. Only the capture marking needs
+   this: the target itself keeps no &block, so the inlining decision (which
+   reads a_proc_create_or_lifted) must not see it. */
+static int a_block_forwarded_to_proc(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
   if (!ty || !sp_streq(ty, "CallNode")) return 0;
@@ -979,7 +1022,8 @@ static int a_block_forwarded_into_poly(Compiler *c, int id) {
     TyKind rt = infer_type(c, recv);
     if (ty_is_object(rt)) mi = comp_method_in_chain(c, ty_object_class(rt), name, NULL);
   }
-  return mi >= 0 && a_scope_forwards_block_to_poly(c, mi);
+  return mi >= 0 && (a_scope_forwards_block_to_poly(c, mi) ||
+                     a_scope_forwards_block_to_keeper(c, mi, 0));
 }
 
 int a_proc_create_or_lifted(Compiler *c, int id) {
@@ -1083,7 +1127,7 @@ void mark_proc_captures(Compiler *c) {
   char *inproc = (char *)calloc((size_t)nt->count, 1);
   if (!inproc) return;
   for (int id = 0; id < nt->count; id++)
-    if (a_proc_create_or_lifted(c, id) || a_block_forwarded_into_poly(c, id)) {
+    if (a_proc_create_or_lifted(c, id) || a_block_forwarded_to_proc(c, id)) {
       int body = a_proc_body(c, id); if (body >= 0) a_mark_subtree(c, body, inproc); }
 
   /* Which proc frame each node belongs to: the INNERMOST proc whose body
@@ -1102,13 +1146,13 @@ void mark_proc_captures(Compiler *c) {
     /* nesting depth of each proc = how many proc bodies cover it, counted by
        stamping every proc body once (O(nodes) per proc, not O(nodes) per pair) */
     for (int id = 0; id < nt->count; id++) {
-      if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_into_poly(c, id)) continue;
+      if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_to_proc(c, id)) continue;
       int body = a_proc_body(c, id);
       if (body >= 0) a_count_subtree(c, body, pdepth, 0);
     }
     int maxd = 0;
     for (int id = 0; id < nt->count; id++) {
-      if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_into_poly(c, id)) continue;
+      if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_to_proc(c, id)) continue;
       pdepth[id] += 1;                /* 0 means "not a proc" */
       if (pdepth[id] > maxd) maxd = pdepth[id];
     }
@@ -1155,7 +1199,7 @@ void mark_proc_captures(Compiler *c) {
   }
 
   for (int id = 0; id < nt->count; id++) {
-    if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_into_poly(c, id)) continue;
+    if (!a_proc_create_or_lifted(c, id) && !a_block_forwarded_to_proc(c, id)) continue;
     /* A fiber/generator only needs a cell for a *value-type* capture, where a
        by-value copy would drop the write. A captured heap object (string, array,
        hash, ...) is already shared by pointer -- in-place mutation reaches the
@@ -1165,7 +1209,7 @@ void mark_proc_captures(Compiler *c) {
     /* a lifted iteration block is consumed while its call runs; everything
        else here may hold its cells past the call (see LocalVar.cell_outlives) */
     int outlives = !(a_block_is_lifted(c, id) && !is_proc_create(c, id) && !fib_create &&
-                     !is_handler_proc_block(c, id) && !a_block_forwarded_into_poly(c, id));
+                     !is_handler_proc_block(c, id) && !a_block_forwarded_to_proc(c, id));
     int body = a_proc_body(c, id);
     if (body < 0) continue;
     int encl = c->nscope[id];
