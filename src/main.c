@@ -371,7 +371,14 @@ static void usage(void) {
     "  --dump-ast  Print the text AST and exit (debug)\n");
 }
 
+#ifdef SP_WORK_COUNT
+static void work_report(void) { fprintf(stderr, "spinel-work: %llu\n", g_nt_work); }
+#endif
+
 int main(int argc, char **argv) {
+#ifdef SP_WORK_COUNT
+  atexit(work_report);
+#endif
   /* `spinel diff FILE.rb ...`: the companion tool beside the compiler runs
      it (tools/diff.rb, built to bin/spinel-diff); the arguments pass through
      untouched, its exit status is the answer. */

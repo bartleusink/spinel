@@ -130,6 +130,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc' && matrix.shard == 1
         run: make alloc-report-test infer-test spin-check
 
+      # The front end's scaling, as a work ratio between a program and one four
+      # times its size (see scale-test in the Makefile). A per-node rescan of
+      # the node table has come back four times, each found weeks late by hand
+      # profiling (rubys/roundhouse#72); this makes the next one a red build.
+      # The count is deterministic, so one lane is enough.
+      - name: Run the front-end scaling test
+        if: matrix.os == 'ubuntu-latest' && matrix.cc == 'gcc' && matrix.shard == 1
+        run: make -j$(getconf _NPROCESSORS_ONLN) build/spinel-work && make scale-test
+
       # Benchmark integration test. Compiles every benchmark/*.rb through
       # the full pipeline (cc -Werror) and diffs the output against CRuby.
       # The bench programs are larger and more realistic than the test/*.rb

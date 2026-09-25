@@ -46,7 +46,7 @@ RBS_LIB      = build/librbs.a
 .PHONY: all regexp wasm-rt wasm-test rbs_extract rbs-test rbs-seed-test re-lit-test reject-test cli-opts-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test gc-str-major-test threaded-render-test gc-locality-test test-corpus test-corpus-summary \
-        gate-optcarrot clean install uninstall deps tools
+        gate-optcarrot scale-test clean install uninstall deps tools
 
 # `make all` includes the RBS extractor when vendor/rbs has been fetched
 # (via `make deps`); without it the extractor is silently omitted. Built under
@@ -328,6 +328,18 @@ $(SPINEL): $(SPINEL_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(R
 	@# Dev convenience: a repo-root `./spinel` pointing at the built binary
 	@# (the installed command is `spinel` too). Best-effort; gitignored.
 	@ln -sf $@ spinel 2>/dev/null || cp $@ spinel 2>/dev/null || true
+
+# The compiler again with SP_WORK_COUNT: every node access counts one unit and
+# the total is printed at exit (see NT_WORK in src/node_table.h). Only the
+# scaling test uses it; -O1 because the count does not depend on optimization.
+SPINEL_WORK = build/spinel-work
+SPINEL_WORK_OBJ = $(patsubst build/csrc/%.o,build/csrc-work/%.o,$(SPINEL_OBJ))
+build/csrc-work/%.o: src/%.c $(SPINEL_HDRS) | build/csrc
+	@mkdir -p build/csrc-work
+	$(CC) $(CFLAGS) -O1 -DSP_WORK_COUNT -Isrc -Ibuild/csrc -c $< -o $@
+build/csrc-work/main.o: build/csrc/spinel_rev.h
+$(SPINEL_WORK): $(SPINEL_WORK_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB)
+	$(CC) $(CFLAGS) $(SPINEL_WORK_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB) -lm $(LDFLAGS) -o $@
 
 # Wrapper around the system `timeout` that always returns GNU coreutils'
 # exit code (124 on timeout), regardless of which `timeout` is on PATH.
@@ -2319,6 +2331,28 @@ gate-props:
 	+@$(MAKE) --no-print-directory collect-errors-test
 	+@$(MAKE) --no-print-directory spin-check
 	+@$(MAKE) --no-print-directory diff-test
+	+@$(MAKE) --no-print-directory scale-test
+
+# The front end's scaling, measured as work rather than time: the counting
+# compiler analyzes one generated program at K units and at 4K, and the ratio
+# of the two work counts is compared with a limit. A linear front end gives 4;
+# a pass that rescans the node table per node, the regression that came back
+# four times before anyone profiled it (rubys/roundhouse#72), pushes it well
+# past. The count is deterministic, so the test does not depend on the
+# machine or its load. The limit sits just above today's ratio (5.3); the
+# Hash.new receiver rescan fixed in c54bb45f measured 6.4. Lower it as the
+# remaining superlinear passes are fixed.
+SCALE_LIMIT ?= 6.0
+scale-test: $(SPINEL_WORK)
+	@tmp=$$(mktemp -d /tmp/spinel-scale.XXXXXX); \
+	sh test/scale/gen.sh 25 > "$$tmp/a.rb"; sh test/scale/gen.sh 100 > "$$tmp/b.rb"; \
+	wa=$$($(SPINEL_WORK) --emit-rbs -o "$$tmp/a.rbs" "$$tmp/a.rb" 2>&1 | sed -n 's/^spinel-work: //p'); \
+	wb=$$($(SPINEL_WORK) --emit-rbs -o "$$tmp/b.rbs" "$$tmp/b.rb" 2>&1 | sed -n 's/^spinel-work: //p'); \
+	rm -rf "$$tmp"; \
+	if [ -z "$$wa" ] || [ -z "$$wb" ]; then echo "scale-test: FAIL (the counting compiler reported no work count)"; exit 1; fi; \
+	awk -v a="$$wa" -v b="$$wb" -v lim="$(SCALE_LIMIT)" 'BEGIN { r = b / a; \
+	  printf "scale-test: work at 4x the program is %.2fx (linear 4.00, limit %.2f)\n", r, lim; exit (r > lim) }' || \
+	  { echo "scale-test: FAIL (the front end grew superlinearly: some pass rescans per node; profile per pass, see rubys/roundhouse#72)"; exit 1; }
 
 # `spinel diff`, end to end, on the three answers the tool has to give: a
 # program both runtimes agree on (exit 0), a documented divergence (exit 1,

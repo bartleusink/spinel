@@ -202,6 +202,19 @@ typedef enum {
   NK__COUNT
 } NodeKind;
 
+/* Work accounting for the scaling test (make scale-test): with SP_WORK_COUNT
+   defined, every node access and kind-list step counts one unit, and the
+   compiler prints the total at exit. The count is deterministic, so the test
+   can compare two program sizes without timing anything; a pass that rescans
+   the table per node shows up as a ratio far above the size ratio
+   (rubys/roundhouse#72). Off in every normal build: the macro is empty. */
+#ifdef SP_WORK_COUNT
+extern unsigned long long g_nt_work;
+#define NT_WORK() (g_nt_work++)
+#else
+#define NT_WORK() ((void)0)
+#endif
+
 /* Integer node-type, computed once per node and cached. NK_NONE if the node
    has no type or an unrecognized one. */
 /* Slow path: resolve the type string to a kind and cache it in the node. */
@@ -211,6 +224,7 @@ NodeKind nt_kind_resolve(const NodeTable *nt, int id);
    measured SLOWER than the inlined byte compare it replaced (the old
    `sp_streq(nt_type(...), "CallNode")` usually differs on the first byte). */
 static inline NodeKind nt_kind(const NodeTable *nt, int id) {
+  NT_WORK();
   if (id < 0 || id >= nt->count) return NK_NONE;
   int k = nt->nodes[id].kind;
   return k ? (NodeKind)(k - 1) : nt_kind_resolve(nt, id);
@@ -240,6 +254,7 @@ static inline NtKindIter nt_kind_iter_begin(const NodeTable *nt, NodeKind k) {
   return it;
 }
 static inline int nt_kind_iter_next(NtKindIter *it) {
+  NT_WORK();
   if (it->i >= it->n) return 0;
   it->id = it->ids[it->i++];
   return 1;
@@ -287,6 +302,7 @@ const char *nt_file_path(const NodeTable *nt, int fid);
 
 const char *nt_type(const NodeTable *nt, int id);          /* NULL if unset */
 static inline const char *nt_str(const NodeTable *nt, int id, const char *key) {
+  NT_WORK();
   if (id < 0 || id >= nt->count) return NULL;
   const SpNode *nd = &nt->nodes[id];
   unsigned d = sp_field_disc(key);
@@ -306,6 +322,7 @@ static inline size_t nt_str_len(const NodeTable *nt, int id, const char *key) {
   return 0;
 }
 static inline long long nt_int(const NodeTable *nt, int id, const char *key, long long dflt) {
+  NT_WORK();
   if (id < 0 || id >= nt->count) return dflt;
   const SpNode *nd = &nt->nodes[id];
   unsigned d = sp_field_disc(key);
@@ -314,6 +331,7 @@ static inline long long nt_int(const NodeTable *nt, int id, const char *key, lon
   return dflt;
 }
 static inline int nt_ref(const NodeTable *nt, int id, const char *key) {
+  NT_WORK();
   if (id < 0 || id >= nt->count) return -1;
   const SpNode *nd = &nt->nodes[id];
   unsigned d = sp_field_disc(key);
@@ -322,6 +340,7 @@ static inline int nt_ref(const NodeTable *nt, int id, const char *key) {
   return -1;
 }
 static inline const int *nt_arr(const NodeTable *nt, int id, const char *key, int *out_n) {
+  NT_WORK();
   if (out_n) *out_n = 0;
   if (id < 0 || id >= nt->count) return NULL;
   const SpNode *nd = &nt->nodes[id];

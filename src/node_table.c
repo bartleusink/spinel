@@ -484,7 +484,11 @@ static const SpNode *node_at(const NodeTable *nt, int id) {
   return &nt->nodes[id];
 }
 
+#ifdef SP_WORK_COUNT
+unsigned long long g_nt_work = 0;
+#endif
 const char *nt_type(const NodeTable *nt, int id) {
+  NT_WORK();
   const SpNode *nd = node_at(nt, id);
   return nd ? nd->type : NULL;
 }
