@@ -2581,6 +2581,83 @@ static int emit_obj_exc_when(Compiler *c, int cid, const char *cn, int t, Buf *b
   return 1;
 }
 
+/* A heap user object reaches a case subject as a pointer, and that pointer
+   is NULL when the slot holds nil: a local assigned nil on one path, a
+   method that answers nil for "none". The static type still names the
+   class, so every arm below that decided "this subject is a Shape" at
+   compile time said so for the nil too, and a hash or array pattern ran
+   #deconstruct_keys on the NULL. nil is an instance of Object, Kernel,
+   BasicObject and NilClass and of nothing else: a root-class arm stays a
+   constant true, a user-class arm first sees a live pointer, `in nil` and
+   `in NilClass` match exactly the NULL, and a nil subject is never
+   deconstructed. A value-type object (comp_ty_value_obj) is a struct, never
+   NULL, so its arms fold as before. */
+static int obj_subject_nilable(Compiler *c, TyKind pt) {
+  return ty_is_object(pt) && !comp_ty_value_obj(c, pt);
+}
+
+/* the subject `_t<t>` holds an object (a live pointer) */
+static void emit_obj_live(Compiler *c, TyKind pt, int t, Buf *b) {
+  if (obj_subject_nilable(c, pt)) buf_printf(b, "(_t%d != NULL)", t);
+  else buf_puts(b, "1");
+}
+
+/* the subject `_t<t>` holds nil (the NULL pointer) */
+static void emit_obj_nil(Compiler *c, TyKind pt, int t, Buf *b) {
+  if (obj_subject_nilable(c, pt)) buf_printf(b, "(_t%d == NULL)", t);
+  else buf_puts(b, "0");
+}
+
+/* The class arm of a `when` (statement or value form) or an `in` on a
+   statically typed object subject, decided from the class table: 1 when it
+   wrote a condition, 0 when the pattern names neither a root the object
+   belongs to, a class nil belongs to, nor the subject's class or one above
+   it (the caller decides the rest). */
+static int emit_obj_class_when(Compiler *c, TyKind pt, const char *cn, int t, Buf *b) {
+  int cid = ty_object_class(pt);
+  if (obj_is_root_class(c, cid, cn)) { buf_puts(b, "1"); return 1; }
+  /* NilClass; Object and Kernel over a blank slate (`< BasicObject`), which
+     the object is not but its nil is */
+  if (!comp_const(c, cn) &&
+      (sp_streq(cn, "NilClass") || sp_streq(cn, "Object") || sp_streq(cn, "Kernel"))) {
+    emit_obj_nil(c, pt, t, b);
+    return 1;
+  }
+  int tcid = comp_class_index(c, cn);
+  if (tcid >= 0 && (cid == tcid || is_descendant(c, cid, tcid))) {
+    emit_obj_live(c, pt, t, b);
+    return 1;
+  }
+  /* a builtin exception above the class table: the runtime chain answers,
+     asked of a live object only (sp_exc_is_a reads the NULL otherwise) */
+  Buf eb; memset(&eb, 0, sizeof eb);
+  if (!emit_obj_exc_when(c, cid, cn, t, &eb)) { free(eb.p); return 0; }
+  if (obj_subject_nilable(c, pt)) buf_printf(b, "(_t%d != NULL && %s)", t, eb.p);
+  else buf_puts(b, eb.p);
+  free(eb.p);
+  return 1;
+}
+
+/* The deconstruct temp of an object subject: `_t<t> ? <call> : NULL`, so a
+   nil subject has nothing to match and the keyed lookups below read no
+   NULL. A value-type subject calls unguarded, and so does a #deconstruct or
+   #deconstruct_keys whose result `rt` is not a container: assigning that
+   result to the container temp is the C error that refuses the program, and
+   a ternary against NULL would only warn and then run (rt is TY_UNKNOWN for
+   a synthesized container, which is always ours to guard). */
+static int obj_deconstruct_guarded(Compiler *c, TyKind pt, TyKind rt) {
+  return obj_subject_nilable(c, pt) &&
+         (rt == TY_UNKNOWN || ty_is_hash(rt) || ty_is_array(rt));
+}
+
+static void emit_obj_deconstruct_open(Compiler *c, TyKind pt, TyKind rt, int t, Buf *b) {
+  if (obj_deconstruct_guarded(c, pt, rt)) buf_printf(b, "_t%d ? ", t);
+}
+
+static void emit_obj_deconstruct_close(Compiler *c, TyKind pt, TyKind rt, Buf *b) {
+  if (obj_deconstruct_guarded(c, pt, rt)) buf_puts(b, " : NULL");
+}
+
 static int g_pm_hash_sink_indent = 0;
 
 /* The `keys` argument a hash pattern hands #deconstruct_keys: an Array of the
@@ -2619,6 +2696,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
     if (pt == TY_POLY) buf_printf(b, "(_t%d.tag == SP_TAG_NIL)", t);
     /* a no-match MatchData is a NULL pointer; `in nil` matches it */
     else if (pt == TY_MATCHDATA) buf_printf(b, "(_t%d == NULL)", t);
+    else if (ty_is_object(pt)) emit_obj_nil(c, pt, t, b);
     else buf_puts(b, (pt == TY_NIL) ? "1" : "0");
     return 1;
   }
@@ -2664,12 +2742,13 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
     if (ty_is_object(pt)) {
       int cid = ty_object_class(pt);
       int tcid = comp_class_index(c, cn2);
-      if (obj_is_root_class(c, cid, cn2)) { buf_puts(b, "1"); return 1; }
-      if (tcid >= 0 && (cid == tcid || is_descendant(c, cid, tcid))) { buf_puts(b, "1"); return 1; }
+      if (emit_obj_class_when(c, pt, cn2, t, b)) return 1;
       if (tcid >= 0 && is_descendant(c, tcid, cid)) {
         const char *acc = comp_ty_value_obj(c, pt) ? "." : "->";
         int first = 1;
         buf_puts(b, "(");
+        /* the tag read below dereferences the subject: a nil one has none */
+        if (obj_subject_nilable(c, pt)) buf_printf(b, "_t%d != NULL && (", t);
         for (int k = 0; k < c->nclasses; k++) {
           if (k != tcid && !is_descendant(c, k, tcid)) continue;
           if (!first) buf_puts(b, " || ");
@@ -2677,10 +2756,10 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
           first = 0;
         }
         if (first) buf_puts(b, "0");
+        if (obj_subject_nilable(c, pt)) buf_puts(b, ")");
         buf_puts(b, ")");
         return 1;
       }
-      if (emit_obj_exc_when(c, cid, cn2, t, b)) return 1;
       buf_puts(b, "0");
       return 1;
     }
@@ -2777,10 +2856,22 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       int ai = g_pm_hash_sink ? g_pm_hash_sink_indent : g_indent;
       emit_indent(as, ai);
       emit_ctype(c, art, as);
-      if (aisv) buf_printf(as, " _t%d = sp_%s_deconstruct(_t%d);\n", at, acn, t);
-      else      buf_printf(as, " _t%d = sp_%s_deconstruct((sp_%s *)_t%d);\n", at, acn, acn, t);
+      buf_printf(as, " _t%d = ", at);
+      emit_obj_deconstruct_open(c, pt, art, t, as);
+      if (aisv) buf_printf(as, "sp_%s_deconstruct(_t%d)", acn, t);
+      else      buf_printf(as, "sp_%s_deconstruct((sp_%s *)_t%d)", acn, acn, t);
+      emit_obj_deconstruct_close(c, pt, art, as);
+      buf_puts(as, ";\n");
       if (needs_root(art)) { emit_indent(as, ai); emit_gc_root_tmp(c, art, at, as); buf_puts(as, "\n"); }
-      return emit_pm_cond(c, pat, at, art, b);
+      /* the array walk boxes the temp before it looks at it, and a NULL
+         boxed is an object with no length to read: the arm needs the
+         subject live first */
+      if (!obj_deconstruct_guarded(c, pt, art)) return emit_pm_cond(c, pat, at, art, b);
+      Buf ac; memset(&ac, 0, sizeof ac);
+      int aok = emit_pm_cond(c, pat, at, art, &ac);
+      if (aok) buf_printf(b, "(_t%d != NULL && (%s))", t, ac.p ? ac.p : "1");
+      free(ac.p);
+      return aok;
     }
     /* From here the scrutinee is a typed (int/float/str) array pointer. A nested
        array element can never match one, since a typed array cannot hold a
@@ -2933,11 +3024,21 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
         emit_ctype(c, drt, ds);
         Buf kab; memset(&kab, 0, sizeof kab);
         emit_pm_deconstruct_keys_arg(c, pat, &kab);
-        if (isv) buf_printf(ds, " _t%d = sp_%s_deconstruct_keys(_t%d, %s);\n", dt, dcn, t, kab.p ? kab.p : "sp_box_nil()");
-        else     buf_printf(ds, " _t%d = sp_%s_deconstruct_keys((sp_%s *)_t%d, %s);\n", dt, dcn, dcn, t, kab.p ? kab.p : "sp_box_nil()");
+        buf_printf(ds, " _t%d = ", dt);
+        emit_obj_deconstruct_open(c, pt, drt, t, ds);
+        if (isv) buf_printf(ds, "sp_%s_deconstruct_keys(_t%d, %s)", dcn, t, kab.p ? kab.p : "sp_box_nil()");
+        else     buf_printf(ds, "sp_%s_deconstruct_keys((sp_%s *)_t%d, %s)", dcn, dcn, t, kab.p ? kab.p : "sp_box_nil()");
+        emit_obj_deconstruct_close(c, pt, drt, ds);
+        buf_puts(ds, ";\n");
         free(kab.p);
         if (needs_root(drt)) { emit_indent(ds, di); emit_gc_root_tmp(c, drt, dt, ds); buf_puts(ds, "\n"); }
-        return emit_pm_cond(c, pat, dt, drt, b);
+        /* a poly result is boxed before it is looked at, as an array is */
+        if (!obj_deconstruct_guarded(c, pt, drt)) return emit_pm_cond(c, pat, dt, drt, b);
+        Buf dc; memset(&dc, 0, sizeof dc);
+        int dok = emit_pm_cond(c, pat, dt, drt, &dc);
+        if (dok) buf_printf(b, "(_t%d != NULL && (%s))", t, dc.p ? dc.p : "1");
+        free(dc.p);
+        return dok;
       }
       Buf hb; memset(&hb, 0, sizeof hb);
       char ho[24]; snprintf(ho, sizeof ho, "_t%d", t);
@@ -2981,7 +3082,10 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       }
     }
     int hcond = ++g_tmp;
-    emit_indent(hs, hi); buf_printf(hs, "int _t%d = 1;\n", hcond);
+    /* the lookups below read the hash: a NULL one holds no key, whether it
+       is the subject itself or a nil object subject's deconstruct temp, the
+       way the typed-array walk starts from `_t && _t->len` */
+    emit_indent(hs, hi); buf_printf(hs, "int _t%d = (_t%d != NULL);\n", hcond, t);
     for (int i = 0; i < en; i++) {
       int key = nt_ref(nt, elms[i], "key");
       int vchk = nt_ref(nt, elms[i], "value");
@@ -3519,6 +3623,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
     TyKind arm_pt = pt;
     int reject_arm = 0;
     int poly_class_guard = -1;   /* `_tN` bool: the poly subject is the pattern's class */
+    int live_subject = -1;       /* `_tN` object pointer a deconstruct below read: NULL is nil */
     if (pt == TY_MATCHDATA && sp_streq(pty, "HashPatternNode")) {
       char md[24]; snprintf(md, sizeof md, "_t%d", t);
       arm_t = emit_md_deconstruct_keys(b, indent + 1, md);
@@ -3550,15 +3655,20 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       int ddef = -1;
       int dm = comp_method_in_chain(c, ty_object_class(pt), "deconstruct", &ddef);
       if (dm >= 0) {
-        TyKind drt = (TyKind)c->scopes[dm].ret;
-        if (!ty_is_array(drt)) drt = TY_POLY_ARRAY;
+        TyKind rrt = (TyKind)c->scopes[dm].ret;
+        TyKind drt = ty_is_array(rrt) ? rrt : TY_POLY_ARRAY;
         const char *dcn = c->classes[ddef].name;
         arm_t = ++g_tmp;
         emit_indent(b, indent + 1); emit_ctype(c, drt, b);
-        if (isv) buf_printf(b, " _t%d = sp_%s_deconstruct(_t%d);\n", arm_t, dcn, t);
-        else     buf_printf(b, " _t%d = sp_%s_deconstruct((sp_%s *)_t%d);\n", arm_t, dcn, dcn, t);
+        buf_printf(b, " _t%d = ", arm_t);
+        emit_obj_deconstruct_open(c, pt, rrt, t, b);
+        if (isv) buf_printf(b, "sp_%s_deconstruct(_t%d)", dcn, t);
+        else     buf_printf(b, "sp_%s_deconstruct((sp_%s *)_t%d)", dcn, dcn, t);
+        emit_obj_deconstruct_close(c, pt, rrt, b);
+        buf_puts(b, ";\n");
         if (needs_root(drt)) { emit_indent(b, indent + 1); emit_gc_root_tmp(c, drt, arm_t, b); buf_puts(b, "\n"); }
         arm_pt = drt;
+        if (obj_deconstruct_guarded(c, pt, rrt)) live_subject = t;
       }
       else if (c->classes[ty_object_class(pt)].is_struct) {
         /* Struct/Data classes have no explicit #deconstruct method, but pattern
@@ -3567,16 +3677,25 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         ClassInfo *sc = &c->classes[ty_object_class(pt)];
         arm_t = ++g_tmp;
         emit_indent(b, indent + 1);
-        buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", arm_t, arm_t);
+        buf_printf(b, "sp_PolyArray *_t%d = ", arm_t);
+        emit_obj_deconstruct_open(c, pt, TY_UNKNOWN, t, b);
+        buf_puts(b, "sp_PolyArray_new()");
+        emit_obj_deconstruct_close(c, pt, TY_UNKNOWN, b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d);\n", arm_t);
+        if (obj_subject_nilable(c, pt)) {
+          live_subject = t;
+          emit_indent(b, indent + 1); buf_printf(b, "if (_t%d) {\n", t);
+        }
         for (int i = 0; i < sc->nivars; i++) {
           char fb[300];
           if (isv) snprintf(fb, sizeof fb, "(_t%d).iv_%s", t, iv_c(sc->ivars[i] + 1));
           else     snprintf(fb, sizeof fb, "((sp_%s *)_t%d)->iv_%s", sc->c_name, t, iv_c(sc->ivars[i] + 1));
-          emit_indent(b, indent + 1);
+          emit_indent(b, indent + 1 + (live_subject >= 0));
           buf_printf(b, "sp_PolyArray_push(_t%d, ", arm_t);
           emit_boxed_text(c, sc->ivar_types[i], fb, b);
           buf_puts(b, ");\n");
         }
+        if (live_subject >= 0) { emit_indent(b, indent + 1); buf_puts(b, "}\n"); }
         arm_pt = TY_POLY_ARRAY;
       }
     }
@@ -3585,18 +3704,23 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       int ddef = -1;
       int dm = comp_method_in_chain(c, ty_object_class(pt), "deconstruct_keys", &ddef);
       if (dm >= 0) {
-        TyKind drt = (TyKind)c->scopes[dm].ret;
-        if (!ty_is_hash(drt)) drt = TY_SYM_POLY_HASH;
+        TyKind rrt = (TyKind)c->scopes[dm].ret;
+        TyKind drt = ty_is_hash(rrt) ? rrt : TY_SYM_POLY_HASH;
         const char *dcn = c->classes[ddef].name;
         arm_t = ++g_tmp;
         emit_indent(b, indent + 1); emit_ctype(c, drt, b);
         Buf kab2; memset(&kab2, 0, sizeof kab2);
         emit_pm_deconstruct_keys_arg(c, pat, &kab2);
-        if (isv) buf_printf(b, " _t%d = sp_%s_deconstruct_keys(_t%d, %s);\n", arm_t, dcn, t, kab2.p ? kab2.p : "sp_box_nil()");
-        else     buf_printf(b, " _t%d = sp_%s_deconstruct_keys((sp_%s *)_t%d, %s);\n", arm_t, dcn, dcn, t, kab2.p ? kab2.p : "sp_box_nil()");
+        buf_printf(b, " _t%d = ", arm_t);
+        emit_obj_deconstruct_open(c, pt, rrt, t, b);
+        if (isv) buf_printf(b, "sp_%s_deconstruct_keys(_t%d, %s)", dcn, t, kab2.p ? kab2.p : "sp_box_nil()");
+        else     buf_printf(b, "sp_%s_deconstruct_keys((sp_%s *)_t%d, %s)", dcn, dcn, t, kab2.p ? kab2.p : "sp_box_nil()");
+        emit_obj_deconstruct_close(c, pt, rrt, b);
+        buf_puts(b, ";\n");
         free(kab2.p);
         if (needs_root(drt)) { emit_indent(b, indent + 1); emit_gc_root_tmp(c, drt, arm_t, b); buf_puts(b, "\n"); }
         arm_pt = drt;
+        if (obj_deconstruct_guarded(c, pt, rrt)) live_subject = t;
       }
       else if (c->classes[ty_object_class(pt)].is_struct) {
         /* Struct/Data #deconstruct_keys synthesized inline: members keyed by
@@ -3604,16 +3728,25 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         ClassInfo *sc = &c->classes[ty_object_class(pt)];
         arm_t = ++g_tmp;
         emit_indent(b, indent + 1);
-        buf_printf(b, "sp_SymPolyHash *_t%d = sp_SymPolyHash_new(); SP_GC_ROOT(_t%d);\n", arm_t, arm_t);
+        buf_printf(b, "sp_SymPolyHash *_t%d = ", arm_t);
+        emit_obj_deconstruct_open(c, pt, TY_UNKNOWN, t, b);
+        buf_puts(b, "sp_SymPolyHash_new()");
+        emit_obj_deconstruct_close(c, pt, TY_UNKNOWN, b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d);\n", arm_t);
+        if (obj_subject_nilable(c, pt)) {
+          live_subject = t;
+          emit_indent(b, indent + 1); buf_printf(b, "if (_t%d) {\n", t);
+        }
         for (int i = 0; i < sc->nivars; i++) {
           char fb[300];
           if (isv) snprintf(fb, sizeof fb, "(_t%d).iv_%s", t, iv_c(sc->ivars[i] + 1));
           else     snprintf(fb, sizeof fb, "((sp_%s *)_t%d)->iv_%s", sc->c_name, t, iv_c(sc->ivars[i] + 1));
-          emit_indent(b, indent + 1);
+          emit_indent(b, indent + 1 + (live_subject >= 0));
           buf_printf(b, "sp_SymPolyHash_set(_t%d, (sp_sym)%d, ", arm_t, comp_sym_intern(c, sc->ivars[i] + 1));
           emit_boxed_text(c, sc->ivar_types[i], fb, b);
           buf_puts(b, ");\n");
         }
+        if (live_subject >= 0) { emit_indent(b, indent + 1); buf_puts(b, "}\n"); }
         arm_pt = TY_SYM_POLY_HASH;
       }
     }
@@ -3743,7 +3876,10 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       int hcond = ++g_tmp;
       const char *hn = ty_is_hash(arm_pt) ? ty_hash_cname(arm_pt) : NULL;
       emit_indent(b, indent + 1);
-      buf_printf(b, "int _t%d = %s;\n", hcond, hn ? "1" : "0");
+      /* the lookups below read the hash: a NULL one (a nil subject's
+         deconstruct temp) holds no key */
+      if (hn) buf_printf(b, "int _t%d = (_t%d != NULL);\n", hcond, arm_t);
+      else    buf_printf(b, "int _t%d = 0;\n", hcond);
       if (hn) {
         TyKind hvt = ty_hash_val(arm_pt);
         int en = 0;
@@ -3851,6 +3987,16 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       emit_indent(b, indent + 1);
       if (has_cond) buf_printf(b, "if (_t%d && (%s)) {\n", poly_class_guard, cond_buf.p ? cond_buf.p : "1");
       else buf_printf(b, "if (_t%d) {\n", poly_class_guard);
+      body_indent = indent + 2;
+    }
+    else if (live_subject >= 0) {
+      /* the deconstruct above made the temp NULL for a nil subject: the
+         array walk boxes that NULL before it looks at it, so the arm asks
+         for the subject first (the hash walk starts from the temp itself,
+         so there the prefix repeats what it already knows) */
+      emit_indent(b, indent + 1);
+      if (has_cond) buf_printf(b, "if (_t%d != NULL && (%s)) {\n", live_subject, cond_buf.p ? cond_buf.p : "1");
+      else buf_printf(b, "if (_t%d != NULL) {\n", live_subject);
       body_indent = indent + 2;
     }
     else if (has_cond) {
@@ -4633,12 +4779,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
               buf_puts(b, "0");
           }
           else if (cn2 && ty_is_object(pt)) {
-            int cid = ty_object_class(pt);
-            int tcid = comp_class_index(c, cn2);
-            int yes = obj_is_root_class(c, cid, cn2) ||
-                      ((tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid)));
-            if (yes) buf_puts(b, "1");
-            else if (!emit_obj_exc_when(c, cid, cn2, t, b)) buf_puts(b, "0");
+            if (!emit_obj_class_when(c, pt, cn2, t, b)) buf_puts(b, "0");
           }
           else if (cn2 && pt == TY_CLASS) {
             /* `when <ClassName>` is ===: a Class VALUE is an instance only
@@ -5004,11 +5145,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
           if (!emit_poly_class_when(c, conds[j], tmp, b)) buf_puts(b, "0");
         }
         else if (cn2 && ty_is_object(pt)) {
-          int cid = ty_object_class(pt); int tcid = comp_class_index(c, cn2);
-          int yes = obj_is_root_class(c, cid, cn2) ||
-                    ((tcid >= 0) && (cid == tcid || is_descendant(c, cid, tcid)));
-          if (yes) buf_puts(b, "1");
-          else if (!emit_obj_exc_when(c, cid, cn2, t, b)) buf_puts(b, "0");
+          if (!emit_obj_class_when(c, pt, cn2, t, b)) buf_puts(b, "0");
         }
         else if (cn2 && pt == TY_CLASS) {
           /* a Class VALUE is an instance only of Class/Module (see the
