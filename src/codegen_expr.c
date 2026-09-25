@@ -1535,11 +1535,13 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
          ivar twin's is. */
       buf_puts(b, "({ ");
       emit_assign(c, id, b, 0);
+      /* a nil write leaves the handle NULL: the value is nil, not a read
+         through it (CodeRabbit on #4990) */
       buf_puts(b, " (_sp_ret_strbuf = (void *)");
       emit_local_ref(c, id, nm, b);
-      buf_puts(b, ", sp_str_concat(sp_String_cstr(");
+      buf_puts(b, ", _sp_ret_strbuf ? sp_str_concat(sp_String_cstr(");
       emit_local_ref(c, id, nm, b);
-      buf_puts(b, "), (&(\"\\xff\")[1]))); })");
+      buf_puts(b, "), (&(\"\\xff\")[1])) : NULL); })");
       return;
     }
     buf_puts(b, "({ ");
