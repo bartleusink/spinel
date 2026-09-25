@@ -17,6 +17,11 @@
 # Rewrites applied (source-compatibility shims for spinel gaps, documented in
 # mspec_lite.rb): ScratchPad -> a local `scratch_pad`.
 
+# ruby/spec sources are UTF-8. Under an empty or C locale Ruby read them as
+# US-ASCII, and the first non-ASCII line raised mid-glob, leaving every later
+# spec file unextracted.
+Encoding.default_external = Encoding::UTF_8
+
 SPEC_DIR = ARGV[0] or abort "usage: extract.rb SPEC_DIR OUT_DIR [glob]"
 OUT_DIR  = ARGV[1] or abort "usage: extract.rb SPEC_DIR OUT_DIR [glob]"
 GLOB     = ARGV[2] || "*_spec.rb"

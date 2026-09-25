@@ -1997,7 +1997,7 @@ rubyspec: $(SPINEL) $(RUBYSPEC_DIR)/.pinned
 	@for d in $(RUBYSPEC_SUITES); do \
 	  nm=$$(echo $$d | tr / -); \
 	  echo "=== ruby/spec $$d ==="; \
-	  rm -rf build/rubyspec-ex-$$nm && ruby tools/rubyspec/extract.rb $(RUBYSPEC_DIR)/$$d build/rubyspec-ex-$$nm; \
+	  rm -rf build/rubyspec-ex-$$nm && ruby tools/rubyspec/extract.rb $(RUBYSPEC_DIR)/$$d build/rubyspec-ex-$$nm || exit 1; \
 	  bash tools/rubyspec/run.sh build/rubyspec-ex-$$nm build/rubyspec-results-$$nm.tsv; \
 	  ruby tools/rubyspec/manifest_diff.rb tools/rubyspec/expectations/$$nm.tsv build/rubyspec-results-$$nm.tsv || true; \
 	done
@@ -2006,15 +2006,28 @@ rubyspec: $(SPINEL) $(RUBYSPEC_DIR)/.pinned
 # fail on any regression. Improvements (non-PASS -> PASS) never fail this
 # target -- they surface in `make rubyspec`'s manifest diff instead, and are
 # promoted by regenerating the manifest deliberately.
+# A failed extraction or run fails the suite, as does a results file with fewer
+# rows than the list: an example that never ran is not one that still passes.
+# Unchecked, an extractor crash left most examples unextracted, run.sh bailed
+# out, and the missing results file counted as zero regressions.
 rubyspec-gate: $(SPINEL) $(RUBYSPEC_DIR)/.pinned
 	@ok=1; for d in $(RUBYSPEC_SUITES); do \
 	  nm=$$(echo $$d | tr / -); \
-	  rm -rf build/rubyspec-ex-$$nm && ruby tools/rubyspec/extract.rb $(RUBYSPEC_DIR)/$$d build/rubyspec-ex-$$nm; \
+	  rm -rf build/rubyspec-ex-$$nm build/rubyspec-gate-$$nm.tsv; \
+	  if ! ruby tools/rubyspec/extract.rb $(RUBYSPEC_DIR)/$$d build/rubyspec-ex-$$nm; then \
+	    echo "rubyspec-gate[$$d]: extraction failed"; ok=0; continue; \
+	  fi; \
 	  awk -F'\t' '$$2=="PASS"{print $$1}' tools/rubyspec/expectations/$$nm.tsv > build/rubyspec-gate-$$nm.list; \
-	  RUBYSPEC_ONLY=build/rubyspec-gate-$$nm.list RUBYSPEC_GATE=1 \
-	    bash tools/rubyspec/run.sh build/rubyspec-ex-$$nm build/rubyspec-gate-$$nm.tsv >/dev/null; \
+	  if ! RUBYSPEC_ONLY=build/rubyspec-gate-$$nm.list RUBYSPEC_GATE=1 \
+	    bash tools/rubyspec/run.sh build/rubyspec-ex-$$nm build/rubyspec-gate-$$nm.tsv >/dev/null; then \
+	    echo "rubyspec-gate[$$d]: run.sh failed"; ok=0; continue; \
+	  fi; \
+	  want=$$(wc -l < build/rubyspec-gate-$$nm.list); \
+	  ran=$$(wc -l < build/rubyspec-gate-$$nm.tsv); \
 	  bad=$$(awk -F'\t' '$$2!="PASS"' build/rubyspec-gate-$$nm.tsv | wc -l); \
-	  if [ $$bad -ne 0 ]; then \
+	  if [ $$ran -ne $$want ]; then \
+	    echo "rubyspec-gate[$$d]: ran $$ran of $$want expected-PASS examples"; ok=0; \
+	  elif [ $$bad -ne 0 ]; then \
 	    echo "rubyspec-gate[$$d]: $$bad regression(s):"; \
 	    awk -F'\t' '$$2!="PASS"' build/rubyspec-gate-$$nm.tsv; ok=0; \
 	  else \
