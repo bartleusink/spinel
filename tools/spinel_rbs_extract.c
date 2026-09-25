@@ -476,6 +476,15 @@ else {
              * ships no `.rbs`, so the inference-level unify_return_type
              * heuristic (load-bearing for stage-2) is unaffected. */
             rbs_types_union_t *u = (rbs_types_union_t *) node;
+            /* a union of singleton(...) types is a Class value whatever the
+             * member: the `class` token, not poly -- which reads as a union
+             * of instances (matz/spinel#5036) */
+            if (u->types != NULL && u->types->length > 0) {
+                bool all_cls = true;
+                for (rbs_node_list_node_t *e = u->types->head; e; e = e->next)
+                    if (e->node->type != RBS_TYPES_CLASS_SINGLETON) { all_cls = false; break; }
+                if (all_cls) { sbuf_set(out, "class", 5); return true; }
+            }
             if (u->types != NULL && u->types->length == 2) {
                 rbs_node_t *a = u->types->head->node;
                 rbs_node_t *b = u->types->head->next->node;
@@ -501,6 +510,12 @@ else {
             sbuf_set(out, "poly", 4);
             return true;
         }
+        case RBS_TYPES_CLASS_SINGLETON:
+            /* `singleton(X)`: the class itself, a Class value. It used to
+             * fall out of the subset, which dropped the whole method's seed,
+             * parameters included (matz/spinel#5036). */
+            sbuf_set(out, "class", 5);
+            return true;
         default:
             /* Out of subset: Self / Top / Bottom / Any / Instance /
              * Class / Block / Function / Interface / Intersection /

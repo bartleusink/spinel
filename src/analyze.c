@@ -2806,6 +2806,9 @@ static TyKind parse_seed_type(Compiler *c, const char *tok) {
   if (sp_streq(buf, "string") || sp_streq(buf, "str")) return TY_STRING;
   if (sp_streq(buf, "symbol") || sp_streq(buf, "sym")) return nilable ? TY_POLY : TY_SYMBOL;
   if (sp_streq(buf, "bool"))   return nilable ? TY_POLY : TY_BOOL;
+  /* `singleton(X)` and unions of them: a Class value, which has no nil of
+     its own, so the nilable form is the boxed one */
+  if (sp_streq(buf, "class"))  return nilable ? TY_POLY : TY_CLASS;
   if (sp_streq(buf, "nil"))    return TY_NIL;
   if (sp_streq(buf, "void"))   return TY_VOID;
   /* heterogeneous unions map to the bare poly tag (#1255); accepting the
