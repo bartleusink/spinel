@@ -5064,6 +5064,7 @@ else {
       TyKind r = TY_UNKNOWN; int found = 0, nat_found = 0;
       int npc = 0;
       const PolyCand *pcs = comp_poly_candidates(c, name, &npc);
+      char ivn_same[256] = "";   /* "@name" for a reader under its own name */
       for (int pi = 0; pi < npc; pi++) {
         int k = pcs[pi].cls;
         if (an_builtin_only) continue;   /* the builtin answer alone is wanted */
@@ -5105,7 +5106,15 @@ else {
           /* resolve alias so `alias_method :required?, :required` reads the
              backing @required, not a bogus @required? */
           const char *rname = comp_resolve_alias(c, k, name);
-          char ivn[256]; snprintf(ivn, sizeof ivn, "@%s", rname);
+          /* the "@name" string once per call, not per candidate class: a
+             reader shared by K classes formatted it K times per ask
+             (rubys in #5035); an alias names another ivar */
+          char ivn[256];
+          if (rname != name || !ivn_same[0]) {
+            snprintf(ivn, sizeof ivn, "@%s", rname);
+            if (rname == name) memcpy(ivn_same, ivn, sizeof ivn_same);
+          }
+          else memcpy(ivn, ivn_same, sizeof ivn);
           int iv = comp_ivar_index(&c->classes[rdcls], ivn);
           TyKind rt2 = iv >= 0 ? ivar_value_ty(&c->classes[rdcls], iv) : TY_UNKNOWN;
           r = found ? ty_unify(r, rt2) : rt2; found = 1;
