@@ -1293,6 +1293,22 @@ inline_x_scope_has_significant_ws(const char *p, const char *end)
   return FALSE;
 }
 
+/* Emit an ASCII letter under /i as the class of it and its other case, and
+   report whether it did. FALSE for anything but a letter, or without /i; the
+   caller then emits the character as it is. emit_cp_folded is the same for a
+   non-ASCII codepoint. */
+static mrb_bool
+emit_ascii_folded(re_compiler *c, uint32_t cp)
+{
+  if (!(c->flags & RE_FLAG_IGNORECASE)) return FALSE;
+  if (!((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z'))) return FALSE;
+  uint16_t id = add_class(c);
+  class_set_bit(&c->classes[id], (uint8_t)cp);
+  class_set_bit(&c->classes[id], (uint8_t)(cp >= 'a' ? cp - 32 : cp + 32));
+  emit(c, RE_CLASS, (uint8_t)id, 0);
+  return TRUE;
+}
+
 /* Compile a single atom (character, class, group, etc.) */
 static void
 compile_atom(re_compiler *c)
@@ -1754,22 +1770,7 @@ compile_atom(re_compiler *c)
     }
     else {
       ch = parse_escape(c);
-      if (c->flags & RE_FLAG_IGNORECASE) {
-        if (ch >= 'A' && ch <= 'Z') {
-          uint16_t id = add_class(c);
-          class_set_bit(&c->classes[id], (uint8_t)ch);
-          class_set_bit(&c->classes[id], (uint8_t)(ch + 32));
-          emit(c, RE_CLASS, (uint8_t)id, 0);
-          break;
-        }
-        else if (ch >= 'a' && ch <= 'z') {
-          uint16_t id = add_class(c);
-          class_set_bit(&c->classes[id], (uint8_t)ch);
-          class_set_bit(&c->classes[id], (uint8_t)(ch - 32));
-          emit(c, RE_CLASS, (uint8_t)id, 0);
-          break;
-        }
-      }
+      if (emit_ascii_folded(c, ch)) break;
       emit(c, RE_CHAR, (uint8_t)ch, 0);
     }
     break;
@@ -1784,22 +1785,7 @@ compile_atom(re_compiler *c)
        the loop never advances. CRuby treats `/{re}/` as matching
        the literal text `{re}`; we mirror that here. Issue #548. */
     next_char(c);
-    if ((c->flags & RE_FLAG_IGNORECASE) && ch < 128) {
-      if (ch >= 'A' && ch <= 'Z') {
-        uint16_t id = add_class(c);
-        class_set_bit(&c->classes[id], (uint8_t)ch);
-        class_set_bit(&c->classes[id], (uint8_t)(ch + 32));
-        emit(c, RE_CLASS, (uint8_t)id, 0);
-        break;
-      }
-      else if (ch >= 'a' && ch <= 'z') {
-        uint16_t id = add_class(c);
-        class_set_bit(&c->classes[id], (uint8_t)ch);
-        class_set_bit(&c->classes[id], (uint8_t)(ch - 32));
-        emit(c, RE_CLASS, (uint8_t)id, 0);
-        break;
-      }
-    }
+    if (emit_ascii_folded(c, ch)) break;
     if (ch >= 128) {
       /* Under /i the character is emitted as the class of its counterparts
          instead: a counterpart need not have the same width, so a run of bytes
@@ -1905,14 +1891,7 @@ static void
 emit_codepoint(re_compiler *c, uint32_t cp)
 {
   if (cp < 128) {
-    if ((c->flags & RE_FLAG_IGNORECASE) &&
-        ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z'))) {
-      uint16_t id = add_class(c);
-      class_set_bit(&c->classes[id], (uint8_t)cp);
-      class_set_bit(&c->classes[id], (uint8_t)(cp >= 'a' ? cp - 32 : cp + 32));
-      emit(c, RE_CLASS, (uint8_t)id, 0);
-      return;
-    }
+    if (emit_ascii_folded(c, cp)) return;
     emit(c, RE_CHAR, (uint8_t)cp, 0);
     return;
   }
