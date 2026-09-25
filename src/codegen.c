@@ -5307,7 +5307,32 @@ void emit_inlined_local_decl(Compiler *c, LocalVar *lv, const char *rn, Buf *b, 
   buf_puts(b, ";\n");
 }
 
+static void emit_proc_literal_here(Compiler *c, int create, Buf *b);
+
+/* The block an inline spliced in (g_block_id) is caller code: it runs under the
+   self, emitting class and rename depth its definition site had, which the
+   inliner parked in the yield fallbacks. emit_block_invoke restores them when
+   it splices the block for a yield; a forwarded `&` / `&blk` / `Proc.new(&b)`
+   that turns the same block into a proc has to as well. Otherwise the proc
+   captured the inlined callee's receiver as its self, and the block's ivar
+   writes landed in that object instead of the one that wrote the block. */
 void emit_proc_literal(Compiler *c, int create, Buf *b) {
+  if (create < 0 || create != g_block_id || !g_yield_self_fallback) {
+    emit_proc_literal_here(c, create, b);
+    return;
+  }
+  const char *sv_self = g_self, *sv_deref = g_self_deref;
+  int sv_emcls = g_emitting_class_id, sv_nren = g_nren;
+  g_self = g_yield_self_fallback;
+  g_self_deref = g_yield_self_deref_fallback;
+  g_emitting_class_id = g_yield_emitting_class_fallback;
+  if (g_block_nren < g_nren) g_nren = g_block_nren;
+  emit_proc_literal_here(c, create, b);
+  g_self = sv_self; g_self_deref = sv_deref;
+  g_emitting_class_id = sv_emcls; g_nren = sv_nren;
+}
+
+static void emit_proc_literal_here(Compiler *c, int create, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *cty = nt_type(nt, create);
   int is_lambda_node = cty && sp_streq(cty, "LambdaNode");
