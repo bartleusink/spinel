@@ -7504,9 +7504,14 @@ static int narrow_int_table_ivars(Compiler *c) {
     }
   }
   const NodeTable *nt = c->nt;
-  /* The ivar reads and writes, in node order, listed once: each candidate
-     slot below walked the whole table for them. */
-  int *ivl = NULL, nivl = 0;
+  /* The ivar reads and writes, in node order, listed once and grouped by name:
+     each candidate slot below walked the whole table for them, and then every
+     ivar node of every name. And for a read, the first call it is the
+     receiver of -- the only one the check below looks at -- which it found by
+     walking the whole table again, per read. */
+  int *ivl = NULL, nivl = 0, *ivl_next = NULL, *first_call = NULL;
+  const char **ivl_name = NULL;
+  int ivl_buckets = 0, *ivl_head = NULL;
   for (int ci = 0; ci < c->nclasses; ci++) {
     ClassInfo *cl = &c->classes[ci];
     for (int iv = 0; iv < cl->nivars; iv++) {
@@ -7519,6 +7524,28 @@ static int narrow_int_table_ivars(Compiler *c) {
           if (k == NK_InstanceVariableReadNode || k == NK_InstanceVariableWriteNode ||
               k == NK_InstanceVariableOperatorWriteNode || k == NK_InstanceVariableOrWriteNode ||
               k == NK_InstanceVariableAndWriteNode) ivl[nivl++] = id;
+        }
+        /* name -> its ivar nodes, ascending (chained in reverse, walked forward) */
+        ivl_buckets = nivl > 0 ? nivl : 1;
+        ivl_head = malloc(sizeof(int) * (size_t)ivl_buckets);
+        ivl_next = malloc(sizeof(int) * (size_t)(nivl + 1));
+        ivl_name = malloc(sizeof(char *) * (size_t)(nivl + 1));
+        first_call = malloc(sizeof(int) * (size_t)(nt->count + 1));
+        if (!ivl_head || !ivl_next || !ivl_name || !first_call) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+        for (int b = 0; b < ivl_buckets; b++) ivl_head[b] = -1;
+        for (int li = nivl - 1; li >= 0; li--) {
+          const char *nm = nt_str(nt, ivl[li], "name");
+          ivl_name[li] = nm;
+          unsigned h = 2166136261u;
+          for (const char *q = nm ? nm : ""; *q; q++) { h ^= (unsigned char)*q; h *= 16777619u; }
+          int b = (int)(h % (unsigned)ivl_buckets);
+          ivl_next[li] = ivl_head[b]; ivl_head[b] = li;
+        }
+        for (int u = 0; u < nt->count; u++) first_call[u] = -1;
+        for (int u = nt->count - 1; u >= 0; u--) {   /* descending: the lowest call wins */
+          if (nt_kind(nt, u) != NK_CallNode) continue;
+          int r = nt_ref(nt, u, "receiver");
+          if (r >= 0 && r < nt->count) first_call[r] = u;
         }
       }
       if (cl->ivar_types[iv] != TY_POLY_ARRAY) continue;
@@ -7534,7 +7561,10 @@ static int narrow_int_table_ivars(Compiler *c) {
       if (comp_is_reader(cl, bare) || comp_is_writer(cl, bare)) continue;
       if (comp_is_sg_reader(cl, bare) || comp_is_sg_writer(cl, bare)) continue;
       int ok = 1, saw_table = 0;
-      for (int li = 0; li < nivl && ok; li++) {
+      unsigned hb = 2166136261u;
+      for (const char *q = ivn; *q; q++) { hb ^= (unsigned char)*q; hb *= 16777619u; }
+      for (int li = ivl_head[hb % (unsigned)ivl_buckets]; li >= 0 && ok; li = ivl_next[li]) {
+        if (!ivl_name[li] || !sp_streq(ivl_name[li], ivn)) continue;
         int id = ivl[li];
         const char *ty = nt_type(nt, id);
         if (!ty) continue;
@@ -7589,9 +7619,7 @@ static int narrow_int_table_ivars(Compiler *c) {
         }
         /* a read: it must BE the receiver of a modeled op, nothing else */
         int used = 0;
-        for (int u = 0; u < nt->count; u++) {
-          if (!nt_type(nt, u) || !sp_streq(nt_type(nt, u), "CallNode")) continue;
-          if (nt_ref(nt, u, "receiver") != id) continue;
+        for (int u = first_call[id]; u >= 0; u = -1) {
           const char *un = nt_str(nt, u, "name");
           int ua = nt_ref(nt, u, "arguments"); int uan = 0;
           if (ua >= 0) nt_arr(nt, ua, "arguments", &uan);
@@ -7611,7 +7639,7 @@ static int narrow_int_table_ivars(Compiler *c) {
       }
     }
   }
-  free(ivl);
+  free(ivl); free(ivl_head); free(ivl_next); free(ivl_name); free(first_call);
   return narrowed;
 }
 
