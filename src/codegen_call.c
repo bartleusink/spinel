@@ -9427,9 +9427,9 @@ static void emit_splat_operand_array(Compiler *c, int node, Buf *b) {
    members at run time. Data requires an exact count; Struct nil-fills a short
    array and rejects a long one (#2971); a keyword_init Struct takes no
    positionals at all. */
-static void emit_struct_splat_new(Compiler *c, ClassInfo *cls, int psplat, int kw_init, Buf *b) {
+static void emit_struct_spread_new(Compiler *c, ClassInfo *cls, const char *arr, int kw_init, Buf *b) {
   int tsa = ++g_tmp, tln = ++g_tmp;
-  buf_printf(b, "({ sp_PolyArray *_t%d = ", tsa); emit_splat_operand_array(c, psplat, b);
+  buf_printf(b, "({ sp_PolyArray *_t%d = %s", tsa, arr);
   buf_printf(b, "; SP_GC_ROOT(_t%d); sp_int _t%d = sp_PolyArray_length(_t%d);", tsa, tln, tsa);
   if (kw_init)
     buf_printf(b, " if (_t%d != 0) sp_raise_cls(\"ArgumentError\", sp_sprintf(\"wrong number of arguments (given %%lld, expected 0)\", (long long)_t%d));", tln, tln);
@@ -9446,6 +9446,44 @@ static void emit_struct_splat_new(Compiler *c, ClassInfo *cls, int psplat, int k
     else emit_unbox_text(c, cls->ivar_types[a], elem, b);
   }
   buf_puts(b, "); })");
+}
+static void emit_struct_splat_new(Compiler *c, ClassInfo *cls, int psplat, int kw_init, Buf *b) {
+  Buf ab; memset(&ab, 0, sizeof ab);
+  emit_splat_operand_array(c, psplat, &ab);
+  emit_struct_spread_new(c, cls, ab.p ? ab.p : "sp_PolyArray_new()", kw_init, b);
+  free(ab.p);
+}
+/* `X.new(0, *rest)` / `X.new(*mid, last)`: positionals beside a splat. The
+   count is still only known at run time, so gather every argument into one
+   array in order and spread that, as a sole splat does. Returns 0 (emitting
+   nothing) when a splat operand has no array form. */
+static int emit_struct_mixed_splat_new(Compiler *c, ClassInfo *cls, const int *argv, int argc, Buf *b) {
+  const NodeTable *nt = c->nt;
+  for (int a = 0; a < argc; a++) {
+    if (nt_kind(nt, argv[a]) != NK_SplatNode) continue;
+    int op = nt_ref(nt, argv[a], "expression");
+    if (!splat_operand_ok(c, op >= 0 ? op : argv[a])) return 0;
+  }
+  int ta = ++g_tmp;
+  Buf ab; memset(&ab, 0, sizeof ab);
+  buf_printf(&ab, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", ta, ta);
+  for (int a = 0; a < argc; a++) {
+    if (nt_kind(nt, argv[a]) == NK_SplatNode) {
+      int op = nt_ref(nt, argv[a], "expression");
+      buf_printf(&ab, " sp_PolyArray_append_all(_t%d, ", ta);
+      emit_splat_operand_array(c, op >= 0 ? op : argv[a], &ab);
+      buf_puts(&ab, ");");
+    }
+    else {
+      buf_printf(&ab, " sp_PolyArray_push(_t%d, ", ta);
+      emit_boxed(c, argv[a], &ab);
+      buf_puts(&ab, ");");
+    }
+  }
+  buf_printf(&ab, " _t%d; })", ta);
+  emit_struct_spread_new(c, cls, ab.p, 0, b);
+  free(ab.p);
+  return 1;
 }
 
 /* Can `initialize` (scope initm) take this call: the positional count within
@@ -9906,6 +9944,9 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
             emit_struct_splat_new(c, cls, psplat, 0, b);
             return 1;
           }
+          if (kwh < 0 && argc > 1 && call_has_splat_arg(nt, argv, argc) &&
+              emit_struct_mixed_splat_new(c, cls, argv, argc, b))
+            return 1;
         }
         /* Data.new validates its arguments strictly (unlike Struct, which
            nil-fills): exact positional count, or a keyword for every member and
