@@ -14543,9 +14543,33 @@ static void rename_redefined_toplevel_defs(Compiler *c) {
     if (next < 0) continue;
     char *nm = strdup(nm0);
     char to[256];
-    snprintf(to, sizeof to, "%s__redef%d", nm, ++serial);
+    /* a name the program does not already define (`def f__redef1` is legal) */
+    for (;;) {
+      snprintf(to, sizeof to, "%s__redef%d", nm, ++serial);
+      int taken = 0;
+      NT_FOREACH_KIND(nt, NK_DefNode, d) {
+        const char *dn = nt_str(nt, d, "name");
+        if (dn && sp_streq(dn, to)) { taken = 1; break; }
+      }
+      if (!taken) break;
+    }
     nt_set_str(nt, st[i], "name", to);
-    for (int j = i + 1; j < next; j++) redef_rename_calls(nt, st[j], nm, to, 0);
+    for (int j = i + 1; j < next; j++) {
+      redef_rename_calls(nt, st[j], nm, to, 0);
+      /* `alias saved f` between the two names the body in effect there */
+      if (nt_kind(nt, st[j]) == NK_AliasMethodNode) {
+        int on = nt_ref(nt, st[j], "old_name");
+        const char *ov = on >= 0 ? nt_str(nt, on, "value") : NULL;
+        if (ov && sp_streq(ov, nm)) nt_set_str(nt, on, "value", to);
+      }
+    }
+    /* The earlier body's own calls: it is entered only from the renamed
+       calls, all of which run before the later `def`, so while it runs the
+       name is still this definition -- a recursive `fact(n - 1)` is itself,
+       not the redefinition (CodeRabbit on #4972). Parameter defaults run on
+       entry, the same. */
+    redef_rename_calls(nt, nt_ref(nt, st[i], "body"), nm, to, 0);
+    redef_rename_calls(nt, nt_ref(nt, st[i], "parameters"), nm, to, 0);
     free(nm);
   }
   free(st);
