@@ -6688,6 +6688,19 @@ int comp_class_is_module(Compiler *c, ClassInfo *ci) {
   return dt && sp_streq(dt, "ModuleNode");
 }
 
+/* The proc-form clone of class `cid`'s yielding initialize, when it has one
+   and the class is built on the heap: sp_X_new then runs it, and a `new` site
+   that splices the body inline allocates through sp_X_new_noinit instead.
+   Without the clone sp_X_new only allocates, and a `new` whose class is known
+   only at run time left every ivar unset. -1 otherwise. */
+int ctor_init_proc_form(Compiler *c, int cid) {
+  ClassInfo *ci = &c->classes[cid];
+  if (ci->is_struct || ci->is_value_type || ci->is_native_class) return -1;
+  if (comp_class_is_module(c, ci)) return -1;
+  int init = comp_method_in_chain(c, cid, "initialize", NULL);
+  return init >= 0 ? scope_proc_form_of(c, init) : -1;
+}
+
 void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
   /* Native (C-backed) class: constructor + methods live in the package; nothing
      is generated here (see the native_method externs + .new emission). */
@@ -6953,7 +6966,8 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
      removes the malloc/free churn of allocation-heavy workloads. Exception
      subclasses use sp_exc_new_sub storage, so they are not pooled. */
   if (!class_is_exc_subclass(c, cid)) buf_printf(b, "SP_POOL_DEFINE(%s)\n", ci->c_name);
-  buf_printf(b, "static sp_%s *sp_%s_new(", ci->c_name, ci->c_name);
+  int init_pf = ctor_init_proc_form(c, cid);
+  buf_printf(b, "static sp_%s *sp_%s_new%s(", ci->c_name, ci->c_name, init_pf >= 0 ? "_noinit" : "");
   if (init >= 0 && (c->scopes[init].nparams > 0 || init_has_blk)) {
     Scope *s = &c->scopes[init];
     for (int i = 0; i < s->nparams; i++) {
@@ -7027,6 +7041,36 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, ");\n");
   }
   buf_puts(b, "  return self;\n}\n");
+  if (init_pf < 0) return;
+  /* the full constructor: allocate, then run the body through the clone. No
+     block reaches a constructor called this way. */
+  Scope *s = &c->scopes[init], *pf = &c->scopes[init_pf];
+  buf_printf(b, "static sp_%s *sp_%s_new(", ci->c_name, ci->c_name);
+  for (int i = 0; i < s->nparams; i++) {
+    if (i) buf_puts(b, ", ");
+    LocalVar *p = scope_local(s, s->pnames[i]);
+    emit_ctype(c, (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY, b);
+    buf_printf(b, " lv_%s", s->pnames[i]);
+  }
+  if (s->nparams == 0) buf_puts(b, "void");
+  buf_printf(b, ") {\n  sp_%s *self = sp_%s_new_noinit(", ci->c_name, ci->c_name);
+  for (int i = 0; i < s->nparams; i++) buf_printf(b, "%slv_%s", i ? ", " : "", s->pnames[i]);
+  buf_puts(b, ");\n  SP_GC_ROOT(self);\n");
+  buf_printf(b, "  (void)sp_%s_%s(", c->classes[initcls].c_name, mc(pf->name));
+  if (initcls != cid) buf_printf(b, "(sp_%s *)", c->classes[initcls].c_name);
+  buf_puts(b, "self");
+  for (int i = 0; i < s->nparams; i++) {
+    LocalVar *p = scope_local(s, s->pnames[i]);
+    LocalVar *q = pf->pnames[i] ? scope_local(pf, pf->pnames[i]) : NULL;
+    TyKind pt = (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY;
+    TyKind qt = (q && q->type != TY_UNKNOWN) ? q->type : TY_POLY;
+    char ln[128]; snprintf(ln, sizeof ln, "lv_%s", s->pnames[i]);
+    buf_puts(b, ", ");
+    if (qt == TY_POLY && pt != TY_POLY) emit_boxed_text(c, pt, ln, b);
+    else if (pt == TY_POLY && qt != TY_POLY) emit_unbox_text(c, qt, ln, b);
+    else buf_puts(b, ln);
+  }
+  buf_puts(b, ", NULL);\n  return self;\n}\n");
 }
 
 /* Emit a statement-expression that allocates an instance of class `cid` with
@@ -11994,6 +12038,18 @@ char *codegen_program(const NodeTable *nt) {
         buf_puts(&b, ");\n");
       }
       else buf_printf(&b, "static sp_%s %ssp_%s_new(void);\n", ci->c_name, star, ci->c_name);
+      /* the allocation-only half, for the sites that splice the body */
+      if (ctor_init_proc_form(c, i) >= 0) {
+        buf_printf(&b, "static sp_%s *sp_%s_new_noinit(", ci->c_name, ci->c_name);
+        Scope *s = &c->scopes[init];
+        for (int m = 0; m < s->nparams; m++) {
+          if (m) buf_puts(&b, ", ");
+          LocalVar *p = scope_local(s, s->pnames[m]);
+          emit_ctype(c, (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY, &b);
+        }
+        if (s->nparams == 0) buf_puts(&b, "void");
+        buf_puts(&b, ");\n");
+      }
     }
   }
   if (c->nscopes > 1 || c->nclasses > 0) buf_puts(&b, "\n");

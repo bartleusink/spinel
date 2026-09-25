@@ -12972,8 +12972,27 @@ static int scope_yields_inside_lifted_body(Compiler *c, int mi) {
    of `blk.nil?` walked over). The proc form is that arm: its block is the
    real proc, NULL here, which is what `blk.nil?` and a bare `yield` (a
    LocalJumpError) already answer for. */
+/* Is there a `new` whose class is only known at run time (`k.new`, a Class
+   read out of a container)? Its switch arm calls sp_X_new, which cannot splice
+   a yielding initialize the way a constant `X.new` site does, so the class
+   needs the clone for its constructor to run the body at all. */
+static int pf_dynamic_new(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !sp_streq(nm, "new")) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    int rk = nt_kind(nt, recv);
+    if (rk != NK_ConstantReadNode && rk != NK_ConstantPathNode) return 1;
+  }
+  return 0;
+}
+
 static int pf_wanted(Compiler *c, const char *name) {
   const NodeTable *nt = c->nt;
+  if (sp_streq(name, "initialize")) return pf_dynamic_new(c);
   for (int id = 0; id < nt->count; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
@@ -13012,6 +13031,10 @@ int make_yield_proc_forms(Compiler *c) {
     /* reachability is decided after this pass, so do not consult it: an
        unused clone is a static function the C compiler drops. */
     if (!src->yields || src->class_id < 0) continue;
+    /* a by-value or Struct constructor is built by its own emitter, which
+       does not run the clone (ctor_init_proc_form) */
+    if (sp_streq(src->name ? src->name : "", "initialize") &&
+        (c->classes[src->class_id].is_struct || c->classes[src->class_id].is_value_type)) continue;
     if (src->is_transplanted_source || !src->name) continue;
     if (src->body < 0) continue;
     if (!pf_wanted(c, src->name) && !pf_in_class_dispatch(c, src)) continue;
