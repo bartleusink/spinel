@@ -6169,7 +6169,22 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       int root_recv = ncall_arm > 0 || is_lengthlike || is_empty || is_pred ||
                       is_class_named || is_class_reflect || is_ostruct || is_io_rewind || is_poly_to_a ||
                       is_poly_to_h;
-      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+      /* A String mutated in place and then stored is boxed as its
+         shared-mutable handle, which no String arm below reads: the chain
+         built for a name a user class shares answered it with the switch's
+         NoMethodError (#5048). A reading method sees the handle's live
+         string, so it is read through the deref; a mutator, and a question
+         about the object itself rather than its value, keep the handle. */
+      /* Only a name String answers (the face table's String rows, and the
+         length-like and empty? arms above them) builds a String arm, so only
+         those dispatches pay the deref: the hottest one, an attr reader
+         shared by an AST's node classes, never sees a String. */
+      unsigned sface = ty_poly_face_owners(name, argc, nt_ref(nt, id, "block") >= 0, 1, 1);
+      int reads_value = (is_lengthlike || is_empty || ((sface & PF_STRING) && !(sface & PF_MUT))) &&
+                        !sp_str_mutator(name, SP_MUT_LOCAL);
+      buf_printf(b, "({ sp_RbVal _t%d = %s", tv, reads_value ? "sp_poly_strbuf_deref(" : "");
+      emit_expr(c, recv, b);
+      buf_puts(b, reads_value ? "); " : "; ");
       if (root_recv) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
       emit_poly_vis_precheck(c, id, tv, b);
       size_t pd_from = b->len;   /* the region pd_hoist may move out of line */
