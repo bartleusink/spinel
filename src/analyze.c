@@ -6426,6 +6426,27 @@ static int desugar_yielder_block_arg(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
+  /* The two walks below ran over every node once per generator, every round.
+     Their candidates -- a call named to_proc, a call passed a block argument
+     -- are collected once, ascending; each is still tested in full where it
+     is used, since a rewrite for one generator (`&y.to_proc` -> `&y`) can
+     make a node a candidate's match for the next. */
+  int *tp_ids = NULL, ntp = 0, *ba_ids = NULL, nba = 0, has_gen = 0;
+  for (int id = 0; id < n0 && !has_gen; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (nm && sp_streq(nm, "new") && nt_ref(nt, id, "block") >= 0) has_gen = 1;
+  }
+  if (!has_gen) return 0;
+  tp_ids = malloc(sizeof(int) * (size_t)(n0 > 0 ? n0 : 1));
+  ba_ids = malloc(sizeof(int) * (size_t)(n0 > 0 ? n0 : 1));
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (nm && sp_streq(nm, "to_proc")) tp_ids[ntp++] = id;
+    int blk = nt_ref(nt, id, "block");
+    if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode) ba_ids[nba++] = id;
+  }
   for (int en = 0; en < n0; en++) {
     if (nt_kind(nt, en) != NK_CallNode) continue;
     const char *enm = nt_str(nt, en, "name");
@@ -6450,7 +6471,8 @@ static int desugar_yielder_block_arg(Compiler *c) {
        pushes, and `&y.to_proc` is `&y`. Neither had an arm, so the explicit
        spelling raised NoMethodError (#3844). Rewritten before the `&y` loop
        below so the block-argument form rides it. */
-    for (int id = 0; id < n0; id++) {
+    for (int ti = 0; ti < ntp; ti++) {
+      int id = tp_ids[ti];
       if (nt_kind(nt, id) != NK_CallNode) continue;
       const char *tnm = nt_str(nt, id, "name");
       if (!tnm || !sp_streq(tnm, "to_proc")) continue;
@@ -6478,7 +6500,8 @@ static int desugar_yielder_block_arg(Compiler *c) {
       }
     }
     /* every `&y` inside this generator body */
-    for (int id = 0; id < n0; id++) {
+    for (int bi = 0; bi < nba; bi++) {
+      int id = ba_ids[bi];
       if (nt_kind(nt, id) != NK_CallNode) continue;
       int blk = nt_ref(nt, id, "block");
       if (blk < 0 || nt_kind(nt, blk) != NK_BlockArgumentNode) continue;
@@ -6524,6 +6547,7 @@ static int desugar_yielder_block_arg(Compiler *c) {
       changed = 1;
     }
   }
+  free(tp_ids); free(ba_ids);
   return changed;
 }
 
