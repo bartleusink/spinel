@@ -1751,9 +1751,26 @@ const char *comp_super_name(Compiler *c, int parent, const char *name, int is_cm
   if (!u || parent < 0) return u;
   size_t n = strlen(u);
   if (n <= 3 || strcmp(u + n - 3, "#pf") != 0) return u;
-  int hit = is_cmethod ? comp_cmethod_in_chain(c, parent, u, NULL)
-                       : comp_method_in_chain(c, parent, u, NULL);
-  if (hit >= 0) return u;
+  /* The nearest ancestor that defines the method decides: its own clone when
+     it yields, else its plain method. Asking the chain for the clone found a
+     grandparent's and skipped a parent that overrides without yielding
+     (CodeRabbit on #4996). */
+  char base[256];
+  if (n - 3 >= sizeof base) return u;
+  memcpy(base, u, n - 3); base[n - 3] = '\0';
+  int dc = -1;
+  int bm = is_cmethod ? comp_cmethod_in_chain(c, parent, base, &dc)
+                      : comp_method_in_chain(c, parent, base, &dc);
+  int hit = bm < 0 || dc < 0 ? -1
+          : is_cmethod ? comp_cmethod_in_class(c, dc, u) : comp_method_in_class(c, dc, u);
+  if (hit >= 0 || bm < 0) {
+    if (bm >= 0) return u;
+    /* no ancestor defines the plain name: keep the old answer, the clone
+       found anywhere up the chain */
+    int any = is_cmethod ? comp_cmethod_in_chain(c, parent, u, NULL)
+                         : comp_method_in_chain(c, parent, u, NULL);
+    if (any >= 0) return u;
+  }
   static struct pf_base { char *from, *to; struct pf_base *next; } *cache;
   for (struct pf_base *e = cache; e; e = e->next)
     if (strcmp(e->from, u) == 0) return e->to;
