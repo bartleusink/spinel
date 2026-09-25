@@ -497,6 +497,10 @@ int splat_operand_is_scalar(TyKind t);
    returns 1. Shared by emit_args_filled and the INLINE parameter binding, which
    walks parameters looking for keys and so could not see an unclaimed one
    (#4419). */
+void emit_call_arity_check(Compiler *c, Scope *m, int argc, const int *argv, int judge_rest);
+/* Collect a call's keywords no declared keyword parameter takes into a fresh
+   sp_SymPolyHash temp for a `**kwrest` parameter; returns the temp id. */
+int emit_kwrest_collect(Compiler *c, Scope *m, int kwh, int ds_hash_tmp, TyKind ds_hash_type, int argsNode);
 int emit_unknown_kwarg_raise(Compiler *c, Scope *m, int kwh);
 /* The argument of a String append (`<<` / `concat`), rendered for the append.
    An Integer -- typed OR boxed -- is a CODEPOINT, not its decimal digits. Shared

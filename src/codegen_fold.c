@@ -6478,7 +6478,7 @@ void emit_ds_param_extract(Compiler *c, Scope *m, int i, int ds_hash_tmp,
    explicit keyword param, plus merged `**hash` sources -- into a fresh
    SymPolyHash for the callee's `**kwrest` param. Returns the hash temp id.
    Shared by emit_args_filled and emit_dispatch. */
-static int emit_kwrest_collect(Compiler *c, Scope *m, int kwh, int ds_hash_tmp,
+int emit_kwrest_collect(Compiler *c, Scope *m, int kwh, int ds_hash_tmp,
                                TyKind ds_hash_type, int argsNode) {
   const NodeTable *nt = c->nt;
   int krhash = ++g_tmp;
@@ -6744,8 +6744,9 @@ int splat_operand_is_scalar(TyKind t) {
    parameters for positional slots and skipped every keyword hash, so
    `obj.m(3, 4)` against `def m(x, k: 1)` bound silently where `m(3, 4)`
    raised. `judge_rest` is off for the dispatch, which measures a rest
-   target's shortfall itself. */
-static void emit_call_arity_check(Compiler *c, Scope *m, int argc, const int *argv, int judge_rest) {
+   target's shortfall itself. The inlined yield path (emit_inline_call_x)
+   asks here too. */
+void emit_call_arity_check(Compiler *c, Scope *m, int argc, const int *argv, int judge_rest) {
   const NodeTable *nt = c->nt;
   int kwh = -1;
   int pos_argc = argc;
