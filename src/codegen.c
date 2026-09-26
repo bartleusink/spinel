@@ -8686,6 +8686,67 @@ static void emit_obj_cmp_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "  }\n  *comparable = FALSE; return 0;\n}\n");
 }
 
+/* A boxed argument `v` handed to parameter `pi` of method scope `m`, as the
+   user dispatch tables below pass it: `guard` (empty when any value will do)
+   tests that the value fits the parameter, and `arg` is the value in the
+   parameter's C type. 0 when the parameter's type has no such form. */
+static int user_dispatch_arg(Compiler *c, Scope *m, int pi, const char *v,
+                             char *guard, size_t gsz, char *arg, size_t asz) {
+  LocalVar *p = scope_local(m, m->pnames[pi]);
+  TyKind pt = (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY;
+  guard[0] = 0;
+  if (ty_is_object(pt)) {
+    int pcls = ty_object_class(pt);
+    snprintf(guard, gsz, "%s.tag == SP_TAG_OBJ && %s.cls_id == %d",
+             v, v, comp_class_index(c, c->classes[pcls].name));
+    snprintf(arg, asz, "%s(sp_%s *)%s.v.p",
+             c->classes[pcls].is_value_type ? "*" : "", c->classes[pcls].name, v);
+  }
+  else if (pt == TY_POLY) snprintf(arg, asz, "%s", v);
+  else if (pt == TY_INT) { snprintf(guard, gsz, "%s.tag == SP_TAG_INT", v); snprintf(arg, asz, "%s.v.i", v); }
+  else if (pt == TY_FLOAT) { snprintf(guard, gsz, "%s.tag == SP_TAG_FLT", v); snprintf(arg, asz, "%s.v.f", v); }
+  else if (pt == TY_STRING) { snprintf(guard, gsz, "%s.tag == SP_TAG_STR", v); snprintf(arg, asz, "%s.v.s", v); }
+  else if (pt == TY_SYMBOL) { snprintf(guard, gsz, "%s.tag == SP_TAG_SYM", v); snprintf(arg, asz, "(sp_sym)%s.v.i", v); }
+  else return 0;
+  return 1;
+}
+
+/* Whether class k answers a user `[]=` the aset table below can call. */
+static int user_aset_scope(Compiler *c, int k, int *defcls) {
+  int mi = comp_method_in_chain(c, k, "[]=", defcls);
+  if (mi < 0) return -1;
+  Scope *m = &c->scopes[mi];
+  if (!m->reachable || m->yields || scope_is_shadowed(c, mi) ||
+      m->is_transplanted_source || m->nparams != 2 || m->rest_idx >= 0) return -1;
+  return mi;
+}
+
+/* Generate sp_user_aset_dispatch: the `[]=` counterpart of the binop table
+   below, installed as sp_user_aset_hook. `r[k] ||= v` and `r[k] += v` on a
+   boxed r store through sp_poly_set_poly, which knew only the builtin
+   containers, so an object with its own []= lost the store. */
+static void emit_user_aset_dispatch(Compiler *c, Buf *b) {
+  buf_puts(b, "static void sp_user_aset_dispatch(sp_RbVal a, sp_RbVal k, sp_RbVal v, sp_bool *handled) {\n");
+  buf_puts(b, "  *handled = FALSE;\n  switch (a.cls_id) {\n");
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    if (!c->classes[ci].instantiated) continue;
+    int defcls = -1;
+    int mi = user_aset_scope(c, ci, &defcls);
+    if (mi < 0) continue;
+    Scope *m = &c->scopes[mi];
+    char g0[96], a0[160], g1[96], a1[160];
+    if (!user_dispatch_arg(c, m, 0, "k", g0, sizeof g0, a0, sizeof a0) ||
+        !user_dispatch_arg(c, m, 1, "v", g1, sizeof g1, a1, sizeof a1)) continue;
+    const char *dcn = c->classes[defcls].c_name;
+    buf_printf(b, "    case %d:\n", comp_class_index(c, c->classes[ci].name));
+    buf_printf(b, "      if ((%s) && (%s)) {\n", g0[0] ? g0 : "1", g1[0] ? g1 : "1");
+    buf_printf(b, "        *handled = TRUE; (void)sp_%s_%s(%s(sp_%s *)a.v.p, %s, %s);\n      }\n",
+               dcn, mc(m->name ? m->name : "[]="), c->classes[defcls].is_value_type ? "*" : "", dcn, a0, a1);
+    buf_puts(b, "      break;\n");
+  }
+  buf_puts(b, "    default: break;\n  }\n}\n");
+}
+
 /* Generate sp_user_binop_dispatch: a cls_id switch resolving user-defined
    binary operators on a BOXED receiver. Installed as sp_user_binop_hook, the
    last stop before sp_poly_binop_bad raises -- so `acc + x` inside a fold
@@ -8697,7 +8758,10 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
     "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^",
     /* the comparisons too: a boxed receiver reached sp_poly_cmp, which knows
        nothing of a user `<`, and answered ArgumentError (#3501) */
-    "<", ">", "<=", ">=", "<=>", "==", NULL };
+    "<", ">", "<=", ">=", "<=>", "==",
+    /* and the element read, which a boxed `r[k] ||= v` / `r[k] += v` reads
+       through sp_poly_index_poly */
+    "[]", NULL };
   buf_puts(b, "static sp_RbVal sp_user_binop_dispatch(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled) {\n");
   buf_puts(b, "  *handled = FALSE;\n  switch (a.cls_id) {\n");
   for (int k = 0; k < c->nclasses; k++) {
@@ -8718,26 +8782,12 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
       if (!m->reachable || m->yields || scope_is_shadowed(c, mi) ||
           m->is_transplanted_source) continue;
       if (m->nparams < 1 || m->rest_idx >= 0) continue;
-      LocalVar *p = scope_local(m, m->pnames[0]);
-      TyKind pt = (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY;
+      if (sp_streq(uops[u], "[]") && m->nparams != 1) continue;
       const char *dcn = c->classes[defcls].c_name;
       int self_vt = c->classes[defcls].is_value_type;
-      char argbuf[160];
-      const char *guard = NULL;
-      if (ty_is_object(pt)) {
-        int pcls = ty_object_class(pt);
-        static char gb[64];
-        snprintf(gb, sizeof gb, "b.tag == SP_TAG_OBJ && b.cls_id == %d",
-                 comp_class_index(c, c->classes[pcls].name));
-        guard = gb;
-        snprintf(argbuf, sizeof argbuf, "%s(sp_%s *)b.v.p",
-                 c->classes[pcls].is_value_type ? "*" : "", c->classes[pcls].name);
-      }
-      else if (pt == TY_POLY) snprintf(argbuf, sizeof argbuf, "b");
-      else if (pt == TY_INT) { guard = "b.tag == SP_TAG_INT"; snprintf(argbuf, sizeof argbuf, "b.v.i"); }
-      else if (pt == TY_FLOAT) { guard = "b.tag == SP_TAG_FLT"; snprintf(argbuf, sizeof argbuf, "b.v.f"); }
-      else if (pt == TY_STRING) { guard = "b.tag == SP_TAG_STR"; snprintf(argbuf, sizeof argbuf, "b.v.s"); }
-      else continue;
+      char argbuf[160], gb[96];
+      if (!user_dispatch_arg(c, m, 0, "b", gb, sizeof gb, argbuf, sizeof argbuf)) continue;
+      const char *guard = gb[0] ? gb : NULL;
       buf_printf(b, "      if (strcmp(op, \"%s\") == 0%s%s%s) {\n",
                  uops[u], guard ? " && (" : "", guard ? guard : "", guard ? ")" : "");
       char callbuf[256];
@@ -9109,6 +9159,8 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "static sp_int sp_obj_cmp_dispatch(sp_RbVal a, sp_RbVal b, sp_bool *comparable);\n");
   if (g_has_user_binop)
     buf_puts(b, "static sp_RbVal sp_user_binop_dispatch(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled);\n");
+  if (g_has_user_aset)
+    buf_puts(b, "static void sp_user_aset_dispatch(sp_RbVal a, sp_RbVal k, sp_RbVal v, sp_bool *handled);\n");
   if (g_has_user_coerce)
     buf_puts(b, "static sp_RbVal sp_user_coerce_dispatch(const char *op, sp_RbVal recv, sp_RbVal obj, sp_bool *handled);\n");
   if (g_has_user_to_io)
@@ -9182,6 +9234,8 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  sp_obj_cmp_hook = sp_obj_cmp_dispatch;\n");
   if (g_has_user_binop)
     buf_puts(b, "  sp_user_binop_hook = sp_user_binop_dispatch;\n");
+  if (g_has_user_aset)
+    buf_puts(b, "  sp_user_aset_hook = sp_user_aset_dispatch;\n");
   if (g_has_user_coerce)
     buf_puts(b, "  sp_user_coerce_hook = sp_user_coerce_dispatch;\n");
   if (g_has_user_to_io)
@@ -12361,7 +12415,7 @@ char *codegen_program(const NodeTable *nt) {
   g_has_user_binop = 0;
   {
     static const char *const uops[] = {
-      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", NULL };
+      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "[]", NULL };
     /* A class that defines a #coerce needs the table for its COMPARISONS too:
        the protocol routes `5 < obj` to the boxed entry, which reaches the
        class through this hook. Only for such a class, though -- an ordinary
@@ -12377,6 +12431,9 @@ char *codegen_program(const NodeTable *nt) {
         if (comp_method_in_chain(c, k, cops[u], NULL) >= 0) { g_has_user_binop = 1; break; }
     }
   }
+  g_has_user_aset = 0;
+  for (int k = 0; k < c->nclasses && !g_has_user_aset; k++)
+    if (c->classes[k].instantiated && user_aset_scope(c, k, NULL) >= 0) g_has_user_aset = 1;
   g_has_user_coerce = 0;
   for (int k = 0; k < c->nclasses; k++) {
     if (!c->classes[k].instantiated) continue;
@@ -12439,6 +12496,7 @@ char *codegen_program(const NodeTable *nt) {
   emit_synth_line_marker(body);
   if (g_has_user_cmp) emit_obj_cmp_dispatch(c, body);
   if (g_has_user_binop) emit_user_binop_dispatch(c, body);
+  if (g_has_user_aset) emit_user_aset_dispatch(c, body);
   if (g_has_user_coerce) emit_user_coerce_dispatch(c, body);
   if (g_has_user_to_io) emit_user_to_io_dispatch(c, body);
   /* Struct/Data value-== hook (after the class struct definitions); emitted

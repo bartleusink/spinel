@@ -2420,6 +2420,12 @@ static inline void *sp_poly_obj_ptr(sp_RbVal v) {
 }
 typedef sp_RbVal (*sp_user_binop_fn)(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled);
 static sp_user_binop_fn sp_user_binop_hook = NULL;
+/* The same for a user `[]=` on a BOXED receiver (sp_user_aset_dispatch):
+   `r[k] ||= v` and `r[k] += v` on a boxed r store through sp_poly_set_poly,
+   which knows only the builtin containers. `[]` goes through the binop hook
+   above. handled stays FALSE when no arm takes the receiver and key. */
+typedef void (*sp_user_aset_fn)(sp_RbVal recv, sp_RbVal key, sp_RbVal val, sp_bool *handled);
+static sp_user_aset_fn sp_user_aset_hook = NULL;
 /* The numeric coerce protocol from the other side: `5 + obj` asks obj for
    `coerce(5)` and applies the operator to the pair it answers. The generated
    TU installs a cls_id switch over the classes that define #coerce. The static
@@ -8176,6 +8182,11 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* heterogeneous-key hash: any key kind (incl. Method) looks up directly. */
   if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_POLY_POLY_HASH)
     return sp_PolyPolyHash_get((sp_PolyPolyHash *)recv.v.p, idx);
+  /* a user object's own [] (`r[k] ||= v` on a boxed r reads through here) */
+  if (SP_UNLIKELY(sp_poly_is_user_obj(recv))) {
+    sp_RbVal _u;
+    if (sp_poly_user_cmp("[]", recv, idx, &_u)) return _u;
+  }
   if (idx.tag == SP_TAG_STR) return sp_poly_get_str(recv, idx.v.s);
   if (idx.tag == SP_TAG_SYM) return sp_poly_get_sym(recv, (sp_sym)idx.v.i);
   /* a Range index on a poly STRING is a substring (String#[Range]); without
@@ -8935,6 +8946,12 @@ static sp_RbVal sp_poly_arr_widen_and_set(sp_RbVal v, sp_int idx, sp_RbVal val) 
 static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
   if (v.tag != SP_TAG_OBJ) return val;
+  /* a user object's own []= */
+  if (SP_UNLIKELY(sp_poly_is_user_obj(v) && sp_user_aset_hook)) {
+    sp_bool h = FALSE;
+    sp_user_aset_hook(v, key, val, &h);
+    if (h) return val;
+  }
   /* Every array arm below wants an integer index. A Float converts through
      #to_int, and anything else is the TypeError the static path raises rather
      than a write to drop on the floor (#3926). */

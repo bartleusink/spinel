@@ -900,6 +900,7 @@ int g_uses_argv = 0;
 int g_uses_threads = 0;
 int g_has_user_cmp = 0;
 int g_has_user_binop = 0;
+int g_has_user_aset = 0;
 TyKind g_ie_next_ty = TY_UNKNOWN;
 int g_has_user_coerce = 0;
 int g_has_user_to_io = 0;

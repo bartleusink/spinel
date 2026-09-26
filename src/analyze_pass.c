@@ -9785,12 +9785,20 @@ void cr_collect_calls(Compiler *c, const NodeTable *nt, int id,
     if (tl > 17 && (sp_streq(ty + tl - 17, "OperatorWriteNode")))
       nm = nt_str(nt, id, "binary_operator");
   }
-  if (nm) {
+  /* `r[k] op= v`, `r[k] ||= v` and `r[k] &&= v` read and write the element:
+     a receiver with its own [] / []= is called for both */
+  const char *names[3] = { nm, NULL, NULL };
+  int k0 = nt_kind(nt, id);
+  if (k0 == NK_IndexOperatorWriteNode || k0 == NK_IndexOrWriteNode || k0 == NK_IndexAndWriteNode) {
+    names[1] = "[]"; names[2] = "[]=";
+  }
+  for (int j = 0; j < 3; j++) {
+    if (!names[j]) continue;
     int found = 0;
-    for (int i = 0; i < *n; i++) if (sp_streq((*out)[i], nm)) { found = 1; break; }
+    for (int i = 0; i < *n; i++) if (sp_streq((*out)[i], names[j])) { found = 1; break; }
     if (!found) {
       if (*n >= *cap) { *cap = *cap ? *cap * 2 : 8; *out = realloc(*out, sizeof(char *) * (size_t)*cap); }
-      (*out)[(*n)++] = strdup(nm);
+      (*out)[(*n)++] = strdup(names[j]);
     }
   }
   int nr = nt_num_refs(nt, id);

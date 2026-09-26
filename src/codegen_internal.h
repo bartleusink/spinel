@@ -428,6 +428,7 @@ extern int g_uses_argv;
 extern int g_uses_threads;
 extern int g_has_user_cmp;
 extern int g_has_user_binop;
+extern int g_has_user_aset;
 extern int g_has_user_coerce;
 /* 1 if class k defines a #coerce this TU emits and can call: one parameter,
    no rest, an array return -- the [other, self] pair, poly or homogeneously
