@@ -234,6 +234,14 @@ SP_NORETURN SP_COLD void sp_raise_nil_float_op(int left_nil, const char *op);
 #define SP_FLOAT_NIL_CK(a, b, op) \
   if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_float_op(sp_float_is_nil(a), op)
 
+/* A divisor that is a power of two the C compiler can see (a literal the
+   emitter wrote) makes Ruby's floored % a mask: for b = 2**k, `a % b` is
+   exactly `a & (b - 1)` for every a, negative included. clang finds this
+   through the floor fix-up in sp_imod; gcc does not, and emitted a
+   truncating remainder plus the fix-up. The same holds for / as `a >> k`,
+   but taking it moved optcarrot's code enough to cost it 2% (branch
+   aliasing, not work), so / keeps the general path. */
+#define SP_POW2_CONST(b) (__builtin_constant_p(b) && (b) > 0 && ((b) & ((b) - 1)) == 0)
 static inline sp_int sp_idiv(sp_int a, sp_int b) {
   SP_INT_NIL_CK(a, b, "/");
   if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
@@ -249,6 +257,7 @@ static inline sp_int sp_int_abs(sp_int a) {
 }
 static inline sp_int sp_imod(sp_int a, sp_int b) {
   SP_INT_NIL_CK(a, b, "%");
+  if (SP_POW2_CONST(b)) return a & (b - 1);
   if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   sp_int r = a % b;
   if ((r != 0) && ((r ^ b) < 0)) r += b;
