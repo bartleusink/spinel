@@ -13040,12 +13040,21 @@ static int an_class_dynamic_new_risk(Compiler *c, int cid) {
         if (mi < 0) continue;        /* no initialize: no parameter to protect */
         int pn = (mi < c->nscopes && c->scopes[mi].def_node >= 0)
                      ? nt_ref(nt, c->scopes[mi].def_node, "parameters") : -1;
-        int nreq = 0, nopt = 0, rest = -1;
+        int nreq = 0, nopt = 0, npost = 0, rest = -1;
         if (pn >= 0) {
           nt_arr(nt, pn, "requireds", &nreq);
           nt_arr(nt, pn, "optionals", &nopt);
+          /* the required parameters AFTER the optionals -- `def initialize(n = 0, b)`
+             takes 1..2, not 0..1. Counting only the leading requireds put the
+             class out of reach of a two-argument `k.new`, the parameter was
+             promoted, and the arm codegen then wanted no longer matched: the
+             dynamic call fell through to the default and raised NoMethodError
+             where it had merely been wrong before. emit_class_value_new_kw
+             counts all three, and these two have to agree. */
+          nt_arr(nt, pn, "posts", &npost);
           rest = nt_ref(nt, pn, "rest");
         }
+        nreq += npost;
         if (nreq >= 64) continue;              /* no countable shape reaches it */
         unsigned long long accept;
         if (rest >= 0) accept = ~0ULL << nreq;  /* nreq or more */
