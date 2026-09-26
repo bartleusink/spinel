@@ -445,6 +445,34 @@ static int fetch_operand_is_inert(Compiler *c, int n) {
 }
 
 int emit_array_call(Compiler *c, int id, Buf *b) {
+  /* An array indexed by a String or a Symbol is CRuby's TypeError. A
+     parameter can be typed that way by a call that never runs it -- one arm
+     of a dispatch over several classes' [] (#5076) -- and the typed read
+     below would pass the String as an index, which the C build refused.
+     Answer the raise, with the call's zero for the value it never makes. */
+  {
+    const NodeTable *ntI = c->nt;
+    const char *nmI = nt_str(ntI, id, "name");
+    int recvI = nt_ref(ntI, id, "receiver");
+    int aI = nt_ref(ntI, id, "arguments"); int acI = 0;
+    const int *avI = aI >= 0 ? nt_arr(ntI, aI, "arguments", &acI) : NULL;
+    if (nmI && recvI >= 0 && acI == 1 && ty_is_array(comp_ntype(c, recvI)) &&
+        (sp_streq(nmI, "[]") || sp_streq(nmI, "at") || sp_streq(nmI, "slice")) &&
+        nt_kind(ntI, avI[0]) != NK_SplatNode) {
+      TyKind itI = comp_ntype(c, avI[0]);
+      const char *knI = itI == TY_STRING ? "String" : itI == TY_SYMBOL ? "Symbol" : NULL;
+      if (knI) {
+        TyKind rtI = comp_ntype(c, id);
+        buf_puts(b, "((void)("); emit_expr(c, recvI, b);
+        buf_puts(b, "), (void)("); emit_expr(c, avI[0], b);
+        buf_printf(b, "), sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into Integer\"), ", knI);
+        if (rtI == TY_UNKNOWN || rtI == TY_VOID || rtI == TY_NIL) buf_puts(b, "sp_box_nil()");
+        else buf_puts(b, default_value(rtI));
+        buf_puts(b, ")");
+        return 1;
+      }
+    }
+  }
   /* The variadic Array mutators accept zero elements and return the receiver
      unchanged; every arm below is written for argc >= 1, so a no-argument call
      fell through to the unsupported-call refusal (#3340). */
@@ -2782,10 +2810,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sArray_get(", k);
         emit_expr(c, recv, b); buf_puts(b, ", ");
         if (infer_type(c, argv[0]) == TY_POLY) {
-          /* sp_poly_to_i, not a raw `.v.i`: the union read assumed the box
-             held an Integer, so a boxed user object indexed by its pointer
-             bits and the read answered a wrong element in silence. */
-          buf_puts(b, "sp_poly_to_i(");
+          /* a checked conversion, not a raw `.v.i`: the union read assumed
+             the box held an Integer, so a boxed user object indexed by its
+             pointer bits and the read answered a wrong element in silence;
+             and not sp_poly_to_i either, which read a String or a Symbol as
+             0 where CRuby raises TypeError. */
+          buf_puts(b, "sp_poly_arg_int_chk(");
           emit_expr(c, argv[0], b);
           buf_puts(b, ")");
         }
