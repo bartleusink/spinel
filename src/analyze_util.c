@@ -160,6 +160,18 @@ int is_builtin_exception_name(const char *n) {
 }
 /* Defined here rather than in codegen_util.c so the id and the name
    predicates cannot disagree; codegen_internal.h still declares it. */
+/* The builtin class above a builtin a program can subclass, as the generated
+   sp_builtin_superclass table answers it (the exception chain is asked of
+   the runtime instead): File is an IO, the numbers are Numeric, everything
+   else sits under Object (-116). */
+int builtin_class_parent_id(int id) {
+  switch (id) {
+    case -121: return -120;                                    /* File -> IO */
+    case -100: case -101: case -131: case -142: return -113;   /* -> Numeric */
+    default: return -116;
+  }
+}
+
 int builtin_class_id(const char *name) {
   const BuiltinClass *r = builtin_row(name);
   return r ? r->id : 0;

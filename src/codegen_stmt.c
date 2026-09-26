@@ -2633,9 +2633,12 @@ static int emit_obj_class_when(Compiler *c, TyKind pt, const char *cn, int t, Bu
      `class E < StandardError`): the row the generated sp_class_superclass
      table carries, which is_a? on the same slot already reads */
   int bid = builtin_class_id(cn);
-  if (tcid < 0 && bid < 0 && class_builtin_parent(c, cid) == bid) {
-    emit_obj_live(c, pt, t, b);
-    return 1;
+  if (tcid < 0 && bid < 0 && !comp_const(c, cn)) {
+    /* ...or one above that builtin (`class Log < File` is an IO) */
+    for (int p = class_builtin_parent(c, cid), g = 0; p < 0 && p != -116 && g < 8;
+         p = builtin_class_parent_id(p), g++) {
+      if (p == bid) { emit_obj_live(c, pt, t, b); return 1; }
+    }
   }
   /* a builtin exception above the class table: the runtime chain answers,
      asked of a live object only (sp_exc_is_a reads the NULL otherwise) */

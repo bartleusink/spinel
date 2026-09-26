@@ -695,6 +695,7 @@ const char *sp_re_literal_error(const char *src, int len, int flags);
 #define SP_PROC_ARG_SLOTS 64
 #endif
 int builtin_class_id(const char *name);
+int builtin_class_parent_id(int id);   /* analyze_util.c */
 int is_builtin_class_name(const char *n);
 int is_builtin_module_name(const char *n);
 int is_builtin_exception_name(const char *n);
