@@ -12343,6 +12343,12 @@ static TyKind emit_face_arm(Compiler *c, int id, unsigned kind, unsigned flags, 
       }
     }
     if (!has_val) buf_printf(val, "({ (void)(%s); %s; })", call, wb.p);
+    else if (nat == TY_NIL) {
+      /* a literal nil argument answered by a setter (`box.default = nil`):
+         nil has no C type of its own to bind the value to */
+      buf_printf(val, "({ (void)(%s); %s; sp_box_nil(); })", call, wb.p);
+      nat = TY_POLY;
+    }
     else if (kind == PF_HASH && (flags & PF_VAL_SELF)) {
       /* The value is the receiver -- the box -- not the general copy the
          emitter worked on: a typed original has no general stand-in, and the
@@ -14226,7 +14232,26 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
      silently (#4240). */
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "replace") && argc == 1 &&
       !user_defines_or_reads(c, name)) {
-    buf_puts(b, "sp_poly_replace("); emit_expr(c, recv, b);
+    /* A bang transform analyze.c lowered to `x.replace(x.transform_values { })`
+       names the receiver node twice. Now that the replace reaches a hash, an
+       `hs[(i += 1) % 2].transform_values! { }` would write one hash's
+       transform into the other: bind the receiver once and let the inner
+       call read the temp. A value that is no hash (a `break` out of the
+       block) is the call's answer, and nothing is written. */
+    if (nt_str(nt, id, "bang_splice") && g_n_argov < MAX_ARG_OVERRIDE) {
+      int tv = ++g_tmp;
+      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", tv, rb.p ? rb.p : "sp_box_nil()", tv);
+      free(rb.p);
+      g_argov_node[g_n_argov] = recv;
+      snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", tv);
+      g_n_argov++;
+      buf_printf(b, "sp_poly_hash_splice(_t%d, ", tv); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      g_n_argov--;
+      return 1;
+    }
+    buf_puts(b, "sp_poly_replace_any("); emit_expr(c, recv, b);
     buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
     return 1;
   }
