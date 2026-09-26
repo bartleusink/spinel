@@ -866,29 +866,15 @@ int desugar_public_send_recv(Compiler *c) {
    The step passes read positional arguments, so a lone KeywordHashNode argument
    is otherwise mis-read as an integer limit (an int-from-pointer miscompile).
    Rewrite the to:/by: form into the positional list before those passes run. */
-/* `expr => pattern` where the pattern NESTS another pattern, rewritten to the
-   one-arm `case expr; in pattern; end` it is defined to mean. The rightward
-   form has its own destructuring emitter, and that one binds direct local
-   targets only: a nested class pattern (`{ left: Lit(value: lv) }`) bound
-   nothing at all and raised nothing either, so the local came out nil (#4047).
-   The case form's emitter recurses, and answers the same NoMatchingPatternError
-   on a miss. Only the nesting shapes are rewritten -- the flat ones the
-   dedicated emitter handles keep going through it. */
-static int pattern_nests(const NodeTable *nt, int pat, int depth) {
-  if (pat < 0 || depth > 8) return 0;
-  const char *ty = nt_type(nt, pat);
-  if (!ty || !sp_streq(ty, "HashPatternNode")) return 0;
-  int en = 0; const int *el = nt_arr(nt, pat, "elements", &en);
-  for (int i = 0; i < en; i++) {
-    if (!nt_type(nt, el[i]) || !sp_streq(nt_type(nt, el[i]), "AssocNode")) continue;
-    int v = nt_ref(nt, el[i], "value");
-    const char *vt = v >= 0 ? nt_type(nt, v) : NULL;
-    if (vt && !sp_streq(vt, "LocalVariableTargetNode")) return 1;
-  }
-  return 0;
-}
-
-int desugar_rightward_nested_pattern(Compiler *c) {
+/* `expr => pattern` is defined to mean the one-arm `case expr; in pattern;
+   end`, and is rewritten to it. The rightward form had a destructuring
+   emitter of its own that bound direct local targets and checked an
+   array's length, and nothing else: a class or value pattern (`v => Shape`,
+   `5 => String`) raised nothing, a nested one bound nothing (#4047), a nil
+   in an object slot was deconstructed, and a typed hash value refused the
+   build. The case form's emitter checks every pattern kind and answers
+   NoMatchingPatternError on a miss. */
+int desugar_rightward_pattern(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
@@ -897,7 +883,6 @@ int desugar_rightward_nested_pattern(Compiler *c) {
     int value = nt_ref(nt, id, "value");
     int pattern = nt_ref(nt, id, "pattern");
     if (value < 0 || pattern < 0) continue;
-    if (!pattern_nests(nt, pattern, 0)) continue;
     int inn = nt_new_node(nt, "InNode");
     int st = nt_new_node(nt, "StatementsNode");
     if (inn < 0 || st < 0) continue;
