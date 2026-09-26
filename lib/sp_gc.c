@@ -116,8 +116,13 @@ static sp_gc_hdr *sp_gc_old_heap = NULL;
 /* The mark stack grows on demand: overflowing it used to drop the walk into
    recursive scanning, and a live set of a few hundred thousand containers
    (an A* frontier of [vertex, priority] pairs) then overflowed the C stack
-   and crashed the process mid-collection. */
+   and crashed the process mid-collection. SP_GC_MARK_STACK_MAX is its
+   initial capacity, allocated as one block on the first mark (512 KB on
+   LP64). A build can set it with -DSP_GC_MARK_STACK_MAX=<n>, as it can
+   SP_GC_STACK_MAX; the stack still grows from there on demand. */
+#ifndef SP_GC_MARK_STACK_MAX
 #define SP_GC_MARK_STACK_MAX (1024*64)
+#endif
 /* Per thread: the collector's, and under the parallel mark each helper's
    own; a scan pushes onto the stack of the thread running it. */
 static SP_TLS void **sp_gc_mark_stack = NULL;

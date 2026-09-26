@@ -601,7 +601,9 @@ static inline sp_Encoding sp_encoding_binary(void){return(sp_Encoding){&("\xff" 
    moved to sp_gc.h (shared so lib/sp_marshal.c can root its in-flight objects).
    sp_re_mark_globals is defined below (with the regex globals it marks) and
    carries external linkage so the collector body can reach it. */
+#ifndef SP_GC_MARK_STACK_MAX   /* the collector's initial mark stack (lib/sp_gc.c) */
 #define SP_GC_MARK_STACK_MAX (1024*64)
+#endif
 #define SP_GC_NBUCKETS 32
 static sp_gc_hdr*sp_gc_buckets[SP_GC_NBUCKETS];
 static inline int sp_gc_bucket(size_t sz){int b=(int)(sz/16);return b<SP_GC_NBUCKETS?b:SP_GC_NBUCKETS-1;}
@@ -9982,7 +9984,16 @@ __attribute__((constructor)) static void sp_json_install_hooks(void) {
 }
 
 #include <setjmp.h>
+/* Depth of the begin/rescue/ensure handler stack. Each entry holds a jmp_buf
+   (200-300 bytes on common targets) plus the parallel arrays below, all
+   static in every generated program. A build can set it with
+   -DSP_EXC_STACK_MAX=<n>, as it can SP_GC_STACK_MAX; the depth that matters
+   is the deepest nesting of simultaneously active handlers, not the number
+   of begin blocks in the source. Pushes are bounds-checked, so a program
+   that nests deeper raises SystemStackError (sp_stack_too_deep). */
+#ifndef SP_EXC_STACK_MAX
 #define SP_EXC_STACK_MAX 64
+#endif
 /* Per-worker (SP_TLS) in the threaded build: this is the active exception/ensure
    handler stack of the thread currently executing. It is swapped per fiber by
    sp_exc_ctx_save/load, which assumes a single active stack -- true at N=1, but
@@ -10848,7 +10859,11 @@ void sp_bigint_raise_zerodiv(const char *msg) { sp_raise_cls("ZeroDivisionError"
    The SP_UNWIND_* enum and sp_unwind_* state are declared earlier (before
    sp_raise_cls, which clears them when a real exception supersedes an unwind). */
 
+/* Depth of the catch/throw stack: the same jmp_buf cost and the same knob as
+   SP_EXC_STACK_MAX above (-DSP_CATCH_STACK_MAX=<n>). */
+#ifndef SP_CATCH_STACK_MAX
 #define SP_CATCH_STACK_MAX 64
+#endif
 static SP_TLS jmp_buf sp_catch_stack[SP_CATCH_STACK_MAX];   /* per-worker (see sp_exc_stack) */
 static SP_TLS const char *sp_catch_tag[SP_CATCH_STACK_MAX];
 /* 0 = name tag (symbol/string, matched by content); 1 = object tag (matched
