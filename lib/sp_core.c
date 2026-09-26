@@ -167,6 +167,48 @@ static const char *sp_int_scan(const char *p, sp_int base, sp_int *v, int *any) 
   }
 }
 
+/* The promote-mode parsers (sp_str_to_i_promote, spinel_rt.h) read the
+   same text as the sp_int ones below, and take a Bignum where the sp_int
+   scan overflows. Whether it does, for `s` in `base` (0 resolves from the
+   prefix): */
+int sp_str_int_overflows(const char *s, intptr_t base) {
+  if (!s) return 0;
+  int neg, any;
+  sp_int v, b = base;
+  const char *p = sp_int_head(s, &b, &neg);
+  if (b < 2 || b > 36) return 0;
+  return sp_int_scan(p, b, &v, &any) == NULL;
+}
+
+/* ...and the digits as the Bignum parser wants them: a '-' for a negative
+   value, then the digits without their `_` separators. *base comes back
+   resolved, *rest just past the last digit. A malloc'd string. */
+char *sp_int_digits_dup(const char *s, intptr_t *base, const char **rest) {
+  int neg, any = 0;
+  sp_int b = *base;
+  const char *p = sp_int_head(s, &b, &neg);
+  size_t k = 0;
+  char *out = (char *)malloc(strlen(p) + 2);
+  if (!out) return NULL;
+  if (neg) out[k++] = '-';
+  for (;; p++) {
+    int d = sp_digit36((unsigned char)*p);
+    if (d < 0 || d >= (int)b) {
+      if (*p == '_' && any) {
+        int n = sp_digit36((unsigned char)p[1]);
+        if (n >= 0 && n < (int)b) continue;
+      }
+      break;
+    }
+    out[k++] = *p;
+    any = 1;
+  }
+  out[k] = 0;
+  *base = b;
+  if (rest) *rest = p;
+  return out;
+}
+
 /* `String#to_i(base)` with a non-decimal base. Accepts bases 2..36
    like MRI; `_` is allowed between digits the same way as base 10.
    Stops at the first invalid digit and returns what's parsed so

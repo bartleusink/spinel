@@ -24521,9 +24521,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if (kconv_noraise && sp_streq(name, "Integer") && (ac == 1 || ac == 2)) {
       TyKind at0 = comp_ntype(c, av[0]);
       if (at0 == TY_STRING) {
-        buf_puts(b, "sp_str_to_i_lenient_base("); emit_expr(c, av[0], b); buf_puts(b, ", ");
+        int promo = comp_ntype(c, id) == TY_POLY;   /* promote mode: a Bignum past sp_int */
+        buf_puts(b, promo ? "sp_str_to_i_promote(" : "sp_str_to_i_lenient_base("); emit_expr(c, av[0], b); buf_puts(b, ", ");
         if (ac == 2) emit_int_expr(c, av[1], b); else buf_puts(b, "0");
-        buf_puts(b, ")");
+        buf_puts(b, promo ? ", 2)" : ")");
         return;
       }
       /* with a base only a String converts, so a number is nil here */
@@ -24558,7 +24559,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       { NodeKind ek = nt_kind(nt, av[0]);
         if (at == TY_UNKNOWN && (ek == NK_HashNode || ek == NK_KeywordHashNode || ek == NK_ArrayNode))
           at = TY_POLY_ARRAY; }
-      if (at == TY_STRING) { buf_puts(b, "sp_str_to_i_strict("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
+      if (at == TY_STRING && comp_ntype(c, id) == TY_POLY) {   /* promote mode: a Bignum past sp_int */
+        buf_puts(b, "sp_str_to_i_promote("); emit_expr(c, av[0], b); buf_puts(b, ", 0, 1)");
+      }
+      else if (at == TY_STRING) { buf_puts(b, "sp_str_to_i_strict("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
       /* a Float truncates, and NaN or an infinity is CRuby's FloatDomainError
          rather than the C cast's undefined value */
       else if (at == TY_FLOAT) {
@@ -24601,9 +24605,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if (sp_streq(name, "Integer") && ac == 2) {
       TyKind at = comp_ntype(c, av[0]);
       if (at == TY_STRING) {
-        buf_puts(b, "sp_str_to_i_strict_base("); emit_expr(c, av[0], b);
+        int promo = comp_ntype(c, id) == TY_POLY;   /* promote mode: a Bignum past sp_int */
+        buf_puts(b, promo ? "sp_str_to_i_promote(" : "sp_str_to_i_strict_base("); emit_expr(c, av[0], b);
         /* Integer("5", nil) is CRuby's TypeError, not base 0 */
-        buf_puts(b, ", "); emit_int_expr(c, av[1], b); buf_puts(b, ")");
+        buf_puts(b, ", "); emit_int_expr(c, av[1], b); buf_puts(b, promo ? ", 1)" : ")");
       }
       /* only a String converts with a base, and whether a boxed value or a
          user object is one -- a plain String, a shared handle, an object's
@@ -27775,7 +27780,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             if (sp_streq(name, "dup") || sp_streq(name, "clone")) { buf_printf(b, "sp_str_dup(%s)", s); return; }
             if (sp_streq(name, "to_s") || sp_streq(name, "itself")) { buf_puts(b, s); return; }
             if (sp_streq(name, "to_sym"))     { buf_printf(b, "sp_sym_intern(%s)", s); return; }
-            if (sp_streq(name, "to_i"))       { buf_printf(b, "sp_str_to_i(%s)", s); return; }
+            if (sp_streq(name, "to_i")) {
+              if (comp_ntype(c, id) == TY_POLY) buf_printf(b, "sp_str_to_i_promote(%s, -1, 0)", s);
+              else buf_printf(b, "sp_str_to_i(%s)", s);
+              return;
+            }
             if (sp_streq(name, "to_f"))       { buf_printf(b, "sp_str_to_f(%s)", s); return; }
             if (sp_streq(name, "length") || sp_streq(name, "size")) { buf_printf(b, "sp_str_length(%s)", s); return; }
             if (sp_streq(name, "bytesize"))   { buf_printf(b, "sp_str_bytesize(%s)", s); return; }

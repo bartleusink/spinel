@@ -1480,6 +1480,9 @@ static int kconv_noraise_kw(Compiler *c, int argc, const int *argv) {
 static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise) {
   static const char *const names[] = { "to_int", "to_i" };
   TyKind at = infer_type(c, arg);
+  /* promote mode reads a String too wide for sp_int as a Bignum
+     (sp_str_to_i_promote) */
+  if (g_promote_mode && at == TY_STRING) return TY_POLY;
   if (!ty_is_object(at)) return TY_INT;
   for (int k = 0; k < 2; k++) {
     int mi = comp_method_in_chain(c, ty_object_class(at), names[k], NULL);
@@ -5822,6 +5825,8 @@ else {
       if (at0 != TY_STRING && at0 != TY_UNKNOWN) return TY_NIL;
       return sp_streq(name, "casecmp") ? TY_INT : TY_BOOL;
     }
+    /* promote mode: a String#to_i past sp_int is a Bignum (sp_str_to_i_promote) */
+    if (g_promote_mode && sp_streq(name, "to_i") && argc <= 1) return TY_POLY;
     if (sp_streq(name, "index") || sp_streq(name, "to_i") || sp_streq(name, "count") ||
         sp_streq(name, "oct") || sp_streq(name, "hex") || sp_streq(name, "ord") ||
         sp_streq(name, "bytesize") || sp_streq(name, "setbyte") || sp_streq(name, "getbyte")) return TY_INT;

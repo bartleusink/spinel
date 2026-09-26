@@ -20,6 +20,8 @@ intptr_t sp_str_to_i_base(const char *s, intptr_t base);
 intptr_t sp_str_to_i_strict(const char *s);
 intptr_t sp_str_to_i_strict_base(const char *s, intptr_t base);
 intptr_t sp_str_to_i_lenient_base(const char *s, intptr_t base);
+int     sp_str_int_overflows(const char *s, intptr_t base);
+char   *sp_int_digits_dup(const char *s, intptr_t *base, const char **rest);
 double  sp_str_to_f_strict(const char *s);
 double sp_str_to_f_lenient(const char *s);
 int     sp_snprintf_c_float(char *buf, size_t size, const char *fmt, double v);

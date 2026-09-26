@@ -7927,6 +7927,12 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       }
       else if (sp_streq(name, "chars") && argc == 0)   buf_printf(b, "sp_str_chars(%s)", r);
       else if ((sp_streq(name, "succ") || sp_streq(name, "next")) && argc == 0) buf_printf(b, "sp_str_succ(%s)", r);
+      /* promote mode types the call poly: a Bignum past sp_int */
+      else if (sp_streq(name, "to_i") && argc <= 1 && comp_ntype(c, id) == TY_POLY) {
+        buf_printf(b, "sp_str_to_i_promote(%s, ", r);
+        if (argc == 1) emit_int_expr(c, argv[0], b); else buf_puts(b, "-1");
+        buf_puts(b, ", 0)");
+      }
       else if (sp_streq(name, "to_i") && argc == 0)    buf_printf(b, "sp_str_to_i_cruby(%s)", r);
       else if (sp_streq(name, "to_i") && argc == 1)    { buf_printf(b, "sp_str_to_i_base(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (sp_streq(name, "to_f") && argc == 0)    buf_printf(b, "sp_str_to_f_cruby(%s)", r);  /* underscores (#2330) */
