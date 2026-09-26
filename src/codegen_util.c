@@ -2274,6 +2274,17 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
   }
   emit_expr(c, key, b);
 }
+/* 1 when `kwh` is a keyword list made only of `**` spreads (`m(**a, **b)`).
+   Such a list may be empty at run time, and an empty spread passes no
+   argument at all (`m(1, **{})` is `m(1)`). */
+int kwh_only_spreads(const NodeTable *nt, int kwh) {
+  if (kwh < 0 || nt_kind(nt, kwh) != NK_KeywordHashNode) return 0;
+  int en = 0; const int *el = nt_arr(nt, kwh, "elements", &en);
+  if (en == 0) return 0;
+  for (int e = 0; e < en; e++)
+    if (nt_kind(nt, el[e]) != NK_AssocSplatNode) return 0;
+  return 1;
+}
 int unwrap_parens(Compiler *c, int id) {
   while (id >= 0) {
     const char *ty = nt_type(c->nt, id);
