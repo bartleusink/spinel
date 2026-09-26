@@ -11904,6 +11904,7 @@ static int strbuf_demand_container_stores_here(Compiler *c, const char *contn, S
    did not even agree on the element's C type. A literal argument is its own
    store site: its string elements mark for the handle wrap directly. */
 static int an_call_targets_scope(Compiler *c, int u, int mi2, Scope *m2);
+static int an_new_recv_all_constant(Compiler *c);
 static int strbuf_demand_param_container_stores(Compiler *c, const char *pn, Scope *ps, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -12747,7 +12748,164 @@ static int promote_shared_stored_strings(Compiler *c) {
    all this rule does; convert_byref_handle_params then pulls every call site's
    argument into the shared set, exactly as it does for a byref parameter that
    has just become a handle. */
-static int promote_params_stored_in_shared_ivars(Compiler *c) {
+/* Is this argument already a shared handle?
+
+   Either by name -- an_arg_is_shared_handle reads the slot -- or through a
+   reader over a shared slot (`K.new(obj.reader)`), where the handle reaches
+   the argument by a call rather than a name and the slot-reading form cannot
+   see it. */
+static int an_arg_hands_handle(Compiler *c, int node) {
+  if (node < 0) return 0;
+  if (an_arg_is_shared_handle(c, node)) return 1;
+  { char ivb[300]; int defc = -1;
+    const char *ivn = an_reader_ivar_of(c, node, &defc, ivb, sizeof ivb);
+    if (ivn && defc >= 0) {
+      int ivx = comp_ivar_index(&c->classes[defc], ivn);
+      if (ivx >= 0 && c->classes[defc].ivar_str_shared[ivx]) return 1;
+    } }
+  return 0;
+}
+
+/* Which scope does CallNode `u` statically call? The forward form of
+   an_call_targets_scope, so one walk can fill a table for every scope at once
+   instead of re-deciding per candidate. The two must agree; the order of the
+   two arms is the same (a unique user method named `new` wins over the
+   constructor reading). */
+static void an_call_targets_of(Compiler *c, int u, int new_ok,
+                               int out[2], int *nout) {
+  const NodeTable *nt = c->nt;
+  *nout = 0;
+  const char *un = nt_str(nt, u, "name");
+  if (!un) return;
+  /* BOTH arms, because an_call_targets_scope answers for both and a call can
+     satisfy each against a different scope: with a method named `new` in the
+     program, `K.new(s)` matches that scope by name AND resolves to
+     K#initialize as a constructor. Resolving to a single scope dropped one of
+     them -- whichever arm ran second -- and the call site vanished from that
+     scope's chain, which is how `Holder.new(s)` stopped being evidence and the
+     copy came back. */
+  int byname = an_unique_scope_by_name(c, un);
+  if (byname >= 0 && c->scopes[byname].name &&
+      sp_streq(c->scopes[byname].name, un)) out[(*nout)++] = byname;
+  if (!sp_streq(un, "new")) return;
+  /* `new_ok` is an_new_recv_all_constant, hoisted by the caller: it walks the
+     whole node table, so asking it per call node made the build quadratic. */
+  if (!new_ok) return;
+  int rc = nt_ref(nt, u, "receiver");
+  if (rc < 0 || nt_kind(nt, rc) != NK_ConstantReadNode) return;
+  const char *cn = nt_str(nt, rc, "name");
+  int cid = cn ? comp_class_index(c, cn) : -1;
+  if (cid < 0) return;
+  int mi = comp_method_in_class(c, cid, "initialize");
+  if (mi < 0 || mi >= c->nscopes) return;
+  Scope *m2 = &c->scopes[mi];
+  if (!m2->name || m2->class_id < 0 || m2->is_cmethod) return;
+  if (*nout == 0 || out[0] != mi) out[(*nout)++] = mi;
+}
+
+/* (scope, parameter) -> "some call site hands that parameter a shared handle".
+
+   Evidence from the CALLER, which the rules around it do not have. The
+   propagation runs param -> argument: a parameter that is byref, or already a
+   handle, pulls its call sites' locals into the shared set. Nothing ran the
+   other way, so a parameter that is only RETAINED -- never mutated, in a class
+   that never mutates the slot -- stayed a value while the argument was a
+   handle, and the call site handed it sp_str_concat(cstr, "") instead. The
+   holder walked away with a snapshot and never saw a mutation made through any
+   other alias:
+
+       class Holder; def initialize(b) @b = b end; def at(i) @b.getbyte(i) end; end
+       class Poker;  def initialize(b) @b = b end; def poke(i,v) @b.setbyte(i,v) end; end
+       s = +"abcd"; h = Holder.new(s); pk = Poker.new(s)
+       pk.poke(2, 7); h.at(2)   # 7 in Ruby, the old byte here
+
+   Poker's parameter is a handle (its slot is mutated) and that made `s` one;
+   Holder's had no evidence of its own. The argument being a handle IS the
+   evidence -- what a handle is passed to is a handle, the call-site twin of
+   the rule below.
+
+   Built ONCE per pass, not per candidate. The question is asked for every ivar
+   write that stores a parameter, and answering each by walking the call nodes
+   made the pass O(writes x nodes): a 15k-line program whose classes mostly
+   retain a string parameter took 3.1x as long to compile. One walk fills every
+   slot, and the answers move only between passes anyway, as slots promote. */
+typedef struct {
+  int *off;            /* scope -> base into `bit`, or -1 when it has no params */
+  unsigned char *bit;
+  int ok;              /* 0 when allocation failed: fall back to no evidence */
+  /* scope -> its call sites, as a head/next chain over call node ids. The
+     byref pass below asked `does call u target scope mi2?` for every node and
+     every handle parameter, which is O(handle params x nodes) -- fine while
+     handle parameters were rare, and the dominant cost once a whole program's
+     retaining classes became handles. The same walk that fills `bit` records
+     the chain, so both passes read it instead. */
+  int *head;           /* scope -> first edge, or -1 */
+  int *enext;          /* edge -> next edge for the same scope */
+  int *enode;          /* edge -> the call node */
+} HandleArgTab;
+
+static void handle_arg_tab_init(Compiler *c, HandleArgTab *t) {
+  const NodeTable *nt = c->nt;
+  t->off = NULL; t->bit = NULL; t->head = NULL; t->enext = NULL; t->enode = NULL;
+  t->ok = 0;
+  if (c->nscopes <= 0) return;
+  size_t maxe = (size_t)(nt->count > 0 ? nt->count : 1) * 2;
+  t->off = (int *)malloc(sizeof(int) * (size_t)c->nscopes);
+  t->head = (int *)malloc(sizeof(int) * (size_t)c->nscopes);
+  t->enext = (int *)malloc(sizeof(int) * maxe);
+  t->enode = (int *)malloc(sizeof(int) * maxe);
+  if (!t->off || !t->head || !t->enext || !t->enode) {
+    free(t->off); free(t->head); free(t->enext); free(t->enode);
+    t->off = NULL; t->head = NULL; t->enext = NULL; t->enode = NULL; return;
+  }
+  for (int i = 0; i < c->nscopes; i++) t->head[i] = -1;
+  int total = 0;
+  for (int i = 0; i < c->nscopes; i++) {
+    int np = c->scopes[i].nparams;
+    if (np <= 0) { t->off[i] = -1; continue; }
+    t->off[i] = total; total += np;
+  }
+  t->bit = total > 0 ? (unsigned char *)calloc((size_t)total, 1) : NULL;
+  if (total > 0 && !t->bit) {
+    free(t->off); free(t->head); free(t->enext); free(t->enode);
+    t->off = NULL; t->head = NULL; t->enext = NULL; t->enode = NULL; return;
+  }
+  t->ok = 1;
+  int ne = 0;
+  int new_ok = an_new_recv_all_constant(c);
+  for (int u = 0; u < nt->count; u++) {
+    if (nt_kind(nt, u) != NK_CallNode) continue;
+    int tgt[2], ntg = 0;
+    an_call_targets_of(c, u, new_ok, tgt, &ntg);
+    for (int k = 0; k < ntg; k++) {
+      int mi = tgt[k];
+      if (mi < 0 || mi >= c->nscopes) continue;
+      t->enode[ne] = u; t->enext[ne] = t->head[mi]; t->head[mi] = ne; ne++;
+      if (t->off[mi] < 0 || !t->bit) continue;
+      int argsN = nt_ref(nt, u, "arguments");
+      int argc2 = 0;
+      const int *argv2 = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &argc2) : NULL;
+      if (!argv2) continue;
+      int np = c->scopes[mi].nparams;
+      for (int pj = 0; pj < argc2 && pj < np; pj++)
+        if (an_arg_hands_handle(c, argv2[pj])) t->bit[t->off[mi] + pj] = 1;
+    }
+  }
+}
+
+static void handle_arg_tab_free(HandleArgTab *t) {
+  free(t->off); free(t->bit); free(t->head); free(t->enext); free(t->enode);
+  t->off = NULL; t->bit = NULL; t->head = NULL;
+  t->enext = NULL; t->enode = NULL; t->ok = 0;
+}
+
+static int handle_arg_tab_get(const HandleArgTab *t, int mi, int pj) {
+  if (!t->ok || !t->bit || mi < 0 || pj < 0 || t->off[mi] < 0) return 0;
+  return t->bit[t->off[mi] + pj] != 0;
+}
+
+static int promote_params_stored_in_shared_ivars(Compiler *c,
+                                                 const HandleArgTab *hat) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   for (int w = 0; w < nt->count; w++) {
@@ -12790,7 +12948,14 @@ static int promote_params_stored_in_shared_ivars(Compiler *c) {
          copy, so the second name did not see the mutation and was not the same
          object. What a handle is assigned to is a handle (#4363). */
       int src_is_handle = pp->type == TY_STRBUF && pp->str_shared;
-      if (!already && !src_is_handle &&
+      /* And from the other side of the call: the ARGUMENT is already a handle.
+         Without this the chain only ever ran outwards from a slot that could
+         show its own mutation, so a retaining class that mutates nothing --
+         the reader half of an aliased pair -- was handed a copy. */
+      int arg_is_handle =
+          handle_arg_tab_get(hat, (int)(ms - c->scopes),
+                             an_param_idx(ms, lname));
+      if (!already && !src_is_handle && !arg_is_handle &&
           mk != 1 && !(mk == -1 && (ivt0 == TY_STRING || ivt0 == TY_STRBUF)))
         continue; }
     if (pp->type != TY_UNKNOWN && pp->type != TY_STRING &&
@@ -12883,9 +13048,13 @@ static int mark_reader_identity_operands(Compiler *c) {
   return changed;
 }
 
-static int convert_byref_handle_params(Compiler *c) {
+static int convert_byref_handle_params(Compiler *c,
+                                       const HandleArgTab *hat) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  /* the call-site chain is what makes this pass affordable; with no table
+     there is nothing to walk, and promoting nothing is the safe answer */
+  if (!hat->ok) return 0;
   /* byref -> handle parameter conversion: a shared handle passed into a
      string-mutating (byref) parameter converts that parameter to the handle
      representation -- byref's const char** slot cannot carry the handle, so
@@ -12904,9 +13073,8 @@ static int convert_byref_handle_params(Compiler *c) {
       /* one pass over this method's call sites: detect a handle arg, and
          (once converted) pull plain-local args into the shared set */
       int saw_handle = is_handle;
-      for (int u = 0; u < nt->count; u++) {
-        if (nt_kind(nt, u) != NK_CallNode) continue;
-        if (!an_call_targets_scope(c, u, mi2, m2)) continue;
+      for (int e = hat->head[mi2]; e >= 0; e = hat->enext[e]) {
+        int u = hat->enode[e];
         int argsN = nt_ref(nt, u, "arguments");
         int uargc = 0;
         const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;
@@ -12937,9 +13105,8 @@ static int convert_byref_handle_params(Compiler *c) {
         changed = 1;
       }
       /* pull the remaining plain-local args into the shared set */
-      for (int u = 0; u < nt->count; u++) {
-        if (nt_kind(nt, u) != NK_CallNode) continue;
-        if (!an_call_targets_scope(c, u, mi2, m2)) continue;
+      for (int e = hat->head[mi2]; e >= 0; e = hat->enext[e]) {
+        int u = hat->enode[e];
         int argsN = nt_ref(nt, u, "arguments");
         int uargc = 0;
         const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;
@@ -17886,8 +18053,10 @@ void analyze_program(Compiler *c) {
      same reason and feeds the same propagation, so the two run to a joint
      fixpoint rather than one after the other (#4363). */
   for (;;) {
-    int ch = promote_params_stored_in_shared_ivars(c);
-    if (convert_byref_handle_params(c)) ch = 1;
+    HandleArgTab hat; handle_arg_tab_init(c, &hat);
+    int ch = promote_params_stored_in_shared_ivars(c, &hat);
+    if (convert_byref_handle_params(c, &hat)) ch = 1;
+    handle_arg_tab_free(&hat);
     if (!ch) break;
   }
   mark_reader_identity_operands(c);

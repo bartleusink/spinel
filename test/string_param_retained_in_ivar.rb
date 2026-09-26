@@ -197,3 +197,80 @@ p [pr.one, pr.two, q]
 p [pr.one.equal?(q), pr.one.equal?(pr.two)]
 q << "?"
 p [pr.one, pr.two]
+
+# Neither slot has evidence of its own. The RETAINING class never mutates what
+# it holds, and the slot the mutation goes through belongs to a DIFFERENT
+# class, so the mutation census -- which keys on calls whose receiver is an
+# ivar read -- records nothing against the retaining one. The propagation only
+# ever ran param -> argument (a parameter that is byref, or already a handle,
+# pulls its call sites' locals into the shared set), so the reading half was
+# handed sp_str_concat(...) -- a snapshot -- and never saw the write. What a
+# handle is PASSED TO is a handle, which is the call-site twin of the rule the
+# Pair case above covers.
+class Peek
+  def initialize(b)
+    @b = b
+  end
+  def at(i)
+    @b.getbyte(i)
+  end
+end
+
+class Poke
+  def initialize(b)
+    @b = b
+  end
+  def poke(i, v)
+    @b.setbyte(i, v)
+  end
+end
+
+z = +"abcd"
+pe = Peek.new(z)
+po = Poke.new(z)
+po.poke(2, 7)
+p [pe.at(2), z.getbyte(2)]
+
+# The same with the handle reaching the argument through a READER rather than a
+# name, and with the buffer built by setbyte on a local before it is handed on.
+class Box
+  attr_reader :bytes
+  def initialize(bytes)
+    @bytes = bytes
+  end
+end
+
+def built(n)
+  buf = Array.new(n, 0).pack("C*")
+  i = 0
+  while i < n
+    buf.setbyte(i, 1)
+    i += 1
+  end
+  buf
+end
+
+bx = Box.new(built(4))
+pe2 = Peek.new(bx.bytes)
+po2 = Poke.new(bx.bytes)
+po2.poke(1, 9)
+p [pe2.at(1), bx.bytes.getbyte(1)]
+
+# A scope named `new` that is never called by that name. The call-site index
+# behind these rules resolves `K.new(...)` two ways -- a method matching the
+# call's name, and a constant receiver's `initialize` -- and both answers are
+# live at once here: `Holder.new(s)` matches this method BY NAME and is the
+# constructor of Holder. Keeping only one of them dropped the call from the
+# other scope's call sites, and with it the evidence that the argument is a
+# handle, so the pair below went back to a copy.
+class Factory
+  def new(x)      # never called: it only has to EXIST for the name arm to
+    x + 1         # resolve. Calling it as `Factory.new.new(1)` would put a
+  end             # non-constant receiver on a `new` call, and the whole-program
+end               # guard would switch constructor resolution off instead.
+
+zz = +"abcd"
+pe3 = Peek.new(zz)
+po3 = Poke.new(zz)
+po3.poke(3, 5)
+p [pe3.at(3), zz.getbyte(3)]
