@@ -11308,6 +11308,13 @@ static void emit_hash_store_val(Compiler *c, int val, TyKind rt, Buf *b) {
   else emit_expr(c, val, b);
 }
 
+/* The receiver of a statement-position String mutator that it reassigns:
+   a variable (str_mut_var_recv), or self inside a String method. Any other
+   receiver falls through to the value form. */
+static int str_mut_recv_assignable(Compiler *c, int recv) {
+  return nt_kind(c->nt, recv) == NK_SelfNode || str_mut_var_recv(c, recv);
+}
+
 int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -11544,8 +11551,7 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       cur = crecv;
     }
     const char *rty = nt_type(nt, cur);
-    if (nchain > 0 && rty &&
-        (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"))) {
+    if (nchain > 0 && str_mut_recv_assignable(c, cur)) {
       /* chain was collected outermost-first; emit left-to-right */
       for (int j = nchain - 1; j >= 0; j--) {
         int arg = chain[j];
@@ -11638,7 +11644,7 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
           return 1;
         }
       }
-      if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"))) {
+      if (str_mut_recv_assignable(c, recv)) {
         /* a frozen receiver raises FrozenError before the transform (#2314) */
         emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
         emit_indent(b, indent);
@@ -11654,9 +11660,7 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
      span: the string form deletes the first occurrence, the (i, len) form
      splices the span out. */
   if ((rt == TY_STRING || rt == TY_STRBUF) && argc >= 1) {
-    const char *rty2 = nt_type(nt, recv);
-    int assignable2 = rty2 && (sp_streq(rty2, "LocalVariableReadNode") ||
-                               sp_streq(rty2, "InstanceVariableReadNode") || sp_streq(rty2, "SelfNode"));
+    int assignable2 = str_mut_recv_assignable(c, recv);
     if (sb_shadowed_reader(recv)) assignable2 = 1;   /* the reader shim's shadow */
     const char *abase = NULL, *abang = NULL;
     if      (sp_streq(name, "gsub!"))   { abase = "gsub";   abang = "gsub!"; }
@@ -11758,7 +11762,7 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   /* replace / prepend / clear / delete_prefix!/suffix! via reassignment */
   if (rt == TY_STRING) {
     const char *rty = nt_type(nt, recv);
-    int assignable = rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") || sp_streq(rty, "SelfNode"));
+    int assignable = str_mut_recv_assignable(c, recv);
     if (sb_shadowed_reader(recv)) assignable = 1;   /* the reader shim's shadow */
     /* an in-place mutator on a frozen string literal raises FrozenError */
     if (rty && sp_streq(rty, "StringNode") &&
