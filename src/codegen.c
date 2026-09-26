@@ -6600,6 +6600,67 @@ const char *exc_builtin_parent(Compiler *c, int ci) {
   return "StandardError";
 }
 
+/* The C type of an ivar field of type t in a class struct. Both
+   emit_class_struct and the layout check below spell it through here, so the
+   check compares exactly what the struct declares. */
+static void emit_ivar_field_ctype(Compiler *c, TyKind t, Buf *b) {
+  /* belt and suspenders: analyze widens void/nil ivar slots to poly
+     (they have no C storage type); never declare a `void` field. */
+  if (t == TY_VOID || t == TY_NIL) t = TY_POLY;
+  emit_ctype(c, t == TY_UNKNOWN ? TY_INT : t, b);
+}
+
+static char *ivar_field_ctype(Compiler *c, TyKind t) {
+  Buf tb; memset(&tb, 0, sizeof tb);
+  emit_ivar_field_ctype(c, t, &tb);
+  return tb.p ? tb.p : strdup("");
+}
+
+/* An inherited method is emitted once and called through a cast to the class
+   that defines it (`sp_Base_m((sp_Base *)self)`), so each class struct must
+   be a common initial sequence of its subclasses' structs: the same ivars,
+   in the same order, with the same C types. inherit_members keeps the names
+   and the order, and the ivar fixpoints are meant to keep the types; when an
+   inference path widens a subclass slot and not the base's, the two fields
+   differ in width, every later member moves, and the base's methods write
+   onto the wrong members. Nothing fails at that point -- the subclass reads
+   a wrong value later, far from the cause -- so refuse to emit such C.
+   Exception subclasses are laid out after the sp_Exception header, so only
+   an ancestor on the same side of that line is compared. */
+static void check_class_layout_prefix(Compiler *c) {
+  for (int i = 0; i < c->nclasses; i++) {
+    ClassInfo *ci = &c->classes[i];
+    if (ci->is_native_class || is_builtin_reopen(ci->name)) continue;
+    int is_exc = class_is_exc_subclass(c, i);
+    for (int a = ci->parent; a >= 0; a = c->classes[a].parent) {
+      ClassInfo *pc = &c->classes[a];
+      if (pc->is_native_class || is_builtin_reopen(pc->name)) continue;
+      if (class_is_exc_subclass(c, a) != is_exc) continue;
+      if (pc->nivars > ci->nivars) {
+        fprintf(stderr, "spinel: class layout: %s has %d ivars but its ancestor %s has %d\n",
+                ci->name, ci->nivars, pc->name, pc->nivars);
+        exit(1);
+      }
+      for (int k = 0; k < pc->nivars; k++) {
+        if (!sp_streq(pc->ivars[k], ci->ivars[k])) {
+          fprintf(stderr, "spinel: class layout: ivar slot %d is %s in %s but %s in its ancestor %s\n",
+                  k, ci->ivars[k], ci->name, pc->ivars[k], pc->name);
+          exit(1);
+        }
+        char *pt = ivar_field_ctype(c, pc->ivar_types[k]);
+        char *ct = ivar_field_ctype(c, ci->ivar_types[k]);
+        if (!sp_streq(pt, ct)) {
+          fprintf(stderr, "spinel: class layout: %s is `%s` in %s but `%s` in its ancestor %s; "
+                          "methods inherited from %s would reach %s's fields through a different layout\n",
+                  ci->ivars[k], ct, ci->name, pt, pc->name, pc->name, ci->name);
+          exit(1);
+        }
+        free(pt); free(ct);
+      }
+    }
+  }
+}
+
 void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   /* Native (C-backed) class: the package owns the struct; the generated TU has
      only its forward-decl (`typedef struct sp_X_s sp_X;`) and holds pointers. */
@@ -6636,12 +6697,8 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, "  sp_bool priv_call;\n");
     buf_puts(b, "  sp_StrArray *backtrace;\n");
     for (int i = 0; i < ci->nivars; i++) {
-      TyKind t = ci->ivar_types[i];
-      /* belt and suspenders: analyze widens void/nil ivar slots to poly
-         (they have no C storage type); never declare a `void` field. */
-      if (t == TY_VOID || t == TY_NIL) t = TY_POLY;
       buf_puts(b, "  ");
-      emit_ctype(c, t == TY_UNKNOWN ? TY_INT : t, b);
+      emit_ivar_field_ctype(c, ci->ivar_types[i], b);
       buf_printf(b, " iv_%s;\n", iv_c(ci->ivars[i] + 1));
     }
     buf_puts(b, "};\n");
@@ -6652,13 +6709,8 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   buf_printf(b, "struct sp_%s_s {\n", ci->c_name);
   buf_puts(b, "  sp_int cls_id;\n");  /* runtime class tag for virtual dispatch */
   for (int i = 0; i < ci->nivars; i++) {
-    TyKind t = ci->ivar_types[i];
-    /* belt and suspenders: analyze widens void/nil ivar slots to poly
-       (they have no C storage type); never declare a `void` field. */
-    if (t == TY_VOID || t == TY_NIL) t = TY_POLY;
-    if (!is_scalar_ret(t) && t != TY_UNKNOWN) { /* ok */ }
     buf_puts(b, "  ");
-    emit_ctype(c, t == TY_UNKNOWN ? TY_INT : t, b);
+    emit_ivar_field_ctype(c, ci->ivar_types[i], b);
     /* ivar name includes '@'; strip it for the field (mangled for a member
        like `verbose?` whose raw name is not a valid C identifier) */
     buf_printf(b, " iv_%s;\n", iv_c(ci->ivars[i] + 1));
@@ -12004,6 +12056,7 @@ char *codegen_program(const NodeTable *nt) {
     else
       buf_printf(&b, "typedef struct sp_%s_s sp_%s;\n", c->classes[i].c_name, c->classes[i].c_name);
   }
+  check_class_layout_prefix(c);
   for (int i = 0; i < c->nclasses; i++)
     if (!is_builtin_reopen(c->classes[i].name))
       emit_class_struct(c, &c->classes[i], &b);
