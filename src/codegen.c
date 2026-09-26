@@ -12512,6 +12512,11 @@ char *codegen_program(const NodeTable *nt) {
       if (!c->classes[k].instantiated) continue;
       for (int u = 0; uops[u]; u++)
         if (comp_method_in_chain(c, k, uops[u], NULL) >= 0) { g_has_user_binop = 1; break; }
+      /* a `<=>` with no `==` is Comparable's equality, which the table
+         derives: a boxed `m == n` (a block parameter, a hash value, a
+         `when FIVE`) reaches it only through the table */
+      if (!g_has_user_binop && comp_method_in_chain(c, k, "<=>", NULL) >= 0 &&
+          comp_method_in_chain(c, k, "==", NULL) < 0) { g_has_user_binop = 1; break; }
       if (g_has_user_binop || !class_has_coerce_shape(c, k)) continue;
       for (int u = 0; cops[u]; u++)
         if (comp_method_in_chain(c, k, cops[u], NULL) >= 0) { g_has_user_binop = 1; break; }
