@@ -4687,15 +4687,8 @@ else {
         if ((sp_streq(name, "each") || sp_streq(name, "reverse_each") ||
              sp_streq(name, "each_entry") || sp_streq(name, "each_with_index")) && argc == 0)
           return rt;
-        if ((sp_streq(name, "map") || sp_streq(name, "collect")) && argc == 0) {
-          int obody = nt_ref(nt, oblk, "body");
-          int obn = 0; const int *obb = obody >= 0 ? nt_arr(nt, obody, "body", &obn) : NULL;
-          TyKind obt = obn > 0 ? yield_aware_elem_ty(c, obb[obn - 1]) : TY_UNKNOWN;
-          TyKind obnt = ie_block_break_next_ty(c, obody);
-          if (obnt != TY_UNKNOWN) obt = (obt == TY_UNKNOWN) ? obnt : ty_unify(obt, obnt);
-          if (c->arr_want && id < c->node_cap && ty_is_ptr_array(c->arr_want[id])) return c->arr_want[id];
-          return ty_array_of(obt);
-        }
+        if ((sp_streq(name, "map") || sp_streq(name, "collect")) && argc == 0)
+          return infer_map_block_ty(c, id, oblk);
       } }
   }
 

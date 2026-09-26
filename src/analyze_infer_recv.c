@@ -485,6 +485,31 @@ int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   return 0;
 }
 
+/* The array a map-shaped call `id` answers: the tail value of its `block`
+   is the element type. */
+TyKind infer_map_block_ty(Compiler *c, int id, int block) {
+  const NodeTable *nt = c->nt;
+  int body = nt_ref(nt, block, "body");
+  int bn = 0;
+  const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  TyKind bt = bn > 0 ? yield_aware_elem_ty(c, bb[bn - 1]) : TY_UNKNOWN;
+  /* A value-carrying next widens the element type past the tail
+     (e.g. `next "s"` string vs trailing `x` int -> poly array), so the
+     collected value is boxed rather than assigned to a typed temp. */
+  TyKind bnt = ie_block_break_next_ty(c, body);
+  if (bnt != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? bnt : ty_unify(bt, bnt);
+  /* A table of rows: ty_array_of has no kind for "array of int/float
+     array" -- those exist only once narrow_object_arrays has decided a
+     slot carries one -- so that pass records its decision here and this
+     reads it back, the way the empty row literal of an
+     `Array.new(n) { [] }` table already does (#4484). Without it a
+     mapped table was built as a poly array, boxing every row on the way
+     in only to unbox it again on each read. */
+  if (c->arr_want && id < c->node_cap && ty_is_ptr_array(c->arr_want[id]))
+    return c->arr_want[id];
+  return ty_array_of(bt);
+}
+
 /* Hash receivers: the hash face of infer_call */
 int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   const NodeTable *nt = c->nt;
@@ -601,24 +626,8 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (nt_ref(nt, id, "block") < 0 && sp_streq(name, "sum") && argc == 0)
       { *out = TY_INT; return 1; }
     {
-      if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {
-        int body = nt_ref(nt, block, "body");
-        int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-        TyKind bt = bn > 0 ? yield_aware_elem_ty(c, bb[bn - 1]) : TY_UNKNOWN;
-        /* a value-carrying next widens the element type past the tail */
-        TyKind bnt = ie_block_break_next_ty(c, body);
-        if (bnt != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? bnt : ty_unify(bt, bnt);
-        /* A table of rows: ty_array_of has no kind for "array of int/float
-           array" -- those exist only once narrow_object_arrays has decided a
-           slot carries one -- so that pass records its decision here and this
-           reads it back, the way the empty row literal of an
-           `Array.new(n) { [] }` table already does (#4484). Without it a
-           mapped table was built as a poly array, boxing every row on the way
-           in only to unbox it again on each read. */
-        if (c->arr_want && id < c->node_cap && ty_is_ptr_array(c->arr_want[id]))
-          { *out = c->arr_want[id]; return 1; }
-        { *out = ty_array_of(bt); return 1; }
-      }
+      if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP))
+        { *out = infer_map_block_ty(c, id, block); return 1; }
       if (block >= 0 &&
           (sp_streq(name, "select!") || sp_streq(name, "filter!") || sp_streq(name, "reject!")))
         { *out = TY_POLY; return 1; }  /* self, or nil when nothing was removed */
@@ -781,27 +790,8 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
        pairs; the desugar interposes to_a so .map/.count chains compose. */
     if (nt_ref(nt, id, "block") >= 0 && sp_streq(name, "chunk")) { *out = TY_ENUMERATOR; return 1; }
     if (block >= 0) {
-      if (ty_iter_shape(name) == TY_ITER_MAP) {
-        int body = nt_ref(nt, block, "body");
-        int bn = 0;
-        const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-        TyKind bt = bn > 0 ? yield_aware_elem_ty(c, bb[bn - 1]) : TY_UNKNOWN;
-        /* A value-carrying next widens the element type past the tail
-           (e.g. `next "s"` string vs trailing `x` int -> poly array), so the
-           collected value is boxed rather than assigned to a typed temp. */
-        TyKind bnt = ie_block_break_next_ty(c, body);
-        if (bnt != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? bnt : ty_unify(bt, bnt);
-        /* A table of rows: ty_array_of has no kind for "array of int/float
-           array" -- those exist only once narrow_object_arrays has decided a
-           slot carries one -- so that pass records its decision here and this
-           reads it back, the way the empty row literal of an
-           `Array.new(n) { [] }` table already does (#4484). Without it a
-           mapped table was built as a poly array, boxing every row on the way
-           in only to unbox it again on each read. */
-        if (c->arr_want && id < c->node_cap && ty_is_ptr_array(c->arr_want[id]))
-          { *out = c->arr_want[id]; return 1; }
-        { *out = ty_array_of(bt); return 1; }
-      }
+      if (ty_iter_shape(name) == TY_ITER_MAP)
+        { *out = infer_map_block_ty(c, id, block); return 1; }
       if (sp_streq(name, "to_h") && argc == 0) {
         /* array.to_h { |x| [k, v] } -> a boxed-value hash, keyed by the
            block's [k, v] tail-pair key type (string/symbol get their own
