@@ -1513,6 +1513,122 @@ int desugar_call_op_write(Compiler *c) {
   return changed;
 }
 
+/* `recv[k] ||= v`, `recv[k] &&= v` and `recv[k] op= v` on an instance of a
+   user class with its own `[]` and `[]=`: the index-write emitters know the
+   builtin containers only, and refused the shape (#5054). Rewritten into the
+   calls Ruby means, the receiver and the key each evaluated once into a
+   fresh local first:
+     (__ixr_N = recv; __ixk_N = k; __ixr_N[__ixk_N] || (__ixr_N[__ixk_N] = v))
+   with `&&` for `&&=`, and `__ixr_N[__ixk_N] = __ixr_N[__ixk_N] op v` for an
+   operator. A key list other than one plain argument is left alone. */
+static int ixw_call(NodeTable *nt, int recv_tmp_name_node_src, const char *rname, const char *name,
+                    const int *args, int nargs) {
+  (void)recv_tmp_name_node_src;
+  int rr = nt_new_node(nt, "LocalVariableReadNode");
+  int call = nt_new_node(nt, "CallNode");
+  int an = nargs > 0 ? nt_new_node(nt, "ArgumentsNode") : -1;
+  if (rr < 0 || call < 0 || (nargs > 0 && an < 0)) return -1;
+  nt_node_set_str(nt, rr, "name", rname);
+  nt_node_set_int(nt, rr, "depth", 0);
+  nt_node_set_ref(nt, call, "receiver", rr);
+  nt_node_set_str(nt, call, "name", name);
+  if (an >= 0) {
+    nt_node_set_arr(nt, an, "arguments", args, nargs);
+    nt_node_set_ref(nt, call, "arguments", an);
+  }
+  return call;
+}
+
+static int ixw_read(NodeTable *nt, const char *name) {
+  int r = nt_new_node(nt, "LocalVariableReadNode");
+  if (r < 0) return -1;
+  nt_node_set_str(nt, r, "name", name);
+  nt_node_set_int(nt, r, "depth", 0);
+  return r;
+}
+
+int desugar_index_op_write_user(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_IndexOrWriteNode && k != NK_IndexAndWriteNode && k != NK_IndexOperatorWriteNode) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    int val = nt_ref(nt, id, "value");
+    int args = nt_ref(nt, id, "arguments");
+    if (recv < 0 || val < 0 || args < 0 || nt_ref(nt, id, "block") >= 0) continue;
+    int argc = 0; const int *argv = nt_arr(nt, args, "arguments", &argc);
+    if (argc != 1 || !argv) continue;
+    NodeKind ak = nt_kind(nt, argv[0]);
+    if (ak == NK_SplatNode || ak == NK_BlockArgumentNode || ak == NK_KeywordHashNode) continue;
+    TyKind rt = infer_type(c, recv);
+    if (!ty_is_object(rt)) continue;
+    int ci = ty_object_class(rt);
+    if (comp_method_in_chain(c, ci, "[]", NULL) < 0 || comp_method_in_chain(c, ci, "[]=", NULL) < 0) continue;
+    const char *op = k == NK_IndexOperatorWriteNode ? nt_str(nt, id, "binary_operator") : NULL;
+    if (k == NK_IndexOperatorWriteNode && !op) continue;
+    char opname[64]; if (op) snprintf(opname, sizeof opname, "%s", op);
+    int key = argv[0];
+    char rname[48], kname[48];
+    snprintf(rname, sizeof rname, "__ixr_%d", id);
+    snprintf(kname, sizeof kname, "__ixk_%d", id);
+    int first = nt->count;
+    int rw = nt_new_node(nt, "LocalVariableWriteNode");
+    int kw = nt_new_node(nt, "LocalVariableWriteNode");
+    if (rw < 0 || kw < 0) continue;
+    nt_node_set_str(nt, rw, "name", rname); nt_node_set_int(nt, rw, "depth", 0);
+    nt_node_set_ref(nt, rw, "value", recv);
+    nt_node_set_str(nt, kw, "name", kname); nt_node_set_int(nt, kw, "depth", 0);
+    nt_node_set_ref(nt, kw, "value", key);
+    int k1 = ixw_read(nt, kname);
+    int get = k1 >= 0 ? ixw_call(nt, -1, rname, "[]", &k1, 1) : -1;
+    if (get < 0) continue;
+    int last = -1;
+    if (k == NK_IndexOperatorWriteNode) {
+      int bin = nt_new_node(nt, "CallNode");
+      int ba = nt_new_node(nt, "ArgumentsNode");
+      int k2 = ixw_read(nt, kname);
+      if (bin < 0 || ba < 0 || k2 < 0) continue;
+      nt_node_set_arr(nt, ba, "arguments", &val, 1);
+      nt_node_set_ref(nt, bin, "receiver", get);
+      nt_node_set_str(nt, bin, "name", opname);
+      nt_node_set_ref(nt, bin, "arguments", ba);
+      int wa[2] = { k2, bin };
+      last = ixw_call(nt, -1, rname, "[]=", wa, 2);
+    }
+    else {
+      int k2 = ixw_read(nt, kname);
+      if (k2 < 0) continue;
+      int wa[2] = { k2, val };
+      int set = ixw_call(nt, -1, rname, "[]=", wa, 2);
+      int logic = nt_new_node(nt, k == NK_IndexOrWriteNode ? "OrNode" : "AndNode");
+      if (set < 0 || logic < 0) continue;
+      nt_node_set_ref(nt, logic, "left", get);
+      nt_node_set_ref(nt, logic, "right", set);
+      last = logic;
+    }
+    int stmts = nt_new_node(nt, "StatementsNode");
+    if (last < 0 || stmts < 0) continue;
+    int body[3] = { rw, kw, last };
+    nt_node_set_arr(nt, stmts, "body", body, 3);
+    nt_node_set_type(nt, id, "ParenthesesNode");
+    nt_node_set_ref(nt, id, "body", stmts);
+    nt_node_set_ref(nt, id, "receiver", -1);
+    nt_node_set_ref(nt, id, "arguments", -1);
+    nt_node_set_ref(nt, id, "value", -1);
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = first; j < nt->count; j++) c->nscope[j] = encl;
+    /* locals were collected before the fixpoint; these are new */
+    Scope *sc = comp_scope_of(c, rw);
+    scope_local_intern(sc, rname);
+    scope_local_intern(sc, kname);
+    changed = 1;
+  }
+  return changed;
+}
+
 /* `:sym.to_proc.call(recv, *args)` -> `recv.sym(*args)`. An explicit Symbol#to_proc
    followed by a call applies the named method to the first argument; with both the
    symbol and the call site statically known, it rewrites to an ordinary method call

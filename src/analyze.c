@@ -15857,6 +15857,7 @@ void analyze_program(Compiler *c) {
     ch |= desugar_respond_to_probe(c);         /* recv.respond_to?(:m) -> probe recv.m type */
     ch |= desugar_symbol_to_proc_call(c);      /* :sym.to_proc.call(x) -> x.sym */
     ch |= desugar_call_op_write(c);            /* r.x += 1 with a def writer -> r.x = r.x + 1 */
+    ch |= desugar_index_op_write_user(c);      /* obj[k] ||= v on a user [] / []= -> the calls */
     ch |= desugar_array_at(c);                 /* a.at(i) -> a[i] */
     ch |= desugar_array_first_last(c);         /* arr.first -> arr[0], arr.last -> arr[-1] */
     ch |= desugar_to_h_block(c);               /* recv.to_h{|e|[k,v]} -> recv.map{...}.to_h */
