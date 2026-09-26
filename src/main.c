@@ -397,7 +397,12 @@ int main(int argc, char **argv) {
   }
   const char *source = NULL;
   const char *output = NULL;
-  const char *link_extra[64]; int n_link_extra = 0;
+  /* Every --link consumes an argv slot, so argc bounds the list. A fixed
+     array dropped the entries past its end without a word: a program whose
+     packages carry more than 64 objects linked without the last of them
+     (and without the allocator flag spin appends after them). */
+  const char **link_extra = malloc(sizeof(const char *) * (size_t)(argc > 0 ? argc : 1));
+  int n_link_extra = 0;
   const char *cc_cmd = "cc";
   const char *opt_level = "2";
   /* --target=wasm32-wasi: the program is a WebAssembly module for a WASI
@@ -444,7 +449,7 @@ int main(int argc, char **argv) {
     else if (!strncmp(a, "--int-overflow=", 15)) { int_overflow = a + 15; i++; }
     else if (sp_streq(a, "--int-overflow")) { if (++i < argc) int_overflow = argv[i]; i++; }
     else if (sp_streq(a, "-o"))            { if (++i < argc) output = argv[i]; i++; }
-    else if (sp_streq(a, "--link"))        { if (++i < argc && n_link_extra < 64) link_extra[n_link_extra++] = argv[i]; i++; }
+    else if (sp_streq(a, "--link"))        { if (++i < argc) link_extra[n_link_extra++] = argv[i]; i++; }
     else if (sp_streq(a, "-O"))            { if (++i < argc) opt_level = argv[i]; i++; }
     /* `-O2`, the spelling every C compiler takes and the one a build script
        reaches for. Only the separated form was matched, so the joined one

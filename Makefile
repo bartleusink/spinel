@@ -974,6 +974,9 @@ cli-opts-test: $(SPINEL)
 	out=$$($(SPINEL) -E "$$tmp/p.rb" --a-program-flag 2>&1); \
 	[ "$$out" = '["--a-program-flag"]' ] || \
 	  { echo "cli-opts-test: FAIL (run mode did not hand the program its flag: $$out)"; ok=0; }; \
+	links=""; i=0; while [ $$i -lt 70 ]; do links="$$links --link -lm"; i=$$((i + 1)); done; \
+	$(SPINEL) "$$tmp/p.rb" $$links --link -lsp_last_link --print-build 2>/dev/null | grep -q 'lib -lsp_last_link' || \
+	  { echo "cli-opts-test: FAIL (a --link past the 64th was dropped)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	[ $$ok = 1 ] && echo "cli-opts-test: pass" || exit 1
 
