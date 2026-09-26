@@ -2645,13 +2645,21 @@ static int emit_obj_class_when(Compiler *c, TyKind pt, const char *cn, int t, Bu
    result to the container temp is the C error that refuses the program, and
    a ternary against NULL would only warn and then run (rt is TY_UNKNOWN for
    a synthesized container, which is always ours to guard). */
+/* The class a qualified pattern (`Sub(x:)`, `Sub[a, b]`) asks of an object
+   subject, when it is not already known to hold: the subject is deconstructed
+   only when it holds, as CRuby tests `Sub === obj` first. NULL outside such
+   an arm. */
+static const char *g_pm_qual = NULL;
+
 static int obj_deconstruct_guarded(Compiler *c, TyKind pt, TyKind rt) {
-  return obj_subject_nilable(c, pt) &&
+  return (obj_subject_nilable(c, pt) || g_pm_qual) &&
          (rt == TY_UNKNOWN || ty_is_hash(rt) || ty_is_array(rt));
 }
 
 static void emit_obj_deconstruct_open(Compiler *c, TyKind pt, TyKind rt, int t, Buf *b) {
-  if (obj_deconstruct_guarded(c, pt, rt)) buf_printf(b, "_t%d ? ", t);
+  if (!obj_deconstruct_guarded(c, pt, rt)) return;
+  if (g_pm_qual) buf_printf(b, "(%s) ? ", g_pm_qual);
+  else buf_printf(b, "_t%d ? ", t);
 }
 
 static void emit_obj_deconstruct_close(Compiler *c, TyKind pt, TyKind rt, Buf *b) {
@@ -3624,6 +3632,20 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
     int reject_arm = 0;
     int poly_class_guard = -1;   /* `_tN` bool: the poly subject is the pattern's class */
     int live_subject = -1;       /* `_tN` object pointer a deconstruct below read: NULL is nil */
+    /* `in Sub(x:)` / `in Sub[a, b]` on an object subject: the class first,
+       decided as a bare `in Sub` is. The deconstruct then only runs, and the
+       arm only matches, where it holds; a class the subject can never be
+       fails the arm. The qualifier was dropped, and a Shape matched
+       `in Sub(x:)` whenever its fields did. */
+    Buf qual_buf = {NULL, 0, 0};
+    g_pm_qual = NULL;
+    if (ty_is_object(pt) && (sp_streq(pty, "ArrayPatternNode") || sp_streq(pty, "HashPatternNode"))) {
+      int qn = nt_ref(nt, pat, "constant");
+      if (qn >= 0 && emit_pm_cond(c, qn, t, pt, &qual_buf) && qual_buf.p) {
+        if (sp_streq(qual_buf.p, "1")) { free(qual_buf.p); qual_buf.p = NULL; }
+        else g_pm_qual = qual_buf.p;   /* "0" too: the arm then never deconstructs or matches */
+      }
+    }
     if (pt == TY_MATCHDATA && sp_streq(pty, "HashPatternNode")) {
       char md[24]; snprintf(md, sizeof md, "_t%d", t);
       arm_t = emit_md_deconstruct_keys(b, indent + 1, md);
@@ -3682,9 +3704,11 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         buf_puts(b, "sp_PolyArray_new()");
         emit_obj_deconstruct_close(c, pt, TY_UNKNOWN, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d);\n", arm_t);
-        if (obj_subject_nilable(c, pt)) {
+        if (obj_subject_nilable(c, pt) || g_pm_qual) {
           live_subject = t;
-          emit_indent(b, indent + 1); buf_printf(b, "if (_t%d) {\n", t);
+          emit_indent(b, indent + 1);
+          if (g_pm_qual) buf_printf(b, "if (%s) {\n", g_pm_qual);
+          else buf_printf(b, "if (_t%d) {\n", t);
         }
         for (int i = 0; i < sc->nivars; i++) {
           char fb[300];
@@ -3733,9 +3757,11 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         buf_puts(b, "sp_SymPolyHash_new()");
         emit_obj_deconstruct_close(c, pt, TY_UNKNOWN, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d);\n", arm_t);
-        if (obj_subject_nilable(c, pt)) {
+        if (obj_subject_nilable(c, pt) || g_pm_qual) {
           live_subject = t;
-          emit_indent(b, indent + 1); buf_printf(b, "if (_t%d) {\n", t);
+          emit_indent(b, indent + 1);
+          if (g_pm_qual) buf_printf(b, "if (%s) {\n", g_pm_qual);
+          else buf_printf(b, "if (_t%d) {\n", t);
         }
         for (int i = 0; i < sc->nivars; i++) {
           char fb[300];
@@ -3805,6 +3831,12 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
        pattern already fails closed below via a null hash cname.) */
     if (sp_streq(pty, "ArrayPatternNode") && !ty_is_array(arm_pt) && arm_pt != TY_POLY)
       reject_arm = 1;
+
+    /* the qualifier guards this arm's own deconstruct only: a nested object
+       pattern below asks its own class */
+    const char *qual = g_pm_qual;
+    g_pm_qual = NULL;
+    if (qual && live_subject < 0) live_subject = t;
 
     /* --- compute match condition --- */
     Buf cond_buf = {NULL, 0, 0};
@@ -3995,8 +4027,10 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
          for the subject first (the hash walk starts from the temp itself,
          so there the prefix repeats what it already knows) */
       emit_indent(b, indent + 1);
-      if (has_cond) buf_printf(b, "if (_t%d != NULL && (%s)) {\n", live_subject, cond_buf.p ? cond_buf.p : "1");
-      else buf_printf(b, "if (_t%d != NULL) {\n", live_subject);
+      char lv[32]; snprintf(lv, sizeof lv, "_t%d != NULL", live_subject);
+      const char *pre = qual ? qual : lv;
+      if (has_cond) buf_printf(b, "if ((%s) && (%s)) {\n", pre, cond_buf.p ? cond_buf.p : "1");
+      else buf_printf(b, "if (%s) {\n", pre);
       body_indent = indent + 2;
     }
     else if (has_cond) {
@@ -4005,6 +4039,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       body_indent = indent + 2;
     }
     free(cond_buf.p);
+    free(qual_buf.p);
 
     /* --- bindings --- */
     int guard = arm_guard;
