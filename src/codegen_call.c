@@ -30114,15 +30114,20 @@ else {
             buf_printf(&call_buf, "_b%d_%d", tb, ai);
           }
         }
-        /* Extra variadic args: promote by inferred type (int->long long,
+        /* Extra variadic args: promote by inferred type (int->sp_int,
            float->double, str->const char*, ptr->void*). A poly-typed vararg
-           has no compile-time C type to promote to, so reject it loudly. */
+           has no compile-time C type to promote to, so reject it loudly.
+           An Integer goes at the target's Integer width, sp_int, not at
+           long long: on an ILP32 target a `%d` reads 4 bytes, and an 8-byte
+           long long shifted every later vararg by 4 (a following `%s` then
+           read an integer as a pointer). On LP64 sp_int is 8 bytes, as
+           long long was, so the call is the same. */
         if (is_vararg) {
           for (int ai = fixed_argc; ai < argc; ai++) {
             if (ai) buf_puts(&call_buf, ", ");
             TyKind at = comp_ntype(c, argv[ai]);
             if (at == TY_INT || at == TY_BOOL) {
-              buf_puts(&call_buf, "((long long)("); emit_int_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))");
+              buf_puts(&call_buf, "((sp_int)("); emit_int_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))");
             }
             else if (at == TY_FLOAT) {
               buf_puts(&call_buf, "((double)("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))");
