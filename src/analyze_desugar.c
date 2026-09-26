@@ -1513,6 +1513,47 @@ int desugar_call_op_write(Compiler *c) {
   return changed;
 }
 
+/* `self.m` where self is main and `m` is a top-level def: the def is a
+   private method of Object, and a literal `self.` receiver may call a
+   private method (Feature #11297), so this is the receiverless call the
+   top-level function already serves. It went through main's dispatch,
+   where the def is not, and raised NoMethodError (#5061). The rule is
+   syntactic, as CRuby's is: only a bare `self` node, not `(self)` and not
+   a local holding it. */
+int desugar_main_self_call(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    const char *name = nt_str(nt, id, "name");
+    if (!name) continue;
+    /* ...and the other way: a receiverless `instance_eval { }` or
+       `instance_exec { }` on main is the `self.instance_eval` spelling,
+       which the rebinding machinery serves; bare, it was refused */
+    if (recv < 0 && nt_ref(nt, id, "block") >= 0 &&
+        (sp_streq(name, "instance_eval") || sp_streq(name, "instance_exec")) &&
+        comp_method_index(c, name) < 0 && self_is_main(c, id)) {
+      int sn = nt_new_node(nt, "SelfNode");
+      if (sn < 0) continue;
+      nt_node_set_ref(nt, id, "receiver", sn);
+      comp_grow_node_arrays(c);
+      c->nscope[sn] = c->nscope[id];
+      changed = 1;
+      continue;
+    }
+    if (recv < 0 || nt_kind(nt, recv) != NK_SelfNode) continue;
+    const char *cop = nt_str(nt, id, "call_operator");
+    if (cop && sp_streq(cop, "&.")) continue;
+    if (!self_is_main(c, recv)) continue;
+    if (comp_method_index(c, name) < 0) continue;   /* no top-level def */
+    nt_node_set_ref(nt, id, "receiver", -1);
+    changed = 1;
+  }
+  return changed;
+}
+
 /* `recv[k] ||= v`, `recv[k] &&= v` and `recv[k] op= v` on an instance of a
    user class with its own `[]` and `[]=`: the index-write emitters know the
    builtin containers only, and refused the shape (#5054). Rewritten into the

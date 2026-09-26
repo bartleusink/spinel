@@ -26279,7 +26279,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
      top level and previously fell through unsupported (#3035) */
   if (recv >= 0 && sp_streq(name, "class") && argc == 0 &&
       nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "SelfNode") &&
-      ({ Scope *_ss = comp_scope_of(c, id); !_ss || _ss->class_id < 0; })) {
+      self_is_main(c, recv)) {
     buf_puts(b, "((sp_Class){(sp_int)-116, SPL(\"Object\")})");
     return;
   }
