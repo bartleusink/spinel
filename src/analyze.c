@@ -12771,27 +12771,36 @@ static int an_arg_hands_handle(Compiler *c, int node) {
    instead of re-deciding per candidate. The two must agree; the order of the
    two arms is the same (a unique user method named `new` wins over the
    constructor reading). */
-static int an_call_resolve_scope(Compiler *c, int u, int new_ok) {
+static void an_call_targets_of(Compiler *c, int u, int new_ok,
+                               int out[2], int *nout) {
   const NodeTable *nt = c->nt;
+  *nout = 0;
   const char *un = nt_str(nt, u, "name");
-  if (!un) return -1;
+  if (!un) return;
+  /* BOTH arms, because an_call_targets_scope answers for both and a call can
+     satisfy each against a different scope: with a method named `new` in the
+     program, `K.new(s)` matches that scope by name AND resolves to
+     K#initialize as a constructor. Resolving to a single scope dropped one of
+     them -- whichever arm ran second -- and the call site vanished from that
+     scope's chain, which is how `Holder.new(s)` stopped being evidence and the
+     copy came back. */
   int byname = an_unique_scope_by_name(c, un);
   if (byname >= 0 && c->scopes[byname].name &&
-      sp_streq(c->scopes[byname].name, un)) return byname;
-  if (!sp_streq(un, "new")) return -1;
+      sp_streq(c->scopes[byname].name, un)) out[(*nout)++] = byname;
+  if (!sp_streq(un, "new")) return;
   /* `new_ok` is an_new_recv_all_constant, hoisted by the caller: it walks the
      whole node table, so asking it per call node made the build quadratic. */
-  if (!new_ok) return -1;
+  if (!new_ok) return;
   int rc = nt_ref(nt, u, "receiver");
-  if (rc < 0 || nt_kind(nt, rc) != NK_ConstantReadNode) return -1;
+  if (rc < 0 || nt_kind(nt, rc) != NK_ConstantReadNode) return;
   const char *cn = nt_str(nt, rc, "name");
   int cid = cn ? comp_class_index(c, cn) : -1;
-  if (cid < 0) return -1;
+  if (cid < 0) return;
   int mi = comp_method_in_class(c, cid, "initialize");
-  if (mi < 0 || mi >= c->nscopes) return -1;
+  if (mi < 0 || mi >= c->nscopes) return;
   Scope *m2 = &c->scopes[mi];
-  if (!m2->name || m2->class_id < 0 || m2->is_cmethod) return -1;
-  return mi;
+  if (!m2->name || m2->class_id < 0 || m2->is_cmethod) return;
+  if (*nout == 0 || out[0] != mi) out[(*nout)++] = mi;
 }
 
 /* (scope, parameter) -> "some call site hands that parameter a shared handle".
@@ -12830,24 +12839,26 @@ typedef struct {
      handle parameters were rare, and the dominant cost once a whole program's
      retaining classes became handles. The same walk that fills `bit` records
      the chain, so both passes read it instead. */
-  int *head;           /* scope -> first call node id, or -1 */
-  int *next;           /* call node id -> next in the same scope's chain */
+  int *head;           /* scope -> first edge, or -1 */
+  int *enext;          /* edge -> next edge for the same scope */
+  int *enode;          /* edge -> the call node */
 } HandleArgTab;
 
 static void handle_arg_tab_init(Compiler *c, HandleArgTab *t) {
   const NodeTable *nt = c->nt;
-  t->off = NULL; t->bit = NULL; t->head = NULL; t->next = NULL; t->ok = 0;
+  t->off = NULL; t->bit = NULL; t->head = NULL; t->enext = NULL; t->enode = NULL;
+  t->ok = 0;
   if (c->nscopes <= 0) return;
+  size_t maxe = (size_t)(nt->count > 0 ? nt->count : 1) * 2;
   t->off = (int *)malloc(sizeof(int) * (size_t)c->nscopes);
-  if (!t->off) return;
   t->head = (int *)malloc(sizeof(int) * (size_t)c->nscopes);
-  t->next = nt->count > 0 ? (int *)malloc(sizeof(int) * (size_t)nt->count) : NULL;
-  if (!t->head || (nt->count > 0 && !t->next)) {
-    free(t->off); free(t->head); free(t->next);
-    t->off = NULL; t->head = NULL; t->next = NULL; return;
+  t->enext = (int *)malloc(sizeof(int) * maxe);
+  t->enode = (int *)malloc(sizeof(int) * maxe);
+  if (!t->off || !t->head || !t->enext || !t->enode) {
+    free(t->off); free(t->head); free(t->enext); free(t->enode);
+    t->off = NULL; t->head = NULL; t->enext = NULL; t->enode = NULL; return;
   }
   for (int i = 0; i < c->nscopes; i++) t->head[i] = -1;
-  for (int i = 0; i < nt->count; i++) t->next[i] = -1;
   int total = 0;
   for (int i = 0; i < c->nscopes; i++) {
     int np = c->scopes[i].nparams;
@@ -12856,30 +12867,36 @@ static void handle_arg_tab_init(Compiler *c, HandleArgTab *t) {
   }
   t->bit = total > 0 ? (unsigned char *)calloc((size_t)total, 1) : NULL;
   if (total > 0 && !t->bit) {
-    free(t->off); free(t->head); free(t->next);
-    t->off = NULL; t->head = NULL; t->next = NULL; return;
+    free(t->off); free(t->head); free(t->enext); free(t->enode);
+    t->off = NULL; t->head = NULL; t->enext = NULL; t->enode = NULL; return;
   }
   t->ok = 1;
+  int ne = 0;
   int new_ok = an_new_recv_all_constant(c);
   for (int u = 0; u < nt->count; u++) {
     if (nt_kind(nt, u) != NK_CallNode) continue;
-    int mi = an_call_resolve_scope(c, u, new_ok);
-    if (mi < 0 || mi >= c->nscopes) continue;
-    t->next[u] = t->head[mi]; t->head[mi] = u;
-    if (t->off[mi] < 0 || !t->bit) continue;
-    int argsN = nt_ref(nt, u, "arguments");
-    int argc2 = 0;
-    const int *argv2 = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &argc2) : NULL;
-    if (!argv2) continue;
-    int np = c->scopes[mi].nparams;
-    for (int pj = 0; pj < argc2 && pj < np; pj++)
-      if (an_arg_hands_handle(c, argv2[pj])) t->bit[t->off[mi] + pj] = 1;
+    int tgt[2], ntg = 0;
+    an_call_targets_of(c, u, new_ok, tgt, &ntg);
+    for (int k = 0; k < ntg; k++) {
+      int mi = tgt[k];
+      if (mi < 0 || mi >= c->nscopes) continue;
+      t->enode[ne] = u; t->enext[ne] = t->head[mi]; t->head[mi] = ne; ne++;
+      if (t->off[mi] < 0 || !t->bit) continue;
+      int argsN = nt_ref(nt, u, "arguments");
+      int argc2 = 0;
+      const int *argv2 = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &argc2) : NULL;
+      if (!argv2) continue;
+      int np = c->scopes[mi].nparams;
+      for (int pj = 0; pj < argc2 && pj < np; pj++)
+        if (an_arg_hands_handle(c, argv2[pj])) t->bit[t->off[mi] + pj] = 1;
+    }
   }
 }
 
 static void handle_arg_tab_free(HandleArgTab *t) {
-  free(t->off); free(t->bit); free(t->head); free(t->next);
-  t->off = NULL; t->bit = NULL; t->head = NULL; t->next = NULL; t->ok = 0;
+  free(t->off); free(t->bit); free(t->head); free(t->enext); free(t->enode);
+  t->off = NULL; t->bit = NULL; t->head = NULL;
+  t->enext = NULL; t->enode = NULL; t->ok = 0;
 }
 
 static int handle_arg_tab_get(const HandleArgTab *t, int mi, int pj) {
@@ -13056,7 +13073,8 @@ static int convert_byref_handle_params(Compiler *c,
       /* one pass over this method's call sites: detect a handle arg, and
          (once converted) pull plain-local args into the shared set */
       int saw_handle = is_handle;
-      for (int u = hat->head[mi2]; u >= 0; u = hat->next[u]) {
+      for (int e = hat->head[mi2]; e >= 0; e = hat->enext[e]) {
+        int u = hat->enode[e];
         int argsN = nt_ref(nt, u, "arguments");
         int uargc = 0;
         const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;
@@ -13087,7 +13105,8 @@ static int convert_byref_handle_params(Compiler *c,
         changed = 1;
       }
       /* pull the remaining plain-local args into the shared set */
-      for (int u = hat->head[mi2]; u >= 0; u = hat->next[u]) {
+      for (int e = hat->head[mi2]; e >= 0; e = hat->enext[e]) {
+        int u = hat->enode[e];
         int argsN = nt_ref(nt, u, "arguments");
         int uargc = 0;
         const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;

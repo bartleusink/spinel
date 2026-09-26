@@ -255,3 +255,22 @@ pe2 = Peek.new(bx.bytes)
 po2 = Poke.new(bx.bytes)
 po2.poke(1, 9)
 p [pe2.at(1), bx.bytes.getbyte(1)]
+
+# A scope named `new` that is never called by that name. The call-site index
+# behind these rules resolves `K.new(...)` two ways -- a method matching the
+# call's name, and a constant receiver's `initialize` -- and both answers are
+# live at once here: `Holder.new(s)` matches this method BY NAME and is the
+# constructor of Holder. Keeping only one of them dropped the call from the
+# other scope's call sites, and with it the evidence that the argument is a
+# handle, so the pair below went back to a copy.
+class Factory
+  def new(x)      # never called: it only has to EXIST for the name arm to
+    x + 1         # resolve. Calling it as `Factory.new.new(1)` would put a
+  end             # non-constant receiver on a `new` call, and the whole-program
+end               # guard would switch constructor resolution off instead.
+
+zz = +"abcd"
+pe3 = Peek.new(zz)
+po3 = Poke.new(zz)
+po3.poke(3, 5)
+p [pe3.at(3), zz.getbyte(3)]
