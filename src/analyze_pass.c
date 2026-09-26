@@ -4659,6 +4659,7 @@ int infer_param_types(Compiler *c) {
             if (mi >= 0 && def_cid >= 0) caller_cid = def_cid;
           }
         }
+        else mi = comp_cbody_call_mi(c, id, name);
       }
       if (mi < 0) mi = comp_method_index(c, name);
       if (mi < 0) mi = comp_included_method_index(c, name);
@@ -7953,7 +7954,8 @@ int infer_block_params(Compiler *c) {
     {
       int mi = -1;
       if (recv < 0) {
-        mi = comp_method_index(c, name);
+        mi = comp_cbody_call_mi(c, id, name);
+        if (mi < 0) mi = comp_method_index(c, name);
         if (mi < 0) {
           Scope *self = comp_scope_of(c, id);
           if (self->class_id >= 0) {

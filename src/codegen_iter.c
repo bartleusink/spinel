@@ -217,6 +217,10 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
         if (mi >= 0) implicit_self = 1;
       }
     }
+    else if (g_class_body_id >= 0) {
+      mi = comp_cmethod_in_chain(c, g_class_body_id, name, NULL);
+      if (mi >= 0) cm_class = g_class_body_id;
+    }
     if (mi < 0) mi = comp_method_index(c, name);   /* free function */
     if (mi < 0) return 0;
   }
@@ -1962,13 +1966,13 @@ static int call_targets_yielding_method(Compiler *c, int id) {
   int recv = nt_ref(nt, id, "receiver");
   int mi = -1;
   if (recv < 0) {
-    mi = comp_method_index(c, name);
-    if (mi < 0) {
-      Scope *encl = comp_scope_of(c, id);
-      if (encl && encl->class_id >= 0) {
-        mi = comp_method_in_chain(c, encl->class_id, name, NULL);
-        if (mi < 0 && encl->is_cmethod) mi = comp_cmethod_in_chain(c, encl->class_id, name, NULL);
-      }
+    Scope *encl = comp_scope_of(c, id);
+    if ((!encl || encl->class_id < 0) && g_class_body_id >= 0)
+      mi = comp_cmethod_in_chain(c, g_class_body_id, name, NULL);
+    if (mi < 0) mi = comp_method_index(c, name);
+    if (mi < 0 && encl && encl->class_id >= 0) {
+      mi = comp_method_in_chain(c, encl->class_id, name, NULL);
+      if (mi < 0 && encl->is_cmethod) mi = comp_cmethod_in_chain(c, encl->class_id, name, NULL);
     }
   }
   else {

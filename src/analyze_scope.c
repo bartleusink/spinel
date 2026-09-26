@@ -3767,10 +3767,8 @@ static int scope_body_uses_ivar(Compiler *c, int scope_idx) {
    includer may override it. Spinel gave the module's own storage (a
    `civ_<Mod>_<name>` global), the Module object, and the module's sibling.
 
-   Which bodies care is the question the extend path already answers for the
-   mirror transplant (scope_reads_ivar / scope_has_receiverless_call below):
-   an ivar, a self, or a receiverless call. A body with none of those runs the
-   same either way and keeps the single shared copy. */
+   Which bodies care: an ivar, a self, or a receiverless call. A body with none
+   of those runs the same either way and keeps the single shared copy. */
 static int module_function_self_dependent(Compiler *c, int scope_idx) {
   const NodeTable *nt = c->nt;
   if (scope_body_uses_ivar(c, scope_idx)) return 1;
@@ -4144,35 +4142,6 @@ void register_includes(Compiler *c) {
 int cmethod_needs_specialization(Compiler *c, int mi, int ci, int def_cls, int *has_new);
 static void specialize_cmethod_for(Compiler *c, int mi, int def_cls, int ci);
 
-/* True if scope `mi`'s body contains a receiverless (implicit-self) call --
-   a `new`, a sibling method, etc. Such a call rebinds when the method runs as
-   a class method of an extending class, so its body must be specialized. */
-/* An ivar named in a module method reaches different storage once the method
-   runs as a class method of an extending class: `@x` is then a class-level
-   ivar, not a field of an instance. The transplant shares the module's AST, so
-   the node still resolves to the module scope and the read is emitted against
-   a `self` that is a Class value. Specialize such a body too. */
-static int scope_reads_ivar(Compiler *c, int mi) {
-  const NodeTable *nt = c->nt;
-  NT_FOREACH_KIND(nt, NK_InstanceVariableReadNode, id) {
-    if (c->nscope[id] == mi) return 1;
-  }
-  NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, id) {
-    if (c->nscope[id] == mi) return 1;
-  }
-  return 0;
-}
-
-static int scope_has_receiverless_call(Compiler *c, int mi) {
-  const NodeTable *nt = c->nt;
-  NT_FOREACH_KIND(nt, NK_CallNode, id) {
-    if (c->nscope[id] != mi) continue;
-    if (nt_ref(nt, id, "receiver") >= 0) continue;
-    return 1;
-  }
-  return 0;
-}
-
 /* attr_reader/attr_accessor/attr_writer and alias_method in a MODULE body
    belong to every class that includes it, just like a plain def. The transplant
    copies method scopes only, so carry the declarative surface across too: the
@@ -4410,45 +4379,24 @@ void register_extends(Compiler *c) {
              to an instance pointer (#4648). */
           if (src->class_id != mod_id || (src->is_cmethod && !src->is_module_function) || !src->name) continue;
           if (comp_cmethod_in_class(c, ci, src->name) >= 0) continue;
-          /* A module method whose body makes a receiverless call binds `self`
-             to the extending class: a bare `new` constructs that class, and a
-             sibling call resolves to the extending class's (transplanted) class
-             method. Sharing the module's body leaves those nodes attributed to
-             the module scope, where codegen cannot resolve them. When the body
-             has any receiverless call, CLONE and re-walk against `ci` via the
-             inherited-cmethod specializer (which also pins a bare-`new` return
-             to ty_object(ci)); the module source is then DCE'd (#3177). */
-          if (scope_has_receiverless_call(c, ms) || scope_reads_ivar(c, ms)) {
-            /* the ivars the body names become class-level ivars of the
-               extending class, and their storage is declared from its ivar
-               list -- register them even when nothing assigns one there */
-            { const NodeTable *nt2 = c->nt;
-              NT_FOREACH_KIND(nt2, NK_InstanceVariableReadNode, ivid)
-                if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
-                  comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
-              NT_FOREACH_KIND(nt2, NK_InstanceVariableWriteNode, ivid)
-                if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
-                  comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name")); }
-            specialize_cmethod_for(c, ms, mod_id, ci);
-            src = &c->scopes[ms];  /* realloc-safe */
-            /* a module_function stays callable on the module itself
-               (`Coordinates.countdown(1)`), so its source is not dead */
-            if (!src->is_module_function) src->is_transplanted_source = 1;
-            did_clone = 1;
-            continue;
-          }
-          Scope *dst = comp_scope_new(c, src->name, src->def_node);
-          src = &c->scopes[ms];
-          dst->body = src->body;
-          dst->class_id = ci;
-          dst->is_cmethod = 1;  /* transplanted as a class method */
-          dst->reachable = src->reachable;
-          dst->yields = src->yields;
-          dst->nrequired = src->nrequired;
-          dst->rest_idx = src->rest_idx;
-          dst->kwrest_idx = src->kwrest_idx;
-          if (src->blk_param) dst->blk_param = strdup(src->blk_param);
-          scope_copy_params(dst, src);
+          /* Always a clone re-walked against `ci`, as include does: a shared
+             body kept the module's attribution, so `self`, the block and the
+             parameter types resolved against the module, not the class.
+             The ivars the body names become class-level ivars of the
+             extending class, and their storage is declared from its ivar
+             list -- register them even when nothing assigns one there. */
+          { const NodeTable *nt2 = c->nt;
+            NT_FOREACH_KIND(nt2, NK_InstanceVariableReadNode, ivid)
+              if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
+                comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
+            NT_FOREACH_KIND(nt2, NK_InstanceVariableWriteNode, ivid)
+              if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
+                comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name")); }
+          specialize_cmethod_for(c, ms, mod_id, ci);
+          src = &c->scopes[ms];  /* realloc-safe */
+          did_clone = 1;
+          /* a module_function stays callable on the module itself
+             (`Coordinates.countdown(1)`), so its source is not dead */
           if (!src->is_module_function) src->is_transplanted_source = 1;
         }
       }
