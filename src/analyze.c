@@ -12747,6 +12747,50 @@ static int promote_shared_stored_strings(Compiler *c) {
    all this rule does; convert_byref_handle_params then pulls every call site's
    argument into the shared set, exactly as it does for a byref parameter that
    has just become a handle. */
+/* Does any call site of scope `mi2` hand a shared handle to parameter `pj`?
+
+   Evidence from the CALLER, which the rules around it do not have. The
+   propagation runs param -> argument: a parameter that is byref, or already a
+   handle, pulls its call sites' locals into the shared set. Nothing ran the
+   other way, so a parameter that is only RETAINED -- never mutated, in a class
+   that never mutates the slot -- stayed a value while the argument was a
+   handle, and the call site handed it sp_str_concat(cstr, "") instead. The
+   holder walked away with a snapshot and never saw a mutation made through any
+   other alias:
+
+       class Holder; def initialize(b) @b = b end; def at(i) @b.getbyte(i) end; end
+       class Poker;  def initialize(b) @b = b end; def poke(i,v) @b.setbyte(i,v) end; end
+       s = +"abcd"; h = Holder.new(s); pk = Poker.new(s)
+       pk.poke(2, 7); h.at(2)   # 7 in Ruby, the old byte here
+
+   Poker's parameter is a handle (its slot is mutated) and that made `s` one;
+   Holder's had no evidence of its own. The argument being a handle IS the
+   evidence -- what a handle is passed to is a handle, the call-site twin of
+   the rule below. */
+static int an_param_gets_handle_arg(Compiler *c, int mi2, Scope *m2, int pj) {
+  const NodeTable *nt = c->nt;
+  if (pj < 0) return 0;
+  for (int u = 0; u < nt->count; u++) {
+    if (nt_kind(nt, u) != NK_CallNode) continue;
+    if (!an_call_targets_scope(c, u, mi2, m2)) continue;
+    int argsN = nt_ref(nt, u, "arguments");
+    int uargc = 0;
+    const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;
+    if (!uargv || pj >= uargc) continue;
+    if (an_arg_is_shared_handle(c, uargv[pj])) return 1;
+    /* `K.new(obj.reader)`: the handle reaches the argument through a reader
+       rather than a name, so an_arg_is_shared_handle -- which reads slots --
+       does not see it. The reader over a shared slot hands out that slot. */
+    { char ivb[300]; int defc = -1;
+      const char *ivn = an_reader_ivar_of(c, uargv[pj], &defc, ivb, sizeof ivb);
+      if (ivn && defc >= 0) {
+        int ivx = comp_ivar_index(&c->classes[defc], ivn);
+        if (ivx >= 0 && c->classes[defc].ivar_str_shared[ivx]) return 1;
+      } }
+  }
+  return 0;
+}
+
 static int promote_params_stored_in_shared_ivars(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -12790,7 +12834,14 @@ static int promote_params_stored_in_shared_ivars(Compiler *c) {
          copy, so the second name did not see the mutation and was not the same
          object. What a handle is assigned to is a handle (#4363). */
       int src_is_handle = pp->type == TY_STRBUF && pp->str_shared;
-      if (!already && !src_is_handle &&
+      /* And from the other side of the call: the ARGUMENT is already a handle.
+         Without this the chain only ever ran outwards from a slot that could
+         show its own mutation, so a retaining class that mutates nothing --
+         the reader half of an aliased pair -- was handed a copy. */
+      int arg_is_handle =
+          an_param_gets_handle_arg(c, (int)(ms - c->scopes), ms,
+                                   an_param_idx(ms, lname));
+      if (!already && !src_is_handle && !arg_is_handle &&
           mk != 1 && !(mk == -1 && (ivt0 == TY_STRING || ivt0 == TY_STRBUF)))
         continue; }
     if (pp->type != TY_UNKNOWN && pp->type != TY_STRING &&
