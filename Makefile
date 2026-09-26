@@ -310,8 +310,11 @@ build/csrc/sp_parse_lib.o: src/spinel_parse.c $(PRISM_LIB) | build/csrc
 # time and refuse one the engine cannot read, where it used to reach the
 # engine only at the built program's startup. src/re_lit_check.c is the seam
 # (and carries the sp_sprintf the engine's object file references).
-build/csrc/re_lit_check.o: src/re_lit_check.c lib/regexp/re_internal.h | build/csrc
-	$(CC) $(CFLAGS) -Ilib/regexp -c src/re_lit_check.c -o $@
+# the regexp engine is mruby-regexp as mruby carries it; shim/ answers its
+# mruby API and re_spinel.c is spinel's side of it
+RE_HDRS = $(wildcard lib/regexp/*.h lib/regexp/*.inc lib/regexp/shim/*.h lib/regexp/shim/mruby/*.h)
+build/csrc/re_lit_check.o: src/re_lit_check.c $(RE_HDRS) | build/csrc
+	$(CC) $(CFLAGS) -Ilib/regexp -Ilib/regexp/shim -c src/re_lit_check.c -o $@
 
 # Defined HERE, above the first rule that names it. GNU make expands a rule's
 # prerequisites when the rule is READ, so with this further down the file the
@@ -319,7 +322,7 @@ build/csrc/re_lit_check.o: src/re_lit_check.c lib/regexp/re_internal.h | build/c
 # regexp objects happened to be on disk and never rebuilt a stale one. The
 # recipe's own $(RE_OBJ) expands at run time, so the link named the right
 # files -- which is what made it look like the compiler was ignoring an edit.
-RE_SRC = lib/regexp/re_compile.c lib/regexp/re_exec.c lib/regexp/re_utf8.c
+RE_SRC = lib/regexp/re_compile.c lib/regexp/re_exec.c lib/regexp/re_utf8.c lib/regexp/unicase.c lib/regexp/re_spinel.c
 RE_OBJ = $(patsubst lib/regexp/%.c,build/regexp/%.o,$(RE_SRC))
 
 $(SPINEL): $(SPINEL_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB)
@@ -369,20 +372,17 @@ endif
 
 # ---- Runtime library (regexp + bigint + …) ----
 
-# RE_CASE_FLAGS: the Unicode tables the regexp engine carries, each left out by
-# asking for it. -DRE_NO_UNICODE_CASE gives ASCII-only /i folding and leaves
-# out the ~3KB fold table; -DRE_NO_UNICODE_CTYPE gives ASCII-only POSIX
-# brackets and word boundaries, leaves out the ~14KB type table, and takes the
-# ~18KB `\p{...}` property tables with it (a property is refused rather than
-# answered from ASCII, since a category means nothing there). Pass both for the
-# smallest engine.
+# RE_CASE_FLAGS: the Unicode tables the regexp engine carries. Either of
+# -DRE_NO_UNICODE_CASE and -DRE_NO_UNICODE_CTYPE is mruby's MRB_USE_ASCII_CTYPE
+# build (lib/regexp/shim/mruby.h): ASCII-only /i folding, POSIX brackets and
+# word boundaries, without the case and type tables. The `\p{...}` tables stay.
 RE_CASE_FLAGS ?=
 
-build/regexp/%.o: lib/regexp/%.c lib/regexp/re_internal.h lib/regexp/re_casefold.h lib/regexp/re_ctype.h lib/regexp/re_uniprop.h
+build/regexp/%.o: lib/regexp/%.c $(RE_HDRS)
 	@mkdir -p build/regexp
-	$(CC) -c $(COPT) $(SEC_FLAGS) $(RE_CASE_FLAGS) -Ilib/regexp $< -o $@
+	$(CC) -c $(COPT) $(SEC_FLAGS) $(RE_CASE_FLAGS) -Ilib/regexp -Ilib/regexp/shim $< -o $@
 
-RT_HDRS = $(wildcard lib/*.h lib/regexp/*.h)
+RT_HDRS = $(wildcard lib/*.h lib/regexp/*.h lib/regexp/*.inc lib/regexp/shim/*.h lib/regexp/shim/mruby/*.h)
 
 # One rule for every lib/*.c object. The per-object header lists here used to be
 # written by hand and had drifted: build/sp_array.o never named lib/sp_str.h,
@@ -471,7 +471,7 @@ packages/zlib/sp_zlib_mt.o: packages/zlib/sp_zlib.c \
 
 build/sp_cold.o: lib/sp_cold.c $(RT_HDRS)
 	@mkdir -p build
-	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) -Ilib -Ilib/regexp lib/sp_cold.c -o build/sp_cold.o
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) -Ilib -Ilib/regexp -Ilib/regexp/shim lib/sp_cold.c -o build/sp_cold.o
 
 SP_RT_LIB = lib/libspinel_rt.a
 
@@ -493,13 +493,13 @@ MT_DEF = -DSP_THREADS -ftls-model=initial-exec
 
 # Specific rule before generic: GNU Make 3.81 (macOS system make) picks the
 # first matching pattern rule, not the shortest-stem one (3.82+).
-build/mt/regexp/%.o: lib/regexp/%.c lib/regexp/re_internal.h lib/regexp/re_casefold.h lib/regexp/re_ctype.h
+build/mt/regexp/%.o: lib/regexp/%.c $(RE_HDRS)
 	@mkdir -p $(@D)
-	$(CC) -c $(COPT) $(SEC_FLAGS) $(MT_DEF) -Ilib/regexp $< -o $@
+	$(CC) -c $(COPT) $(SEC_FLAGS) $(MT_DEF) -Ilib/regexp -Ilib/regexp/shim $< -o $@
 
 build/mt/%.o: lib/%.c $(RT_HDRS)
 	@mkdir -p $(@D)
-	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(MT_DEF) -Ilib -Ilib/regexp $< -o $@
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(MT_DEF) -Ilib -Ilib/regexp -Ilib/regexp/shim $< -o $@
 
 RE_MT_OBJ = $(patsubst lib/regexp/%.c,build/mt/regexp/%.o,$(RE_SRC))
 
@@ -518,13 +518,13 @@ SP_RT_MT_TSAN_LIB = lib/libspinel_rt_mt_tsan.a
 TSAN_DEF = $(MT_DEF) -fsanitize=thread -g
 
 # Specific before generic, as in the mt pair above.
-build/mt-tsan/regexp/%.o: lib/regexp/%.c lib/regexp/re_internal.h lib/regexp/re_casefold.h lib/regexp/re_ctype.h
+build/mt-tsan/regexp/%.o: lib/regexp/%.c $(RE_HDRS)
 	@mkdir -p $(@D)
-	$(CC) -c -O1 $(SEC_FLAGS) $(TSAN_DEF) -Ilib/regexp $< -o $@
+	$(CC) -c -O1 $(SEC_FLAGS) $(TSAN_DEF) -Ilib/regexp -Ilib/regexp/shim $< -o $@
 
 build/mt-tsan/%.o: lib/%.c $(RT_HDRS)
 	@mkdir -p $(@D)
-	$(CC) -c -O1 -Wno-all $(SEC_FLAGS) $(TSAN_DEF) -Ilib -Ilib/regexp $< -o $@
+	$(CC) -c -O1 -Wno-all $(SEC_FLAGS) $(TSAN_DEF) -Ilib -Ilib/regexp -Ilib/regexp/shim $< -o $@
 
 RE_MT_TSAN_OBJ = $(patsubst lib/regexp/%.c,build/mt-tsan/regexp/%.o,$(RE_SRC))
 
@@ -552,9 +552,9 @@ WASI_CFLAGS = -Ilib/wasi -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS
 SP_RT_WASI_LIB = lib/wasm32-wasi/libspinel_rt.a
 WASI_SHIM_HDRS = $(wildcard lib/wasi/*.h lib/wasi/sys/*.h)
 
-build/wasm32-wasi/regexp/%.o: lib/regexp/%.c lib/regexp/re_internal.h lib/regexp/re_casefold.h lib/regexp/re_ctype.h lib/regexp/re_uniprop.h
+build/wasm32-wasi/regexp/%.o: lib/regexp/%.c $(RE_HDRS)
 	@mkdir -p $(@D)
-	$(WASI_CC) -c $(COPT) $(SEC_FLAGS) $(RE_CASE_FLAGS) $(WASI_CFLAGS) -Ilib/regexp $< -o $@
+	$(WASI_CC) -c $(COPT) $(SEC_FLAGS) $(RE_CASE_FLAGS) $(WASI_CFLAGS) -Ilib/regexp -Ilib/regexp/shim $< -o $@
 
 build/wasm32-wasi/wasi/%.o: lib/wasi/%.c $(WASI_SHIM_HDRS)
 	@mkdir -p $(@D)
@@ -562,7 +562,7 @@ build/wasm32-wasi/wasi/%.o: lib/wasi/%.c $(WASI_SHIM_HDRS)
 
 build/wasm32-wasi/%.o: lib/%.c $(RT_HDRS) $(WASI_SHIM_HDRS)
 	@mkdir -p $(@D)
-	$(WASI_CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(WASI_CFLAGS) -Ilib -Ilib/regexp $< -o $@
+	$(WASI_CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(WASI_CFLAGS) -Ilib -Ilib/regexp -Ilib/regexp/shim $< -o $@
 
 RE_WASI_OBJ = $(patsubst lib/regexp/%.c,build/wasm32-wasi/regexp/%.o,$(RE_SRC))
 WASI_SHIM_OBJ = $(patsubst lib/wasi/%.c,build/wasm32-wasi/wasi/%.o,$(wildcard lib/wasi/*.c))
@@ -646,15 +646,11 @@ bin/spinel-%: tools/%.rb tools/tool_common.rb $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_
 # ---- Test ----
 
 TESTS := $(wildcard test/*.rb)
-# Build-incompatible: regexp_unicode_casefold pins what the Unicode fold table
-# answers, and -DRE_NO_UNICODE_CASE is the build that leaves the table out.
-ifneq (,$(findstring RE_NO_UNICODE_CASE,$(RE_CASE_FLAGS)))
-TESTS := $(filter-out test/regexp_unicode_casefold.rb,$(TESTS))
-endif
-# Likewise for the type table: regexp_unicode_ctype pins what a POSIX bracket
-# and a word boundary hold above ASCII, which -DRE_NO_UNICODE_CTYPE drops.
-ifneq (,$(findstring RE_NO_UNICODE_CTYPE,$(RE_CASE_FLAGS)))
-TESTS := $(filter-out test/regexp_unicode_ctype.rb,$(TESTS))
+# Build-incompatible: regexp_unicode_casefold and regexp_unicode_ctype pin
+# what the Unicode case and type tables answer, and either RE_NO_UNICODE_*
+# switch is the ASCII build that leaves both out.
+ifneq (,$(findstring RE_NO_UNICODE_,$(RE_CASE_FLAGS)))
+TESTS := $(filter-out test/regexp_unicode_casefold.rb test/regexp_unicode_ctype.rb,$(TESTS))
 endif
 # Mode-incompatible: int_overflow_raises pins raise-mode semantics; under
 # --int-overflow=promote the same code auto-promotes and output diverges.
@@ -941,7 +937,7 @@ ext-cruby-test: $(SPINEL) $(SP_RT_LIB)
 	  --ext-entry ExtKernel.triple,ExtKernel.shout,ExtKernel.total,ExtKernel.must_pos \
 	  -o "$$tmp/extk.c" >/dev/null 2>&1 || { echo "ext-cruby-test: FAIL (emission)"; ok=0; }; \
 	if [ $$ok -eq 1 ]; then \
-	  if $(CC) $$SOFLAGS -fPIC -O1 -w -I"$$RH" -I"$$RA" -Ilib -Ilib/regexp -I"$$tmp" \
+	  if $(CC) $$SOFLAGS -fPIC -O1 -w -I"$$RH" -I"$$RA" -Ilib -Ilib/regexp -Ilib/regexp/shim -I"$$tmp" \
 	       "$$tmp/extk_ext.c" "$$tmp/extk.c" $$(ls lib/*.c lib/regexp/*.c | sed 's/^/ /') \
 	       $(LDFLAGS) -lm -o "$$tmp/extk.$$DLEXT" 2>"$$tmp/cc.err"; then \
 	    ( cd "$$tmp" && cp $(CURDIR)/test/ext/driver.rb . && ruby driver.rb > out 2>&1 ); \

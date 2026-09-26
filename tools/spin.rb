@@ -1452,6 +1452,8 @@ def cmd_pack(prj, targets, outdir)
   pack_mkdir(File.join(outdir, "src"))
   pack_mkdir(File.join(outdir, "lib"))
   pack_mkdir(File.join(outdir, "lib", "regexp"))
+  pack_mkdir(File.join(outdir, "lib", "regexp", "shim"))
+  pack_mkdir(File.join(outdir, "lib", "regexp", "shim", "mruby"))
   pack_mkdir(File.join(outdir, "native"))
 
   # One compiler run writes the C and reports the build ingredients: `-c` and
@@ -1540,6 +1542,11 @@ def cmd_pack(prj, targets, outdir)
   Dir.glob(File.join(rtdir, "*.h")).each { |f| pack_copy(f, File.join(outdir, "lib", File.basename(f))) }
   Dir.glob(File.join(rtdir, "regexp", "*.c")).each { |f| pack_copy(f, File.join(outdir, "lib", "regexp", File.basename(f))) }
   Dir.glob(File.join(rtdir, "regexp", "*.h")).each { |f| pack_copy(f, File.join(outdir, "lib", "regexp", File.basename(f))) }
+  Dir.glob(File.join(rtdir, "regexp", "*.inc")).each { |f| pack_copy(f, File.join(outdir, "lib", "regexp", File.basename(f))) }
+  # the headers the vendored mruby engine includes as <mruby.h> and
+  # <mruby/string.h>: the directory shape is part of their names
+  Dir.glob(File.join(rtdir, "regexp", "shim", "*.h")).each { |f| pack_copy(f, File.join(outdir, "lib", "regexp", "shim", File.basename(f))) }
+  Dir.glob(File.join(rtdir, "regexp", "shim", "mruby", "*.h")).each { |f| pack_copy(f, File.join(outdir, "lib", "regexp", "shim", "mruby", File.basename(f))) }
   # lib/spinel/ is the ABI a native package compiles against -- it includes
   # <spinel/runtime.h> by that path, so the directory has to keep its name.
   if Dir.exist?(File.join(rtdir, "spinel"))
@@ -1572,7 +1579,7 @@ def cmd_pack(prj, targets, outdir)
 "        "# gcc and clang (including cross builds of them) work and a strict ISO C
 "        "# compiler does not.
 "        "CC ?= cc
-"        "CFLAGS ?= -O2#{cflags} -Ilib -Ilib/regexp
+"        "CFLAGS ?= -O2#{cflags} -Ilib -Ilib/regexp -Ilib/regexp/shim
 "        "LIBS ?=#{libs}
 "        "#{threaded ? pack_pthread_probe(name) : ""}"        "# String#crypt is libc crypt(3): a separate library on glibc, inside
 "        "# libSystem on Darwin. The recipient's platform decides, not the packer's.
@@ -2282,8 +2289,17 @@ def cmd_ext_build(root)
   rt = ext_runtime_dir
   n = 0
   (Dir.glob(File.join(rt, "*.c")) + Dir.glob(File.join(rt, "*.h")) +
-   Dir.glob(File.join(rt, "regexp", "*.c")) + Dir.glob(File.join(rt, "regexp", "*.h"))).each do |f|
+   Dir.glob(File.join(rt, "regexp", "*.c")) + Dir.glob(File.join(rt, "regexp", "*.h")) +
+   Dir.glob(File.join(rt, "regexp", "*.inc")) + Dir.glob(File.join(rt, "regexp", "shim", "*.h"))).each do |f|
     File.write(File.join(extdir, File.basename(f)), File.read(f))
+    n += 1
+  end
+  # <mruby/string.h> and its siblings keep their directory: the vendored
+  # regexp engine names them by that path
+  mdir = File.join(extdir, "mruby")
+  Dir.mkdir(mdir) unless File.exist?(mdir)
+  Dir.glob(File.join(rt, "regexp", "shim", "mruby", "*.h")).each do |f|
+    File.write(File.join(mdir, File.basename(f)), File.read(f))
     n += 1
   end
   puts "built ext/#{pkg}/ (#{pkg}.c, #{pkg}.h, #{pkg}_ext.c + #{n} runtime files)"

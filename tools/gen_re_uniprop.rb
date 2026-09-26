@@ -1,12 +1,13 @@
 # Generates lib/regexp/re_uniprop.h: the Unicode properties `\p{...}` can name.
-# Run it under a CRuby whose Unicode data is the one you want, the way
-# tools/gen_re_ctype.rb and tools/gen_re_casefold.rb are run:
+# Run it under a CRuby whose Unicode data is the one you want:
 #
 #   ruby tools/gen_re_uniprop.rb > lib/regexp/re_uniprop.h
 #
-# Read off CRuby rather than off the Unicode Character Database, for the reason
-# gen_re_ctype.rb gives: what this engine has to agree with is CRuby, so asking
-# CRuby is both shorter and closer to the question.
+# The rest of lib/regexp (the engine, re_ctype.h, the case tables) is mruby's
+# and is taken by copying it; this table is spinel's own, for the `\p{...}`
+# rewrite in re_spinel.c. Read off CRuby rather than off the Unicode Character
+# Database: what this has to agree with is CRuby, so asking CRuby is both
+# shorter and closer to the question.
 #
 # Two tables, because the properties fall into two shapes.
 #

@@ -807,9 +807,11 @@ The same applies to `freeze` on these values: they are value-frozen already
 simple case folding, so `/ä/i` matches "Ä" and `/k/i` matches "K" (U+212A).
 A source whose fold is several codepoints has no single counterpart to fold
 to and is matched literally: `"ß" =~ /ss/i` is `nil` where CRuby answers `0`.
-Building the regexp engine with `-DRE_NO_UNICODE_CASE` (`make
-RE_CASE_FLAGS=-DRE_NO_UNICODE_CASE`) leaves the ~3KB fold table out and folds
-ASCII alone; a non-ASCII literal then matches literally under `/i` too.
+Building the regexp engine with `-DRE_NO_UNICODE_CASE` or
+`-DRE_NO_UNICODE_CTYPE` (`make RE_CASE_FLAGS=-DRE_NO_UNICODE_CASE`) is mruby's
+`MRB_USE_ASCII_CTYPE` build: it leaves the case tables and the type table out
+together, folds ASCII alone, and a non-ASCII literal then matches literally
+under `/i` too.
 
 **A pattern may have at most 31 capture groups.** The match registers `$~`
 and `$1`..`$9` are built from hold that many, and so does the frame that saves
@@ -836,23 +838,21 @@ engine, whose choice points and undo records are capped together by
 choice point per iteration, so what a search holds grows with the length of
 the subject: `"a" * n + "b" + "a" * n =~ /\A(a+)b\1\z/` is answered for n up
 to roughly 30000 and gives up above it, where CRuby keeps going. Giving up
-answers `nil`, the same as no match. The step ceiling
-(`MRB_REGEXP_STEP_LIMIT`) bounds the catastrophic shapes the same way, so
-`("a" * 40 + "!") =~ /(a+)+$/` returns `nil` in milliseconds rather than
-running for years.
+raises `RegexpError` (`stack limit over (MRB_REGEXP_STACK_LIMIT)`) rather than
+answering `nil`: a search stopped at the limit has not shown that there is no
+match, and a `nil` there would be a wrong answer whenever the match lay past
+it. The step ceiling (`MRB_REGEXP_STEP_LIMIT`) bounds the catastrophic shapes
+the same way, so `("a" * 40 + "!") =~ /(a*)*b\1/` raises in milliseconds
+rather than running for years.
 
 **A POSIX bracket and a word boundary read Unicode above ASCII.**
 `[[:alpha:]]` and its ten siblings hold what CRuby's brackets hold in every
 script, and `\b` / `\B` sit beside a character of any script, both read off
 the type table in `lib/regexp/re_ctype.h`. `\d`, `\w` and `\s` are ASCII in
 Ruby's syntax and stay so, exactly as in CRuby, so `/\w/` and `/\b/` answer
-different questions about the same character on purpose. Building with
-`-DRE_NO_UNICODE_CTYPE` (`make RE_CASE_FLAGS=-DRE_NO_UNICODE_CTYPE`) leaves
-the ~14KB table out and a bracket then holds its ASCII set alone, which the
-boundary reads too. One case above ASCII still differs from CRuby: a bracket
-under `/i` reaches a character through the 1:1 foldings only, so
-`"ß" =~ /[[:upper:]]/i` is nil here and 0 in CRuby, for the same reason
-`"ß" =~ /ss/i` does not match (see the fold note above).
+different questions about the same character on purpose. The ASCII build
+(see the fold note above) leaves the type table out, and a bracket then holds
+its ASCII set alone, which the boundary reads too.
 
 **Character properties (`\p{...}` / `\P{...}`) carry three families.** The
 POSIX names (`Alpha`, `Alnum`, `Word`, `Space`, `Upper`, `Lower`, `Digit`,
@@ -870,8 +870,9 @@ Names match the way CRuby matches them, so case, underscores, hyphens and
 spaces make no difference. Anything else -- a script (`\p{Han}`), a binary
 property (`\p{Alphabetic}`), an age or block -- raises `RegexpError` naming
 the property, so the message says which one to reach around. The tables are
-generated from CRuby by `tools/gen_re_uniprop.rb` and are about 18KB;
-`-DRE_NO_UNICODE_CTYPE` leaves them out, and then every property is refused.
+generated from CRuby by `tools/gen_re_uniprop.rb` and are about 18KB; a
+property is rewritten into the class of code points it names before the
+engine reads the pattern, so the ASCII build keeps them.
 
 **A regexp construct the engine does not carry is refused, not read as its
 letters.** `\K` (drop what was matched before it), `\R` (any linebreak) and
@@ -883,11 +884,16 @@ letter too, and so does the class parser here, so `[\R]` still matches an `R`.
 `\G` and `\g<name>` ARE carried and behave as CRuby does.
 
 The same applies inside a character class, where a `[` never stands for
-itself: `[[a][b]]` (a nested class), `[[.a.]]` (a collating element) and
-`[[=a=]]` (an equivalence class) each raise `RegexpError` rather than compile
-a different pattern than the one written -- taken as plain members, `[[a][b]]`
-was `[` or `a`, then `b`, then `]`. `[[:alpha:]]` is read, and `[\[]` holds
-the bracket itself as it does in CRuby.
+itself: `[[.a.]]` (a collating element) and `[[=a=]]` (an equivalence class)
+each raise `RegexpError` rather than compile a different pattern than the one
+written. A nested class is read as CRuby reads it, the union of its members
+(`[[a][b]]` is `[ab]`), and so are `[[:alpha:]]` and `&&`; `[\[]` holds the
+bracket itself as it does in CRuby.
+
+**A byte escape that starts no character is that byte.** The engine has no
+encodings: `/[\x80]/` matches the byte 0x80, where CRuby refuses a UTF-8
+pattern with `invalid multibyte escape`. It reads the same byte inside a
+nested class or a `&&` intersection, where CRuby answers differently again.
 
 **An `--rbs` seed is enforced where a value crosses into it.** A parameter
 seeded `Hash[Symbol, untyped]` handed a hash whose keys the caller widened to

@@ -21,7 +21,7 @@
 [50, true, true]
 [300, true, true]
 false
-false
+RegexpError
 ["aa", "a"]
 ["abac"]
 ["a", "a"]

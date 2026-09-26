@@ -13,12 +13,12 @@ nil
 nil
 0
 0
-ws-x: RegexpError
+ws-x: compiled
 *: RegexpError
 +: RegexpError
 ?: RegexpError
-a***: RegexpError
-(?~foo): RegexpError
+a***: compiled
+(?~foo): compiled
 (?(a)b): RegexpError
 (?q)a: RegexpError
 (?x:ab): compiled

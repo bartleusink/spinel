@@ -1,4 +1,4 @@
-nested | RegexpError
+nested | 0
 nested2 | RegexpError
 collating | RegexpError
 equivalent | RegexpError

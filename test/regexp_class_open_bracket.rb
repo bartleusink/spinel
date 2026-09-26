@@ -1,7 +1,9 @@
 # A '[' inside a character class never stands for itself in CRuby: it opens a
 # POSIX bracket, a collating element, an equivalence class, or a class nested
 # in this one. Only the bracket was read here and the rest taken as members, so
-# [[a][b]] compiled to a different pattern than the one written.
+# [[a][b]] compiled to a different pattern than the one written. The nested
+# class is read as the union it is (mruby-regexp 173fdd7d8); a collating
+# element and an equivalence class are refused.
 # Ported from mruby-regexp cafc53ae4.
 def t(label)
   r = begin

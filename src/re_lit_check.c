@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "re_internal.h"
+#include "re_spinel.h"
 
 /* The engine's #inspect / #to_s helpers call sp_sprintf, which the GENERATED
    program defines for itself. Nothing on the validation path reaches those,

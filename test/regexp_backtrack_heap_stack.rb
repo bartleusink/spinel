@@ -47,9 +47,16 @@ end
         !!("a" =~ Regexp.new("(?=" * d + "a" + ")" * d + "a"))]
 end
 
-# The catastrophic shapes still give up at a limit rather than run forever.
-p(!!(("a" * 40 + "!") =~ /(a+)+$/))
-p(!!(("a" * 40 + "!") =~ /(a*)*b\1/))
+# The catastrophic shapes give up at a limit rather than run forever: a
+# search stopped at the limit has not shown there is no match, so it raises
+# RegexpError where it cannot answer instead of reading as a miss.
+[/(a+)+$/, /(a*)*b\1/].each do |re|
+  begin
+    p(!!(("a" * 40 + "!") =~ re))
+  rescue RegexpError => e
+    p e.class
+  end
+end
 
 # and the ordinary ones are what they were
 p(/(a)\1/.match("aa").to_a)

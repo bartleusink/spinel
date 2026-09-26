@@ -34,10 +34,10 @@ rescue RegexpError
   puts "ws-x: RegexpError"
 end
 
-# Invalid patterns raise RegexpError instead of hanging. Deliberate
-# divergences from CRuby, which are loud (raise), not silent: CRuby merely
-# warns on the redundant `a***`, and supports the absence operator (?~...)
-# and conditionals; spinel rejects them at compile.
+# Invalid patterns raise RegexpError instead of hanging. The redundant
+# `a***` compiles (CRuby warns), and so do the absence operator (?~...) and
+# the conditional, which the engine carries since mruby-regexp 046c3ce22 and
+# 047225c63; (?(a)b) names no group and is refused, as CRuby refuses it.
 ["*", "+", "?", "a***", "(?~foo)", "(?(a)b)", "(?q)a", "(?x:ab)"].each do |src|
   begin
     Regexp.new(src)
