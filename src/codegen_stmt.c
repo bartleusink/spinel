@@ -1949,7 +1949,11 @@ int static_isa_cond(Compiler *c, int pred) {
   if (!ty_is_object(rt)) return -1;
   int rcls = ty_object_class(rt);
   if (rcls == target) return 1;
-  if (!sp_streq(nm, "instance_of?") && is_descendant(c, rcls, target)) return 1;
+  if (sp_streq(nm, "instance_of?")) return 0;
+  if (is_descendant(c, rcls, target)) return 1;
+  /* a module the class (or a superclass) includes */
+  if (comp_class_is_module(c, &c->classes[target]) &&
+      class_includes_module_named(c, rcls, target_name)) return 1;
   return 0;
 }
 
@@ -2611,8 +2615,8 @@ static void emit_obj_nil(Compiler *c, TyKind pt, int t, Buf *b) {
 /* The class arm of a `when` (statement or value form) or an `in` on a
    statically typed object subject, decided from the class table: 1 when it
    wrote a condition, 0 when the pattern names neither a root the object
-   belongs to, a class nil belongs to, nor the subject's class or one above
-   it (the caller decides the rest). */
+   belongs to, a class nil belongs to, the subject's class or one above it,
+   nor a module one of those includes (the caller decides the rest). */
 static int emit_obj_class_when(Compiler *c, TyKind pt, const char *cn, int t, Buf *b) {
   int cid = ty_object_class(pt);
   if (obj_is_root_class(c, cid, cn)) { buf_puts(b, "1"); return 1; }
@@ -2623,8 +2627,13 @@ static int emit_obj_class_when(Compiler *c, TyKind pt, const char *cn, int t, Bu
     emit_obj_nil(c, pt, t, b);
     return 1;
   }
+  /* the class itself or a superclass by index; a module the class (or a
+     superclass) includes by its `include` line, whether a user module or a
+     builtin one such as Comparable (a module is never a parent) */
   int tcid = comp_class_index(c, cn);
-  if (tcid >= 0 && (cid == tcid || is_descendant(c, cid, tcid))) {
+  int is_mod = tcid >= 0 ? comp_class_is_module(c, &c->classes[tcid]) : is_builtin_module_name(cn);
+  if ((tcid >= 0 && (cid == tcid || is_descendant(c, cid, tcid))) ||
+      (is_mod && class_includes_module_named(c, cid, cn))) {
     emit_obj_live(c, pt, t, b);
     return 1;
   }

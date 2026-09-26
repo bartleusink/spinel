@@ -933,6 +933,7 @@ void emit_rest_from_splat_and_argv(int tmp, TyKind at, int from_idx, Compiler *c
 int is_descendant(Compiler *c, int k, int anc);
 int class_builtin_superclass(Compiler *c, int i);   /* codegen.c */
 int class_builtin_parent(Compiler *c, int cid);      /* codegen.c */
+int class_includes_module_named(Compiler *c, int cid, const char *mod_name);  /* codegen_call.c */
 int dispatch_impl_count(Compiler *c, int cid, const char *name);
 void emit_dispatch(Compiler *c, int cid, const char *name, const char *selfptr, int argsNode, int blk_node, Buf *b);
 int emit_tap_then_expr(Compiler *c, int id, Buf *b);
