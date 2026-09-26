@@ -252,7 +252,9 @@ void sp_IntArray_rotate_bang(sp_IntArray*a,sp_int n){SP_GC_ROOT(a);
   if(!a)return;
   if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return;}
   if(a->len<=0)return;
-  n=((n%a->len)+a->len)%a->len;
+  /* already in range is the usual count (a window rotated by part of its
+     length): two divisions per call otherwise, on every tile */
+  if(n<0||n>=a->len)n=((n%a->len)+a->len)%a->len;
   if(n==0)return;
   /* Rotating left by n is "the first n elements move to the end", and the
      window already carries its own start offset (the same one push_grow slides
