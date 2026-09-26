@@ -1030,6 +1030,16 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a Ruby object passed to an ffi pointer slot compiled)"; ok=0; \
 	else grep -q "a Ruby object has no C address" "$$tmp/fp.out" || \
 	  { echo "reject-test: FAIL (an ffi pointer slot refused a Ruby object without saying why)"; sed -n 1,5p "$$tmp/fp.out"; ok=0; }; fi; \
+	t=test/reject/class_eval_on_class_in_method.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/ce.c" >"$$tmp/ce.out" 2>&1; then \
+	  echo "reject-test: FAIL (a Class.class_eval inside a method compiled)"; ok=0; \
+	else grep -q "methods are added to Class only by a top-level" "$$tmp/ce.out" || \
+	  { echo "reject-test: FAIL (a Class.class_eval inside a method refused without saying why)"; sed -n 1,5p "$$tmp/ce.out"; ok=0; }; fi; \
+	t=test/reject/class_method_on_builtin_class.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/cb.c" >"$$tmp/cb.out" 2>&1; then \
+	  echo "reject-test: FAIL (a method added to Class, called on a builtin class, compiled)"; ok=0; \
+	else grep -q "a method added to Class is not supported on a builtin class" "$$tmp/cb.out" || \
+	  { echo "reject-test: FAIL (a method added to Class, called on a builtin class, refused without saying why)"; sed -n 1,5p "$$tmp/cb.out"; ok=0; }; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 

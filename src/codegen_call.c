@@ -16371,6 +16371,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       const char *rcn = nt_str(nt, recv, "name");
       grt_builtin_cls = rcn && comp_class_index(c, rcn) < 0 && builtin_class_id(rcn) != 0;
     }
+    if (grt_builtin_cls && class_reopen_defines(c, name))
+      unsupported_feature(c, id, "a method added to Class is not supported on a builtin class: "
+                                 "only the program's own classes get it");
     /* A Hash that arrives boxed -- a Fiber#resume value, a seedless
        Array#reduce, a container read -- keeps its whole read-only
        Hash/Enumerable face. Nothing above claimed the name, so normalize the
