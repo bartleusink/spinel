@@ -31955,8 +31955,7 @@ else {
         return;
       } }
     const char *rty = nt_type(nt, recv);
-    if (rty && (sp_streq(rty, "LocalVariableReadNode") ||
-                sp_streq(rty, "InstanceVariableReadNode"))) {
+    if (str_mut_var_recv(c, recv)) {
       /* a fresh unfrozen empty: the shared frozen "" would make a later
          mutation of the cleared receiver raise */
       buf_puts(b, "({ sp_str_check_mutable("); emit_expr(c, recv, b);

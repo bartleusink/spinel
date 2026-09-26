@@ -126,6 +126,7 @@ typedef struct { unsigned char box, demand; TyKind ty; } SbReaderSave;
 int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderSave *sv);
 void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv);
 int sb_shadowed_reader(int node);
+int str_mut_var_recv(Compiler *c, int recv);
 int strbuf_boxed_elem_read(Compiler *c, int v);
 int emit_strbuf_read_ref(Compiler *c, int recv, Buf *b);
 int strbuf_object_ref(Compiler *c, int recv, Buf *b);

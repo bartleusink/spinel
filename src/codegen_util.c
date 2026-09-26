@@ -1329,6 +1329,42 @@ int strbuf_boxed_elem_read(Compiler *c, int v) {
   TyKind rt = comp_ntype(c, r);
   return rt == TY_POLY || rt == TY_POLY_ARRAY || ty_is_hash(rt);
 }
+/* A String is a const char * value, so a String mutator (`<<`, the bang
+   methods, replace/insert/...) is lowered to a reassignment of its receiver:
+   `s = sp_str_append_grow(s, x)`. That needs a receiver whose C form is an
+   lvalue holding the string: a local or ivar, and equally a global, a class
+   variable or a constant (gv_X, cvar_C_X, cst_X). A constant qualifies when
+   its read is the plain slot -- the Class.new-guarded read is a conditional
+   expression, not an lvalue, and a `klass::NAME` path whose owner is a run-time
+   value reads through a switch. Any other receiver has nowhere to put the new
+   string. */
+int str_mut_var_recv(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  switch (nt_kind(nt, recv)) {
+  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+  case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+    return 1;
+  case NK_ConstantReadNode: {
+    LocalVar *cv = comp_const(c, nt_str(nt, recv, "name"));
+    return cv && cv->type != TY_UNKNOWN && !cv->init_guarded;
+  }
+  case NK_ConstantPathNode: {
+    /* the path's read resolves through several tables; ask it for its text */
+    if (comp_ntype(c, recv) != TY_STRING) return 0;
+    int save = g_tmp;
+    Buf rb = expr_buf(c, recv);
+    g_tmp = save;
+    const char *t = rb.p ? rb.p : "";
+    int ok = strncmp(t, "cst_", 4) == 0 && t[4];
+    for (const char *q = t + 4; ok && *q; q++)
+      if (!(isalnum((unsigned char)*q) || *q == '_')) ok = 0;
+    free(rb.p);
+    return ok;
+  }
+  default:
+    return 0;
+  }
+}
 /* A reader call the shared-mutable shim has substituted with its shadow copy
    (through the argument-override table): the value arms may rebind it as they
    would a local. */

@@ -831,9 +831,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     int sbi = -1;
     for (int j = 0; SBANG[j].bang; j++) if (sp_streq(name, SBANG[j].bang)) { sbi = j; break; }
     if (sbi >= 0) {
-      const char *rvt2 = nt_type(nt, recv);
-      int lvw = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                         sp_streq(rvt2, "InstanceVariableReadNode"));
+      int lvw = str_mut_var_recv(c, recv);
       /* A shared-mutable (STRBUF) local mutates its buffer IN PLACE so every
          alias/container observes it: recompute via the non-bang transform of
          the current contents, then replace the buffer (#3227). */
@@ -936,8 +934,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, " sp_String_cstr(_t%d); })", tb9);
         return 1;
       }
-      if (nchain > 0 && bty && !(blv && blv->type == TY_STRBUF) &&
-          (sp_streq(bty, "LocalVariableReadNode") || sp_streq(bty, "InstanceVariableReadNode"))) {
+      if (nchain > 0 && !(blv && blv->type == TY_STRBUF) && str_mut_var_recv(c, cur)) {
         buf_puts(b, "({ ");
         for (int j = nchain; j >= 0; j--) {  /* innermost link first, outer arg last */
           int arg = j > 0 ? chain[j - 1] : argv[0];
@@ -954,9 +951,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
     }
     if ((sp_streq(name, "concat") || sp_streq(name, "<<") ||
          sp_streq(name, "prepend")) && argc >= 1) {
-      const char *rvt2 = nt_type(nt, recv);
-      int lvw = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                         sp_streq(rvt2, "InstanceVariableReadNode"));
+      int lvw = str_mut_var_recv(c, recv);
       int tn2 = ++g_tmp, trc = ++g_tmp;
       /* Evaluate the receiver once into a temp: it feeds both the frozen-mutability
          check and the concatenation, and a chained `s << a << b` receiver has a
@@ -987,10 +982,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (sp_streq(name, "insert") && argc == 2) {
-      const char *rvt2 = nt_type(nt, recv);
-      int lvw = (rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                          sp_streq(rvt2, "InstanceVariableReadNode"))) ||
-                sb_shadowed_reader(recv);
+      int lvw = str_mut_var_recv(c, recv) || sb_shadowed_reader(recv);
       int to = ++g_tmp, ti2 = ++g_tmp, tn2 = ++g_tmp;
       /* rooted across the index and the text, which may allocate */
       buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);
@@ -1004,7 +996,6 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (sp_streq(name, "replace") && argc == 1) {
-      const char *rvt2 = nt_type(nt, recv);
       /* shared-mutable local: swap the buffer contents in place (#3227) */
       { char srefR[1024];
         if (strbuf_slot_ref(c, recv, srefR, sizeof srefR)) {
@@ -1016,8 +1007,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
           return 1;
         }
       }
-      int lvw = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                         sp_streq(rvt2, "InstanceVariableReadNode"));
+      int lvw = str_mut_var_recv(c, recv);
       int tn2 = ++g_tmp;
       buf_printf(b, "({ sp_str_check_mutable(");   /* frozen -> FrozenError (#3003) */
       emit_expr(c, recv, b);
@@ -1031,9 +1021,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
      reassigns the receiver; statement position has its own arm. The
      receiver must be an lvalue (re-read and re-assigned). */
   if (rt == TY_STRING && sp_streq(name, "slice!") && (argc == 1 || argc == 2)) {
-    const char *rvt2 = nt_type(nt, recv);
-    int sb_asgn = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                           sp_streq(rvt2, "InstanceVariableReadNode"));
+    int sb_asgn = str_mut_var_recv(c, recv);
     if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
       int tp2 = ++g_tmp;
       buf_printf(b, "({ const char *_t%d = ", tp2); emit_expr(c, argv[0], b);
@@ -1193,9 +1181,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "); sp_String_set_bin(_t%d, _t%d); _t%d; })", tm2, tn3, tn3);
         return 1;
       } }
-    const char *rvt9 = nt_type(nt, recv);
-    int lvw9 = rvt9 && (sp_streq(rvt9, "LocalVariableReadNode") ||
-                        sp_streq(rvt9, "InstanceVariableReadNode"));
+    int lvw9 = str_mut_var_recv(c, recv);
     int tr9 = ++g_tmp, tn9 = ++g_tmp;
     buf_puts(b, "({ sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, "); ");
     buf_printf(b, "sp_Range _t%d = ", tr9); emit_expr(c, argv[0], b);
@@ -1222,9 +1208,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, " sp_String_cstr(_t%d); })", tm2);
         return 1;
       } }
-    const char *rvt9 = nt_type(nt, recv);
-    int lvw9 = rvt9 && (sp_streq(rvt9, "LocalVariableReadNode") ||
-                        sp_streq(rvt9, "InstanceVariableReadNode"));
+    int lvw9 = str_mut_var_recv(c, recv);
     int tn9 = ++g_tmp;
     /* append_as_bytes accepts String AND Integer arguments; an Integer is the
        raw byte value (100 -> "d"), materialized via sp_int_chr (#2463). A
@@ -1259,9 +1243,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "); sp_String_set_bin(_t%d, _t%d); _t%d; })", tm2, tn3, tn3);
         return 1;
       } }
-    const char *rvt2 = nt_type(nt, recv);
-    int lvw = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                       sp_streq(rvt2, "InstanceVariableReadNode"));
+    int lvw = str_mut_var_recv(c, recv);
     int tn2 = ++g_tmp;
     /* in-place mutator: a frozen receiver raises before the splice (#3333) */
     buf_puts(b, "({ sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, "); ");
@@ -7804,9 +7786,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "setbyte") && argc == 2) {
         /* copy-on-write: rebind an lvalue receiver to the mutated copy
            (a literal's bytes live in static storage, #2029) */
-        const char *rvt2 = nt_type(nt, recv);
-        int lvw = rvt2 && (sp_streq(rvt2, "LocalVariableReadNode") ||
-                           sp_streq(rvt2, "InstanceVariableReadNode"));
+        int lvw = str_mut_var_recv(c, recv);
         int tv2 = ++g_tmp;
         buf_printf(b, "({ sp_int _t%d = ", tv2); emit_int_expr(c, argv[1], b);
         buf_puts(b, "; ");
