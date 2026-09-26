@@ -77,3 +77,29 @@ class Vehicle
 end
 
 p Vehicle.machines[:state].events
+
+# A class-body call whose VALUE is used: the yielding class method is inlined
+# there too, since it has no function of its own, and it wins over a top-level
+# method of the same name.
+def inc = yield * 100
+
+module Twice
+  def twice(n) = yield(n) * 2
+  def doubled = yield * 2
+end
+
+class Y
+  extend Twice
+  def self.inc = yield + 1
+  def self.fwd(&) = K.apply(self, 20, &)
+  p(doubled { 21 })
+  x = inc { 41 }
+  p x
+  p "t=#{twice(3) { |v| v + 1 }}"
+  p K.name_of(Y, twice(4) { |v| v })
+  p [inc { 1 }, inc { 2 }]
+  p(fwd { |o, v| "#{o.name}#{v}" })
+  [1, 2].each { |i| p twice(i) { |v| v } }
+  inc { 0 }
+end
+p(inc { 1 })

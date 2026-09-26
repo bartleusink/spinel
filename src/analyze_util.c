@@ -1202,7 +1202,8 @@ static int yvt_callee_index(Compiler *c, int cid) {
   int crecv = nt_ref(nt, cid, "receiver");
   int rmi = -1;
   if (crecv < 0) {
-    rmi = comp_method_index(c, cn);
+    rmi = comp_cbody_call_mi(c, cid, cn);
+    if (rmi < 0) rmi = comp_method_index(c, cn);
     if (rmi < 0) {
       Scope *cs = comp_scope_of(c, cid);
       if (cs->class_id >= 0) {
@@ -2023,6 +2024,13 @@ int comp_self_call_mi(Compiler *c, int id, const char *name) {
   }
   if (mi < 0) mi = comp_method_index(c, name);
   return mi;
+}
+
+/* A receiverless call directly in a class body is sent to the class. */
+int comp_cbody_call_mi(Compiler *c, int id, const char *name) {
+  Scope *s = comp_scope_of(c, id);
+  if (!name || (s && s->name) || c->node_cbody[id] < 0) return -1;
+  return comp_cmethod_in_chain(c, c->node_cbody[id], name, NULL);
 }
 
 TyKind proc_call_ret(Compiler *c, int recv) {
