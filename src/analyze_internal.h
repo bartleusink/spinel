@@ -277,6 +277,7 @@ int desugar_to_hash_splat(Compiler *c);
 int desugar_lazy_method_call(Compiler *c);
 int desugar_value_callable_forwards(Compiler *c);
 int desugar_root_scoped_constants(Compiler *c);
+void desugar_class_reopen(Compiler *c);
 int desugar_builtins(Compiler *c);
 int desugar_enum_walk_calls(Compiler *c);
 int desugar_index_op_write_user(Compiler *c);
@@ -397,6 +398,7 @@ extern const char *g_ext_entries;
 /* the class every value of a boxed-value hash slot holds, or -1 (#4846) */
 int hv_value_class(Compiler *c, int recv);
 int comp_class_is_module(Compiler *c, ClassInfo *ci);
+int is_builtin_reopen(const char *name);
 
 #endif
 

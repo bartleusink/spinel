@@ -581,6 +581,68 @@ int class_eval_reopen_class(Compiler *c, int id, int enclosing_class) {
   return ci;
 }
 
+/* A method added to Class is a class method of every class: the top-level
+   `class Class` / `Class.class_eval { }` body becomes this module, and
+   register_extends extends it into every root class, whose subclasses inherit. */
+static const char *const class_reopen_mod = "Class__reopen";
+
+static int is_class_const(const NodeTable *nt, int id) {
+  return id >= 0 && nt_kind(nt, id) == NK_ConstantReadNode &&
+         nt_str(nt, id, "name") && sp_streq(nt_str(nt, id, "name"), "Class");
+}
+
+int class_reopen_defines(Compiler *c, const char *name) {
+  int cm = comp_class_index(c, class_reopen_mod);
+  return cm >= 0 && name && comp_method_in_class(c, cm, name) >= 0;
+}
+
+static int is_class_eval_name(const char *nm) {
+  return nm && (sp_streq(nm, "class_eval") || sp_streq(nm, "module_eval") ||
+                sp_streq(nm, "class_exec") || sp_streq(nm, "module_exec"));
+}
+
+void desugar_class_reopen(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int body = nt_ref(nt, nt->root_id, "statements");
+  int n = 0;
+  const int *st = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+  for (int i = 0; i < n; i++) {
+    int s = st[i];
+    if (nt_kind(nt, s) == NK_ClassNode) {
+      int cp = nt_ref(nt, s, "constant_path");
+      if (!is_class_const(nt, cp)) continue;
+      if (nt_ref(nt, s, "superclass") >= 0)
+        unsupported_feature(c, s, "`class Class < ...` is not supported: reopen Class without a superclass");
+      nt_node_set_type(nt, s, "ModuleNode");
+      nt_node_set_str(nt, cp, "name", class_reopen_mod);
+      continue;
+    }
+    if (nt_kind(nt, s) != NK_CallNode || !is_class_eval_name(nt_str(nt, s, "name"))) continue;
+    int recv = nt_ref(nt, s, "receiver"), blk = nt_ref(nt, s, "block");
+    if (!is_class_const(nt, recv) || blk < 0 || nt_kind(nt, blk) != NK_BlockNode ||
+        nt_ref(nt, blk, "parameters") >= 0 || nt_ref(nt, s, "arguments") >= 0) continue;
+    int bbody = nt_ref(nt, blk, "body");
+    long long line = nt_int(nt, s, "node_line", 0), file = nt_int(nt, s, "node_file", 0),
+              col = nt_int(nt, s, "node_col", 0);
+    nt_node_set_ref(nt, blk, "body", -1);
+    nt_node_reset(nt, s, "ModuleNode");
+    nt_node_set_int(nt, s, "node_line", line);
+    nt_node_set_int(nt, s, "node_file", file);
+    nt_node_set_int(nt, s, "node_col", col);
+    nt_node_set_ref(nt, s, "constant_path", recv);
+    nt_node_set_ref(nt, s, "body", bbody);
+    nt_node_set_str(nt, recv, "name", class_reopen_mod);
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!is_class_eval_name(nm) || !is_class_const(nt, nt_ref(nt, id, "receiver"))) continue;
+    char msg[256];
+    snprintf(msg, sizeof msg, "Class.%s is not supported here: methods are added to Class only "
+                              "by a top-level `class Class` or `Class.class_eval { ... }`", nm);
+    unsupported_feature(c, id, msg);
+  }
+}
+
 void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
   if (id < 0 || id >= c->nt->count) return;
   c->nscope[id] = scope_idx;
@@ -4307,6 +4369,60 @@ void unmark_referenced_module_sources(Compiler *c) {
   }
 }
 
+static int extend_class_with(Compiler *c, int ci, int mod_id) {
+  int did_clone = 0;
+  int snap = c->nscopes;
+  for (int ms = 0; ms < snap; ms++) {
+    Scope *src = &c->scopes[ms];
+    /* Only transplant instance methods; self.* on the module stay on it.
+       A module_function method is registered class-level on the module
+       but is an instance method of it too, so `extend` hands it to the
+       extending class like any other; skipped, a bare call to it from
+       one of that class's own class methods fell to the INSTANCE copy an
+       `include` of the same module had made, with the class object cast
+       to an instance pointer (#4648). */
+    if (src->class_id != mod_id || (src->is_cmethod && !src->is_module_function) || !src->name) continue;
+    if (comp_cmethod_in_class(c, ci, src->name) >= 0) continue;
+    /* Always a clone re-walked against `ci`, as include does: a shared
+       body kept the module's attribution, so `self`, the block and the
+       parameter types resolved against the module, not the class.
+       The ivars the body names become class-level ivars of the
+       extending class, and their storage is declared from its ivar
+       list -- register them even when nothing assigns one there. */
+    { const NodeTable *nt2 = c->nt;
+      NT_FOREACH_KIND(nt2, NK_InstanceVariableReadNode, ivid)
+        if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
+          comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
+      NT_FOREACH_KIND(nt2, NK_InstanceVariableWriteNode, ivid)
+        if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
+          comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
+      /* `@memo ||= v` / `&&=` / `+=` name the ivar too, and may be
+         the body's only mention of it */
+      static const NodeKind ow[] = { NK_InstanceVariableOrWriteNode,
+                                     NK_InstanceVariableAndWriteNode,
+                                     NK_InstanceVariableOperatorWriteNode };
+      for (int k = 0; k < 3; k++)
+        NT_FOREACH_KIND(nt2, ow[k], ivid)
+          if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
+            comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name")); }
+    specialize_cmethod_for(c, ms, mod_id, ci);
+    src = &c->scopes[ms];  /* realloc-safe */
+    did_clone = 1;
+    /* a module_function stays callable on the module itself
+       (`Coordinates.countdown(1)`), so its source is not dead */
+    if (!src->is_module_function) src->is_transplanted_source = 1;
+  }
+  return did_clone;
+}
+
+static int class_is_root(Compiler *c, int ci) {
+  ClassInfo *k = &c->classes[ci];
+  if (k->is_native_class || is_builtin_reopen(k->name) || comp_class_is_module(c, k)) return 0;
+  if (k->parent < 0) return 1;
+  ClassInfo *p = &c->classes[k->parent];
+  return p->is_native_class || is_builtin_reopen(p->name);
+}
+
 /* For each class, find `extend M` declarations and transplant M's instance
    methods as class methods (is_cmethod=1) so they are callable as C.m. */
 void register_extends(Compiler *c) {
@@ -4339,6 +4455,7 @@ void register_extends(Compiler *c) {
     }
     body_node[nbody] = cn; body_cls[nbody] = bci; nbody++;
   }
+  int cls_mod = comp_class_index(c, class_reopen_mod);
   for (int ci = 0; ci < c->nclasses; ci++) {
    /* Every body that defines this class, not only the first: `extend M` is
       commonly written in a REOPENING of the class, and reading def_node alone
@@ -4367,50 +4484,12 @@ void register_extends(Compiler *c) {
         else if (aty && sp_streq(aty, "ConstantPathNode")) mname = nt_str(nt, args[j], "name");
         int mod_id = mname ? comp_class_index(c, mname) : -1;
         if (mod_id < 0) continue;
-        int snap = c->nscopes;
-        for (int ms = 0; ms < snap; ms++) {
-          Scope *src = &c->scopes[ms];
-          /* Only transplant instance methods; self.* on the module stay on it.
-             A module_function method is registered class-level on the module
-             but is an instance method of it too, so `extend` hands it to the
-             extending class like any other; skipped, a bare call to it from
-             one of that class's own class methods fell to the INSTANCE copy an
-             `include` of the same module had made, with the class object cast
-             to an instance pointer (#4648). */
-          if (src->class_id != mod_id || (src->is_cmethod && !src->is_module_function) || !src->name) continue;
-          if (comp_cmethod_in_class(c, ci, src->name) >= 0) continue;
-          /* Always a clone re-walked against `ci`, as include does: a shared
-             body kept the module's attribution, so `self`, the block and the
-             parameter types resolved against the module, not the class.
-             The ivars the body names become class-level ivars of the
-             extending class, and their storage is declared from its ivar
-             list -- register them even when nothing assigns one there. */
-          { const NodeTable *nt2 = c->nt;
-            NT_FOREACH_KIND(nt2, NK_InstanceVariableReadNode, ivid)
-              if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
-                comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
-            NT_FOREACH_KIND(nt2, NK_InstanceVariableWriteNode, ivid)
-              if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
-                comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
-            /* `@memo ||= v` / `&&=` / `+=` name the ivar too, and may be
-               the body's only mention of it */
-            static const NodeKind ow[] = { NK_InstanceVariableOrWriteNode,
-                                           NK_InstanceVariableAndWriteNode,
-                                           NK_InstanceVariableOperatorWriteNode };
-            for (int k = 0; k < 3; k++)
-              NT_FOREACH_KIND(nt2, ow[k], ivid)
-                if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
-                  comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name")); }
-          specialize_cmethod_for(c, ms, mod_id, ci);
-          src = &c->scopes[ms];  /* realloc-safe */
-          did_clone = 1;
-          /* a module_function stays callable on the module itself
-             (`Coordinates.countdown(1)`), so its source is not dead */
-          if (!src->is_module_function) src->is_transplanted_source = 1;
-        }
+        did_clone |= extend_class_with(c, ci, mod_id);
       }
     }
    }
+   if (cls_mod >= 0 && class_is_root(c, ci))
+     did_clone |= extend_class_with(c, ci, cls_mod);
   }
   /* The cloned bodies introduced new local nodes, and register_locals ran
      before this pass: a local first assigned in the clone had no slot, so
