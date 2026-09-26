@@ -712,10 +712,20 @@ int desugar_enumerable_chain(Compiler *c) {
         int ci = ty_object_class(rt);
         if (ci >= 0 && comp_method_in_chain(c, ci, "chain", NULL) >= 0) continue;
       }
-      if (!chain_operand_ok(c, recv)) continue;
+      /* A boxed receiver (an Array read out of a container) materializes
+         through the run-time #to_a dispatch over whatever it holds, so it
+         qualifies as an untyped one does; it stands down when a user class
+         defines #chain, since it may hold an instance of that class. A boxed
+         ARGUMENT qualifies only behind a boxed receiver, whose `+` is over
+         two poly arrays; a typed receiver's `+` over the boxed array binds
+         its operands without roots, so that call is left as it was. */
+      if (rt == TY_POLY && an_user_defines_or_reads(c, "chain")) continue;
+      if (rt != TY_POLY && !chain_operand_ok(c, recv)) continue;
     }
     int ok = 1;
-    for (int k = 0; k < argc && ok; k++) if (!chain_operand_ok(c, argv[k])) ok = 0;
+    int recv_boxed = is_chain && infer_type(c, recv) == TY_POLY;
+    for (int k = 0; k < argc && ok; k++)
+      if (!chain_operand_ok(c, argv[k]) && !(recv_boxed && infer_type(c, argv[k]) == TY_POLY)) ok = 0;
     if (!ok) continue;
 
     int saved[32];

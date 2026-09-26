@@ -15930,11 +15930,15 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
      (each.with_index, each.map) uses are matched earlier and never reach here. */
   /* A blockless `each` on a BOXED receiver (an Array read out of a container,
      a block parameter) is the same external Enumerator over its elements --
-     without this arm the call fell through to a NoMethodError raise (#3584). */
+     without this arm the call fell through to a NoMethodError raise (#3584).
+     `reverse_each` is the reversed one, through the constructor the typed
+     array arm below uses. */
   if (recv >= 0 && argc == 0 && nt_ref(nt, id, "block") < 0 &&
       comp_ntype(c, recv) == TY_POLY && comp_ntype(c, id) == TY_ENUMERATOR &&
-      (sp_streq(name, "each") || sp_streq(name, "each_entry"))) {
-    buf_puts(b, "sp_Enumerator_new_from("); emit_boxed(c, recv, b); buf_puts(b, ")");
+      (sp_streq(name, "each") || sp_streq(name, "each_entry") ||
+       sp_streq(name, "reverse_each"))) {
+    buf_printf(b, "sp_Enumerator_new_from%s(", sp_streq(name, "reverse_each") ? "_rev" : "");
+    emit_boxed(c, recv, b); buf_puts(b, ")");
     return 1;
   }
   if (recv >= 0 && argc == 0 && nt_ref(nt, id, "block") < 0 &&
