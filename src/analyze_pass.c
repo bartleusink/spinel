@@ -4657,6 +4657,8 @@ int infer_param_types(Compiler *c) {
             if (mi >= 0 && def_cid >= 0) caller_cid = def_cid;
           }
         }
+        else if (!self->name && c->node_cbody[id] >= 0)
+          mi = comp_cmethod_in_chain(c, c->node_cbody[id], name, NULL);
       }
       if (mi < 0) mi = comp_method_index(c, name);
       if (mi < 0) mi = comp_included_method_index(c, name);

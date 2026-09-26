@@ -217,6 +217,10 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
         if (mi >= 0) implicit_self = 1;
       }
     }
+    else if (g_class_body_id >= 0) {
+      mi = comp_cmethod_in_chain(c, g_class_body_id, name, NULL);
+      if (mi >= 0) cm_class = g_class_body_id;
+    }
     if (mi < 0) mi = comp_method_index(c, name);   /* free function */
     if (mi < 0) return 0;
   }
