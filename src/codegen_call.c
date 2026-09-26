@@ -26430,7 +26430,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       Buf _rb = expr_buf(c, recv);
       emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", _tobj);
       buf_puts(g_pre, _rb.p ? _rb.p : ""); buf_puts(g_pre, ";\n"); free(_rb.p);
-      buf_printf(b, "((sp_Class){_t%d ? _t%d->cls_id : %d})", _tobj, _tobj, _cidx);
+      /* a heap object slot's NULL is nil, whose class is NilClass (self is
+         never nil) */
+      buf_printf(b, "((sp_Class){_t%d ? _t%d->cls_id : %d})", _tobj, _tobj,
+                 comp_ty_value_obj(c, rt) || nt_kind(c->nt, recv) == NK_SelfNode
+                   ? _cidx : builtin_class_id("NilClass"));
       return;
     }
     if (cn && rt == TY_INT) {
