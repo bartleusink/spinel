@@ -5452,6 +5452,16 @@ static void sp_PolyArray_flatten_into(sp_PolyArray *dst, sp_RbVal v) {
     sp_poly_recur_pop(mark);
     return;
   }
+  /* A user object answering #to_ary is spliced in as that array, as
+     CRuby's flatten does for any element that converts (#5057) */
+  if (v.cls_id >= 0 && v.v.p && sp_obj_to_ary_fn) {
+    sp_RbVal a = sp_obj_to_ary_fn(v);
+    if (a.tag == SP_TAG_OBJ && a.v.p && sp_poly_is_array_kind(a.cls_id)) {
+      SP_GC_ROOT_RBVAL(a);
+      sp_PolyArray_flatten_into(dst, a);
+      return;
+    }
+  }
   /* Other array variants fall through as opaque elements; rare for
      deep-flatten use cases. */
   sp_PolyArray_push(dst, v);
@@ -5472,6 +5482,11 @@ static sp_PolyArray *sp_PolyArray_flatten(sp_PolyArray *a) {
    (CRuby's flatten(1)); a negative depth flattens fully. */
 static void sp_PolyArray_flatten_into_d(sp_PolyArray *out, sp_RbVal v, sp_int depth);
 static void sp_PolyArray_flatten_into_d(sp_PolyArray *out, sp_RbVal v, sp_int depth) {
+  /* an element answering #to_ary unwraps as that array (#5057) */
+  if (depth != 0 && v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_obj_to_ary_fn) {
+    sp_RbVal a = sp_obj_to_ary_fn(v);
+    if (a.tag == SP_TAG_OBJ && a.v.p && sp_poly_is_array_kind(a.cls_id)) { SP_GC_ROOT_RBVAL(a); v = a; }
+  }
   if (depth != 0 && v.tag == SP_TAG_OBJ && sp_poly_is_array_kind(v.cls_id)) {
     /* Only the unlimited walk (a negative depth) can be trapped by a cycle. A
        counted one ends by counting down, and CRuby prints [[[...]]] for it
@@ -5915,6 +5930,11 @@ static sp_PolyArray *sp_PolyArray_rassoc(sp_PolyArray *a, sp_RbVal val) {
    `Array#flatten(n)`. */
 static void sp_PolyArray_flatten_into_n(sp_PolyArray *dst, sp_RbVal v, sp_int depth) {
   if (depth == 0 || v.tag != SP_TAG_OBJ) { sp_PolyArray_push(dst, v); return; }
+  /* an element answering #to_ary unwraps as that array (#5057) */
+  if (v.cls_id >= 0 && v.v.p && sp_obj_to_ary_fn) {
+    sp_RbVal a = sp_obj_to_ary_fn(v);
+    if (a.tag == SP_TAG_OBJ && a.v.p && sp_poly_is_array_kind(a.cls_id)) { SP_GC_ROOT_RBVAL(a); v = a; }
+  }
   if (v.cls_id == SP_BUILTIN_INT_ARRAY) { sp_IntArray *ia = (sp_IntArray *)v.v.p; for (sp_int i = 0; i < ia->len; i++) sp_PolyArray_push(dst, sp_box_int(ia->data[ia->start + i])); return; }
   if (v.cls_id == SP_BUILTIN_STR_ARRAY) { sp_StrArray *sa = (sp_StrArray *)v.v.p; for (sp_int i = 0; i < sa->len; i++) sp_PolyArray_push(dst, sp_box_str(sa->data[i])); return; }
   if (v.cls_id == SP_BUILTIN_SYM_ARRAY) { sp_IntArray *ya = (sp_IntArray *)v.v.p; for (sp_int i = 0; i < ya->len; i++) sp_PolyArray_push(dst, sp_box_sym((sp_sym)ya->data[ya->start + i])); return; }
