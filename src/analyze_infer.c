@@ -252,6 +252,31 @@ static int node_is_call_receiver(Compiler *c, int id) {
   return id >= 0 && id < g_recv_cnt && g_recv_used[id];
 }
 
+/* Whether node `id` is an element of an array literal or a value of a hash
+   literal: a value placed straight into a container, with no local of its
+   own whose uses could narrow it. Cached per node table like the receiver
+   set above. */
+static unsigned char *g_elem_used; static int g_elem_cnt = -1, g_elem_gen = -1;
+static const NodeTable *g_elem_nt;
+static int node_is_container_elem(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (g_elem_gen != g_narrow_gen || g_elem_nt != nt || g_elem_cnt != nt->count) {
+    free(g_elem_used);
+    g_elem_used = calloc((size_t)(nt->count > 0 ? nt->count : 1), 1);
+    if (!g_elem_used) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    NT_FOREACH_KIND(nt, NK_ArrayNode, a) {
+      int en = 0; const int *el = nt_arr(nt, a, "elements", &en);
+      for (int k = 0; k < en; k++) if (el[k] >= 0 && el[k] < nt->count) g_elem_used[el[k]] = 1;
+    }
+    NT_FOREACH_KIND(nt, NK_AssocNode, a) {
+      int v = nt_ref(nt, a, "value");
+      if (v >= 0 && v < nt->count) g_elem_used[v] = 1;
+    }
+    g_elem_gen = g_narrow_gen; g_elem_nt = nt; g_elem_cnt = nt->count;
+  }
+  return id >= 0 && id < g_elem_cnt && g_elem_used[id];
+}
+
 /* ---- A hash whose values are all one class (#4846) ----
    `@items = {}` filled only by `@items[k] = item` keeps boxed values (there is
    no object-valued hash kind), so every read of a value was poly and every
@@ -3066,6 +3091,10 @@ else {
            ("undefined method 'fetch' for unknown", #3823). The faithful
            variant is the one the argument position already uses. */
         if (node_is_call_receiver(c, id)) return TY_POLY_POLY_HASH;
+        /* ...and so does one placed straight into an array or hash literal
+           (`[Hash.new(4), 0]`): left unknown, the array took an Integer
+           element and the build failed */
+        if (node_is_container_elem(c, id)) return TY_POLY_POLY_HASH;
         /* ...and a Hash.new that is a method's VALUE has no receiver use of
            its own either, so it stayed unknown and the method emitted as
            void: `def mk = Hash.new(0)` answered nothing, and every call on
