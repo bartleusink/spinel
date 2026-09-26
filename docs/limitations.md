@@ -854,25 +854,28 @@ different questions about the same character on purpose. The ASCII build
 (see the fold note above) leaves the type table out, and a bracket then holds
 its ASCII set alone, which the boundary reads too.
 
-**Character properties (`\p{...}` / `\P{...}`) carry three families.** The
-POSIX names (`Alpha`, `Alnum`, `Word`, `Space`, `Upper`, `Lower`, `Digit`,
-`Punct`, `Graph`, `Print`, `Blank`, `Cntrl`, `XDigit`, `ASCII`) are the types
-the bracket classes already read, so `\p{Alpha}` is `[[:alpha:]]` and folds
-under `/i` the same way. The general categories are all thirty of them, one
-and two letter alike -- `\p{Lu}`, `\p{Ll}`, `\p{Lt}`, `\p{Lm}`, `\p{Lo}`,
-`\p{Mn}`, `\p{Mc}`, `\p{Me}`, `\p{Nd}`, `\p{Nl}`, `\p{No}`, `\p{Pc}`,
-`\p{Pd}`, `\p{Ps}`, `\p{Pe}`, `\p{Pi}`, `\p{Pf}`, `\p{Po}`, `\p{Sm}`,
-`\p{Sc}`, `\p{Sk}`, `\p{So}`, `\p{Zs}`, `\p{Zl}`, `\p{Zp}`, `\p{Cc}`,
-`\p{Cf}`, `\p{Co}`, `\p{Cs}`, `\p{Cn}`, and `\p{L}` / `\p{M}` / `\p{N}` /
-`\p{P}` / `\p{S}` / `\p{Z}` / `\p{C}` for every category under a letter. And
-three emoji properties: `Emoji`, `Emoji_Presentation`, `Extended_Pictographic`.
-Names match the way CRuby matches them, so case, underscores, hyphens and
-spaces make no difference. Anything else -- a script (`\p{Han}`), a binary
-property (`\p{Alphabetic}`), an age or block -- raises `RegexpError` naming
-the property, so the message says which one to reach around. The tables are
-generated from CRuby by `tools/gen_re_uniprop.rb` and are about 18KB; a
-property is rewritten into the class of code points it names before the
-engine reads the pattern, so the ASCII build keeps them.
+**Unicode properties are the POSIX names, the general categories and the
+emoji properties.** `\p{name}` holds the characters with the property, and
+`\P{name}` or `\p{^name}` the ones without it, inside a class or outside one.
+The POSIX names (`Alpha`, `Alnum`, `Word`, `Space`, `Upper`, `Lower`, `Digit`,
+`Punct`, `Graph`, `Print`, `Blank`, `Cntrl`, `XDigit`, `ASCII`) are the brackets
+under another spelling, `/i` included, except that `\p{Punct}` leaves out the
+nine ASCII symbols `$`, `+`, `<`, `=`, `>`, `^`, `` ` ``, `|` and `~` that
+`[[:punct:]]` holds, as CRuby does. The
+general categories are the thirty two-letter ones (`\p{Lu}` .. `\p{Cn}`) and
+the first letter alone for a group (`\p{L}`, `\p{M}`, `\p{N}`, `\p{P}`,
+`\p{S}`, `\p{Z}`, `\p{C}`); the emoji properties are `Emoji`,
+`Emoji_Presentation` and `Extended_Pictographic`. Names match as CRuby
+matches them: case, `_`, `-` and spaces make no difference. Under `/i` a
+property folds as the class of its members would (`/\p{Lu}/i` holds "e"), and
+a negated one follows CRuby: `\P{Lu}` under `/i` holds no cased letter, while
+`[\P{Lu}]` holds them all. A script (`\p{Han}`), a binary property
+(`\p{Alphabetic}`), an age, a block and every other name raise `RegexpError`
+naming the property, and a property cannot end a range (`[a-\p{L}]`). The
+tables come from the Unicode 17.0.0 database (`lib/regexp/re_prop.h`, about
+18KB); the ASCII build (see the fold note above) leaves them out, answers the
+POSIX names from ASCII as its brackets do, and refuses the categories and the
+emoji properties rather than answer them from ASCII.
 
 **A regexp construct the engine does not carry is refused, not read as its
 letters.** `\K` (drop what was matched before it), `\R` (any linebreak) and

@@ -3,11 +3,10 @@
 # property IS the predicate, so nothing on the author's side can rewrite it
 # (#4143).
 #
-# Two tables behind this, generated from CRuby by tools/gen_re_uniprop.rb.
-# General category is a partition, so it is one run table answering `\p{Lu}`
-# and `\p{L}` alike; the emoji properties overlap, so they get a bitmask table.
-# The POSIX-named ones are the types re_ctype.h already carries and route
-# there, which is what makes them fold under /i.
+# The engine (mruby-regexp) builds a property as the class of its ranges, from
+# tables generated from the Unicode 17.0.0 database (lib/regexp/re_prop.h).
+# The POSIX-named ones are the types re_ctype.h already carries and take the
+# path the brackets take.
 
 # The shape this arrived as: once-campfire's String#all_emoji?, verbatim.
 class String
@@ -56,11 +55,15 @@ p "🔔".match?(/\p{extended pictographic}/)
 p "🔔".match?(/\p{EXTENDED_PICTOGRAPHIC}/)
 p "🔔".match?(/\p{Extended-Pictographic}/)
 
-# A POSIX-named property folds under /i exactly as its bracket does; a
-# category does not, because the category IS the case distinction.
+# A POSIX-named property folds under /i exactly as its bracket does, and so
+# does a category, as a class does: /\p{Ll}/i holds "É" too.
 p "É".match?(/\p{Lower}/i)
 p "É".match?(/[[:lower:]]/i)
 p "É".match?(/\p{Ll}/)
+p "É".match?(/\p{Ll}/i)
+p "e".match?(/\p{Lu}/i)
+p "e".match?(/\P{Lu}/i)
+p "e".match?(/[\P{Lu}]/i)
 
 # Quantified, anchored, alternated, and inside a group.
 p "Hello".match?(/\A\p{Lu}\p{Ll}+\z/)

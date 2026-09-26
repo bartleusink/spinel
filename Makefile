@@ -375,7 +375,8 @@ endif
 # RE_CASE_FLAGS: the Unicode tables the regexp engine carries. Either of
 # -DRE_NO_UNICODE_CASE and -DRE_NO_UNICODE_CTYPE is mruby's MRB_USE_ASCII_CTYPE
 # build (lib/regexp/shim/mruby.h): ASCII-only /i folding, POSIX brackets and
-# word boundaries, without the case and type tables. The `\p{...}` tables stay.
+# word boundaries, without the case, type and property tables (a category or
+# an emoji property is then refused).
 RE_CASE_FLAGS ?=
 
 build/regexp/%.o: lib/regexp/%.c $(RE_HDRS)
