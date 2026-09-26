@@ -18582,6 +18582,45 @@ static int emit_ie_poly(Compiler *c, int id, Buf *b) {
 /* the value read of a one-class hash being emitted in its boxed form */
 static int g_hv_read_node = -1;
 
+static int call_args_need_spread(const NodeTable *nt, const int *argv, int argc) {
+  for (int k = 0; k < argc; k++)
+    if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) return 1;
+  return argc > 0 && kwh_only_spreads(nt, argv[argc - 1]);
+}
+
+static int emit_spread_args(Compiler *c, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  g_needs_proc_poly_argslot = 1;
+  int ta = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", ta, ta);
+  for (int k = 0; k < argc; k++) {
+    Buf ab; memset(&ab, 0, sizeof ab);
+    const char *aty = nt_type(nt, argv[k]);
+    if (aty && sp_streq(aty, "SplatNode")) {
+      int sx = nt_ref(nt, argv[k], "expression");
+      if (sx >= 0) emit_boxed(c, sx, &ab);
+      int ts = ++g_tmp, ti = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
+                        " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
+                        " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }\n",
+                 ts, ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
+    }
+    else {
+      emit_boxed(c, argv[k], &ab);
+      emit_indent(g_pre, g_indent);
+      if (kwh_only_spreads(nt, argv[k]))
+        buf_printf(g_pre, "{ sp_RbVal _kh = %s; if (sp_poly_length(_kh) > 0) sp_PolyArray_push(_t%d, _kh); }\n",
+                   ab.p ? ab.p : "sp_box_nil()", ta);
+      else
+        buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", ta, ab.p ? ab.p : "sp_box_nil()");
+    }
+    free(ab.p);
+  }
+  return ta;
+}
+
 static void emit_call_body(Compiler *c, int id, Buf *b) {
   /* the class's own method in a builtin's receiver test (`__r.is_a?(K) ?
      __r.m { } : __enum_m(__r) { }`): the test has decided the receiver is
@@ -20596,39 +20635,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          spread dispatches on the value's class (sp_poly_callable_spread): reading
          it as an sp_Proc made a Method call segfault (#3178, #4395). */
       {
-        int any_splat_pc = 0;
-        for (int k = 0; k < argc; k++)
-          if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) any_splat_pc = 1;
-        if (argc > 0 && kwh_only_spreads(nt, argv[argc - 1])) any_splat_pc = 1;
-        if (any_splat_pc) {
-          g_needs_proc_poly_argslot = 1;
-          int ta = ++g_tmp;
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", ta, ta);
-          for (int k = 0; k < argc; k++) {
-            Buf ab; memset(&ab, 0, sizeof ab);
-            const char *aty2 = nt_type(nt, argv[k]);
-            if (aty2 && sp_streq(aty2, "SplatNode")) {
-              int sx = nt_ref(nt, argv[k], "expression");
-              if (sx >= 0) emit_boxed(c, sx, &ab);
-              int ts = ++g_tmp, ti = ++g_tmp;
-              emit_indent(g_pre, g_indent);
-              buf_printf(g_pre, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
-                                " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
-                                " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }\n",
-                         ts, ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
-            }
-            else {
-              emit_boxed(c, argv[k], &ab);
-              emit_indent(g_pre, g_indent);
-              if (kwh_only_spreads(nt, argv[k]))
-                buf_printf(g_pre, "{ sp_RbVal _kh = %s; if (sp_poly_length(_kh) > 0) sp_PolyArray_push(_t%d, _kh); }\n",
-                           ab.p ? ab.p : "sp_box_nil()", ta);
-              else
-                buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", ta, ab.p ? ab.p : "sp_box_nil()");
-            }
-            free(ab.p);
-          }
+        if (call_args_need_spread(nt, argv, argc)) {
+          int ta = emit_spread_args(c, argv, argc);
           buf_printf(b, "sp_poly_callable_spread(_t%d, sp_box_poly_array(_t%d))", t, ta);
           return;
         }
@@ -22527,39 +22535,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        call time -- the length is dynamic, unlike the fixed sp_int[16] list.
        #2691, #2729 */
     {
-      int any_splat = 0;
-      for (int k = 0; k < argc; k++)
-        if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) any_splat = 1;
-      if (argc > 0 && kwh_only_spreads(nt, argv[argc - 1])) any_splat = 1;
-      if (any_splat) {
-        g_needs_proc_poly_argslot = 1;
-        int ta = ++g_tmp;
-        emit_indent(g_pre, g_indent);
-        buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);%c", ta, ta, 10);
-        for (int k = 0; k < argc; k++) {
-          Buf ab; memset(&ab, 0, sizeof ab);
-          const char *aty = nt_type(nt, argv[k]);
-          if (aty && sp_streq(aty, "SplatNode")) {
-            int sx = nt_ref(nt, argv[k], "expression");
-            if (sx >= 0) emit_boxed(c, sx, &ab);
-            int ts = ++g_tmp, ti = ++g_tmp;
-            emit_indent(g_pre, g_indent);
-            buf_printf(g_pre, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
-                              " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
-                              " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }%c",
-                       ts, ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti, 10);
-          }
-          else {
-            emit_boxed(c, argv[k], &ab);
-            emit_indent(g_pre, g_indent);
-            if (kwh_only_spreads(nt, argv[k]))
-              buf_printf(g_pre, "{ sp_RbVal _kh = %s; if (sp_poly_length(_kh) > 0) sp_PolyArray_push(_t%d, _kh); }%c",
-                         ab.p ? ab.p : "sp_box_nil()", ta, 10);
-            else
-              buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);%c", ta, ab.p ? ab.p : "sp_box_nil()", 10);
-          }
-          free(ab.p);
-        }
+      if (call_args_need_spread(nt, argv, argc)) {
+        int ta = emit_spread_args(c, argv, argc);
         buf_puts(b, "((void)sp_proc_call_spread(");
         if (proc_nil_raises) buf_puts(b, "sp_proc_recv(");
         emit_expr(c, recv, b);
