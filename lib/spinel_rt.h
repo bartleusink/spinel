@@ -11738,6 +11738,10 @@ static sp_PolyArray *sp_enum_items_from(sp_RbVal v) {
         return r;
       }
     }
+    /* An Enumerator read out of a container drains to its items, as
+       sp_poly_to_a_arr does; it fell to the empty array below, so a blockless
+       each or reverse_each over one yielded nothing. */
+    if (v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p) return sp_enum_to_a_boxed(v);
     /* A user object materializes through its own #to_a (or the __enum_to_a
        synthesized for an Enumerable that defines #each), the way sp_poly_arr_recv
        already does. Without the arm every such object fell to the empty array
