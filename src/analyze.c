@@ -1592,6 +1592,84 @@ int ie_implicit_self_class(Compiler *c, int id) {
   return s->class_id;
 }
 
+static int ie_self_call_names(Compiler *c, int node, const char **names, int n, int max) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return n;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return n;
+  int skip = -1;
+  if (k == NK_CallNode) {
+    int r = nt_ref(nt, node, "receiver");
+    const char *nm = nt_str(nt, node, "name");
+    int self_call = r < 0 || nt_kind(nt, r) == NK_SelfNode;
+    if (nm && self_call && !ie_kernel_global(nm)) {
+      int seen = 0;
+      for (int i = 0; i < n; i++) if (sp_streq(names[i], nm)) seen = 1;
+      if (!seen && n < max) names[n++] = nm;
+    }
+    if (self_call || (nm && (sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec"))))
+      skip = nt_ref(nt, node, "block");
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) {
+    int ch = nt_ref_at(nt, node, i);
+    if (ch != skip) n = ie_self_call_names(c, ch, names, n, max);
+  }
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) n = ie_self_call_names(c, ids[j], names, n, max);
+  }
+  return n;
+}
+
+static int ie_class_answers(Compiler *c, int k, const char *nm) {
+  return comp_method_in_chain(c, k, nm, NULL) >= 0 || comp_reader_in_chain(c, k, nm, NULL);
+}
+
+static int ie_poly_class_ok(Compiler *c, int k) {
+  return !c->classes[k].is_native_class && c->classes[k].ctor_reachable &&
+         builtin_class_id(c->classes[k].name) == 0;
+}
+
+/* The classes a poly receiver can run an instance_eval/exec body as: those
+   answering every self call that some class, and no top-level def, answers
+   (*need: the first). 0 when the body makes no such call. */
+int ie_poly_self_classes(Compiler *c, const char *name, int body, int *out, int max,
+                         const char **need) {
+  const char *names[64];
+  int nn = ie_self_call_names(c, body, names, 0, 64);
+  if (nn == 64) return 0;
+  int ask[64], nask = 0;
+  for (int i = 0; i < nn; i++) {
+    if (comp_method_index(c, names[i]) >= 0) continue;
+    for (int k = 0; k < c->nclasses; k++) {
+      if (ie_poly_class_ok(c, k) && ie_class_answers(c, k, names[i])) { ask[nask++] = i; break; }
+    }
+  }
+  if (nask == 0) return 0;
+  if (need) *need = names[ask[0]];
+  int n = 0;
+  for (int k = 0; k < c->nclasses && n < max; k++) {
+    if (!ie_poly_class_ok(c, k) || comp_method_in_chain(c, k, name, NULL) >= 0) continue;
+    int all = 1;
+    for (int i = 0; i < nask && all; i++) all = ie_class_answers(c, k, names[ask[i]]);
+    if (all) out[n++] = k;
+  }
+  return n;
+}
+
+static int ie_poly_mark(Compiler *c, int id, TyKind rt) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  int blk = nt_ref(nt, id, "block");
+  if (rt != TY_POLY || !nm || blk < 0 || nt_kind(nt, blk) != NK_BlockNode ||
+      (!sp_streq(nm, "instance_eval") && !sp_streq(nm, "instance_exec"))) return -1;
+  int k[2];
+  int n = ie_poly_self_classes(c, nm, nt_ref(nt, blk, "body"), k, 2, NULL);
+  return n == 1 ? k[0] : n > 1 ? -2 - id : -1;
+}
+
 /* In a call-site KeywordHashNode (`k: 9, j: 2`), the value node bound to the
    keyword `name`, or -1. Used to match instance_exec keyword block params. */
 int ie_kwhash_value(Compiler *c, int kwhash, const char *name) {
@@ -1703,8 +1781,8 @@ void build_ie_map(Compiler *c) {
     }
     else {
       TyKind rt = infer_type(c, recv);
-      if (!ty_is_object(rt)) continue;
-      cls = ty_object_class(rt);
+      cls = ty_is_object(rt) ? ty_object_class(rt) : ie_poly_mark(c, id, rt);
+      if (cls == -1) continue;
       if (!sp_streq(nm, "instance_eval") && !sp_streq(nm, "instance_exec")) {
         /* not a direct instance_eval/exec: maybe a trampoline method on `cls`? */
         if (!comp_trampoline_kind(c, cls, nm, NULL)) continue;
@@ -1722,6 +1800,34 @@ int ie_class_of(Compiler *c, int node) {
      synthesized mid-iteration (id >= cap) has no instance_eval receiver yet. */
   return (g_ie_node_class && node >= 0 && node < g_ie_node_class_cap)
            ? g_ie_node_class[node] : -1;
+}
+
+int *ie_body_retype(Compiler *c, int body, int cls) {
+  int n = c->nt->count;
+  if (body < 0 || !g_ie_node_class || g_ie_node_class_cap < n || g_ie_node_class[body] == cls)
+    return NULL;
+  int *snap = malloc(sizeof(int) * (2 * (size_t)n + 1));
+  if (!snap) return NULL;
+  snap[0] = n;
+  for (int i = 0; i < n; i++) { snap[1 + i] = (int)c->ntype[i]; snap[1 + n + i] = g_ie_node_class[i]; }
+  mark_ie_subtree(c, body, cls);
+  infer_subtree(c, body);
+  return snap;
+}
+
+void ie_body_restore(Compiler *c, int *snap) {
+  if (!snap) return;
+  int n = snap[0];
+  for (int i = 0; i < n; i++) { c->ntype[i] = (TyKind)snap[1 + i]; g_ie_node_class[i] = snap[1 + n + i]; }
+  free(snap);
+}
+
+int ie_poly_classes_at(Compiler *c, int node, int *out, int max) {
+  int v = ie_class_of(c, node);
+  if (v >= -1) return 0;
+  int call = -2 - v;
+  int blk = nt_ref(c->nt, call, "block");
+  return ie_poly_self_classes(c, nt_str(c->nt, call, "name"), nt_ref(c->nt, blk, "body"), out, max, NULL);
 }
 
 /* Whether `self` at node is top-level self, the main object (#4926): no
@@ -17747,18 +17853,19 @@ void analyze_program(Compiler *c) {
     int recv2 = nt_ref(c->nt, id, "receiver");
     if (blk2 < 0 || recv2 < 0) continue;
     TyKind rt2 = c->ntype[recv2];
-    if (!ty_is_object(rt2)) continue;
+    int cls2 = ty_is_object(rt2) ? ty_object_class(rt2) : ie_poly_mark(c, id, rt2);
+    if (cls2 < 0) continue;
     int is_ie2 = sp_streq(nm2, "instance_eval") || sp_streq(nm2, "instance_exec");
     if (is_ie2) {
-      if (comp_method_in_chain(c, ty_object_class(rt2), nm2, NULL) >= 0) continue;
+      if (comp_method_in_chain(c, cls2, nm2, NULL) >= 0) continue;
     }
-    else if (!comp_trampoline_kind(c, ty_object_class(rt2), nm2, NULL)) continue;
+    else if (!comp_trampoline_kind(c, cls2, nm2, NULL)) continue;
     int bdy2 = nt_ref(c->nt, blk2, "body");
     if (bdy2 < 0) continue;
     int bn2 = 0; const int *bb2 = nt_arr(c->nt, bdy2, "body", &bn2);
     if (bn2 <= 0 || !bb2) continue;
     int saved2 = an_ie_class_id;
-    an_ie_class_id = ty_object_class(rt2);
+    an_ie_class_id = cls2;
     for (int k2 = 0; k2 < bn2; k2++) infer_type(c, bb2[k2]);
     /* refresh the splice call's own type from the now-rebound body so a
        consumer (e.g. truthiness) sees the poly result, not the stale type

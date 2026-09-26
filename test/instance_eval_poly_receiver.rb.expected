@@ -1,0 +1,23 @@
+[:a]
+[:b, :c]
+[:d]
+[:e]
+:f
+42
+"h!"
+3
+["HI", "THERE"]
+["hi"]
+["psst"]
+["HI", "THERE", "AGAIN"]
+4
+-2
+[-2, -3]
+Loud
+[-3, -4]
+7
+-5
+-4
+8
+["hi", "x", "1", "2", "6"]
+undefined method 'say' for nil
