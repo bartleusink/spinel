@@ -96,6 +96,7 @@ const char *(*sp_obj_to_path_fn)(int cls_id, void *p) = NULL;
 int (*sp_obj_conv_fn)(int cls_id, void *p, int which, sp_RbVal *out) = NULL;
 const char *(*sp_obj_cls_name_fn)(int cls_id) = NULL;
 int (*sp_class_le_id_fn)(int sub, int super) = NULL;
+int (*sp_class_kind_of_name_fn)(int cls, const char *name) = NULL;
 sp_marshal_vt sp_marshal_v = {0};   /* filled by the generated TU (sp_tu_init) */
 
 /* The concurrent sweep (sp_sched.c): start takes the lists the barrier

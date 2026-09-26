@@ -931,6 +931,8 @@ int emit_anon_rest_ref(Compiler *c, int splat, Buf *buf);
 void emit_array_elem_at(TyKind at, int tmp, int elem_idx, Buf *b);
 void emit_rest_from_splat_and_argv(int tmp, TyKind at, int from_idx, Compiler *c, int argv_from, int pos_argc, const int *argv, Buf *b);
 int is_descendant(Compiler *c, int k, int anc);
+int class_builtin_superclass(Compiler *c, int i);   /* codegen.c */
+int class_builtin_parent(Compiler *c, int cid);      /* codegen.c */
 int dispatch_impl_count(Compiler *c, int cid, const char *name);
 void emit_dispatch(Compiler *c, int cid, const char *name, const char *selfptr, int argsNode, int blk_node, Buf *b);
 int emit_tap_then_expr(Compiler *c, int id, Buf *b);

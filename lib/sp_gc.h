@@ -621,6 +621,9 @@ extern const char *(*sp_obj_cls_name_fn)(int cls_id);
    class bank installs it; NULL means only an exact id can be trusted. A
    pointer array of one class checks a stored object against it (#4486). */
 extern int (*sp_class_le_id_fn)(int sub, int super);
+/* the same walk from a user class id, matching the ancestor by the NAME the
+   runtime reader holds (sp_class_kind_of_name in the generated program) */
+extern int (*sp_class_kind_of_name_fn)(int cls, const char *name);
 
 /* ---- Hot inline mark helpers (inlined into both sides) ----
  * String tag bytes: 0xfe heap-unmarked -> 0xfc marked; others skipped. */
