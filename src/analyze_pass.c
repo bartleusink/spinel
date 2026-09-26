@@ -1935,6 +1935,56 @@ static void widen_ivar_hash_literals(Compiler *c, const LWIndex *ivw, int cls, c
 /* The `@h ||= {}` / `h ||= {}` a container write's receiver evaluates to:
    the receiver itself, parenthesized or not, or the tail of a zero-argument
    self-getter (`def tbl = (@h ||= {})`; `tbl[k] = v`). -1 otherwise. */
+/* Whether `nm` is a parameter of a block written in scope `sc` that its
+   callee keeps as a Proc rather than yields to: every method of the call's
+   name takes it as a named `&blk` and none yields (`Agg.new { |ctx| }` into
+   `def initialize(&blk) = @blk = blk`). Whoever calls that Proc later is out
+   of sight here. */
+static int local_is_kept_block_param(Compiler *c, Scope *sc, const char *nm) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    int id = nt_ref(nt, call, "block");
+    if (id < 0 || nt_kind(nt, id) != NK_BlockNode || comp_scope_of(c, id) != sc) continue;
+    int pn = nt_ref(nt, id, "parameters");
+    if (pn < 0 || nt_kind(nt, pn) != NK_BlockParametersNode) continue;
+    int inner = nt_ref(nt, pn, "parameters");
+    if (inner < 0) continue;
+    int hit = 0;
+    int rn = 0; const int *reqs = nt_arr(nt, inner, "requireds", &rn);
+    for (int k = 0; k < rn && !hit; k++) {
+      const char *p = nt_str(nt, reqs[k], "name");
+      if (p && sp_streq(p, nm)) hit = 1;
+    }
+    int on = 0; const int *opts = nt_arr(nt, inner, "optionals", &on);
+    for (int k = 0; k < on && !hit; k++) {
+      const char *p = nt_str(nt, opts[k], "name");
+      if (p && sp_streq(p, nm)) hit = 1;
+    }
+    if (!hit) continue;
+    const char *mn = nt_str(nt, call, "name");
+    if (!mn) return 0;
+    /* `Klass.new { }`: the block goes to Klass's initialize */
+    int recv = nt_ref(nt, call, "receiver");
+    if (sp_streq(mn, "new")) {
+      const char *cn = recv >= 0 && nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+      int ci = cn ? comp_class_index(c, cn) : -1;
+      int si = ci >= 0 ? comp_method_in_chain(c, ci, "initialize", NULL) : -1;
+      if (si < 0) return 0;
+      Scope *d = &c->scopes[si];
+      return !d->yields && d->blk_param && d->blk_param[0];
+    }
+    int nkept = 0;
+    for (int s = 0; s < c->nscopes; s++) {
+      Scope *d = &c->scopes[s];
+      if (!d->name || !sp_streq(d->name, mn)) continue;
+      if (d->yields || !d->blk_param || !d->blk_param[0]) return 0;
+      nkept++;
+    }
+    return nkept > 0;
+  }
+  return 0;
+}
+
 static int recv_hash_or_write(Compiler *c, int recv) {
   const NodeTable *nt = c->nt;
   int n = unwrap_parens(c, recv);
@@ -2858,7 +2908,7 @@ int infer_write_types(Compiler *c) {
          would otherwise collide with it. Mirrors the ivar guard. */
       if (!is_push && lv->type == TY_UNKNOWN) {
         int lsc_sid = (int)(lsc - c->scopes);
-        int has_array_write = 0, has_unsettled_write = 0;
+        int has_array_write = 0, has_unsettled_write = 0, nwrites = 0;
         for (int _r = lw_index_first(&lw_ix, rnm, lsc_sid); _r >= 0; _r = lw_ix.next[_r]) {
           int w = lw_ix.node[_r];
           if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
@@ -2866,6 +2916,7 @@ int infer_write_types(Compiler *c) {
           if (!wn || !sp_streq(wn, rnm) || comp_scope_of(c, w) != lsc) continue;
           int wv = nt_ref(nt, w, "value");
           if (wv < 0) continue;
+          nwrites++;
           if (ty_is_array(infer_type(c, wv))) { has_array_write = 1; break; }
           /* `xs = src.map { ... }` is an ARRAY once the block's own return
              settles, but it reads UNKNOWN until then -- and an int-keyed
@@ -2882,6 +2933,13 @@ int infer_write_types(Compiler *c) {
             has_unsettled_write = 1;
         }
         if (has_array_write) continue;
+        /* A block parameter nothing in the body assigns holds what the
+           block's caller passes. For a block its callee keeps as a Proc, that
+           caller is out of sight, and a `p[:k] = v` in the body says nothing
+           about what it is: the block of `Agg.new { |ctx, v| ctx[:n] = 1 }`
+           may well be handed an object with its own `[]=`, and a hash
+           guessed here read that object as a hash's table. */
+        if (nwrites == 0 && local_is_kept_block_param(c, lsc, rnm)) continue;
         /* while the fixpoint runs; the second stage (g_infer_optimistic
            cleared) still types a slot whose array evidence never arrived */
         if (g_infer_optimistic && has_unsettled_write) continue;
