@@ -8301,7 +8301,7 @@ else {
     emit_indent(b, indent);
     if (ct == TY_STRING && op && sp_streq(op, "+")) {
       buf_printf(b, "%s = sp_str_concat(%s, ", ref, ref);
-      emit_expr(c, v, b); buf_puts(b, ");\n");
+      emit_str_expr(c, v, b); buf_puts(b, ");\n");
     }
     else if (emit_array_op_assign(c, ref, ct, op, v, b)) { }
     else if (ct == TY_POLY) {
@@ -9116,7 +9116,7 @@ else {
     char gref[256]; snprintf(gref, sizeof gref, "gv_%s", rn);
     if (lv->type == TY_STRING && op && sp_streq(op, "+")) {
       buf_printf(b, "gv_%s = sp_str_concat(gv_%s, ", rn, rn);
-      emit_expr(c, v, b); buf_puts(b, ");\n");
+      emit_str_expr(c, v, b); buf_puts(b, ");\n");
     }
     else if (emit_array_op_assign(c, gref, lv->type, op, v, b)) { }
     else if (emit_scalar_op_assign(c, gref, lv->type, op, v, 1, b)) { }
