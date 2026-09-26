@@ -8470,13 +8470,22 @@ else {
           /* a pointer array compares through its boxed elements (#4486) */
           buf_printf(b, "; _t%d = %ssp_PolyArray_include(sp_poly_to_poly_array(_t%d), _t%d)%s; break; }", tr, ibo, tv, tbox, ibc);
         }
-        /* PolyPolyHash: keys are boxed sp_RbVal */
+        /* Every hash kind the arms above did not claim: the key boxed and
+           looked up by the storage's key kind (a key of another kind is
+           simply absent). Only the general hash had an arm, so a
+           Symbol-keyed hash read out of a nested literal answered
+           `key?(k)` false for a boxed k, whatever it held. */
         {
           int tbox = ++g_tmp;
-          buf_printf(b, " case SP_BUILTIN_POLY_POLY_HASH: { sp_RbVal _t%d = ", tbox);
+          buf_puts(b, " case SP_BUILTIN_POLY_POLY_HASH:");
+          if (at != TY_STRING)
+            buf_puts(b, " case SP_BUILTIN_STR_INT_HASH: case SP_BUILTIN_STR_STR_HASH: case SP_BUILTIN_STR_POLY_HASH:");
+          if (at != TY_SYMBOL) buf_puts(b, " case SP_BUILTIN_SYM_POLY_HASH:");
+          buf_puts(b, " case SP_BUILTIN_INT_INT_HASH: case SP_BUILTIN_INT_STR_HASH:");
+          buf_printf(b, " { sp_RbVal _t%d = ", tbox);
           char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[0]);
           emit_boxed_text(c, at, tn, b);
-          buf_printf(b, "; _t%d = %ssp_PolyPolyHash_has_key((sp_PolyPolyHash *)_t%d.v.p, _t%d)%s; break; }", tr, ibo, tv, tbox, ibc);
+          buf_printf(b, "; _t%d = %ssp_poly_has_key(_t%d, _t%d)%s; break; }", tr, ibo, tv, tbox, ibc);
         }
       }
       if (is_arr_index && argc == 1) {
