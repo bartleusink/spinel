@@ -28838,9 +28838,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       if (argc == 1) emit_int_expr(c, argv[0], b); else buf_puts(b, "0");
       buf_puts(b, "))"); return;
     }
-    if (sp_streq(name, "clock_gettime") && argc >= 1) {
+    if ((sp_streq(name, "clock_gettime") || sp_streq(name, "clock_getres")) && argc >= 1) {
       /* honor the clock id, and the unit (default :float_second). An integer
-         unit yields an Integer; the float units and the default yield a Float. */
+         unit yields an Integer; the float units and the default yield a Float.
+         clock_getres (#3045) differs only in the runtime call. */
       const char *unit = NULL;
       if (argc >= 2 && nt_type(nt, argv[1]) && sp_streq(nt_type(nt, argv[1]), "SymbolNode"))
         unit = nt_str(nt, argv[1], "value");
@@ -28853,30 +28854,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, "({ sp_raise_cls(\"ArgumentError\", (&(\"\\xff\" \"unexpected unit: %s\")[1])); 0.0; })", unit);
         return;
       }
-      buf_puts(b, "(sp_process_clock_ns(");
-      if (!emit_clock_id(c, argv[0], b)) emit_int_expr(c, argv[0], b);
-      buf_puts(b, ")");
-      if (unit && sp_streq(unit, "nanosecond")) buf_puts(b, ")");
-      else if (unit && sp_streq(unit, "microsecond")) buf_puts(b, " / 1000)");
-      else if (unit && sp_streq(unit, "millisecond")) buf_puts(b, " / 1000000)");
-      else if (unit && sp_streq(unit, "second")) buf_puts(b, " / 1000000000)");
-      else if (unit && sp_streq(unit, "float_microsecond")) buf_puts(b, " / 1e3)");
-      else if (unit && sp_streq(unit, "float_millisecond")) buf_puts(b, " / 1e6)");
-      else buf_puts(b, " / 1e9)");  /* float_second (default) */
-      return;
-    }
-    if (sp_streq(name, "clock_getres") && argc >= 1) {  /* (#3045) */
-      const char *unit = NULL;
-      if (argc >= 2 && nt_type(nt, argv[1]) && sp_streq(nt_type(nt, argv[1]), "SymbolNode"))
-        unit = nt_str(nt, argv[1], "value");
-      if (unit && !sp_streq(unit, "nanosecond") && !sp_streq(unit, "microsecond") &&
-          !sp_streq(unit, "millisecond") && !sp_streq(unit, "second") &&
-          !sp_streq(unit, "float_microsecond") && !sp_streq(unit, "float_millisecond") &&
-          !sp_streq(unit, "float_second")) {
-        buf_printf(b, "({ sp_raise_cls(\"ArgumentError\", (&(\"\\xff\" \"unexpected unit: %s\")[1])); 0.0; })", unit);
-        return;
-      }
-      buf_puts(b, "(sp_process_clock_res_ns(");
+      buf_puts(b, sp_streq(name, "clock_getres") ? "(sp_process_clock_res_ns(" : "(sp_process_clock_ns(");
       if (!emit_clock_id(c, argv[0], b)) emit_int_expr(c, argv[0], b);
       buf_puts(b, ")");
       if (unit && sp_streq(unit, "nanosecond")) buf_puts(b, ")");
