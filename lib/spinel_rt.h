@@ -12149,11 +12149,14 @@ static sp_RbVal sp_poly_hash_shift(sp_RbVal v) {
 /* Hash#replace through a boxed receiver: the original takes the other
    hash's entries, in its own representation, through the write-back (which
    refuses a key or value the variant cannot hold); a general original takes
-   them directly. Its own default stays, as it does through the typed
-   emitter (CRuby takes the source's). The bang transforms arrive here too:
-   analyze.c makes `h.transform_values! { }` a `replace` of the non-bang
-   result. sp_poly_replace (sp_cold.c) keeps the Array and String kinds. */
-static sp_RbVal sp_poly_hash_replace(sp_RbVal recv, sp_RbVal src) {
+   them directly. The source's default comes with them, as in CRuby
+   (`Hash.new(1).replace(b: 2).default` is nil). The bang transforms arrive
+   here too -- analyze.c makes `h.transform_values! { }` a `replace` of the
+   non-bang result -- and keep the receiver's own (`keep_default`), since
+   the result they splice in is the receiver's entries transformed, not a
+   hash of its own. sp_poly_replace (sp_cold.c) keeps the Array and String
+   kinds. */
+static sp_RbVal sp_poly_hash_replace(sp_RbVal recv, sp_RbVal src, int keep_default) {
   SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT_RBVAL(src);
   if (sp_gc_is_frozen(recv.v.p)) sp_raise_frozen_hash_at(recv.v.p, recv.cls_id);
   if (src.tag != SP_TAG_OBJ || !sp_poly_is_hash_kind(src.cls_id))
@@ -12162,7 +12165,7 @@ static sp_RbVal sp_poly_hash_replace(sp_RbVal recv, sp_RbVal src) {
   sp_PolyPolyHash *work = sp_poly_as_pp_hash(src, "replace");
   SP_GC_ROOT(work);
   if (recv.cls_id != SP_BUILTIN_POLY_POLY_HASH) {
-    sp_poly_hash_writeback_ex(recv, work, 0);
+    sp_poly_hash_writeback_ex(recv, work, !keep_default);
     return recv;
   }
   sp_PolyPolyHash *h = (sp_PolyPolyHash *)recv.v.p;
@@ -12171,10 +12174,16 @@ static sp_RbVal sp_poly_hash_replace(sp_RbVal recv, sp_RbVal src) {
     sp_int j = work->order[i];
     sp_PolyPolyHash_set(h, work->keys[j], work->vals[j]);
   }
+  if (!keep_default) {
+    sp_gc_wb((void *)h);
+    h->default_v = work->default_v;
+    h->dproc = work->dproc;
+    h->dproc_self = work->dproc_self;
+  }
   return recv;
 }
 static sp_RbVal sp_poly_replace_any(sp_RbVal recv, sp_RbVal src) {
-  if (recv.tag == SP_TAG_OBJ && recv.v.p && sp_poly_is_hash_kind(recv.cls_id)) return sp_poly_hash_replace(recv, src);
+  if (recv.tag == SP_TAG_OBJ && recv.v.p && sp_poly_is_hash_kind(recv.cls_id)) return sp_poly_hash_replace(recv, src, 0);
   return sp_poly_replace(recv, src);
 }
 /* The lowered bang transform (analyze.c): the transformed hash goes into
@@ -12182,7 +12191,8 @@ static sp_RbVal sp_poly_replace_any(sp_RbVal recv, sp_RbVal src) {
    answer, with the receiver untouched. */
 static sp_RbVal sp_poly_hash_splice(sp_RbVal recv, sp_RbVal v) {
   if (v.tag != SP_TAG_OBJ || !v.v.p || !sp_poly_is_hash_kind(v.cls_id)) return v;
-  return sp_poly_replace_any(recv, v);
+  if (recv.tag == SP_TAG_OBJ && recv.v.p && sp_poly_is_hash_kind(recv.cls_id)) return sp_poly_hash_replace(recv, v, 1);
+  return sp_poly_replace(recv, v);
 }
 /* OpenStruct.new(hash) where hash is a runtime value (not a literal): seed the
    member table from the hash's entries, keys coerced to symbols. Copies, so
