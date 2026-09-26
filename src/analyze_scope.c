@@ -4391,7 +4391,16 @@ void register_extends(Compiler *c) {
                 comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
             NT_FOREACH_KIND(nt2, NK_InstanceVariableWriteNode, ivid)
               if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
-                comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name")); }
+                comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name"));
+            /* `@memo ||= v` / `&&=` / `+=` name the ivar too, and may be
+               the body's only mention of it */
+            static const NodeKind ow[] = { NK_InstanceVariableOrWriteNode,
+                                           NK_InstanceVariableAndWriteNode,
+                                           NK_InstanceVariableOperatorWriteNode };
+            for (int k = 0; k < 3; k++)
+              NT_FOREACH_KIND(nt2, ow[k], ivid)
+                if (c->nscope[ivid] == ms && nt_str(nt2, ivid, "name"))
+                  comp_ivar_intern(&c->classes[ci], nt_str(nt2, ivid, "name")); }
           specialize_cmethod_for(c, ms, mod_id, ci);
           src = &c->scopes[ms];  /* realloc-safe */
           did_clone = 1;
