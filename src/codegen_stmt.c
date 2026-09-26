@@ -2331,12 +2331,27 @@ void emit_pm_eq(Compiler *c, int t, TyKind pt, int valnode, Buf *b) {
 
 static int emit_pm_subcond_expr(Compiler *c, int spat, const char *elem, Buf *b);
 
+/* The boxed value `v` as an array pattern reads it: a user object (a Struct,
+   a Data, a class with its own #deconstruct) as what its #deconstruct
+   answers, anything else as itself. A statement-expression, so it stays
+   inside a condition. */
+static void pm_deconstructed(const char *v, Buf *b) {
+  int t = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = %s;"
+                " if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id >= 0"
+                " && !sp_poly_is_array_kind(_t%d.cls_id)"
+                " && (sp_obj_deconstruct_fn || sp_obj_to_a_fn))"
+                " _t%d = sp_obj_deconstruct_fn ? sp_obj_deconstruct_fn(_t%d)"
+                " : sp_obj_to_a_fn(_t%d); _t%d; })",
+             t, v, t, t, t, t, t, t, t);
+}
+
 /* Recursive match condition for a (possibly nested) array pattern over the
    boxed value `arr` (an sp_RbVal C-expression): `arr` is an array of the right
    length and every required/post element matches its sub-pattern (a literal,
    class, alternation, range, or nested container -- anything the general
    sub-pattern matcher checks). */
-static void emit_pm_array_cond(Compiler *c, int pat, const char *arr, Buf *b) {
+static void emit_pm_array_cond(Compiler *c, int pat, const char *arr, int check_const, Buf *b) {
   const NodeTable *nt = c->nt;
   /* the deconstructed temp's name is read by every element accessor below, so
      it lives as long as this call -- and per call, since this recurses */
@@ -2360,22 +2375,24 @@ static void emit_pm_array_cond(Compiler *c, int pat, const char *arr, Buf *b) {
   /* A Struct or Data element answers #deconstruct, so convert it to that array
      before the array-kind guard rejects it (#3580). The conversion is a
      statement-expression so it stays inside this condition. */
-  int tdc = ++g_tmp;
+  /* A qualified pattern (`Pt[a, b]`) asks the class first, of the value
+     itself rather than of what it deconstructs to. A caller that already
+     asked it and hands over the deconstructed members (the Struct arm)
+     says so with check_const 0. */
+  Buf kb; memset(&kb, 0, sizeof kb);
+  int kn = check_const ? nt_ref(nt, pat, "constant") : -1;
+  int has_k = kn >= 0 && emit_pm_subcond_expr(c, kn, arr, &kb) && kb.p;
   Buf dbuf; memset(&dbuf, 0, sizeof dbuf);
-  buf_printf(&dbuf, "({ sp_RbVal _t%d = %s;"
-                    " if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id >= 0"
-                    " && !sp_poly_is_array_kind(_t%d.cls_id)"
-                    " && (sp_obj_deconstruct_fn || sp_obj_to_a_fn))"
-                    " _t%d = sp_obj_deconstruct_fn ? sp_obj_deconstruct_fn(_t%d)"
-                    " : sp_obj_to_a_fn(_t%d); _t%d; })",
-             tdc, arr, tdc, tdc, tdc, tdc, tdc, tdc, tdc);
+  pm_deconstructed(arr, &dbuf);
   int tda = ++g_tmp;
   buf_printf(b, "({ sp_RbVal _t%d = %s; ", tda, dbuf.p ? dbuf.p : arr);
   free(dbuf.p);
   snprintf(pm_arr_name, sizeof pm_arr_name, "_t%d", tda);
   arr = pm_arr_name;
-  buf_printf(b, "((%s).tag == SP_TAG_OBJ && sp_poly_is_array_kind((%s).cls_id) && sp_poly_length(%s) %s %dLL",
+  buf_printf(b, "(%s%s%s(%s).tag == SP_TAG_OBJ && sp_poly_is_array_kind((%s).cls_id) && sp_poly_length(%s) %s %dLL",
+             has_k ? "(" : "", has_k ? kb.p : "", has_k ? ") && " : "",
              arr, arr, arr, has_rest ? ">=" : "==", apn + npost);
+  free(kb.p);
   for (int i = 0; i < apn; i++) {
     /* the element accessor nests one level per recursion (arr grows), so build
        it in a Buf rather than a fixed buffer that would truncate. */
@@ -2497,7 +2514,7 @@ static int emit_pm_subcond_expr(Compiler *c, int spat, const char *elem, Buf *b)
     return 0;
   if (sp_streq(pty, "CapturePatternNode"))
     return emit_pm_subcond_expr(c, nt_ref(nt, spat, "value"), elem, b);
-  if (sp_streq(pty, "ArrayPatternNode")) { emit_pm_array_cond(c, spat, elem, b); return 1; }
+  if (sp_streq(pty, "ArrayPatternNode")) { emit_pm_array_cond(c, spat, elem, 1, b); return 1; }
   if (sp_streq(pty, "HashPatternNode")) { emit_pm_hash_cond_poly(c, spat, elem, b); return 1; }
   if (sp_streq(pty, "FindPatternNode")) { emit_pm_find_cond_poly(c, spat, elem, b); return 1; }
   int tn = ++g_tmp;
@@ -2858,7 +2875,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       char arr[48];
       if (pt == TY_POLY_ARRAY) snprintf(arr, sizeof arr, "sp_box_poly_array(_t%d)", t);
       else                     snprintf(arr, sizeof arr, "_t%d", t);
-      emit_pm_array_cond(c, pat, arr, b);
+      emit_pm_array_cond(c, pat, arr, pt == TY_POLY, b);
       return 1;
     }
     /* A user object answers an array pattern through its own #deconstruct,
@@ -3302,8 +3319,17 @@ void emit_pm_bind_pattern(Compiler *c, int pat, const char *src_poly, int indent
   emit_pm_bind_container_poly(c, pat, src_poly, indent, b, sc);
 }
 
-static void emit_pm_bind_poly(Compiler *c, int pat, const char *arr, int indent, Buf *b, Scope *sc) {
+static void emit_pm_bind_poly(Compiler *c, int pat, const char *arr0, int indent, Buf *b, Scope *sc) {
   const NodeTable *nt = c->nt;
+  /* read the elements from what the value deconstructs to, as the condition
+     did: a user object has no [] of its own to index */
+  int td = ++g_tmp;
+  Buf db; memset(&db, 0, sizeof db);
+  pm_deconstructed(arr0, &db);
+  emit_indent(b, indent);
+  buf_printf(b, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", td, db.p ? db.p : arr0, td);
+  free(db.p);
+  char arr[24]; snprintf(arr, sizeof arr, "_t%d", td);
   int apn = 0;
   const int *reqs = nt_arr(nt, pat, "requireds", &apn);
   for (int i = 0; i < apn; i++) {

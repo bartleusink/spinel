@@ -7593,10 +7593,25 @@ static void emit_obj_to_ary_dispatch(Compiler *c, Buf *b) {
    #deconstruct with its members but has no #to_a at all, so the to_a dispatch
    deliberately skips it and a nested array sub-pattern never matched a Data
    element (#3882). Everything else defers to that dispatch. */
+/* The scope of class i's own #deconstruct when it has one this TU emits
+   and a boxed value can call (no arguments, no block), else -1. A Struct's
+   comes from the Struct machinery, not from here. */
+static int user_deconstruct_scope(Compiler *c, int i, int *defcls) {
+  ClassInfo *ci = &c->classes[i];
+  if (!ci->instantiated || ci->is_native_class || ci->is_data) return -1;
+  int mi = comp_method_in_chain(c, i, "deconstruct", defcls);
+  if (mi < 0) return -1;
+  Scope *m = &c->scopes[mi];
+  if (!m->reachable || m->yields || m->nparams != 0 || scope_is_shadowed(c, mi) ||
+      m->is_transplanted_source) return -1;
+  return mi;
+}
 static int obj_deconstruct_any(Compiler *c) {
-  for (int i = 0; i < c->nclasses; i++)
+  for (int i = 0; i < c->nclasses; i++) {
     if (c->classes[i].is_data && c->classes[i].instantiated && !c->classes[i].is_native_class)
       return 1;
+    if (user_deconstruct_scope(c, i, NULL) >= 0) return 1;
+  }
   return 0;
 }
 static void emit_obj_deconstruct_dispatch(Compiler *c, Buf *b) {
@@ -7605,6 +7620,19 @@ static void emit_obj_deconstruct_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "  switch (v.cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
+    /* a class with its own #deconstruct answers with it (`in Pt[a, b]` on a
+       Pt read out of a mixed array) */
+    int dcls = -1, dmi = user_deconstruct_scope(c, i, &dcls);
+    if (dmi >= 0) {
+      const char *dcn = c->classes[dcls].c_name;
+      char call[256];
+      snprintf(call, sizeof call, "sp_%s_deconstruct(%s(sp_%s *)v.v.p)",
+               dcn, c->classes[dcls].is_value_type ? "*" : "", dcn);
+      buf_printf(b, "    case %d: return ", i);
+      emit_boxed_text(c, c->scopes[dmi].ret, call, b);
+      buf_puts(b, ";\n");
+      continue;
+    }
     if (!ci->is_data || !ci->instantiated || ci->is_native_class) continue;
     buf_printf(b, "    case %d: {\n", i);
     buf_printf(b, "      sp_%s *o = (sp_%s *)v.v.p; (void)o;\n", ci->c_name, ci->c_name);
@@ -7628,12 +7656,17 @@ static void emit_obj_deconstruct_dispatch(Compiler *c, Buf *b) {
 static void emit_obj_is_data(Compiler *c, Buf *b) {
   if (!obj_deconstruct_any(c)) return;
   buf_puts(b, "static int sp_obj_is_data(int cls_id) {\n  switch (cls_id) {\n");
+  int any = 0;
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
     if (!ci->is_data || !ci->instantiated || ci->is_native_class) continue;
     buf_printf(b, "    case %d:\n", i);
+    any = 1;
   }
-  buf_puts(b, "      return 1;\n    default: return 0;\n  }\n}\n");
+  /* the table may be here for a class's own #deconstruct alone, with no
+     Data to list */
+  if (any) buf_puts(b, "      return 1;\n");
+  buf_puts(b, "    default: return 0;\n  }\n}\n");
 }
 
 static void emit_obj_with_dispatch(Compiler *c, Buf *b) {
