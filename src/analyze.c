@@ -4246,6 +4246,9 @@ static void desugar_enum_chain_shapes(Compiler *c) {
         nt_node_set_ref(nt, inner, "block", blk);
         nt_node_set_arr(nt, rargs, "arguments", &inner, 1);
         nt_node_set_str(nt, id, "name", "replace");
+        /* both calls name the receiver node: the poly replace arm reads this
+           to bind it once (codegen_call_recv.c) */
+        nt_node_set_str(nt, id, "bang_splice", "1");
         nt_node_set_ref(nt, id, "block", -1);
         nt_node_set_ref(nt, id, "arguments", rargs);
         comp_grow_node_arrays(c);

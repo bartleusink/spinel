@@ -33927,8 +33927,9 @@ else {
     buf_printf(b, "; _t%d; })", t);
     return;
   }
-  /* {}.default (empty hash literal with unknown type) always returns nil */
-  if (recv >= 0 && sp_streq(name, "default") && argc == 0 && !ty_is_hash(rt)) {
+  /* {}.default (empty hash literal with unknown type) always returns nil; a
+     boxed hash answers through its face row below, from the copy's default */
+  if (recv >= 0 && sp_streq(name, "default") && argc == 0 && !ty_is_hash(rt) && rt != TY_POLY) {
     buf_puts(b, "sp_box_nil()");
     return;
   }

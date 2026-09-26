@@ -7361,8 +7361,12 @@ static sp_RbVal sp_poly_clear(sp_RbVal v) {
    removed, as an Array (#3613). */
 static sp_RbVal sp_poly_pop(sp_RbVal v);
 static sp_RbVal sp_poly_shift(sp_RbVal v);
+static sp_RbVal sp_poly_hash_shift(sp_RbVal v);   /* defined with the hash helpers below */
 static sp_PolyArray *sp_poly_pop_n(sp_RbVal v, sp_int n, int from_front) {
   SP_GC_ROOT_RBVAL(v);
+  /* Hash#shift takes no argument; sp_poly_shift answers a hash now */
+  if (v.tag == SP_TAG_OBJ && v.v.p && sp_poly_is_hash_kind(v.cls_id))
+    sp_raise_cls("ArgumentError", "wrong number of arguments (given 1, expected 0)");
   if (n < 0) sp_raise_cls("ArgumentError", "negative array size");
   sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
   for (sp_int i = 0; i < n; i++) {
@@ -7529,6 +7533,7 @@ static sp_RbVal sp_poly_delete_at(sp_RbVal v, sp_int i) {
   return sp_box_nil();
 }
 static sp_RbVal sp_poly_shift(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.v.p && sp_poly_is_hash_kind(v.cls_id)) return sp_poly_hash_shift(v);
   if (v.tag == SP_TAG_OBJ && v.v.p) {
     switch (v.cls_id) {
       case SP_BUILTIN_INT_ARRAY: {
@@ -12009,7 +12014,7 @@ static void sp_hash_wb_want(sp_RbVal v, int tag, int nil_ok, const char *what, c
    rather than coerced into a key or value it was not. Frozenness was refused
    at the coercion, before the mutator ran, and is refused again here for an
    original frozen since -- by its own argument, say. */
-static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
+static void sp_poly_hash_writeback_ex(sp_RbVal orig, sp_PolyPolyHash *work, int with_default) {
   if (orig.tag != SP_TAG_OBJ || !work || !orig.v.p) return;
   if (orig.cls_id == SP_BUILTIN_POLY_POLY_HASH) return;
   if (!sp_poly_is_hash_kind(orig.cls_id)) return;
@@ -12028,10 +12033,30 @@ static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
       default: return;
     }
   }
+  /* The default too, when the mutator may have set one (`with_default`: a
+     boxed `h.default = v` set it on the copy; a `replace` keeps the
+     receiver's own, as the typed emitter does). An Integer- or
+     String-valued variant holds one of its own kind (or nil); the Symbol-
+     and String-keyed poly variants hold any value. A default PROC set
+     through the box (a PolyPolyHash body) has no slot of its signature in
+     a typed variant: refused, like a key of the wrong kind, rather than
+     dropped. The bridge is the original's own proc, installed on the copy
+     by sp_poly_hash_merge, and means no change. */
+  if (with_default) {
+    if (work->dproc && work->dproc != sp_poly_hash_dproc_bridge)
+      sp_raise_cls("TypeError", sp_sprintf("can't store a default proc in a %s through a boxed receiver",
+                                           sp_poly_class_name(orig)));
+    switch (orig.cls_id) {
+      case SP_BUILTIN_STR_INT_HASH: case SP_BUILTIN_INT_INT_HASH: sp_hash_wb_want(work->default_v, SP_TAG_INT, 1, "default", "Integer values"); break;
+      case SP_BUILTIN_STR_STR_HASH: case SP_BUILTIN_INT_STR_HASH: sp_hash_wb_want(work->default_v, SP_TAG_STR, 1, "default", "String values"); break;
+      default: break;
+    }
+  }
   switch (orig.cls_id) {
     case SP_BUILTIN_STR_INT_HASH: {
       sp_StrIntHash *h = (sp_StrIntHash *)orig.v.p;
       sp_StrIntHash_clear(h);
+      if (with_default) h->default_v = sp_poly_to_i_or_nil(work->default_v);
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
         sp_StrIntHash_set(h, sp_poly_to_s(work->keys[j]), sp_poly_to_i_or_nil(work->vals[j]));
@@ -12041,6 +12066,7 @@ static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
     case SP_BUILTIN_STR_STR_HASH: {
       sp_StrStrHash *h = (sp_StrStrHash *)orig.v.p;
       sp_StrStrHash_clear(h);
+      if (with_default) h->default_v = sp_poly_to_s_or_nil(work->default_v);
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
         sp_StrStrHash_set(h, sp_poly_to_s(work->keys[j]), sp_poly_to_s_or_nil(work->vals[j]));
@@ -12050,6 +12076,7 @@ static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
     case SP_BUILTIN_INT_STR_HASH: {
       sp_IntStrHash *h = (sp_IntStrHash *)orig.v.p;
       sp_IntStrHash_clear(h);
+      if (with_default) h->default_v = sp_poly_to_s_or_nil(work->default_v);
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
         sp_IntStrHash_set(h, sp_poly_to_i(work->keys[j]), sp_poly_to_s_or_nil(work->vals[j]));
@@ -12059,6 +12086,7 @@ static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
     case SP_BUILTIN_INT_INT_HASH: {
       sp_IntIntHash *h = (sp_IntIntHash *)orig.v.p;
       sp_IntIntHash_clear(h);
+      if (with_default) h->default_v = sp_poly_to_i_or_nil(work->default_v);
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
         sp_IntIntHash_set(h, sp_poly_to_i(work->keys[j]), sp_poly_to_i_or_nil(work->vals[j]));
@@ -12068,6 +12096,7 @@ static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
     case SP_BUILTIN_STR_POLY_HASH: {
       sp_StrPolyHash *h = (sp_StrPolyHash *)orig.v.p;
       sp_StrPolyHash_clear(h);
+      if (with_default) h->default_v = work->default_v;
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
         sp_StrPolyHash_set(h, sp_poly_to_s(work->keys[j]), work->vals[j]);
@@ -12077,6 +12106,7 @@ static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
     case SP_BUILTIN_SYM_POLY_HASH: {
       sp_SymPolyHash *h = (sp_SymPolyHash *)orig.v.p;
       sp_SymPolyHash_clear(h);
+      if (with_default) h->default_v = work->default_v;
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
         sp_SymPolyHash_set(h, (sp_sym)work->keys[j].v.i, work->vals[j]);
@@ -12085,6 +12115,74 @@ static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
     }
     default: return;
   }
+}
+static void sp_poly_hash_writeback(sp_RbVal orig, sp_PolyPolyHash *work) {
+  sp_poly_hash_writeback_ex(orig, work, 1);
+}
+/* Hash#shift through a boxed receiver: the first-inserted pair, removed
+   from the original in place (no general copy to write back), nil when
+   empty. Every variant keeps its insertion order compacted, so order[0] is
+   the first key. */
+static sp_RbVal sp_poly_hash_shift(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);
+  if (sp_gc_is_frozen(v.v.p)) sp_raise_frozen_hash_at(v.v.p, v.cls_id);
+  sp_RbVal k;
+  switch (v.cls_id) {
+    case SP_BUILTIN_STR_INT_HASH: { sp_StrIntHash *h = (sp_StrIntHash *)v.v.p; if (h->len <= 0) return sp_box_nil(); k = sp_box_str(h->order[0]); break; }
+    case SP_BUILTIN_STR_STR_HASH: { sp_StrStrHash *h = (sp_StrStrHash *)v.v.p; if (h->len <= 0) return sp_box_nil(); k = sp_box_str(h->order[0]); break; }
+    case SP_BUILTIN_STR_POLY_HASH: { sp_StrPolyHash *h = (sp_StrPolyHash *)v.v.p; if (h->len <= 0) return sp_box_nil(); k = sp_box_str(h->order[0]); break; }
+    case SP_BUILTIN_INT_STR_HASH: { sp_IntStrHash *h = (sp_IntStrHash *)v.v.p; if (h->len <= 0) return sp_box_nil(); k = sp_box_int(h->order[0]); break; }
+    case SP_BUILTIN_INT_INT_HASH: { sp_IntIntHash *h = (sp_IntIntHash *)v.v.p; if (h->len <= 0) return sp_box_nil(); k = sp_box_int(h->order[0]); break; }
+    case SP_BUILTIN_SYM_POLY_HASH: { sp_SymPolyHash *h = (sp_SymPolyHash *)v.v.p; if (h->len <= 0) return sp_box_nil(); k = sp_box_sym(h->order[0]); break; }
+    case SP_BUILTIN_POLY_POLY_HASH: { sp_PolyPolyHash *h = (sp_PolyPolyHash *)v.v.p; if (h->len <= 0) return sp_box_nil(); k = h->keys[h->order[0]]; break; }
+    default: sp_raise_nomethod(sp_nomethod_msg("shift", v)); return sp_box_nil();
+  }
+  SP_GC_ROOT_RBVAL(k);
+  sp_RbVal val = sp_poly_delete_key(v, k);
+  SP_GC_ROOT_RBVAL(val);
+  sp_PolyArray *pair = sp_PolyArray_new();
+  SP_GC_ROOT(pair);
+  sp_PolyArray_push(pair, k);
+  sp_PolyArray_push(pair, val);
+  return sp_box_poly_array(pair);
+}
+/* Hash#replace through a boxed receiver: the original takes the other
+   hash's entries, in its own representation, through the write-back (which
+   refuses a key or value the variant cannot hold); a general original takes
+   them directly. Its own default stays, as it does through the typed
+   emitter (CRuby takes the source's). The bang transforms arrive here too:
+   analyze.c makes `h.transform_values! { }` a `replace` of the non-bang
+   result. sp_poly_replace (sp_cold.c) keeps the Array and String kinds. */
+static sp_RbVal sp_poly_hash_replace(sp_RbVal recv, sp_RbVal src) {
+  SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT_RBVAL(src);
+  if (sp_gc_is_frozen(recv.v.p)) sp_raise_frozen_hash_at(recv.v.p, recv.cls_id);
+  if (src.tag != SP_TAG_OBJ || !sp_poly_is_hash_kind(src.cls_id))
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Hash", sp_convert_src_name(src)));
+  if (recv.v.p == src.v.p) return recv;
+  sp_PolyPolyHash *work = sp_poly_as_pp_hash(src, "replace");
+  SP_GC_ROOT(work);
+  if (recv.cls_id != SP_BUILTIN_POLY_POLY_HASH) {
+    sp_poly_hash_writeback_ex(recv, work, 0);
+    return recv;
+  }
+  sp_PolyPolyHash *h = (sp_PolyPolyHash *)recv.v.p;
+  sp_PolyPolyHash_clear(h);
+  for (sp_int i = 0; i < work->len; i++) {
+    sp_int j = work->order[i];
+    sp_PolyPolyHash_set(h, work->keys[j], work->vals[j]);
+  }
+  return recv;
+}
+static sp_RbVal sp_poly_replace_any(sp_RbVal recv, sp_RbVal src) {
+  if (recv.tag == SP_TAG_OBJ && recv.v.p && sp_poly_is_hash_kind(recv.cls_id)) return sp_poly_hash_replace(recv, src);
+  return sp_poly_replace(recv, src);
+}
+/* The lowered bang transform (analyze.c): the transformed hash goes into
+   the receiver; any other value is a `break` out of the block and is the
+   answer, with the receiver untouched. */
+static sp_RbVal sp_poly_hash_splice(sp_RbVal recv, sp_RbVal v) {
+  if (v.tag != SP_TAG_OBJ || !v.v.p || !sp_poly_is_hash_kind(v.cls_id)) return v;
+  return sp_poly_replace_any(recv, v);
 }
 /* OpenStruct.new(hash) where hash is a runtime value (not a literal): seed the
    member table from the hash's entries, keys coerced to symbols. Copies, so
