@@ -178,6 +178,40 @@ int desugar_bare_const_get(Compiler *c) {
   return changed;
 }
 
+/* Inside an instance_eval / instance_exec block self is the receiver, so a
+   receiverless `is_a?(Box)` or `respond_to?(:v)` there asks the receiver.
+   A user method of the name already resolves through the block's receiver
+   class; one of Object's own had nothing to ask and was refused. Give it
+   self, as `self.is_a?(Box)`, which the SelfNode path already rebinds to
+   the receiver. */
+int desugar_ie_bare_object_calls(Compiler *c) {
+  static const char *const names[] = {
+    "is_a?", "kind_of?", "instance_of?", "respond_to?", "frozen?", "nil?",
+    "object_id", "hash", "inspect", "to_s", "freeze", "dup", "clone",
+    "itself", "equal?", "eql?", "instance_variable_get",
+    "instance_variable_set", "instance_variable_defined?",
+    "instance_variables", "public_send", "__send__", "send", NULL };
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    if (nt_ref(nt, id, "receiver") >= 0) continue;
+    int cls = ie_class_of(c, id);
+    if (cls < 0 || id >= c->node_cap) continue;
+    const char *nm = nt_str(nt, id, "name");
+    int hit = 0;
+    for (int k = 0; nm && names[k] && !hit; k++) hit = sp_streq(nm, names[k]);
+    if (!hit || comp_method_in_chain(c, cls, nm, NULL) >= 0) continue;
+    int sn = nt_new_node(nt, "SelfNode");
+    if (sn < 0) continue;
+    comp_grow_node_arrays(c);
+    c->nscope[sn] = c->nscope[id];
+    c->node_cbody[sn] = c->node_cbody[id];
+    nt_node_set_ref(nt, id, "receiver", sn);
+    changed = 1;
+  }
+  return changed;
+}
+
 /* Proc#>> / #<< with a Method operand: wrap the Method side in #to_proc at the
    AST, so composition always runs proc-to-proc. The to_proc emission builds a
    real trampoline proc that publishes its boxed result through the return
