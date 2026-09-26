@@ -603,6 +603,17 @@ static int is_class_eval_name(const char *nm) {
 
 void desugar_class_reopen(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
+  /* The reopening is carried under a name of its own, which the extension
+     pass later finds by that name: a declaration the program itself writes
+     under it would be taken for the reopening (from the #5078 review). */
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_ClassNode && k != NK_ModuleNode && k != NK_ConstantWriteNode) continue;
+    int cp = k == NK_ConstantWriteNode ? id : nt_ref(nt, id, "constant_path");
+    const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (cn && sp_streq(cn, class_reopen_mod))
+      unsupported_feature(c, id, "the constant name Class__reopen is reserved by the compiler");
+  }
   int body = nt_ref(nt, nt->root_id, "statements");
   int n = 0;
   const int *st = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
@@ -619,8 +630,17 @@ void desugar_class_reopen(Compiler *c) {
     }
     if (nt_kind(nt, s) != NK_CallNode || !is_class_eval_name(nt_str(nt, s, "name"))) continue;
     int recv = nt_ref(nt, s, "receiver"), blk = nt_ref(nt, s, "block");
-    if (!is_class_const(nt, recv) || blk < 0 || nt_kind(nt, blk) != NK_BlockNode ||
-        nt_ref(nt, blk, "parameters") >= 0 || nt_ref(nt, s, "arguments") >= 0) continue;
+    if (!is_class_const(nt, recv)) continue;
+    /* top-level already: what is not supported is the shape, so say that
+       rather than the placement message below (from the #5078 review) */
+    if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode ||
+        nt_ref(nt, blk, "parameters") >= 0 || nt_ref(nt, s, "arguments") >= 0) {
+      char msg[256];
+      snprintf(msg, sizeof msg, "Class.%s adds methods to Class only with a literal block and "
+                                "no block parameters or arguments", nt_str(nt, s, "name"));
+      unsupported_feature(c, s, msg);
+      continue;
+    }
     int bbody = nt_ref(nt, blk, "body");
     long long line = nt_int(nt, s, "node_line", 0), file = nt_int(nt, s, "node_file", 0),
               col = nt_int(nt, s, "node_col", 0);

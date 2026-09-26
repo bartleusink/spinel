@@ -1040,6 +1040,16 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a method added to Class, called on a builtin class, compiled)"; ok=0; \
 	else grep -q "a method added to Class is not supported on a builtin class" "$$tmp/cb.out" || \
 	  { echo "reject-test: FAIL (a method added to Class, called on a builtin class, refused without saying why)"; sed -n 1,5p "$$tmp/cb.out"; ok=0; }; fi; \
+	t=test/reject/class_eval_on_class_with_params.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/cp.c" >"$$tmp/cp.out" 2>&1; then \
+	  echo "reject-test: FAIL (a Class.class_eval with block parameters compiled)"; ok=0; \
+	else grep -q "only with a literal block and no block parameters or arguments" "$$tmp/cp.out" || \
+	  { echo "reject-test: FAIL (a Class.class_eval with block parameters refused without saying why)"; sed -n 1,5p "$$tmp/cp.out"; ok=0; }; fi; \
+	t=test/reject/class_reopen_reserved_name.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/cr.c" >"$$tmp/cr.out" 2>&1; then \
+	  echo "reject-test: FAIL (a program declaring Class__reopen compiled)"; ok=0; \
+	else grep -q "Class__reopen is reserved" "$$tmp/cr.out" || \
+	  { echo "reject-test: FAIL (a program declaring Class__reopen refused without saying why)"; sed -n 1,5p "$$tmp/cr.out"; ok=0; }; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 
