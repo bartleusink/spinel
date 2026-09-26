@@ -104,6 +104,45 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
 int patch_lv_reads(Compiler *c, int id, const char *nm, TyKind ty,
                            int *ids_out, TyKind *ty_out, int cap);
 
+/* Emit, into g_pre after the caller's `<lhs> = `, the rest of the statement
+   binding a hash block's first parameter to entry `ti` of `_t<trecv>`: the
+   boxed [k, v] pair when `pair`, else the key or the value per `is_key`. */
+static void emit_hash_p0_rhs(Compiler *c, TyKind rt, const char *hn,
+                             int trecv, int ti, int pair, int is_key) {
+  TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+  if (pair) {
+    int tpp = ++g_tmp;
+    buf_printf(g_pre, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", tpp, tpp);
+    if (rt == TY_POLY_POLY_HASH) {
+      buf_printf(g_pre, "sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]); ", tpp, trecv, trecv, ti);
+      buf_printf(g_pre, "sp_PolyArray_push(_t%d, _t%d->vals[_t%d->order[_t%d]]); ", tpp, trecv, trecv, ti);
+    }
+    else {
+      char kx[96], vx[128];
+      snprintf(kx, sizeof kx, "_t%d->order[_t%d]", trecv, ti);
+      snprintf(vx, sizeof vx, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
+      Buf bk; memset(&bk, 0, sizeof bk); emit_boxed_text(c, kt, kx, &bk);
+      Buf bv; memset(&bv, 0, sizeof bv); emit_boxed_text(c, vt, vx, &bv);
+      buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s); sp_PolyArray_push(_t%d, %s); ",
+                 tpp, bk.p ? bk.p : "sp_box_nil()", tpp, bv.p ? bv.p : "sp_box_nil()");
+      free(bk.p); free(bv.p);
+    }
+    buf_printf(g_pre, "sp_box_poly_array(_t%d); });\n", tpp);
+  }
+  else if (is_key) {
+    if (rt == TY_POLY_POLY_HASH)
+      buf_printf(g_pre, "_t%d->keys[_t%d->order[_t%d]];\n", trecv, trecv, ti);
+    else
+      buf_printf(g_pre, "_t%d->order[_t%d];\n", trecv, ti);
+  }
+  else {
+    if (rt == TY_POLY_POLY_HASH)
+      buf_printf(g_pre, "_t%d->vals[_t%d->order[_t%d]];\n", trecv, trecv, ti);
+    else
+      buf_printf(g_pre, "sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", hn, trecv, trecv, ti);
+  }
+}
+
 /* Bind a hash-iteration block's parameters to C locals for entry `ti` of the
    materialized hash temp `_t<trecv>` (type rt, runtime cname hn), emit the
    block's leading statements into g_pre at g_indent+1, evaluate its final
@@ -147,37 +186,8 @@ static char *emit_hash_block_eval(Compiler *c, int block, TyKind rt, const char 
     emit_indent(g_pre, g_indent + 1);
     if (ns0) {
       st0 = ++g_tmp; emit_ctype(c, p0_actual, g_pre);
-      if (!p1_orig && p0_solo_is_value == 2) {
-        int tpp = ++g_tmp;
-        buf_printf(g_pre, " lv__bp%d = ({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", st0, tpp, tpp);
-        if (rt == TY_POLY_POLY_HASH) {
-          buf_printf(g_pre, "sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]); ", tpp, trecv, trecv, ti);
-          buf_printf(g_pre, "sp_PolyArray_push(_t%d, _t%d->vals[_t%d->order[_t%d]]); ", tpp, trecv, trecv, ti);
-        }
-        else {
-          char kx[96], vx[128];
-          snprintf(kx, sizeof kx, "_t%d->order[_t%d]", trecv, ti);
-          snprintf(vx, sizeof vx, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
-          Buf bk; memset(&bk, 0, sizeof bk); emit_boxed_text(c, kt, kx, &bk);
-          Buf bv; memset(&bv, 0, sizeof bv); emit_boxed_text(c, vt, vx, &bv);
-          buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s); sp_PolyArray_push(_t%d, %s); ",
-                     tpp, bk.p ? bk.p : "sp_box_nil()", tpp, bv.p ? bv.p : "sp_box_nil()");
-          free(bk.p); free(bv.p);
-        }
-        buf_printf(g_pre, "sp_box_poly_array(_t%d); });\n", tpp);
-      }
-      else if (p0_is_key) {
-        if (rt == TY_POLY_POLY_HASH)
-          buf_printf(g_pre, " lv__bp%d = _t%d->keys[_t%d->order[_t%d]];\n", st0, trecv, trecv, ti);
-        else
-          buf_printf(g_pre, " lv__bp%d = _t%d->order[_t%d];\n", st0, trecv, ti);
-      }
-      else {
-        if (rt == TY_POLY_POLY_HASH)
-          buf_printf(g_pre, " lv__bp%d = _t%d->vals[_t%d->order[_t%d]];\n", st0, trecv, trecv, ti);
-        else
-          buf_printf(g_pre, " lv__bp%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", st0, hn, trecv, trecv, ti);
-      }
+      buf_printf(g_pre, " lv__bp%d = ", st0);
+      emit_hash_p0_rhs(c, rt, hn, trecv, ti, !p1_orig && p0_solo_is_value == 2, p0_is_key);
       for (int ri = 0; ri < g_nren; ri++) {
         if (sp_streq(g_ren_from[ri], p0_orig)) {
           sri0 = ri; strncpy(sro0, g_ren_to[ri], sizeof sro0 - 1);
@@ -190,37 +200,8 @@ static char *emit_hash_block_eval(Compiler *c, int block, TyKind rt, const char 
       }
     }
     else {
-      if (!p1_orig && p0_solo_is_value == 2) {
-        int tpp = ++g_tmp;
-        buf_printf(g_pre, "lv_%s = ({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", p0, tpp, tpp);
-        if (rt == TY_POLY_POLY_HASH) {
-          buf_printf(g_pre, "sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]); ", tpp, trecv, trecv, ti);
-          buf_printf(g_pre, "sp_PolyArray_push(_t%d, _t%d->vals[_t%d->order[_t%d]]); ", tpp, trecv, trecv, ti);
-        }
-        else {
-          char kx[96], vx[128];
-          snprintf(kx, sizeof kx, "_t%d->order[_t%d]", trecv, ti);
-          snprintf(vx, sizeof vx, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
-          Buf bk; memset(&bk, 0, sizeof bk); emit_boxed_text(c, kt, kx, &bk);
-          Buf bv; memset(&bv, 0, sizeof bv); emit_boxed_text(c, vt, vx, &bv);
-          buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s); sp_PolyArray_push(_t%d, %s); ",
-                     tpp, bk.p ? bk.p : "sp_box_nil()", tpp, bv.p ? bv.p : "sp_box_nil()");
-          free(bk.p); free(bv.p);
-        }
-        buf_printf(g_pre, "sp_box_poly_array(_t%d); });\n", tpp);
-      }
-      else if (p0_is_key) {
-        if (rt == TY_POLY_POLY_HASH)
-          buf_printf(g_pre, "lv_%s = _t%d->keys[_t%d->order[_t%d]];\n", p0, trecv, trecv, ti);
-        else
-          buf_printf(g_pre, "lv_%s = _t%d->order[_t%d];\n", p0, trecv, ti);
-      }
-      else {
-        if (rt == TY_POLY_POLY_HASH)
-          buf_printf(g_pre, "lv_%s = _t%d->vals[_t%d->order[_t%d]];\n", p0, trecv, trecv, ti);
-        else
-          buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", p0, hn, trecv, trecv, ti);
-      }
+      buf_printf(g_pre, "lv_%s = ", p0);
+      emit_hash_p0_rhs(c, rt, hn, trecv, ti, !p1_orig && p0_solo_is_value == 2, p0_is_key);
     }
   }
   if (p1_orig) {
