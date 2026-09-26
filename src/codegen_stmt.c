@@ -2281,7 +2281,7 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", tmp);
       int first = 1;
       for (int k = 0; k < c->nclasses; k++) {
-        if (k == cid || is_descendant(c, k, cid)) {
+        if (class_isa_user(c, k, cid, cn)) {
           buf_printf(b, "%s%s.cls_id == %d", first ? "" : " || ", tmp, k);
           first = 0;
         }

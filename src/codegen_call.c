@@ -16905,6 +16905,22 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
 }
 
 
+/* Whether user class k was written as a module (`module M`). */
+static int class_is_module_def(Compiler *c, int k) {
+  const char *dt = c->classes[k].def_node >= 0 ? nt_type(c->nt, c->classes[k].def_node) : NULL;
+  return dt && sp_streq(dt, "ModuleNode");
+}
+
+/* Whether an instance of user class k is_a? user class or module `cid`
+   (named `cn`): cid is k, a superclass of it, or a module k or a
+   superclass includes. The runtime class tests of a boxed value list the
+   classes this answers yes for. */
+int class_isa_user(Compiler *c, int k, int cid, const char *cn) {
+  if (k == cid || is_descendant(c, k, cid)) return 1;
+  return class_is_module_def(c, cid) && !class_is_module_def(c, k) &&
+         class_includes_module_named(c, k, cn);
+}
+
 /* The runtime test for `<poly value v> is_a? <class named cn>` (exact: the
    instance_of? form, no ancestry). Shared by is_a?/kind_of?/instance_of? and by
    `Klass === poly`, which used to carry its own shorter copy of the table and
@@ -16944,8 +16960,11 @@ static int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int ex
     if (cid >= 0) {
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", v);
       int first = 1;
+      /* a module is an ancestor of every class that includes it: an
+         `A.new` read out of a mixed array answers is_a?(Greet) as the typed
+         receiver does */
       for (int k = 0; k < c->nclasses; k++)
-        if (k == cid || (!exact && is_descendant(c, k, cid))) {
+        if (k == cid || (!exact && class_isa_user(c, k, cid, cn))) {
           buf_printf(b, "%s%s.cls_id == %d", first ? "" : " || ", v, k); first = 0;
         }
       if (first) buf_puts(b, "0");
