@@ -20483,6 +20483,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         int any_splat_pc = 0;
         for (int k = 0; k < argc; k++)
           if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) any_splat_pc = 1;
+        if (argc > 0 && kwh_only_spreads(nt, argv[argc - 1])) any_splat_pc = 1;
         if (any_splat_pc) {
           g_needs_proc_poly_argslot = 1;
           int ta = ++g_tmp;
@@ -20504,7 +20505,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
             else {
               emit_boxed(c, argv[k], &ab);
               emit_indent(g_pre, g_indent);
-              buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", ta, ab.p ? ab.p : "sp_box_nil()");
+              if (kwh_only_spreads(nt, argv[k]))
+                buf_printf(g_pre, "{ sp_RbVal _kh = %s; if (sp_poly_length(_kh) > 0) sp_PolyArray_push(_t%d, _kh); }\n",
+                           ab.p ? ab.p : "sp_box_nil()", ta);
+              else
+                buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", ta, ab.p ? ab.p : "sp_box_nil()");
             }
             free(ab.p);
           }
@@ -22409,6 +22414,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int any_splat = 0;
       for (int k = 0; k < argc; k++)
         if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) any_splat = 1;
+      if (argc > 0 && kwh_only_spreads(nt, argv[argc - 1])) any_splat = 1;
       if (any_splat) {
         g_needs_proc_poly_argslot = 1;
         int ta = ++g_tmp;
@@ -22430,7 +22436,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           else {
             emit_boxed(c, argv[k], &ab);
             emit_indent(g_pre, g_indent);
-            buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);%c", ta, ab.p ? ab.p : "sp_box_nil()", 10);
+            if (kwh_only_spreads(nt, argv[k]))
+              buf_printf(g_pre, "{ sp_RbVal _kh = %s; if (sp_poly_length(_kh) > 0) sp_PolyArray_push(_t%d, _kh); }%c",
+                         ab.p ? ab.p : "sp_box_nil()", ta, 10);
+            else
+              buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);%c", ta, ab.p ? ab.p : "sp_box_nil()", 10);
           }
           free(ab.p);
         }

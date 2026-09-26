@@ -6190,7 +6190,10 @@ else {
       emit_boxed(c, inner, &kel);
     }
     else emit_boxed(c, kwh, &kel);
-    buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, kel.p ? kel.p : "sp_box_nil()");
+    if (kwh_only_spreads(nt, kwh))
+      buf_printf(b, " { sp_RbVal _kh = %s; if (sp_poly_length(_kh) > 0) sp_PolyArray_push(_t%d, _kh); }", kel.p ? kel.p : "sp_box_nil()", t);
+    else
+      buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, kel.p ? kel.p : "sp_box_nil()");
     free(kel.p);
   }
   buf_printf(b, " _t%d; })", t);
