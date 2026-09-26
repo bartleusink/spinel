@@ -9194,7 +9194,8 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  sp_user_exc_parent_fn = sp_user_exc_parent;\n"
                 "  sp_user_exc_modules_fn = sp_user_exc_modules;\n"
                 "  sp_poly_is_a_hook = sp_poly_is_a;\n"
-                "  sp_class_le_id_fn = sp_class_le_ids;\n");
+                "  sp_class_le_id_fn = sp_class_le_ids;\n"
+                "  sp_class_kind_of_name_fn = sp_class_kind_of_name;\n");
   /* an unoptimised build runs its fibers on 1 MB stacks (see g_opt_level);
      SPINEL_FIBER_STACK in the environment still wins */
   if (g_opt_level < 2)
@@ -10185,6 +10186,31 @@ static int emit_write_file(const char *path, const char *text) {
 }
 
 /* ---- top level ---- */
+
+/* The builtin class directly above a user class that has no user superclass:
+   Struct (-145) or Data (-146) for a Struct.new / Data.define class, the named
+   builtin for `class E < StandardError`, Object (-116) otherwise. This is the
+   row the generated sp_class_superclass table carries for the class, so the
+   runtime's is_a? walk and the compile-time case arm read one answer. */
+int class_builtin_superclass(Compiler *c, int i) {
+  int builtin_par = c->classes[i].is_struct ? (c->classes[i].is_data ? -146 : -145)
+                                            : -116;  /* Object */
+  int sc_node = nt_ref(c->nt, c->classes[i].def_node, "superclass");
+  if (sc_node >= 0) {
+    const char *sc_ty = nt_type(c->nt, sc_node);
+    const char *sc_nm = (sc_ty && (sp_streq(sc_ty, "ConstantReadNode") || sp_streq(sc_ty, "ConstantPathNode"))) ? nt_str(c->nt, sc_node, "name") : NULL;
+    if (sc_nm) { int bid = builtin_class_id(sc_nm); if (bid != 0) builtin_par = bid; }
+  }
+  return builtin_par;
+}
+
+/* The builtin class above the whole user chain of `cid`: walk the user
+   superclasses to the root and answer that root's builtin superclass. */
+int class_builtin_parent(Compiler *c, int cid) {
+  int k = cid;
+  while (k >= 0 && c->classes[k].parent >= 0) k = c->classes[k].parent;
+  return k >= 0 ? class_builtin_superclass(c, k) : -116;
+}
 
 /* Conservative pre-scan: does the program use the class-introspection helper
    bank (sp_class_to_s / sp_class_superclass / sp_class_is_ancestor /
@@ -11472,18 +11498,7 @@ char *codegen_program(const NodeTable *nt) {
         buf_printf(&b, "  case %d: return ((sp_Class){%d});\n", i, par);
       }
       else {
-        /* Check if the ClassNode has a builtin superclass. */
-        int sc_node = nt_ref(c->nt, c->classes[i].def_node, "superclass");
-        /* a Struct/Data-generated class sits under the Struct/Data builtin
-           (Pt = Struct.new(:x) -> Pt.superclass == Struct, CRuby) */
-        int builtin_par = c->classes[i].is_struct ? (c->classes[i].is_data ? -146 : -145)
-                                                  : -116;  /* Object */
-        if (sc_node >= 0) {
-          const char *sc_ty = nt_type(c->nt, sc_node);
-          const char *sc_nm = (sc_ty && (sp_streq(sc_ty, "ConstantReadNode") || sp_streq(sc_ty, "ConstantPathNode"))) ? nt_str(c->nt, sc_node, "name") : NULL;
-          if (sc_nm) { int bid = builtin_class_id(sc_nm); if (bid != 0) builtin_par = bid; }
-        }
-        buf_printf(&b, "  case %d: return ((sp_Class){%d});\n", i, builtin_par);
+        buf_printf(&b, "  case %d: return ((sp_Class){%d});\n", i, class_builtin_superclass(c, i));
       }
     }
     buf_puts(&b, "  default: return ((sp_Class){-116});\n  }\n}\n");
@@ -11504,6 +11519,23 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(&b, "    if(cur.cls_id==-117)break;\n"); /* BasicObject: root */
     buf_puts(&b, "    sp_Class next=cur.cls_id>=0?sp_class_superclass(cur):sp_builtin_superclass(cur);\n");
     buf_puts(&b, "    if(next.cls_id==cur.cls_id)break;\n");
+    buf_puts(&b, "    cur=next;\n");
+    buf_puts(&b, "  }\n");
+    buf_puts(&b, "  return 0;\n}\n");
+    /* The same walk up from a user class, matching an ANCESTOR by name: the
+       runtime's poly is_a? and class-arm helper hold the arm's class as the
+       name it was written with. The class itself was compared before the
+       call, and Object and BasicObject were answered there too, so the walk
+       starts one step up and stops at Object: a plain user class costs no
+       compare, a Struct.new class one. (A name-to-id table scan would cost
+       eighty per call, on every poly is_a? a user object fails.) */
+    buf_puts(&b, "static int sp_class_kind_of_name(int cls, const char *cn){\n");
+    buf_puts(&b, "  sp_Class cur = {cls, NULL};\n");
+    buf_printf(&b, "  for(int _i=0;_i<%d;_i++){\n", depth);
+    buf_puts(&b, "    sp_Class next=cur.cls_id>=0?sp_class_superclass(cur):sp_builtin_superclass(cur);\n");
+    buf_puts(&b, "    if(next.cls_id==cur.cls_id||next.cls_id==-116||next.cls_id==-117)return 0;\n");
+    buf_puts(&b, "    const char *s=sp_class_to_s(next);\n");
+    buf_puts(&b, "    if(s&&s[0]&&!strcmp(s,cn))return 1;\n");
     buf_puts(&b, "    cur=next;\n");
     buf_puts(&b, "  }\n");
     buf_puts(&b, "  return 0;\n}\n");

@@ -8659,6 +8659,12 @@ static sp_bool sp_poly_kind_of_builtin(sp_RbVal v, const char *cn) {
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_user_exc_parent_fn &&
       sp_user_exc_parent_fn(sp_poly_class_name(v)))
     return (sp_bool)sp_exc_is_a((volatile struct sp_Exception_s *)v.v.p, cn);
+  /* A user class under a builtin class (a Struct.new or Data.define class, a
+     subclass of either) boxes under its own id, so the exact-name test above
+     never saw Struct or Data. The program's class table records the builtin
+     above the class: walk it, as is_a? on the typed slot does. */
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && sp_class_kind_of_name_fn)
+    return (sp_bool)sp_class_kind_of_name_fn((int)v.cls_id, cn);
   return FALSE;
 }
 /* is_a?/instance_of? for a poly value against a RUNTIME class value `cls` (a

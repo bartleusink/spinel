@@ -2628,6 +2628,15 @@ static int emit_obj_class_when(Compiler *c, TyKind pt, const char *cn, int t, Bu
     emit_obj_live(c, pt, t, b);
     return 1;
   }
+  /* the builtin class directly above the user chain (Struct for a Struct.new
+     class, Data for a Data.define one, the named superclass of
+     `class E < StandardError`): the row the generated sp_class_superclass
+     table carries, which is_a? on the same slot already reads */
+  int bid = builtin_class_id(cn);
+  if (tcid < 0 && bid < 0 && class_builtin_parent(c, cid) == bid) {
+    emit_obj_live(c, pt, t, b);
+    return 1;
+  }
   /* a builtin exception above the class table: the runtime chain answers,
      asked of a live object only (sp_exc_is_a reads the NULL otherwise) */
   Buf eb; memset(&eb, 0, sizeof eb);
