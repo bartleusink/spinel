@@ -4650,7 +4650,21 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
     /* a native handle or value kind answers `cond === subj` the way
        an explicit === does (emit_native_object_protocol) */
     if (!emit_native_case_eq(c, cond, pt, sref2, b)) {
-      buf_printf(b, "(_t%d == ", t); emit_expr(c, cond, b); buf_puts(b, ")");
+      /* an object without an === or == of its own answers the inherited
+         one: a Struct's is by member value, a Comparable's comes from its
+         <=>, and a boxed compare reaches both (`when ORIGIN` against a
+         Point). The pointer compare below answered identity for all. */
+      TyKind ct = comp_ntype(c, cond);
+      if (ty_is_object(pt) || ty_is_object(ct)) {
+        buf_puts(b, "sp_poly_eq(");
+        emit_boxed(c, cond, b);
+        buf_puts(b, ", ");
+        emit_boxed_text(c, pt, sref2, b);
+        buf_puts(b, ")");
+      }
+      else {
+        buf_printf(b, "(_t%d == ", t); emit_expr(c, cond, b); buf_puts(b, ")");
+      }
     }
   }
 }
