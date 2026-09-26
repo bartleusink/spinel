@@ -1811,7 +1811,7 @@ int *ie_body_retype(Compiler *c, int body, int cls) {
   snap[0] = n;
   for (int i = 0; i < n; i++) { snap[1 + i] = (int)c->ntype[i]; snap[1 + n + i] = g_ie_node_class[i]; }
   mark_ie_subtree(c, body, cls);
-  infer_subtree(c, body);
+  if (cls >= 0) infer_subtree(c, body);
   return snap;
 }
 
@@ -1834,7 +1834,7 @@ int ie_poly_classes_at(Compiler *c, int node, int *out, int max) {
    enclosing class and no instance_eval/exec receiver rebinding it. */
 int self_is_main(Compiler *c, int node) {
   Scope *s = comp_scope_of(c, node);
-  return s && s->class_id < 0 && an_ie_class_id < 0 && ie_class_of(c, node) < 0;
+  return s && s->class_id < 0 && an_ie_class_id < 0 && ie_class_of(c, node) == -1;
 }
 
 /* Register an ivar first assigned inside an instance_exec/instance_eval block on

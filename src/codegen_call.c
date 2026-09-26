@@ -27518,14 +27518,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       const char *sv_self = g_self, *sv_deref = g_self_deref;
       char selfb[32]; snprintf(selfb, sizeof selfb, "_t%d", tself);
       g_self = selfb; g_self_deref = ".";
+      int *nsnap = ie_body_retype(c, nbody, -2 - id);
       for (int j = 0; j < nbn - 1; j++) emit_stmt(c, nbb[j], g_pre, g_indent);
-      if (nbn == 0) { g_self = sv_self; g_self_deref = sv_deref; buf_puts(b, "sp_box_nil()"); return; }
+      if (nbn == 0) { ie_body_restore(c, nsnap); g_self = sv_self; g_self_deref = sv_deref; buf_puts(b, "sp_box_nil()"); return; }
       int nscalar = is_scalar_ret(nbt) && nbt != TY_VOID && nbt != TY_NIL && nbt != TY_UNKNOWN;
       int nbox = comp_ntype(c, id) == TY_POLY && nbt != TY_POLY;
       if (nscalar) {
         int tr = ++g_tmp;
-        emit_indent(g_pre, g_indent); emit_ctype(c, nbt, g_pre); buf_printf(g_pre, " _t%d = ", tr);
-        Buf vb = expr_buf(c, nbb[nbn - 1]); buf_printf(g_pre, "%s;\n", vb.p ? vb.p : "0"); free(vb.p);
+        Buf vb = expr_buf(c, nbb[nbn - 1]);
+        emit_indent(g_pre, g_indent); emit_ctype(c, nbt, g_pre);
+        buf_printf(g_pre, " _t%d = %s;\n", tr, vb.p ? vb.p : "0"); free(vb.p);
+        ie_body_restore(c, nsnap);
         g_self = sv_self; g_self_deref = sv_deref;
         char trb[24]; snprintf(trb, sizeof trb, "_t%d", tr);
         if (nbox) emit_boxed_text(c, nbt, trb, b);
@@ -27533,6 +27536,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       }
       else {
         Buf vb = expr_buf(c, nbb[nbn - 1]);
+        ie_body_restore(c, nsnap);
         g_self = sv_self; g_self_deref = sv_deref;
         if (nbox && vb.p) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "%s;\n", vb.p); }
         buf_printf(b, "%s", vb.p && !nbox ? vb.p : "sp_box_nil()"); free(vb.p);

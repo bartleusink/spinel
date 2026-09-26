@@ -20,4 +20,15 @@ Loud
 -4
 8
 ["hi", "x", "1", "2", "6"]
+Tag
+"tag"
+Tag
+true
+true
+Tag
+Tag
+true
+[Tag, 1]
+Loud
+nil
 undefined method 'say' for nil

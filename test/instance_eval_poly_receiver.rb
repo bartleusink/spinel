@@ -78,6 +78,27 @@ p exec_on(:whisper, 7) { |n| say(n + 1) }
 p exec_on(:loud, 1, 2) { |a, b| say(a + b) }
 p REG[:quiet].log
 
+# self in the block is the receiver, whether or not the block calls anything
+class Tag
+  def name = "tag"
+end
+TAGS = {}
+def on_tag(&b) = (t = TAGS[:t]; t ||= Tag.new; TAGS[:t] = t; t.instance_eval(&b))
+p on_tag { self }.class
+p on_tag { self.name }
+p on_tag { self.class }
+p on_tag { self == TAGS[:t] }
+seen = []
+on_tag { seen << self }
+p seen[0].equal?(TAGS[:t])
+t = TAGS[:t]
+p t.instance_eval { self }.class
+p t.instance_eval { self.class }
+p t.instance_eval { self.equal?(t) }
+p t.instance_exec(1) { |n| [self.class, n] }
+p REG[:loud].instance_eval { say(:s); self }.class
+p TAGS[:none].instance_eval { self }
+
 # a receiver that cannot run the block raises like CRuby
 begin
   REG[:missing].instance_eval { say :nope }

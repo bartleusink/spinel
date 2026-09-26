@@ -7218,7 +7218,7 @@ TyKind infer_uncached(Compiler *c, int id) {
     if (self_cls >= 0 && s->is_cmethod) return TY_CLASS;
     /* `self` inside an instance_eval/exec block is the rebound receiver. */
     if (self_cls < 0) self_cls = (an_ie_class_id >= 0) ? an_ie_class_id : ie_class_of(c, id);
-    if (self_cls < 0) return self_is_main(c, id) ? TY_POLY : TY_UNKNOWN;   /* main, a boxed Object (#4926) */
+    if (self_cls < 0) return TY_POLY;   /* main, a boxed Object (#4926), or a boxed receiver */
     const char *cn = c->classes[self_cls].name;
     if (sp_streq(cn, "String"))  return TY_STRING;
     if (sp_streq(cn, "Integer")) return TY_INT;
