@@ -23599,11 +23599,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     if (sp_streq(name, "printf") && argc >= 1) {
       /* format into a string, then write it (#2796) */
       int tfp = ++g_tmp, tfa = ++g_tmp;
-      emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "const char *_t%d = ", tfp);
+      /* the format goes in a String slot, and is emitted before its
+         declaration is opened, as in Kernel#format */
       Buf ffb; memset(&ffb, 0, sizeof ffb);
-      emit_expr(c, argv[0], &ffb);
-      buf_printf(g_pre, "%s;\n", ffb.p ? ffb.p : "\"\"");
+      emit_str_expr(c, argv[0], &ffb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);\n", tfp, ffb.p ? ffb.p : "\"\"", tfp);
       free(ffb.p);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tfa, tfa);
@@ -24753,13 +24754,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if ((sp_streq(name, "format") || sp_streq(name, "sprintf")) && ac >= 1) {
       /* format(fmt, *args) -> sp_str_format_polyarr(fmt, poly_arr) */
       int tf = ++g_tmp, ta = ++g_tmp;
-      emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "const char *_t%d = ", tf);
+      /* Emit the format into a local buffer BEFORE opening the `const char
+         *_t =` line: a format that is itself a call rooting its operands
+         pushes those statements to g_pre, which must land ahead of this
+         declaration, not inside its initializer (the args below do the same,
+         #1498 / #1508). */
       Buf fb; memset(&fb, 0, sizeof fb);
       emit_str_expr(c, av[0], &fb);
+      emit_indent(g_pre, g_indent);
       /* rooted too: a #to_str's answer lives on the heap, and every arg
          below boxes */
-      buf_printf(g_pre, "%s; SP_GC_ROOT_STR(_t%d);\n", fb.p ? fb.p : "", tf);
+      buf_printf(g_pre, "const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);\n", tf, fb.p ? fb.p : "", tf);
       free(fb.p);
       emit_indent(g_pre, g_indent);
       /* Rooted: every arg below boxes, and a box allocates. */
