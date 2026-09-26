@@ -14939,6 +14939,43 @@ static void rename_main_singleton_defs(Compiler *c) {
   free(st);
 }
 
+/* Propagate ivar types up the inheritance chain: a base-class method runs on
+   subclass instances, so an ivar it reads must carry the union of every
+   subclass's assignments. Without this, an abstract base whose @x is only set
+   to nil/placeholder there sees the wrong type when it calls `@x.foo`, even
+   though every concrete subclass assigns @x a real object.
+
+   It also keeps the structs cast-compatible: an inherited method is emitted
+   once and called as `sp_Base_m((sp_Base *)self)`, which is sound only while
+   the base struct is a common initial sequence of every subclass struct. An
+   ivar held as `sp_PolyArray *` in the base and `sp_RbVal` in a subclass has
+   a different width there, so every later field sits at another offset.
+
+   Monotonic (unify only widens), so callers iterate to a fixpoint. Returns
+   whether anything widened. */
+static int propagate_ivars_up(Compiler *c) {
+  int prop_changed = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    ClassInfo *kc = &c->classes[k];
+    for (int iv = 0; iv < kc->nivars; iv++) {
+      TyKind kt = kc->ivar_types[iv];
+      if (kt == TY_UNKNOWN) continue;
+      const char *ivn = kc->ivars[iv];
+      for (int a = kc->parent; a >= 0; a = c->classes[a].parent) {
+        int ai = comp_ivar_index(&c->classes[a], ivn);
+        if (ai < 0) continue;
+        if (class_ivar_pinned(&c->classes[a], ivn)) continue;  /* --rbs seed pins it */
+        TyKind merged = ty_unify(c->classes[a].ivar_types[ai], kt);
+        sp_ivwatch(ivn[0] == '@' ? ivn + 1 : ivn, "inherited_merge", c->classes[a].ivar_types[ai], merged);
+        if (merged != c->classes[a].ivar_types[ai]) {
+          c->classes[a].ivar_types[ai] = merged; prop_changed = 1;
+        }
+      }
+    }
+  }
+  return prop_changed;
+}
+
 void analyze_program(Compiler *c) {
   comp_poly_candidates_reset();
   comp_descendants_reset();
@@ -16912,34 +16949,9 @@ void analyze_program(Compiler *c) {
     for (int k = 0; k < 8; k++) { int ch = infer_write_types(c); ch |= infer_return_types(c); if (!ch) break; }
 
 
-  /* Propagate ivar types up the inheritance chain: a base-class method runs on
-     subclass instances, so an ivar it reads must carry the union of every
-     subclass's assignments. Without this, an abstract base whose @x is only set
-     to nil/placeholder there sees the wrong type when it calls `@x.foo`, even
-     though every concrete subclass assigns @x a real object. Monotonic (unify
-     only widens), so iterate to a fixpoint. */
-  for (int iter = 0; iter < 16; iter++) {
-    int prop_changed = 0;
-    for (int k = 0; k < c->nclasses; k++) {
-      ClassInfo *kc = &c->classes[k];
-      for (int iv = 0; iv < kc->nivars; iv++) {
-        TyKind kt = kc->ivar_types[iv];
-        if (kt == TY_UNKNOWN) continue;
-        const char *ivn = kc->ivars[iv];
-        for (int a = kc->parent; a >= 0; a = c->classes[a].parent) {
-          int ai = comp_ivar_index(&c->classes[a], ivn);
-          if (ai < 0) continue;
-          if (class_ivar_pinned(&c->classes[a], ivn)) continue;  /* --rbs seed pins it */
-          TyKind merged = ty_unify(c->classes[a].ivar_types[ai], kt);
-          sp_ivwatch(ivn[0] == '@' ? ivn + 1 : ivn, "inherited_merge", c->classes[a].ivar_types[ai], merged);
-          if (merged != c->classes[a].ivar_types[ai]) {
-            c->classes[a].ivar_types[ai] = merged; prop_changed = 1;
-          }
-        }
-      }
-    }
-    if (!prop_changed) break;
-  }
+  /* Widen inherited ivars to their union across the hierarchy (see
+     propagate_ivars_up). Monotonic, so iterate to a fixpoint. */
+  for (int iter = 0; iter < 16; iter++) if (!propagate_ivars_up(c)) break;
 
   /* Re-run param binding now that method(:sym) targets are int-typed (step 1
      above) and ivars carry their inheritance-unioned types: a base method
@@ -17153,6 +17165,12 @@ void analyze_program(Compiler *c) {
   for (int it = 0; it < 8; it++) {
     int ch = infer_ivar_types(c);
     ch |= infer_inherited_ivars(c);
+    /* ... and back up: the re-run above can widen a subclass's copy of an
+       inherited ivar (a poly-fallen param feeding it), and the up-propagation
+       above has long finished. Without this the base keeps the narrower type,
+       its struct stops being a prefix of the subclass's, and every inherited
+       method writes through the `(sp_Base *)self` cast at the wrong offsets. */
+    ch |= propagate_ivars_up(c);
     /* An ivar that widens here (e.g. `@query_log`, whose heterogeneous `= []` /
        `.push(str)` / `= prev` writes merge to poly) must carry its new type into
        any local that merely READS it (`prev = @query_log`). Widen such a local
