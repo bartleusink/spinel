@@ -9888,6 +9888,36 @@ static void mark_empty_literal_args(Compiler *c) {
       }
     }
   }
+  /* `h = {}; yield h` hands the hash to a block the method does not see:
+     the block fills it (`{ |t| t[:a] = 1 }`) with keys this scope has no
+     evidence of, and the String-keyed default then refused the store. Give
+     it the widest hash, as an argument to a yielding method gets. */
+  NT_FOREACH_KIND(nt, NK_YieldNode, id) {
+    int anode = nt_ref(nt, id, "arguments");
+    int an = 0; const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+    for (int j = 0; j < an; j++) {
+      int a = args[j];
+      if (a < 0 || a >= c->node_cap) continue;
+      NodeKind ak = nt_kind(nt, a);
+      if (ak == NK_HashNode) {
+        int en = 0; nt_arr(nt, a, "elements", &en);
+        if (en == 0) c->empty_hash_arg[a] = 1;
+        continue;
+      }
+      if (ak != NK_LocalVariableReadNode) continue;
+      const char *ln = nt_str(nt, a, "name");
+      Scope *asc = comp_scope_of(c, a);
+      if (!ln || !asc || !local_all_writes_empty_hash(c, asc, ln)) continue;
+      for (int w = 0; w < nt->count; w++) {
+        if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
+        const char *wn = nt_str(nt, w, "name");
+        if (!wn || !sp_streq(wn, ln) || comp_scope_of(c, w) != asc) continue;
+        int wv = nt_ref(nt, w, "value");
+        if (wv >= 0 && wv < c->node_cap && nt_kind(nt, wv) == NK_HashNode)
+          c->empty_hash_arg[wv] = 1;
+      }
+    }
+  }
   free(mm);
   free(nix);
   comp_scope_index_set_frozen(was_frozen);
