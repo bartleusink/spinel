@@ -4635,6 +4635,8 @@ int infer_param_types(Compiler *c) {
         mi = comp_method_in_chain(c, iec, name, &def_cid);
         if (mi >= 0) caller_cid = def_cid >= 0 ? def_cid : iec;
       }
+      { int pk[64], npk = ie_poly_classes_at(c, id, pk, 64);
+        for (int i = 0; i < npk; i++) changed |= bind_call_params(c, id, comp_method_in_chain(c, pk[i], name, NULL)); }
       /* Otherwise the call is on the enclosing definition's self: a class
          method resolves against the singleton chain, an instance method
          against the instance chain. Both come before a top-level def, which
@@ -5584,7 +5586,7 @@ int desugar_class_eval_value(Compiler *c) {
    these inside an instance_eval splice must stay receiverless (CRuby finds
    them through the receiver's ancestry via Kernel; spinel's equivalents are
    free functions). */
-static int ie_kernel_global(const char *n) {
+int ie_kernel_global(const char *n) {
   static const char *const K[] = {
     "puts", "print", "p", "pp", "warn", "raise", "require", "require_relative",
     "printf", "sprintf", "format", "rand", "srand", "sleep", "exit", "abort",

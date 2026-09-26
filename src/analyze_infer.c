@@ -4265,6 +4265,15 @@ else {
       int imi = comp_method_in_chain(c, iec, name, NULL);
       if (imi >= 0) return method_call_ret(c, imi, id);
     }
+    int pk[64], npk = ie_poly_classes_at(c, id, pk, 64);
+    TyKind pr = TY_UNKNOWN;
+    for (int i = 0; i < npk; i++) {
+      int imi = comp_method_in_chain(c, pk[i], name, NULL);
+      if (imi < 0) continue;
+      TyKind t = method_call_ret(c, imi, id);
+      pr = pr == TY_UNKNOWN ? t : ty_unify(pr, t);
+    }
+    if (pr != TY_UNKNOWN) return pr;
   }
   /* Kernel conversion with an explicit user-object receiver: obj.send(:Float, x)
      desugars to obj.Float(x); the private Kernel method is available on every
@@ -6568,6 +6577,7 @@ else {
     }
     return TY_POLY;
   }
+  if (sp_streq(name, "instance_exec") && rt == TY_POLY && nt_ref(nt, id, "block") >= 0) return TY_POLY;
 
   /* safe navigation &. with unresolved type: return poly (receiver may be nil at runtime) */
   {
@@ -7208,7 +7218,7 @@ TyKind infer_uncached(Compiler *c, int id) {
     if (self_cls >= 0 && s->is_cmethod) return TY_CLASS;
     /* `self` inside an instance_eval/exec block is the rebound receiver. */
     if (self_cls < 0) self_cls = (an_ie_class_id >= 0) ? an_ie_class_id : ie_class_of(c, id);
-    if (self_cls < 0) return self_is_main(c, id) ? TY_POLY : TY_UNKNOWN;   /* main, a boxed Object (#4926) */
+    if (self_cls < 0) return TY_POLY;   /* main, a boxed Object (#4926), or a boxed receiver */
     const char *cn = c->classes[self_cls].name;
     if (sp_streq(cn, "String"))  return TY_STRING;
     if (sp_streq(cn, "Integer")) return TY_INT;

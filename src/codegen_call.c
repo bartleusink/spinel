@@ -18482,6 +18482,87 @@ static int poly_binop_recv_temp(Compiler *c, int recv, int arg, Buf *b, int *stm
   return t;
 }
 
+static int g_ie_poly_node = -1;
+static int emit_ie_poly(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  int blk = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode || g_n_argov >= MAX_ARG_OVERRIDE) return 0;
+  int body = nt_ref(nt, blk, "body");
+  int cand[64];
+  const char *need = NULL;
+  int nc = ie_poly_self_classes(c, name, body, cand, 64, &need);
+  if (nc <= 0) return 0;
+  TyKind ret = comp_ntype(c, id);
+  int keep = is_scalar_ret(ret) && ret != TY_VOID && ret != TY_NIL && ret != TY_UNKNOWN;
+  int tv = hoist_boxed_rooted(c, recv), tr = ++g_tmp;
+  if (keep) {
+    emit_indent(g_pre, g_indent); emit_ctype(c, ret, g_pre);
+    buf_printf(g_pre, " _t%d = %s;\n", tr, ret == TY_POLY ? "sp_box_nil()" : default_value(ret));
+  }
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  int arms = 0;
+  for (int i = 0; i < nc; i++) {
+    int k = cand[i];
+    if (!c->classes[k].instantiated) continue;
+    const char *cn = c->classes[k].c_name;
+    int val = c->classes[k].is_value_type, ts = ++g_tmp;
+    Buf ab; memset(&ab, 0, sizeof ab);
+    Buf *sv_pre = g_pre; int sv_ind = g_indent;
+    g_pre = &ab; g_indent = sv_ind + 1;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_%s %s_t%d = %s(sp_%s *)_t%d.v.p;\n", cn, val ? "" : "*", ts, val ? "*" : "", cn, tv);
+    g_argov_node[g_n_argov] = recv;
+    snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ts);
+    g_n_argov++;
+    TyKind sv_rt = c->ntype[recv]; c->ntype[recv] = ty_object(k);
+    int sv_face = an_face_node(); TyKind sv_fk = an_face_kind();
+    an_set_face_node(recv, ty_object(k));
+    int sv_node = g_ie_poly_node; g_ie_poly_node = id;
+    int sv_disc = g_ie_discard_value; g_ie_discard_value = !keep;
+    int *snap = ie_body_retype(c, body, k);
+    Buf vb; memset(&vb, 0, sizeof vb);
+    emit_call(c, id, &vb);
+    TyKind vty = bn > 0 ? comp_ntype(c, bb[bn - 1]) : TY_NIL;
+    TyKind bnt = ie_splice_value_ty(c, body);
+    if (bnt != TY_UNKNOWN) vty = (vty == TY_NIL || vty == TY_UNKNOWN) ? bnt : ty_unify(vty, bnt);
+    ie_body_restore(c, snap);
+    g_ie_discard_value = sv_disc;
+    g_ie_poly_node = sv_node;
+    an_set_face_node(sv_face, sv_fk);
+    c->ntype[recv] = sv_rt;
+    g_n_argov--;
+    g_pre = sv_pre; g_indent = sv_ind;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "%sif (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == %d) {\n", arms ? "else " : "", tv, tv, k);
+    buf_puts(g_pre, ab.p ? ab.p : "");
+    if (keep && is_scalar_ret(vty) && vty != TY_VOID && vty != TY_NIL && vty != TY_UNKNOWN) {
+      const char *vt = vb.p ? vb.p : "0";
+      emit_indent(g_pre, g_indent + 1);
+      buf_printf(g_pre, "_t%d = ", tr);
+      if (vty == ret) buf_puts(g_pre, vt);
+      else if (ret == TY_POLY) emit_boxed_text(c, vty, vt, g_pre);
+      else if (vty == TY_POLY) emit_unbox_text(c, ret, vt, g_pre);
+      else {
+        Buf xb; memset(&xb, 0, sizeof xb);
+        emit_boxed_text(c, vty, vt, &xb);
+        emit_unbox_text(c, ret, xb.p ? xb.p : "sp_box_nil()", g_pre);
+        free(xb.p);
+      }
+      buf_puts(g_pre, ";\n");
+    }
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+    free(ab.p); free(vb.p);
+    arms++;
+  }
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "%ssp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d));\n", arms ? "else " : "", need, tv);
+  nd_stamp(id, ND_SWITCH);
+  buf_printf(b, "_t%d", keep ? tr : tv);
+  return 1;
+}
+
 /* the value read of a one-class hash being emitted in its boxed form */
 static int g_hv_read_node = -1;
 
@@ -27393,6 +27474,8 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
   }
 
   int ie_direct = recv >= 0 && (sp_streq(name, "instance_eval") || sp_streq(name, "instance_exec"));
+  if (ie_direct && g_ie_poly_node != id && comp_ntype(c, recv) == TY_POLY && emit_ie_poly(c, id, b))
+    return;
   /* instance_eval/exec on a non-object receiver (nil, a scalar): the block runs
      with self = the receiver. The object splice below needs a cls_id/ivar
      layout, so handle the non-object case directly here -- bind the params
@@ -27401,6 +27484,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
   if (ie_direct && recv >= 0) {
     int nblk = nt_ref(nt, id, "block");
     TyKind nrt = comp_ntype(c, recv);
+    if (nrt == TY_POLY) nblk = resolve_forwarded_block(c, nblk);
     if (!ty_is_object(nrt) && nblk >= 0 && nt_type(nt, nblk) &&
         sp_streq(nt_type(nt, nblk), "BlockNode")) {
       int nexec = sp_streq(name, "instance_exec");
@@ -27434,20 +27518,28 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       const char *sv_self = g_self, *sv_deref = g_self_deref;
       char selfb[32]; snprintf(selfb, sizeof selfb, "_t%d", tself);
       g_self = selfb; g_self_deref = ".";
+      int *nsnap = ie_body_retype(c, nbody, -2 - id);
       for (int j = 0; j < nbn - 1; j++) emit_stmt(c, nbb[j], g_pre, g_indent);
-      if (nbn == 0) { g_self = sv_self; g_self_deref = sv_deref; buf_puts(b, "sp_box_nil()"); return; }
+      if (nbn == 0) { ie_body_restore(c, nsnap); g_self = sv_self; g_self_deref = sv_deref; buf_puts(b, "sp_box_nil()"); return; }
       int nscalar = is_scalar_ret(nbt) && nbt != TY_VOID && nbt != TY_NIL && nbt != TY_UNKNOWN;
+      int nbox = comp_ntype(c, id) == TY_POLY && nbt != TY_POLY;
       if (nscalar) {
         int tr = ++g_tmp;
-        emit_indent(g_pre, g_indent); emit_ctype(c, nbt, g_pre); buf_printf(g_pre, " _t%d = ", tr);
-        Buf vb = expr_buf(c, nbb[nbn - 1]); buf_printf(g_pre, "%s;\n", vb.p ? vb.p : "0"); free(vb.p);
+        Buf vb = expr_buf(c, nbb[nbn - 1]);
+        emit_indent(g_pre, g_indent); emit_ctype(c, nbt, g_pre);
+        buf_printf(g_pre, " _t%d = %s;\n", tr, vb.p ? vb.p : "0"); free(vb.p);
+        ie_body_restore(c, nsnap);
         g_self = sv_self; g_self_deref = sv_deref;
-        buf_printf(b, "_t%d", tr);
+        char trb[24]; snprintf(trb, sizeof trb, "_t%d", tr);
+        if (nbox) emit_boxed_text(c, nbt, trb, b);
+        else buf_puts(b, trb);
       }
       else {
         Buf vb = expr_buf(c, nbb[nbn - 1]);
+        ie_body_restore(c, nsnap);
         g_self = sv_self; g_self_deref = sv_deref;
-        buf_printf(b, "%s", vb.p ? vb.p : "sp_box_nil()"); free(vb.p);
+        if (nbox && vb.p) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "%s;\n", vb.p); }
+        buf_printf(b, "%s", vb.p && !nbox ? vb.p : "sp_box_nil()"); free(vb.p);
       }
       return;
     }

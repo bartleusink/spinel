@@ -16,6 +16,8 @@
    wasm link reports as a signature mismatch and an LP64 link hides) */
 __attribute__((noreturn)) void unsupported_feature(Compiler *c, int id, const char *msg);
 int ie_class_of(Compiler *c, int node);
+int ie_poly_classes_at(Compiler *c, int node, int *out, int max);
+int ie_kernel_global(const char *n);
 
 /* Forward declarations for FFI helpers defined later in this file. */
 const char *ffi_arg_str(const NodeTable *nt, int nid);
