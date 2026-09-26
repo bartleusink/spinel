@@ -1936,12 +1936,16 @@ int static_isa_cond(Compiler *c, int pred) {
   }
   if (!ty_is_object(rt)) return -1;
   int rcls = ty_object_class(rt);
-  if (rcls == target) return 1;
+  /* a heap object slot may hold nil (its NULL), which is none of these: a
+     yes is answered at run time, where the call emitter tests the slot. A
+     no holds for nil too, and self is never nil. */
+  int nilable = !comp_ty_value_obj(c, rt) && nt_kind(nt, recv) != NK_SelfNode;
+  if (rcls == target) return nilable ? -1 : 1;
   if (sp_streq(nm, "instance_of?")) return 0;
-  if (is_descendant(c, rcls, target)) return 1;
+  if (is_descendant(c, rcls, target)) return nilable ? -1 : 1;
   /* a module the class (or a superclass) includes */
   if (comp_class_is_module(c, &c->classes[target]) &&
-      class_includes_module_named(c, rcls, target_name)) return 1;
+      class_includes_module_named(c, rcls, target_name)) return nilable ? -1 : 1;
   return 0;
 }
 
