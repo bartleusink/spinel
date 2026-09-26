@@ -935,6 +935,44 @@ int desugar_rightward_pattern(Compiler *c) {
   return changed;
 }
 
+/* `expr in pattern` is the one-arm `case expr; in pattern then true; else
+   false; end`, and is rewritten to it for the same reason the rightward form
+   is: the predicate had a condition emitter of its own that read a subset
+   of the patterns (a qualified array or hash pattern, `v in Pt[1, _]`, was
+   refused), and it bound nothing, where CRuby binds the pattern's names. */
+int desugar_match_predicate(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_MatchPredicateNode) continue;
+    int value = nt_ref(nt, id, "value");
+    int pattern = nt_ref(nt, id, "pattern");
+    if (value < 0 || pattern < 0) continue;
+    int inn = nt_new_node(nt, "InNode");
+    int st = nt_new_node(nt, "StatementsNode");
+    int tn = nt_new_node(nt, "TrueNode");
+    int els = nt_new_node(nt, "ElseNode");
+    int est = nt_new_node(nt, "StatementsNode");
+    int fn = nt_new_node(nt, "FalseNode");
+    if (inn < 0 || st < 0 || tn < 0 || els < 0 || est < 0 || fn < 0) continue;
+    nt_node_set_ref(nt, inn, "pattern", pattern);
+    nt_node_set_arr(nt, st, "body", &tn, 1);
+    nt_node_set_ref(nt, inn, "statements", st);
+    nt_node_set_arr(nt, est, "body", &fn, 1);
+    nt_node_set_ref(nt, els, "statements", est);
+    nt_node_set_type(nt, id, "CaseMatchNode");
+    nt_node_set_ref(nt, id, "predicate", value);
+    nt_node_set_arr(nt, id, "conditions", &inn, 1);
+    nt_node_set_ref(nt, id, "else_clause", els);
+    comp_grow_node_arrays(c);
+    int made[] = { inn, st, tn, els, est, fn };
+    for (int k = 0; k < 6; k++) c->nscope[made[k]] = c->nscope[id];
+    changed = 1;
+  }
+  return changed;
+}
+
 int desugar_step_kwargs(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;

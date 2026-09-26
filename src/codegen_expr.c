@@ -1245,43 +1245,6 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     return;
   }
 
-  if (sp_streq(ty, "MatchPredicateNode")) {
-    /* `expr in pattern` as a boolean: materialize the scrutinee, then yield the
-       pattern-match condition. Bindings are not introduced by the predicate
-       form here; an unsupported pattern rejects loudly. */
-    int value = nt_ref(nt, id, "value");
-    int pattern = nt_ref(nt, id, "pattern");
-    TyKind vt = comp_ntype(c, value);
-    if (vt == TY_UNKNOWN) vt = TY_POLY;
-    int tv = ++g_tmp;
-    Buf vb = expr_buf(c, value);
-    emit_indent(g_pre, g_indent); emit_ctype(c, vt, g_pre);
-    buf_printf(g_pre, " _t%d = %s;\n", tv, vb.p ? vb.p : default_value(vt));
-    free(vb.p);
-    if (needs_root(vt)) { emit_indent(g_pre, g_indent); emit_gc_root_tmp(c, vt, tv, g_pre); buf_puts(g_pre, "\n"); }
-    Buf cb; memset(&cb, 0, sizeof cb);
-    if (!emit_pm_cond(c, pattern, tv, vt, &cb)) {
-      free(cb.p);
-      unsupported(c, id, "one-line `in` pattern");
-      return;
-    }
-    /* Bind the pattern's captures in the enclosing scope on a successful match
-       (CRuby introduces them like `value => pattern` does, but returns a boolean
-       instead of raising). Evaluate the condition once, bind under it, yield it. */
-    int tc = ++g_tmp;
-    emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "int _t%d = (%s);\n", tc, cb.p ? cb.p : "0");
-    free(cb.p);
-    emit_indent(g_pre, g_indent); buf_printf(g_pre, "if (_t%d) {\n", tc);
-    char tvname[24]; snprintf(tvname, sizeof tvname, "_t%d", tv);
-    Buf boxb; memset(&boxb, 0, sizeof boxb); emit_boxed_text(c, vt, tvname, &boxb);
-    emit_pm_bind_pattern(c, pattern, boxb.p ? boxb.p : "sp_box_nil()", g_indent + 1, g_pre, comp_scope_of(c, id));
-    free(boxb.p);
-    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-    buf_printf(b, "_t%d", tc);
-    return;
-  }
-
   if (sp_streq(ty, "MatchWriteNode")) {
     /* `/(?<n>..)/ =~ str`: run the match (setting the match registers), bind
        each named group to its local (NULL = nil when it did not participate),
