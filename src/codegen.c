@@ -17902,6 +17902,16 @@ static void ext_refuse_param_mutation(Compiler *c) {
   }
 }
 
+/* An ext-init is where the library's life starts, not where the program
+   ends: as a required file's do in CRuby, its at_exit hooks -- and any an
+   entry registers later -- run when the host exits, from a C exit handler the
+   init arms as it arms the END blocks. That runs on the thread that calls
+   exit, and the host's status stands: an exit handler cannot exit again. */
+static void ext_arm_at_exit(Buf *body) {
+  buf_puts(&g_procs, "static void _sp_ext_at_exit(void) { sp_at_exit_run(0); }\n");
+  buf_puts(body, "  atexit(_sp_ext_at_exit);\n");
+}
+
 static void ext_generate_cruby_shim(Compiler *c) {
   Buf sb; memset(&sb, 0, sizeof sb);
   const char *feat = g_ext_feature ? g_ext_feature : "spinel_ext";
@@ -20769,15 +20779,8 @@ char *codegen_program(const NodeTable *nt) {
   if (g_uses_threads && !g_ext_init_name) buf_puts(body, "    sp_sched_drain();\n");
   /* main's exit status is the hooks' to change: a hook that calls `exit`, or
      that raises, decides what the program exits with (sp_at_exit_run). An
-     ext-init is where the library's life starts, not where the program ends:
-     as a required file's do in CRuby, its hooks -- and any an entry registers
-     later -- run when the host exits, from a C exit handler the init arms as
-     it arms the END blocks above. That runs on the thread that calls exit,
-     and the host's status stands: an exit handler cannot exit again. */
-  if (g_needs_at_exit && g_ext_init_name) {
-    buf_puts(&g_procs, "static void _sp_ext_at_exit(void) { sp_at_exit_run(0); }\n");
-    buf_puts(body, "  atexit(_sp_ext_at_exit);\n");
-  }
+     ext-init arms them for the host's exit instead (ext_arm_at_exit). */
+  if (g_needs_at_exit && g_ext_init_name) ext_arm_at_exit(body);
   if (g_ext_init_name) buf_puts(body, "}\n");
   else {
     if (g_needs_at_exit) buf_puts(body, "  _sp_main_rc = sp_at_exit_run(0);\n}\n");
