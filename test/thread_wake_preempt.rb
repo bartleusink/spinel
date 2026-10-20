@@ -4,9 +4,11 @@
 # CPU-bound threads a 1 ms timeslice. Sleepers and a Queue ping-pong run
 # beside more CPU-bound threads than workers, which spin until they are
 # done, so most wakes land on a busy worker. (The spinners pass now and then
-# for CRuby, whose woken threads otherwise wait for its 100 ms timeslice.) All three are read when the first thread starts; CRuby reads the
-# timeslice at startup and the others not at all, and the output does not
-# depend on them.
+# for CRuby, whose woken threads otherwise wait for its 100 ms timeslice.)
+# The spinners are stopped only once each has done a round: the woken threads
+# can be done before a spinner on a loaded machine first runs. All three are
+# read when the first thread starts; CRuby reads the timeslice at startup and
+# the others not at all, and the output does not depend on them.
 ENV["SPINEL_WORKERS"] = "4"
 ENV["RUBY_THREAD_TIMESLICE"] = "1"
 ENV["SPINEL_WAKE_PREEMPT"] = "1"
@@ -22,12 +24,14 @@ def spin(n)
 end
 
 $stop = false
+started = Queue.new
 busy = Array.new(12) do |k|
   Thread.new do
     rounds = 0
     until $stop
       spin(1000 + k)
       rounds += 1
+      started << k if rounds == 1
       Thread.pass if rounds % 16 == 0
     end
     rounds > 0
@@ -52,5 +56,6 @@ end
 p sleepers.map(&:value)
 p a.value
 p b.value
+12.times { started.pop }
 $stop = true
 p busy.map(&:value).uniq
