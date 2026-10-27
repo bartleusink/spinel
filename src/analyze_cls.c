@@ -2272,9 +2272,13 @@ static void cf_builtin_rule(CF *f, int v, int recv_el, const int *argv, int argc
       cf_kval(f, v);
       /* an OpenStruct reads such a name as its member (ostruct_member_name),
          whose value is one of its contents (an OpenStruct of a parsed
-         document's, `doc.size.max`) */
+         document's, `doc.size.max`); not count, whose dispatch keeps the
+         containers' arm (poly_ostruct_member_call), nor a call with
+         arguments, which reads no member */
       int rs = recv_el >= 0 ? cf_set_of(f, recv_el) : CF_EMPTY;
-      if (rs != CF_EMPTY && (rs == CF_ALL || f->pool[rs].os) && ostruct_member_name(nm)) cf_load(f, recv_el, v);
+      if (argc == 0 && rs != CF_EMPTY && (rs == CF_ALL || f->pool[rs].os) && ostruct_member_name(nm) &&
+          !sp_streq(nm, "count"))
+        cf_load(f, recv_el, v);
       return;
     }
     if (cf_element_answer(nm)) {
