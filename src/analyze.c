@@ -11412,9 +11412,23 @@ static int desugar_enum_named_call(Compiler *c, int id, NodeTable *nt, const cha
     int hac = 0;
     if (ha >= 0) nt_arr(nt, ha, "arguments", &hac);
     /* (not where a Hash reopen defines its own store) */
+    TyKind hrt = hrc >= 0 ? infer_type(c, hrc) : TY_UNKNOWN;
+    /* ...and on a Hash subclass instance whose class chain has no store of
+       its own: Hash's []=, even where the class defines its own []=, which
+       Hash#store does not call. Not where the class undefines store or
+       makes it private (NoMethodError on a receiver other than self), nor
+       where a Hash reopen defines its own []=. */
+    int scid = ty_is_object(hrt) ? ty_object_class(hrt) : -1;
+    int sub = hrc >= 0 && scid >= 0 && comp_ary_is_hash(c, scid) &&
+              (nt_int(nt, id, "builtin_only", 0) ||
+               (comp_arysub_name_is_array(c, scid, nm) && !comp_is_undeffed_in_chain(c, scid, nm) &&
+                (comp_method_vis_in_chain(c, scid, nm) == SP_VIS_PUBLIC ||
+                 nt_kind(nt, hrc) == NK_SelfNode))) &&
+              comp_builtin_kind_reopen_mi(c, TY_POLY_POLY_HASH, "[]=") < 0;
     if (hrc >= 0 && hac == 2 && nt_ref(nt, id, "block") < 0 &&
-        ty_is_hash(infer_type(c, hrc)) && an_reopen_owner(c, id, "Hash") < 0) {
+        (ty_is_hash(hrt) || sub) && an_reopen_owner(c, id, "Hash") < 0) {
       nt_node_set_str(nt, id, "name", "[]=");
+      if (sub) nt_node_set_int(nt, id, "builtin_only", 1);
       *changed = 1;
     }
     return 1;
@@ -14648,6 +14662,23 @@ static void oa_restore_pin(Compiler *c, OAS *sl) {
   else c->scopes[sl->sidx].ret_oa_pin = back;
 }
 
+/* Whether an instance of class ci can answer a call named `name`: a reader,
+   a method or an alias by the name in its chain or a reopened Object's, or a
+   method_missing. An ivar slot is listed under its reader's name whether or
+   not the class has that reader, so a `.b` on any dynamic receiver, or a
+   Symbol :b (a Struct with a member :b anywhere in the program spells one),
+   killed every class's @b. A class with a subclass, a Struct and the like
+   make no ivar slot at all, so the class's own chain is all a dynamic
+   receiver of it can reach. */
+static int oa_class_may_answer(Compiler *c, int ci, const char *name) {
+  if (comp_resolve_member(c, ci, name, 0, NULL, NULL) != SP_MEMBER_NONE) return 1;
+  const char *rn = comp_resolve_alias(c, ci, name);
+  if (rn && !sp_streq(rn, name) && comp_resolve_member(c, ci, rn, 0, NULL, NULL) != SP_MEMBER_NONE) return 1;
+  if (comp_method_in_chain(c, ci, "method_missing", NULL) >= 0) return 1;
+  int oc = comp_class_index(c, "Object");
+  return oc >= 0 && oc != ci && comp_resolve_member(c, oc, name, 0, NULL, NULL) != SP_MEMBER_NONE;
+}
+
 /* The slots by the name a call on a dynamic receiver reaches them under: an
    ivar slot by its reader's name, a method's value and parameter slots by
    the method's. The kill such a call makes read every slot, at every such
@@ -15509,8 +15540,10 @@ static int narrow_object_arrays(Compiler *c) {
           for (int pi = oa_byname_first(&oa_bn, name); pi >= 0; pi = oa_bn.next[pi]) {
             if (!sl[pi].alive) continue;
             /* a dynamic receiver may be this class: its reader would hand
-               the unboxed array to a caller expecting the boxed one */
-            if (sl[pi].ici >= 0 || !sl[pi].lv) { sl[pi].alive = 0; continue; }
+               the unboxed array to a caller expecting the boxed one -- when
+               the class has a reader, or a method, by the name at all */
+            if (sl[pi].ici >= 0) { if (oa_class_may_answer(c, sl[pi].ici, name)) sl[pi].alive = 0; continue; }
+            if (!sl[pi].lv) { sl[pi].alive = 0; continue; }
             Scope *PS = &c->scopes[sl[pi].sidx];
             for (int pk = 0; pk < PS->nparams; pk++)
               if (PS->pnames[pk] && scope_local(PS, PS->pnames[pk]) == sl[pi].lv)
@@ -15696,9 +15729,12 @@ static int narrow_object_arrays(Compiler *c) {
     for (int i = 0; i < n; i++) {
       if (sl[i].ici >= 0) {
         /* `send(:items)`, `instance_variable_get(:@items)`, `method(:items)`,
-           a re-declared accessor: any symbol naming the ivar or its reader */
+           a re-declared accessor: any symbol naming the ivar, or naming its
+           reader when the class can answer it (a `:b` that only names a
+           Struct member elsewhere reaches no `b` of this class) */
         const char *ivn = c->classes[sl[i].ici].ivars[sl[i].iiv];
-        if (anh_has(&spelled, ivn) || anh_has(&spelled, ivn + 1)) sl[i].alive = 0;
+        if (anh_has(&spelled, ivn) ||
+            (anh_has(&spelled, ivn + 1) && oa_class_may_answer(c, sl[i].ici, ivn + 1))) sl[i].alive = 0;
         continue;
       }
       if (!sl[i].lv && c->scopes[sl[i].sidx].name &&
@@ -51924,6 +51960,7 @@ void analyze_program(Compiler *c) {
   { c->share_args = NULL; handle_arg_tab_free(&hat); }
   /* the block bodies codegen types per arm, typed here once (#7483) */
   AN_PHASE("arm_facts", an_arm_facts(c));
+  if (elab_check_on(c)) elab_check_visibility(c);
   sp_timing_end(tm_an, "analysis", "");
 }
 

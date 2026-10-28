@@ -5793,6 +5793,17 @@ int call_never_returns(Compiler *c, int id) {
   }
   return mi >= 0 && c->scopes[mi].ret == TY_VOID;
 }
+/* The general Array a fresh typed Array becomes for a push or concat of
+   another kind (an_push_widens_fresh), as an sp_PolyArray * expression: a
+   copy of its elements that keeps its frozen flag (`s.split.freeze << 1`
+   raises FrozenError, as CRuby does). */
+void emit_fresh_lift_recv(Compiler *c, int recv, Buf *b) {
+  int tv = ++g_tmp, tp = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", tv);
+  emit_boxed(c, recv, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_PolyArray *_t%d = sp_poly_to_poly_array(_t%d);"
+                " if (sp_poly_frozen(_t%d)) _t%d->frozen = 1; _t%d; })", tv, tp, tv, tv, tp, tp);
+}
 /* The runtime conversion of a typed array to the poly array; NULL for a kind
    that has none. */
 const char *array_to_poly_fn(TyKind t) {
@@ -6390,12 +6401,13 @@ void emit_str_array_handles(Compiler *c, int v, Buf *b) {
   buf_printf(b, "({ sp_StrArray *_t%d = ", ta);
   emit_expr(c, v, b);
   /* (one-String mode: a nil Array stays nil -- `s&.split(",")` -- where
-     the loop built an empty one) */
+     the loop built an empty one). The copy stands for the same Ruby
+     object, so it keeps the frozen flag (`@b = ["x"].freeze`). */
   buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = _t%d ? sp_PolyArray_new() : NULL; SP_GC_ROOT(_t%d);"
                 " for (sp_int _t%d = 0; _t%d && _t%d < sp_StrArray_length(_t%d); _t%d++)"
                 " sp_PolyArray_push(_t%d, sp_box_nullable_obj(sp_String_new_shared(sp_StrArray_get(_t%d, _t%d)),"
-                " SP_BUILTIN_STRBUF)); _t%d; })",
-             ta, tp, ta, tp, ti, ta, ti, ta, ti, tp, ta, ti, tp);
+                " SP_BUILTIN_STRBUF)); if (_t%d) _t%d->frozen = _t%d->frozen; _t%d; })",
+             ta, tp, ta, tp, ti, ta, ti, ta, ti, tp, ta, ti, tp, tp, ta, tp);
 }
 /* --share-strings: is block parameter lv, bound to an element of kind et, a
    slot the scope holds as the shared handle (TY_STRBUF) over a String
