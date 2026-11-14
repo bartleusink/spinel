@@ -3457,18 +3457,20 @@ static void mark_ie_own(Compiler *c, int body, int cls) {
 static int ie_nested_own_block(Compiler *c, int node) {
   return node >= 0 && node < c->ie_map.cap && (c->ie_map.rb[node] & IE_RB_ROOT);
 }
-static void mark_ie_nonobj(Compiler *c, int node) {
+/* Set a per-node ie_map flag (nonobj, pending) over a block's subtree, short
+   of the defs, classes and modules in it, whose self is their own. */
+static void mark_ie_flag(Compiler *c, unsigned char *flag, int node) {
   if (node < 0 || node >= c->ie_map.cap) return;
   NodeKind k = nt_kind(c->nt, node);
   if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return;
-  if (!c->ie_map.nonobj[node]) { c->ie_map.nonobj[node] = 1; comp_touch_node(c, node); }
+  if (!flag[node]) { flag[node] = 1; comp_touch_node(c, node); }
   int nr = nt_num_refs(c->nt, node);
   for (int i = 0; i < nr; i++)
-    if (!ie_nested_own_block(c, nt_ref_at(c->nt, node, i))) mark_ie_nonobj(c, nt_ref_at(c->nt, node, i));
+    if (!ie_nested_own_block(c, nt_ref_at(c->nt, node, i))) mark_ie_flag(c, flag, nt_ref_at(c->nt, node, i));
   int na = nt_num_arrs(c->nt, node);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *ids = nt_arr_at(c->nt, node, i, &n);
-    for (int j = 0; j < n; j++) if (!ie_nested_own_block(c, ids[j])) mark_ie_nonobj(c, ids[j]);
+    for (int j = 0; j < n; j++) if (!ie_nested_own_block(c, ids[j])) mark_ie_flag(c, flag, ids[j]);
   }
 }
 int ie_nonobj_node(Compiler *c, int node) {
@@ -3478,6 +3480,9 @@ int ie_nonobj_node(Compiler *c, int node) {
    ie_rebound_marks)? */
 int ie_rebound_node(Compiler *c, int node) {
   return node >= 0 && node < c->ie_map.cap && (c->ie_map.rb[node] & IE_RB_IN);
+}
+int ie_pending_node(Compiler *c, int node) {
+  return c->ie_map.pending && node >= 0 && node < c->ie_map.cap && c->ie_map.pending[node];
 }
 
 void mark_ie_subtree(Compiler *c, int node, int cls) {
@@ -5239,14 +5244,16 @@ static void ie_map_fit(Compiler *c) {
   int *gc = realloc(c->ie_map.cls, sizeof(int) * (size_t)nt->count);
   unsigned char *gn = gc ? realloc(c->ie_map.nonobj, (size_t)nt->count) : NULL;
   int *go = gn ? realloc(c->ie_map.own, sizeof(int) * (size_t)nt->count) : NULL;
-  unsigned char *gr = go ? realloc(c->ie_map.rb, (size_t)nt->count) : NULL;
-  int *gp = gr ? realloc(c->ie_map.prm, sizeof(int) * (size_t)nt->count) : NULL;
-  if (!gp) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-  for (int i = c->ie_map.cap; i < nt->count; i++) { gc[i] = -1; gn[i] = 0; go[i] = -1; gr[i] = 0; gp[i] = -1; }
-  c->ie_map.prm = gp;
+  unsigned char *gp = go ? realloc(c->ie_map.pending, (size_t)nt->count) : NULL;
+  unsigned char *gr = gp ? realloc(c->ie_map.rb, (size_t)nt->count) : NULL;
+  int *gq = gr ? realloc(c->ie_map.prm, sizeof(int) * (size_t)nt->count) : NULL;
+  if (!gq) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int i = c->ie_map.cap; i < nt->count; i++) { gc[i] = -1; gn[i] = 0; go[i] = -1; gp[i] = 0; gr[i] = 0; gq[i] = -1; }
+  c->ie_map.prm = gq;
   c->ie_map.cls = gc;
   c->ie_map.nonobj = gn;
   c->ie_map.own = go;
+  c->ie_map.pending = gp;
   c->ie_map.rb = gr;
   c->ie_map.cap = nt->count;
 }
@@ -5306,8 +5313,10 @@ void build_ie_map(Compiler *c) {
   ie_rb_scan(c, rb_new, rb_n);
   /* (each entry that changes moves its node's scope: the build runs
      inferences of its own, which read the map as it stands) */
-  for (int i = 0; i < c->ie_map.cap; i++)
+  for (int i = 0; i < c->ie_map.cap; i++) {
     if (c->ie_map.nonobj[i]) { c->ie_map.nonobj[i] = 0; comp_touch_node(c, i); }
+    if (c->ie_map.pending[i]) { c->ie_map.pending[i] = 0; comp_touch_node(c, i); }
+  }
   int *pend = malloc(sizeof(int) * (size_t)nt->count);
   if (!pend) return;
   int pend_n = nt->count;
@@ -5344,9 +5353,14 @@ void build_ie_map(Compiler *c) {
          counts too: ie_poly_mark found none, or found the self rebound with
          no class it must be, -2 - id; either way its ivars can read nil.
          The mark is the nil question's alone, so it only widens.) */
-      if (cls < 0 && pass && rt != TY_UNKNOWN && !ty_is_object(rt) && is_instance_eval_family(nm) &&
-          nt_kind(nt, blk) == NK_BlockNode)
-        mark_ie_nonobj(c, blk);
+      if (cls < 0 && pass && rt != TY_UNKNOWN && !ty_is_object(rt) &&
+          is_instance_eval_family(nm) && nt_kind(nt, blk) == NK_BlockNode)
+        mark_ie_flag(c, c->ie_map.nonobj, blk);
+      /* (a receiver this round has not typed yet -- a local the round
+         assigns after the build -- still runs the block on itself, never on
+         the scope's self: its ivars wait for the receiver's class) */
+      if (pass && rt == TY_UNKNOWN && is_instance_eval_family(nm) && nt_kind(nt, blk) == NK_BlockNode)
+        mark_ie_flag(c, c->ie_map.pending, blk);
       if (cls == -1 && !pass && !nt_int(nt, id, "ie_usite", 0) && ie_untraced_site(c, id)) {
         nt_node_set_int((NodeTable *)nt, id, "ie_usite", 1);
         ie_rself_mark_literals(c);
@@ -5553,7 +5567,7 @@ int register_ie_block_ivars(Compiler *c) {
     if (!nm) continue;
     ClassInfo *ci = &c->classes[cls];
     int iv = comp_ivar_index(ci, nm);
-    if (iv < 0) { iv = comp_ivar_intern(ci, nm); changed = 1; }
+    if (iv < 0) { iv = comp_ivar_intern(ci, nm, IVS_INST); changed = 1; }
     /* Type the slot from the assignment value. The general ivar-write inference
        keys on the write's enclosing scope class_id, which for a lifted iexec
        block is the toplevel/method, not the receiver -- so it never types this
@@ -8632,7 +8646,7 @@ static void seed_method(Compiler *c, Scope *s, const char *ret_tok, char *ptypes
                ivar declarations, other readers and contradiction checks. */
             if (!inline_pin_agrees(c, NULL, s->class_id, ivn, ret_tok, NULL, where, from_rbs)) return;
             ClassInfo *ci = &c->classes[s->class_id];
-            int idx = comp_ivar_intern(ci, ivn);
+            int idx = comp_ivar_intern(ci, ivn, s->is_cmethod ? IVS_CLASS : IVS_INST);
             ivar_set_type(ci, idx, rt);
             class_pin_ivar(ci, ivn);
             if (!from_rbs) inline_pin_record(NULL, s->class_id, ivn, ret_tok, NULL, where, head);
@@ -8706,7 +8720,7 @@ static void seed_class_ivar(Compiler *c, int cur_ci, const char *a1, const char 
   if (oac >= 0 || nreq) {   /* a request for narrow_object_arrays, not a pin */
     char ivn[300];
     snprintf(ivn, sizeof ivn, "%s%s", a1[0] == '@' ? "" : "@", a1);
-    int idx = comp_ivar_intern(&c->classes[cur_ci], ivn);
+    int idx = comp_ivar_intern(&c->classes[cur_ci], ivn, IVS_INST);
     c->classes[cur_ci].ivar_oa_seed[idx] = nreq ? nreq : oac + 1;
     /* `@t = []` under a nested seed: the empty literal's default kind is
        the int array, which would type the ivar as one and keep it out of
@@ -8736,7 +8750,7 @@ static void seed_class_ivar(Compiler *c, int cur_ci, const char *a1, const char 
        double-emission). Normalize to the sigil form. */
     char ivn[300];
     snprintf(ivn, sizeof ivn, "%s%s", a1[0] == '@' ? "" : "@", a1);
-    int idx = comp_ivar_intern(ci, ivn);
+    int idx = comp_ivar_intern(ci, ivn, IVS_INST);
     ivar_set_type(ci, idx, t);
     class_pin_ivar(ci, ivn);
   }
@@ -23490,8 +23504,9 @@ static const char *an_ivar_get_ivar_of(Compiler *c, int node, int *defc, char *b
   if (!sym || sym[0] != '@' || !ty_is_object(rt)) return NULL;
   int cid = ty_object_class(rt);
   if (cid < 0 || cid >= c->nclasses || c->classes[cid].is_native_class || call_target(c, node, cid, nm, 0, NULL) >= 0) return NULL;
-  /* (a Struct's members are no ivars of CRuby's: a read answers nil) */
-  int iv = comp_ivar_index(&c->classes[cid], sym);
+  /* (a Struct's members are no ivars of CRuby's: a read answers nil;
+     nor is a class-level ivar the object's) */
+  int iv = comp_inst_ivar_index(&c->classes[cid], sym);
   if (iv < 0 || (c->classes[cid].is_struct && iv < c->classes[cid].nmembers)) return NULL;
   snprintf(buf, cap, "%s", sym);
   *defc = cid;
@@ -36711,7 +36726,7 @@ static int nn_call_unboxes_nil(Compiler *c, int v) {
       int cid = ty_object_class(rt);
       if (call_target(c, v, cid, nm, 0, NULL) >= 0) return 0;
       ClassInfo *ci = &c->classes[cid];
-      int iv = comp_ivar_index(ci, sym);
+      int iv = comp_inst_ivar_index(ci, sym);
       return iv >= 0 && (!ci->is_struct || iv >= ci->nmembers) &&
              (ci->ivar_types[iv] == TY_INT || ci->ivar_types[iv] == TY_FLOAT);
     }
@@ -45944,15 +45959,25 @@ static int propagate_ivars_up(Compiler *c) {
     ClassInfo *kc = &c->classes[k];
     for (int iv = 0; iv < kc->nivars; iv++) {
       TyKind kt = kc->ivar_types[iv];
-      if (kt == TY_UNKNOWN) continue;
       const char *ivn = kc->ivars[iv];
+      /* an instance's field the child lays out on a slot it inherits is laid
+         out by every ancestor that carries the slot, so the base struct stays
+         a prefix of the child's (the class side stays each class's own) */
+      if (comp_ivar_on(kc, iv, IVS_INST))
+        for (int a = kc->parent; a >= 0; a = c->classes[a].parent) {
+          int ai = comp_ivar_index(&c->classes[a], ivn);
+          if (ai >= 0 && !comp_ivar_on(&c->classes[a], ai, IVS_INST)) {
+            comp_ivar_intern(&c->classes[a], ivn, IVS_INST); prop_changed = 1;
+          }
+        }
+      if (kt == TY_UNKNOWN) continue;
       for (int a = kc->parent; a >= 0; a = c->classes[a].parent) {
         int ai = comp_ivar_index(&c->classes[a], ivn);
         /* (a base that only test-and-writes it gains the slot here, before the layout is rebuilt parent-first) */
         if (ai < 0 && kt != TY_NIL) {
           int orw_here = 0;
           for (int q = 0; q < norw && !orw_here; q++) orw_here = orw[q].cls == a && sp_streq(orw[q].name, ivn);
-          if (orw_here) { ai = comp_ivar_intern(&c->classes[a], ivn); prop_changed = 1; }
+          if (orw_here) { ai = comp_ivar_intern(&c->classes[a], ivn, IVS_INST); prop_changed = 1; }
         }
         if (ai < 0) continue;
         if (class_ivar_pinned(&c->classes[a], ivn)) continue;  /* --rbs seed pins it */
@@ -54746,6 +54771,7 @@ static void an_presence_class(Compiler *c, int k, int how, int depth) {
     if (!how || (ci->presence_observed & how)) continue;
     ci->presence_observed |= how;
     for (int j = 0; j < ci->nivars; j++) {
+      if (!comp_ivar_on(ci, j, IVS_INST)) continue;
       if (ci->ivar_types[j] == TY_POLY) an_presence_poly_ivar(c, d, ci->ivars[j], how, depth + 1);
       else an_presence_type(c, ci->ivar_types[j], how, depth + 1);
     }
@@ -54968,7 +54994,9 @@ static void an_phase_value_types(Compiler *c) {
     if (ci->is_struct || ci->cext_extension) continue;
     if (ci->def_node < 0) continue;                /* synthetic / Toplevel */
     if (!ci->name || i == c->toplevel_class) continue;
-    if (ci->nivars < 1 || ci->nivars > 8) continue;
+    /* (its instances' fields: a class-level ivar is the class object's) */
+    int ninst = comp_inst_ivar_count(ci);
+    if (ninst < 1 || ninst > 8) continue;
     if (ci->nwriters > 0) continue;
     if (ci->parent >= 0) continue;                 /* explicit user superclass */
     /* A class with any superclass node -- including a builtin like
@@ -54980,6 +55008,7 @@ static void an_phase_value_types(Compiler *c) {
     if (class_def_super(c->nt, ci->def_node) >= 0) continue;
     int scalar = 1;
     for (int j = 0; j < ci->nivars; j++) {
+      if (!comp_ivar_on(ci, j, IVS_INST)) continue;
       TyKind t = ci->ivar_types[j];
       /* int/float/bool need no GC; string fields are heap pointers but get
          GC-rooted per value-type local (the field slot is a stable root). */
@@ -55056,9 +55085,11 @@ static void an_phase_value_types(Compiler *c) {
     }
     /* (one String representation: a String ivar is by value only when
        every write gives it a frozen literal, which no name can change) */
+    /* (an instance's write: a class-level ivar is the class object's,
+       holder_ivar_side) */
     if (ty_k == NK_InstanceVariableWriteNode) {
-      Scope *s = comp_scope_of(c, id);
-      int q = s ? s->class_id : -1;
+      int q;
+      if (holder_ivar_side(c, id, &q) != IVS_INST) q = -1;
       const char *ivn = nt_str(c->nt, id, "name");
       int val = nt_ref(c->nt, id, "value");
       if (q >= 0 && q < c->nclasses && c->classes[q].is_value_type && ivn &&
@@ -55068,17 +55099,20 @@ static void an_phase_value_types(Compiler *c) {
           if (sp_streq(qc->ivars[j], ivn) && qc->ivar_types[j] == TY_STRBUF) { qc->is_value_type = 0; break; }
       }
     }
-    /* immutable check: an ivar write outside `initialize` defeats value type */
+    /* immutable check: an instance's ivar write outside `initialize`
+       defeats value type (a class method's or a class body's write is the
+       class object's, holder_ivar_side) */
     if (ty_k == NK_InstanceVariableWriteNode ||
         ty_k == NK_InstanceVariableOperatorWriteNode ||
         ty_k == NK_InstanceVariableOrWriteNode ||
         ty_k == NK_InstanceVariableAndWriteNode ||
         ty_k == NK_InstanceVariableTargetNode) {
       Scope *s = comp_scope_of(c, id);
-      if (s && s->class_id >= 0 && s->class_id < c->nclasses &&
-          c->classes[s->class_id].is_value_type &&
+      int q;
+      if (s && holder_ivar_side(c, id, &q) == IVS_INST && q >= 0 && q < c->nclasses &&
+          c->classes[q].is_value_type &&
           (!s->name || !sp_streq(s->name, "initialize")))
-        c->classes[s->class_id].is_value_type = 0;
+        c->classes[q].is_value_type = 0;
       /* a block on a boxed receiver writes the instance of each class it
          runs on (the arms of emit_ie_poly), which a by-value one would take
          on its copy */
@@ -55093,7 +55127,8 @@ static void an_phase_value_types(Compiler *c) {
         int ivr = nt_ref(c->nt, id, "receiver");
         if (ivr < 0 || (nt_kind(c->nt, ivr) == NK_SelfNode && comp_ntype(c, ivr) != TY_POLY)) {
           Scope *s = comp_scope_of(c, id);
-          if (s && s->class_id >= 0 && s->class_id < c->nclasses &&
+          /* (in a class method, self is the class: its own ivar) */
+          if (s && s->class_id >= 0 && s->class_id < c->nclasses && !s->is_cmethod &&
               (!s->name || !sp_streq(s->name, "initialize")))
             c->classes[s->class_id].is_value_type = 0;
         }
