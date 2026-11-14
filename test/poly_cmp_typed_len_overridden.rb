@@ -1,3 +1,4 @@
+# spinel: gc-stress
 # A program that gives Array a size of its own, or puts a module with one
 # ahead of Hash, runs that method in a boxed comparison's argument: it is
 # not a count read in place, and the receiver is read before it runs.

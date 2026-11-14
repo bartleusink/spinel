@@ -1,3 +1,4 @@
+# spinel: gc-stress
 # A boxed comparison whose argument is a typed Array's or Hash's count
 # (`pc < cmds.size`) held its receiver in the frame first, as for an
 # argument that may run the program's code: a loop's condition stored and
