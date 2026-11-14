@@ -7903,7 +7903,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   const char *sg_refused = sg_refused_msg(c, s->def_node);
   if (sg_refused ||
       (s->class_id >= 0 && !s->is_cmethod && s->name && c->classes[s->class_id].is_value_type &&
-       comp_trampoline_kind(c, s->class_id, s->name, NULL))) {
+       comp_trampoline_kind(c, (int)(s - c->scopes)))) {
     emit_method_signature(c, s, b);
     buf_printf(b, " {\n  sp_raise_cls(\"NotImplementedError\", \"%s\");\n",
                sg_refused ? sg_refused : "instance_eval of a proc on a by-value object");
@@ -22601,8 +22601,8 @@ static void emit_ffi_decls(Compiler *c, Buf *b) {
     }
     /* IO::Buffer as an ffi_func pointer argument (codegen_call.c) */
     if (cf->n_ffi_funcs > 0 && ffi_iobuffer_class(cf) >= 0) {
-      buf_puts(b, "extern void *sp_IOBuffer_ffi_base(sp_IOBuffer *, sp_int);\n"
-                   "extern void *sp_IOBuffer_ffi_ptr(sp_RbVal, sp_int, sp_int);\n"
+      buf_puts(b, "extern void *sp_IOBuffer_ffi_base(sp_IOBuffer *, sp_int, void **);\n"
+                   "extern void *sp_IOBuffer_ffi_ptr(sp_RbVal, sp_int, sp_int, void **);\n"
                    "extern sp_int sp_IOBuffer_ffi_hold(sp_IOBuffer *);\n"
                    "extern void sp_IOBuffer_ffi_release(sp_IOBuffer *, sp_int);\n"
                    "extern sp_int sp_IOBuffer_ffi_hold_v(sp_RbVal, sp_int);\n"

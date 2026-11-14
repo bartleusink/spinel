@@ -1088,6 +1088,7 @@ static const char *sp_str_frozen_name(const char *s) {
 }
 static inline const char *sp_str_freeze_val(const char *s) {
   if (!s) return s;
+  if (sp_str_is_locked(s)) sp_raise_locked_str();
   unsigned char m = ((const unsigned char *)s)[-1];
   if (m == 0xfe || m == 0xfc) {
     /* a frozen heap string is immortal, as a literal is: the sweep is told */
@@ -6897,6 +6898,14 @@ static sp_bool sp_range_frange_eq(sp_Range r, sp_FloatRange f) {
 /* A Complex's real part as the real it stands for: an Integer part (no
    SP_CPLX_RE_F) as an Integer while it fits, so a Rational or an Integer
    compares against it exactly; else the Float */
+/* Complex#eql?: each part eql? to the other's, so the values and the kind
+   of each part (Integer or Float) agree: Complex(1, 0) is == to
+   Complex(1.0, 0) but not eql? to it. The boxed eql?, the Hash key eql?
+   and the strict eql? share it (the Complex hash mixes the same kinds in). */
+static SP_UNUSED sp_bool sp_complex_eql(const sp_Complex *x, const sp_Complex *y) {
+  return x->re == y->re && x->im == y->im &&
+         (x->fl & (SP_CPLX_RE_F | SP_CPLX_IM_F)) == (y->fl & (SP_CPLX_RE_F | SP_CPLX_IM_F));
+}
 static SP_UNUSED sp_RbVal sp_complex_re_box(sp_Complex z) {
   if (!(z.fl & SP_CPLX_RE_F) && z.re >= -9223372036854775808.0 &&
       z.re < 9223372036854775808.0 && z.re == (sp_float)(long long)z.re)
@@ -8661,7 +8670,7 @@ static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
   }
   /* a frozen String refuses, as the typed paths do: a literal is frozen
      (frozen_string_literal is always on) and so is a `.freeze`d one (#6328) */
-  if (a.tag == SP_TAG_STR && a.v.s && sp_str_is_frozen_val(a.v.s)) sp_raise_frozen_str(a.v.s);
+  if (a.tag == SP_TAG_STR && a.v.s && (sp_str_is_frozen_val(a.v.s) || sp_str_is_locked(a.v.s))) sp_raise_frozen_str(a.v.s);
   /* String#<< appends (sp_str_concat treats NULL as the empty string) */
   if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR)
     return sp_box_str_new(sp_str_concat(a.v.s, b.v.s));
@@ -9544,7 +9553,7 @@ static sp_RbVal sp_poly_splice(sp_RbVal recv, sp_int start, sp_int len, sp_RbVal
      store back, while a shared handle absorbs it in place -- which is the only
      form an element receiver can use, and the write was silently dropped
      before (#3940). */
-  if (recv.tag == SP_TAG_STR && recv.v.s && sp_str_is_frozen_val(recv.v.s)) sp_raise_frozen_str(recv.v.s);   /* #6328 */
+  if (recv.tag == SP_TAG_STR && recv.v.s && (sp_str_is_frozen_val(recv.v.s) || sp_str_is_locked(recv.v.s))) sp_raise_frozen_str(recv.v.s);   /* #6328 */
   if (recv.tag == SP_TAG_STR || sp_poly_is_strbuf(recv)) {
     const char *cur = (recv.tag == SP_TAG_STR) ? (recv.v.s ? recv.v.s : sp_str_empty)
                                                : sp_String_cstr((sp_String *)recv.v.p);
@@ -11997,7 +12006,8 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
         /* a -0.0 part hashes as 0.0: Complex(-0.0, 1) is eql? to Complex(0.0, 1) */
         if (cx->re == 0.0) br = 0;
         if (cx->im == 0.0) bi = 0;
-        return (sp_int)((uintptr_t)(br * 31u) ^ (uintptr_t)bi);
+        /* the part kinds mix in: Complex(1, 0) and Complex(1.0, 0) are not eql? */
+        return (sp_int)((uintptr_t)(br * 31u) ^ (uintptr_t)bi ^ ((uintptr_t)(cx->fl & (SP_CPLX_RE_F | SP_CPLX_IM_F)) * 0x9e3779b9u));
       }
       /* The other values eql? compares by content hash by it, so that equal
          ones meet in uniq and the set operations, which match by hash first:
@@ -12153,7 +12163,8 @@ static sp_bool sp_rbval_eql_key(sp_RbVal a, sp_RbVal b) {
         /* value-based so an equal Complex serves as one Hash key (#2615),
            paired with the value-based hash above */
         sp_Complex *ca = (sp_Complex *)a.v.p, *cb = (sp_Complex *)b.v.p;
-        return (ca && cb) ? (ca->re == cb->re && ca->im == cb->im) : (ca == cb);
+        /* (the part kinds too: Complex(1, 0) and Complex(1.0, 0) are two keys) */
+        return (ca && cb) ? sp_complex_eql(ca, cb) : (ca == cb);
       }
       if (sp_obj_eql_hook) {
         /* a Struct key that holds itself reaches its own eql? through the hook */
@@ -12561,7 +12572,7 @@ static SP_NOINLINE const char *sp_io_read_splat(sp_File *f, sp_PolyArray *a) {
   sp_int ln = sp_poly_nil_p(len) ? 0 : sp_poly_arg_int_chk(len);
   if (!sp_poly_nil_p(buf)) {
     if (sp_poly_is_strbuf(buf)) {
-      if (sp_String_is_frozen((sp_String *)buf.v.p)) sp_raise_frozen_str(sp_String_cstr((sp_String *)buf.v.p));
+      if (sp_String_is_immutable((sp_String *)buf.v.p)) sp_raise_frozen_str(sp_String_cstr((sp_String *)buf.v.p));
     }
     else {
       sp_str_check_mutable(sp_poly_arg_str_chk(buf));
@@ -12583,7 +12594,7 @@ static const char *sp_io_read_nonblock_buffer(sp_File *f, sp_int n, sp_RbVal *bu
   SP_GC_ROOT_RBVAL(v);
   if (n < 0) sp_raise_cls("ArgumentError", sp_sprintf("negative length %lld given", (long long)n));
   const char *s = sp_poly_nil_p(v) ? NULL : sp_poly_arg_str_chk(v);
-  if (s && sp_poly_is_strbuf(v) && sp_String_is_frozen((sp_String *)v.v.p)) sp_raise_frozen_str(s);
+  if (s && sp_poly_is_strbuf(v) && sp_String_is_immutable((sp_String *)v.v.p)) sp_raise_frozen_str(s);
   if (s) sp_str_check_mutable(s);
   if (exception && exception->tag != SP_TAG_BOOL)
     sp_raise_cls("ArgumentError", sp_sprintf("expected true or false as exception: %s", sp_poly_inspect(*exception)));
@@ -14180,6 +14191,10 @@ static inline sp_RbVal sp_poly_clone_freeze(sp_RbVal v, int fz) {
    (sp_gc_is_frozen reports it back), heap strings flip the string marker,
    every immutable tag (int/float/sym/nil/bool/...) is already frozen. */
 static inline sp_RbVal sp_poly_freeze(sp_RbVal v) {
+  if (sp_poly_is_strbuf(v)) {
+    sp_String_freeze((sp_String *)v.v.p);
+    return v;
+  }
   if (v.tag == SP_TAG_OBJ) {
     sp_gc_freeze(v.v.p);
     /* the array mutators test the array's own field, not the header bit, so
@@ -14394,6 +14409,11 @@ static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b) {
     int a_cx = a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX;
     int b_cx = b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX;
     if (a_rat != b_rat || a_cx != b_cx) return FALSE;
+    /* Complex#eql? compares each part with eql?, so an Integer part is not
+       eql? to the same Float part: Complex(1, 0) is == to Complex(1.0, 0)
+       but not eql? to it (the typed eql? compares the part kinds too) */
+    if (a_cx && a.v.p && b.v.p)
+      return a.v.p == b.v.p || sp_complex_eql((sp_Complex *)a.v.p, (sp_Complex *)b.v.p);
   }
   /* Array#eql? answers false for anything that is not an Array: unlike ==, it
      does not defer to an operand that answers to_ary */
@@ -14512,9 +14532,7 @@ static sp_bool sp_poly_eql_strict_obj(sp_RbVal a, sp_RbVal b) {
   if (a.cls_id != b.cls_id || !a.v.p || !b.v.p) return FALSE;
   switch (a.cls_id) {
     case SP_BUILTIN_COMPLEX: {   /* each part's class too: Complex(1, 0) is not eql? to Complex(1.0, 0) */
-      sp_Complex *x = (sp_Complex *)a.v.p, *y = (sp_Complex *)b.v.p;
-      return x->re == y->re && x->im == y->im &&
-             (x->fl & (SP_CPLX_RE_F | SP_CPLX_IM_F)) == (y->fl & (SP_CPLX_RE_F | SP_CPLX_IM_F));
+      return sp_complex_eql((sp_Complex *)a.v.p, (sp_Complex *)b.v.p);
     }
     case SP_BUILTIN_TIME: {
       sp_Time *x = (sp_Time *)a.v.p, *y = (sp_Time *)b.v.p;
@@ -14985,7 +15003,7 @@ static sp_RbVal sp_poly_arr_widen_and_set(sp_RbVal v, sp_int idx, sp_RbVal val) 
      caller to reassign to the poly slot (sp_poly_arr_set is a no-op on a
      string, silently dropping the mutation) (#3172). */
   if (v.tag == SP_TAG_STR) {
-    if (v.v.s && sp_str_is_frozen_val(v.v.s)) sp_raise_frozen_str(v.v.s);   /* #6328 */
+    if (v.v.s && (sp_str_is_frozen_val(v.v.s) || sp_str_is_locked(v.v.s))) sp_raise_frozen_str(v.v.s);   /* #6328 */
     const char *rep = sp_str_aset_rep(val);
     return sp_box_str_new(sp_str_splice_at(v.v.s ? v.v.s : sp_str_empty, idx, 1, rep, 0));
   }
@@ -15027,7 +15045,7 @@ static sp_RbVal sp_poly_str_aset_key(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
     else sp_poly_set_poly(v, key, val);
     return v;
   }
-  if (v.tag == SP_TAG_STR && v.v.s && sp_str_is_frozen_val(v.v.s)) sp_raise_frozen_str(v.v.s);
+  if (v.tag == SP_TAG_STR && v.v.s && (sp_str_is_frozen_val(v.v.s) || sp_str_is_locked(v.v.s))) sp_raise_frozen_str(v.v.s);
   /* refused before anything is rooted: a raise past a root would leave it
      dangling under an inline rescue */
   sp_str_aset_refuse(val);
@@ -23989,7 +24007,7 @@ static sp_RbVal sp_poly_pack_buffer(sp_RbVal recv, sp_RbVal format, sp_RbVal buf
     if (buffer.tag != SP_TAG_STR && !sp_poly_is_strbuf(buffer))
       sp_raise_cls("TypeError", sp_sprintf("buffer must be String, not %s", sp_poly_class_name(buffer)));
     initial = sp_poly_to_s(buffer);
-    if (sp_poly_is_strbuf(buffer) && sp_String_is_frozen((sp_String *)buffer.v.p)) sp_raise_frozen_str(initial);
+    if (sp_poly_is_strbuf(buffer) && sp_String_is_immutable((sp_String *)buffer.v.p)) sp_raise_frozen_str(initial);
     sp_str_check_mutable(initial);
   }
   SP_GC_ROOT_STR(initial);
