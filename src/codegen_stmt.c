@@ -12581,7 +12581,8 @@ static int hc_call_ok(Compiler *c, int id, int stmt) {
 static int hc_node_ok(Compiler *c, int id, int stmt, HcRegion *r);
 /* An Integer block loop the header cache covers as it does a while:
    `n.times { }`, `a.upto(b) { }` / downto, `n.step(...) { }`, an Integer
-   Range's `each { }` -- each a plain C `for` around the block's body --
+   Range's `each { }` and its `step(k) { }` by an Integer -- each a plain C
+   `for` around the block's body --
    an Integer, Float, String or object Array's (or a table's) `each { }`, which walks its own receiver
    through the cache too (emit_iteration_stmt_body), and its
    `each_with_index { }`, an Integer or Float Array's `zip` with one such
@@ -12606,6 +12607,16 @@ static int hc_block_loop(Compiler *c, int id) {
     return at == TY_INT_ARRAY || at == TY_FLOAT_ARRAY;
   }
   if (ty_is_array(rt) && sp_streq(nm, "each_index")) return 1;
+  /* an Integer Range's step by an Integer (or by its default of 1), which
+     walks the span in a plain C `for` too (emit_iteration_stmt_body); not a
+     Float, Rational or boxed step, which may walk Floats or boxed values,
+     and not a Range#step the program defines */
+  if (rt == TY_RANGE && sp_streq(nm, "step")) {
+    int a = nt_ref(nt, id, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    return an <= 1 && (an < 1 || comp_ntype(c, av[0]) == TY_INT) &&
+           !an_range_step_rat(c, id, 0) && !share_builtin_overridden(c, "Range", "step");
+  }
   return rt == TY_RANGE && sp_streq(nm, "each");
 }
 /* ...and can its region keep the headers: the receiver and arguments as
@@ -24934,6 +24945,10 @@ static int push_stmt_takes_value_form(Compiler *c, int id) {
      elements raise ArgumentError, which the value form judges (the
      statement arms push every argument) */
   if (sp_streq(nm, "<<") && (argc != 1 || nt_argv_has_splat(nt, argv, argc))) return 1;
+  /* several arguments of which one reads an Array or a Hash: each is read
+     before the first push (emit_operands_in_order binds it), where the
+     statement arm would read it after the pushes ahead of it */
+  if (pushes_args_one_by_one(c, id) && subtree_reads_container(c, args)) return 1;
   if (read_rebound_by(c, recv, args)) {
     const char *iv = nt_kind(nt, recv) == NK_InstanceVariableReadNode ? nt_str(nt, recv, "name") : NULL;
     if (!iv || ivar_direct_writes(nt, args, iv, 0)) return 1;
