@@ -439,12 +439,12 @@ int desugar_ie_bare_object_calls(Compiler *c) {
     int ro = nm ? comp_arysub_reopen(c, cls) : -1;
     int enumr = nm && !hit && !is_arysub_kernel_name(nm) && ie_enum_reopen_answers(c, cls, nm) &&
                 !comp_is_undeffed_in_chain(c, cls, nm);
-    int own = nm && (comp_arysub_name_is_array(c, cls, nm) || enumr ||
+    int own = nm && (comp_arysub_name_is_array(c, id, cls, nm) || enumr ||
                      (comp_ary_is_str(c, cls) && sp_streq(nm, "dup"))) &&
               !comp_is_undeffed_in_chain(c, cls, nm) &&
               (!is_arysub_kernel_name(nm) || (ro >= 0 && comp_method_in_class(c, ro, nm) >= 0));
     if (nm && !own && call_target(c, id, -1, nm, CT_TOP, NULL) >= 0) continue;
-    int builtin = !hit && nm && (comp_arysub_name_is_array(c, cls, nm) || enumr);
+    int builtin = !hit && nm && (comp_arysub_name_is_array(c, id, cls, nm) || enumr);
     if (!builtin && (!hit || call_target(c, id, cls, nm, 0, NULL) >= 0)) continue;
     int sn = nt_new_node(nt, "SelfNode");
     if (sn < 0) continue;
@@ -5958,7 +5958,7 @@ int step_kw_own_method(Compiler *c, int id) {
     return 0;
   }
   int num = ty_is_numeric(rt) || rt == TY_RATIONAL || rt == TY_BIGINT;
-  return !num || comp_builtin_kind_reopen_mi(c, rt, "step") >= 0;
+  return !num || comp_builtin_kind_reopen_mi(c, id, rt, "step") >= 0;
 }
 
 void step_kw_positional(Compiler *c, NodeTable *nt, int id, int args, int to_v, int by_v, int by_first) {
@@ -8292,9 +8292,9 @@ static int dsend_poly_builtin_classes(Compiler *c, const char **out, int cap) {
    (cls_fact_excludes; a class method, by the class's Class object), one no
    builtin answers, and no class it may hold answers through
    method_missing? */
-static int dsend_name_only_outside(Compiler *c, int recv, const char *name) {
+static int dsend_name_only_outside(Compiler *c, int id, int recv, const char *name) {
   int lo = 0, hi = -1;
-  if (builtin_recv_arity_span(name, &lo, &hi) || comp_object_defines(c, name)) return 0;
+  if (builtin_recv_arity_span(name, &lo, &hi) || cplan_core_method(c, id, CORE_OBJECT, name) >= 0) return 0;
   int any = 0;
   for (int k = 0; k < c->nclasses; k++)
     if (!cls_fact_excludes(c, recv, k) && comp_method_in_chain(c, k, "method_missing", NULL) >= 0) return 0;
@@ -8525,7 +8525,7 @@ static int desugar_dynamic_send_inner(Compiler *c) {
            dispatch's default does) */
         int rbound = !cls_fact_unbounded(c, recv);
         for (int k = 0; k < ncand && k < 256; k++) {
-          if (rbound && !anh_has(&seen, cand[k]) && dsend_name_only_outside(c, recv, cand[k])) continue;
+          if (rbound && !anh_has(&seen, cand[k]) && dsend_name_only_outside(c, id, recv, cand[k])) continue;
           dsend_add_name(&own, &nown, &cap, &seen, cand[k]);
         }
         /* and the builtins' methods: a boxed value is an Integer or a String
@@ -9180,8 +9180,12 @@ static int rtm_class_side(Compiler *c, int id, int recv) {
    or every version over the window it may run in one of the program's
    (none absent)? Not yet defined there is fine while no object it answers
    for can exist yet (a class opened later). A call ahead of the def (`p
-   r.respond_to?(:x); class R; def respond_to_missing?`) or a def under a
-   condition leaves the call to the method-table answer, as before. So do
+   r.respond_to?(:x); class R; def respond_to_missing?`) leaves the call to
+   the method-table answer, as before, and so does a def under a condition,
+   unless it is a lone one the record holds (cond_lone): the call asks its
+   entry, which tests the def's cell where the call runs and answers
+   Kernel's false when the def did not. A version entry is no def of the
+   program's, and is asked of none. So do
    a class object's call (a class's own `def self.respond_to_missing?` is
    not asked), a top-level def and one on a singleton (`def
    o.respond_to_missing?`, extend). */
@@ -9200,14 +9204,17 @@ static int rtm_live_at(Compiler *c, int id) {
   for (int s = an_scopes_named_first(c, RESPOND_TO_MISSING_NAME); s >= 0;
        s = an_scopes_named_next(c, RESPOND_TO_MISSING_NAME, s)) {
     const Scope *sc = &c->scopes[s];
-    if (sc->def_node < 0 || sc->is_cmethod) continue;   /* (a class's own: asked of no instance) */
-    if (sc->class_id < 0 || !elab_def_applied(c, sc->def_node)) return 0;
+    if (sc->def_node < 0 || sc->is_cmethod || sc->entry) continue;   /* (a class's own: asked of no instance; a version entry is no def of the program's) */
+    int held = nt_int(c->nt, sc->def_node, "cond_lone", 0);   /* (a held def's entry tests its cell where the call runs, and its else arm is Kernel's false) */
+    if (sc->class_id < 0 || (!held && !elab_def_applied(c, sc->def_node))) return 0;
     if (!rtm_may_reach(c, cid, sc->class_id)) continue;
     ElabMeet m; const LrDef *out[8];
     elab_call_meet(c, id, sc->class_id, RESPOND_TO_MISSING_NAME, 0, 0, &m, out, 8);
     if (m.at == ELAB_YES && m.d) continue;
     if (m.at == ELAB_NO && !rtm_holders_live(c, sc->class_id, elab_point_of(c, id))) continue;
-    if (m.at != ELAB_UNKNOWN || m.win != ELAB_YES || m.n < 1 || m.n > 8) return 0;
+    if (m.at != ELAB_UNKNOWN || m.win != ELAB_YES) return 0;
+    if (held) continue;
+    if (m.n < 1 || m.n > 8) return 0;
     for (int i = 0; i < m.n; i++) if (!out[i]) return 0;
   }
   return 1;
@@ -16746,7 +16753,8 @@ int desugar_conditional_defs(Compiler *c) {
        `if` of its body is marked cond_lone: what the entry cannot answer
        for it is refused (ver_named_one, ver_refl_named) */
     int left = g[0].cls == -2 || (ng == 1 && !g[0].here);
-    if (!left && ng == 1 && cdef_name_inherited(nt, base, d0)) left = 2;
+    /* (a Kernel row's name, respond_to_missing?, answers behind an instance-side def in a class or module body only) */
+    if (!left && ng == 1 && (cdef_name_inherited(nt, base, d0) || (g[0].cls >= 0 && !g[0].cm && bop_kernel_answers(base, -1, 0)))) left = 2;
     if (ng == 1 && g[0].here && (g[0].cls == -2 || left == 2)) nt_node_set_int(nt, d0, "cond_lone", 1);
     if (left) { free(base); continue; }
     if (bad || (ng >= 2 && same)) { free(base); continue; }
@@ -18500,7 +18508,7 @@ int desugar_builtin_splat_forward(Compiler *c) {
     int tnew = nt_kind(nt, recv) == NK_ConstantReadNode && key_name(c, recv) &&
                sp_streq(key_name(c, recv), "Time") &&
                /* (a reopen of Time leaves Time.new alone unless it defines its own) */
-               (comp_core_class(c, CORE_TIME) < 0 || comp_cmethod_in_chain(c, comp_core_class(c, CORE_TIME), "new", NULL) < 0) &&
+               (comp_core_class(c, CORE_TIME) < 0 || call_target(c, id, comp_core_class(c, CORE_TIME), "new", CT_CMETHOD, NULL) < 0) &&
                sp_streq(nm, "new") && nt_ref(nt, id, "block") < 0 && rest && ms && ty_is_array(infer_type(c, sv));
     if (!tnew && (!rest || !ms || ms->rest_idx < 0 || ms->rest_idx >= ms->nparams || !ms->pnames ||
         !ms->pnames[ms->rest_idx] || !sp_streq(ms->pnames[ms->rest_idx], rest))) continue;

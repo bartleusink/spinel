@@ -491,6 +491,8 @@ void register_singleton_defs(Compiler *c);
 void register_attr_versions(Compiler *c);
 void register_attrs(Compiler *c);
 void register_aliases(Compiler *c);
+void register_alias_methods(Compiler *c, int modules);   /* analyze_scope.c */
+void scope_copy_method_shape(Scope *dst, Scope *src);    /* analyze_scope.c */
 void register_undefs(Compiler *c);
 int is_c_ident(const char *s);
 void register_globals_consts(Compiler *c);
@@ -587,6 +589,8 @@ int class_is_comparable(Compiler *c, int cid);                   /* codegen_call
    declares the same). */
 int bare_call_class_owned(Compiler *c, int id);                  /* codegen_call.c */
 const int *call_args(const NodeTable *nt, int id, int *argc);    /* codegen_call.c */
+int recv_is_const(const Compiler *c, const NodeTable *nt, int recv, const char *name);  /* codegen_fold.c */
+int is_exc_name(const char *n);                                  /* codegen.c */
 /* Is call id a respond_to? the version cells may answer (cplan_cmethod_presence):
    by a literal Symbol, with a literal include_all if any, on a constant, self
    or no receiver? The load record asks it of the source's readers
@@ -1260,7 +1264,7 @@ int class_is_exc_reopen(Compiler *c, int ci);
    shared with a bundled extension's __cext_link (analyze_cext.c) */
 void ffi_semi_append(char **slot, const char *add);
 void *ffi_grow(void *p, int n, int *cap, int init, size_t sz);
-int exc_class_defines(Compiler *c, const char *name);
+int exc_class_defines(Compiler *c, int id, const char *name);
 int super_reaches_exc_text(Compiler *c, int id, int reopen);
 int exc_message_super_to_s(Compiler *c, int id, int *out, int cap);
 int exc_subclass_defines(Compiler *c, const char *name);

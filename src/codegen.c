@@ -11851,11 +11851,12 @@ int class_is_exc_subclass(Compiler *c, int ci) {
   return ans;
 }
 
-/* True when one of the program's exception classes defines `name` itself:
-   reflection on an exception then has to call it, not answer for it. */
-int exc_class_defines(Compiler *c, const char *name) {
+/* True when one of the program's exception classes defines `name` itself
+   (as call id's lookup finds it there: call_target on the class's own
+   table): reflection on an exception then has to call it, not answer for it. */
+int exc_class_defines(Compiler *c, int id, const char *name) {
   for (int k = 0; k < c->nclasses; k++)
-    if (comp_method_in_class(c, k, name) >= 0 && class_is_exc_subclass(c, k)) return 1;
+    if (class_is_exc_subclass(c, k) && call_target(c, id, k, name, CT_OWN, NULL) >= 0) return 1;
   return 0;
 }
 
@@ -18698,10 +18699,10 @@ void emit_regex_section(Compiler *c, Buf *b) {
        defines, or all of them when one defines method_missing */
     static const char *const lacks[] = { "last", "join", "sample", "shuffle", "shuffle!", "flatten", "at", "pack",
                                          "rotate", "values_at", NULL };
-    int mm = reopened_owns(c, "Enumerator", "method_missing") || reopened_owns(c, "Enumerable", "method_missing");
+    int mm = reopened_owns(c, -1, "Enumerator", "method_missing") || reopened_owns(c, -1, "Enumerable", "method_missing");
     int any = 0;
     for (int i = 0; lacks[i]; i++)
-      if (mm || reopened_owns(c, "Enumerator", lacks[i]) || reopened_owns(c, "Enumerable", lacks[i])) {
+      if (mm || reopened_owns(c, -1, "Enumerator", lacks[i]) || reopened_owns(c, -1, "Enumerable", lacks[i])) {
         buf_printf(b, "%s\"%s\"", any ? ", " : "  { static const char *const el[] = { ", lacks[i]);
         any = 1;
       }
@@ -22230,6 +22231,17 @@ static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char 
         *isa_ext = eb.p;
         *isa_ext_at = b->len;
       } }
+    /* a builtin class the program reopens (`class Method; def m; end`): its
+       class value is the program's entry, which no builtin value carries.
+       sp_class_eq maps a top-level reopening with a builtin id to that id
+       (reopened_builtin_class_id); for one with none (Method, UnboundMethod,
+       Random, Enumerator::Chain), a class held in a value (`k === x`,
+       `grep(Method)`) asks the runtime by the class's Ruby name here. The walk
+       below still answers a subclass's instance. */
+    for (int k = 0; k < c->nclasses; k++)
+      if (class_is_builtin_class_reopen(c, k) && !reopened_builtin_class_id(c, k))
+        buf_printf(b, "  if (klass.cls_id == %d && sp_poly_kind_of_builtin(obj, \"%s\")) return 1;\n",
+                   k, class_ruby_name(c, k));
     buf_puts(b,
       "  return sp_class_le(sp_poly_get_class(obj),klass);\n}\n");
     /* Module#< / <= / > / >= / <=> where an operand is boxed: the tri-state
